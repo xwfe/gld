@@ -1,0 +1,24 @@
+[package]
+name = "gld-daemon"
+description = "Background service process, local IPC protocol and lifecycle management for gld"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gld_daemon"
+path = "src/lib.rs"
+
+[dependencies]
+gld-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+fs2 = { workspace = true }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = { workspace = true }

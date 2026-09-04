@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# 原桌面版源码，仅作本地参考，不纳入本仓库
+/_original/
+
+# 本地运行时数据（测试或手动指定 GLD_HOME 到仓库内时）
+/.gld/
+/tmp/
+
+# scripts/package.sh 的产物
+/dist/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

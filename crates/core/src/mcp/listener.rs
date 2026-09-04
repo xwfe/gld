@@ -1,0 +1,508 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use axum::extract::{Form, Query, State};
+use axum::http::{
+    header::{CACHE_CONTROL, WWW_AUTHENTICATE},
+    HeaderMap, StatusCode,
+};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde_json::{json, Value};
+use tokio::sync::oneshot;
+use tower_http::cors::CorsLayer;
+
+use crate::auth::{
+    authorization_server_metadata, authorize_get, authorize_post, external_base_url,
+    protected_resource_metadata, protected_resource_metadata_url, register_client, token_exchange,
+    verify_bearer_header, verify_oauth_bearer_header, AuthorizeForm, AuthorizeParams,
+    ClientRegistrationRequest, OAuthRuntime, TokenForm,
+};
+use crate::local_network;
+use crate::logs::append_profile_log;
+use crate::mcp::server::{handle_request, SharedState};
+use crate::secret::SecretStore;
+use crate::settings::AppSettings;
+use crate::tools::build_tool_context;
+use crate::usage::ServiceUsage;
+use crate::workspace::{AuthConfig, RuntimeConfig};
+
+pub type ShutdownSender = oneshot::Sender<()>;
+
+async fn oauth_register_post(
+    State(state): State<ListenerState>,
+    Json(request): Json<ClientRegistrationRequest>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return oauth_not_configured();
+    };
+    register_client(oauth, request)
+}
+
+#[derive(Clone)]
+struct ListenerState {
+    mcp: SharedState,
+    auth: AuthConfig,
+    workspace_id: String,
+    workspace_path: String,
+    bind_port: u16,
+    configured_public_url: String,
+    bearer_token: Option<String>,
+    oauth: Option<Arc<OAuthRuntime>>,
+    oauth_client_secret: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_listener(
+    port: u16,
+    workspace_path: PathBuf,
+    workspace_id: String,
+    auth: AuthConfig,
+    public_base_url: String,
+    oauth_client_secret: Option<String>,
+    oauth_password: Option<String>,
+    oauth_token_secret: Option<String>,
+    runtime: RuntimeConfig,
+    usage: Arc<ServiceUsage>,
+) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
+    let workspace_display = workspace_path.display().to_string();
+    let global = AppSettings::load_or_default();
+    // 和命令行 `gld tool call` 共用同一个构建入口，两边看到的工具集与策略必然一致。
+    let mcp: SharedState = Arc::new(build_tool_context(
+        workspace_path,
+        auth.clone(),
+        &runtime,
+        &global,
+        usage,
+    )?);
+    let bearer_token = if auth.bearer_enabled() {
+        let key = "bearer_token";
+        if auth.use_shared_secrets {
+            SecretStore::get_shared(key).map_err(|e| e.to_string())?
+        } else {
+            SecretStore::get(&workspace_id, key).map_err(|e| e.to_string())?
+        }
+    } else {
+        None
+    };
+    // 没有 token 就不要起来。以前是照起不误，结果服务显示 running、
+    // 端口也通，但**任何**请求都拿 401——包括配置正确的客户端。
+    // 用户看到的是"服务好好的，客户端连不上"，最难查的一类问题。
+    // Actions 那侧一直是这么做的（"Actions API key is not configured"），
+    // 这里补齐。
+    if auth.bearer_enabled() && bearer_token.as_deref().is_none_or(str::is_empty) {
+        let scope = if auth.use_shared_secrets {
+            "gld secret shared regen bearer_token"
+        } else {
+            "gld secret regen bearer_token"
+        };
+        return Err(format!(
+            "MCP 认证方式是 bearer，但没有 bearer_token，任何客户端都会拿 401。\
+             先执行 `{scope}`，或改用 `gld ws set mcp.auth=oauth`。"
+        ));
+    }
+    let configured_public_url = public_base_url.trim().to_string();
+    let oauth = if auth.oauth_enabled() {
+        let password = oauth_password.unwrap_or_default();
+        let token_secret = oauth_token_secret.unwrap_or_default();
+        let oauth_base = external_base_url(&HeaderMap::new(), port, &configured_public_url);
+        Some(Arc::new(OAuthRuntime::new(
+            oauth_base,
+            auth.oauth_client_id.clone(),
+            oauth_client_secret.clone(),
+            password,
+            token_secret,
+        )))
+    } else {
+        None
+    };
+    let state = ListenerState {
+        mcp,
+        auth,
+        workspace_id,
+        workspace_path: workspace_display,
+        bind_port: port,
+        configured_public_url,
+        bearer_token,
+        oauth,
+        oauth_client_secret,
+    };
+    // 在返回 Running 之前完成 bind，避免后台任务里的端口冲突被伪装成启动成功。
+    let allow_lan_access = AppSettings::load_or_default().allow_lan_access;
+    let listener = bind_listener(port, allow_lan_access)?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let profile_id = state.workspace_id.clone();
+    let handle = crate::async_rt::spawn(async move {
+        let result = serve(listener, port, allow_lan_access, state, shutdown_rx).await;
+        if let Err(err) = &result {
+            append_profile_log(
+                &profile_id,
+                "stderr.log",
+                &format!("[mcp] listener stopped: {err}"),
+            );
+            eprintln!("mcp listener stopped: {err}");
+        } else {
+            append_profile_log(&profile_id, "stderr.log", "[mcp] listener stopped");
+        }
+    });
+    Ok((shutdown_tx, handle))
+}
+
+async fn serve(
+    listener: tokio::net::TcpListener,
+    port: u16,
+    allow_lan_access: bool,
+    state: ListenerState,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let profile_id = state.workspace_id.clone();
+    let app = Router::new()
+        .route("/mcp", get(mcp_discovery).post(mcp_post))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth_protected_resource_metadata),
+        )
+        .route("/register", post(oauth_register_post))
+        .route(
+            "/oauth/authorize",
+            get(oauth_authorize_get).post(oauth_authorize_post),
+        )
+        .route("/oauth/token", post(oauth_token_post))
+        .with_state(state)
+        .layer(CorsLayer::permissive());
+
+    append_profile_log(
+        &profile_id,
+        "stdout.log",
+        &format!(
+            "[mcp] listening on http://{}:{port}/mcp",
+            local_network::bind_host(allow_lan_access)
+        ),
+    );
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown.await;
+        })
+        .await?;
+    Ok(())
+}
+
+fn bind_listener(port: u16, allow_lan_access: bool) -> Result<tokio::net::TcpListener, String> {
+    let addr = local_network::bind_addr(port, allow_lan_access);
+    let listener = std::net::TcpListener::bind(addr)
+        .map_err(|err| format!("MCP 本地端口 {port} 绑定失败: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("MCP 本地端口 {port} 设置非阻塞失败: {err}"))?;
+    tokio::net::TcpListener::from_std(listener)
+        .map_err(|err| format!("MCP 本地监听器初始化失败: {err}"))
+}
+
+async fn mcp_discovery() -> Response {
+    ([(CACHE_CONTROL, "no-store")], Json(mcp_discovery_payload())).into_response()
+}
+
+fn mcp_discovery_payload() -> Value {
+    json!({
+        "name": "coding-tools-mcp",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocolVersion": "2025-06-18"
+    })
+}
+
+fn resolve_oauth_base(state: &ListenerState, headers: &HeaderMap) -> String {
+    external_base_url(headers, state.bind_port, &state.configured_public_url)
+}
+
+async fn mcp_post(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Some(response) = require_mcp_auth(&state, &headers) {
+        return response;
+    }
+    let method = body
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let request_id = body.get("id").cloned().unwrap_or(Value::Null);
+    let request_bytes = serde_json::to_vec(&body)
+        .map(|bytes| bytes.len())
+        .unwrap_or_default();
+    let tool_name = body
+        .get("params")
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    append_profile_log(
+        &state.workspace_id,
+        "mcp-requests.log",
+        &format!(
+            "[rpc] request id={} method={} tool={}",
+            request_id, method, tool_name
+        ),
+    );
+
+    let mcp = state.mcp.clone();
+    let audit_state = state.mcp.clone();
+    let profile_id = state.workspace_id.clone();
+    let result = tokio::task::spawn_blocking(move || handle_request(&mcp, &body)).await;
+    match result {
+        Ok(response) => {
+            let response_bytes = serde_json::to_vec(&response)
+                .map(|bytes| bytes.len())
+                .unwrap_or_default();
+            let is_error = response.get("error").is_some()
+                || response
+                    .get("result")
+                    .and_then(|result| result.get("isError"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            state.mcp.usage().record(
+                request_bytes,
+                response_bytes,
+                method == "tools/call",
+                is_error,
+            );
+            let audit = audit_state.context_audit_snapshot();
+            let repeated_bytes = audit
+                .get("repeated_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let latest_block = audit
+                .get("blocks")
+                .and_then(Value::as_array)
+                .and_then(|blocks| blocks.last());
+            append_profile_log(
+                &profile_id,
+                "mcp-requests.log",
+                &format!(
+                    "[rpc] completed id={} method={} tool={} response_bytes={} repeated_bytes={}",
+                    request_id, method, tool_name, response_bytes, repeated_bytes
+                ),
+            );
+            if let Some(block) = latest_block {
+                append_profile_log(
+                    &profile_id,
+                    "mcp-requests.log",
+                    &format!(
+                        "[context-audit] kind={} bytes={} hash={} repeated={} total_bytes={} repeated_bytes={}",
+                        block.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
+                        block.get("bytes").and_then(Value::as_u64).unwrap_or_default(),
+                        block.get("hash").and_then(Value::as_str).unwrap_or("unknown"),
+                        block.get("repeated").and_then(Value::as_bool).unwrap_or(false),
+                        audit.get("total_bytes").and_then(Value::as_u64).unwrap_or_default(),
+                        repeated_bytes
+                    ),
+                );
+            }
+            if tool_name == "exec_command" || tool_name == "exec_health_check" {
+                let structured = response
+                    .get("result")
+                    .and_then(|result| result.get("structuredContent"));
+                let status = structured
+                    .and_then(|value| value.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let termination_reason = structured
+                    .and_then(|value| value.get("termination_reason"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let exit_code = structured
+                    .and_then(|value| value.get("exit_code"))
+                    .map(Value::to_string)
+                    .unwrap_or_default();
+                let is_error = response
+                    .get("result")
+                    .and_then(|result| result.get("isError"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                append_profile_log(
+                    &profile_id,
+                    "mcp-requests.log",
+                    &format!(
+                        "[exec] id={} tool={} is_error={} status={} termination_reason={} exit_code={}",
+                        request_id, tool_name, is_error, status, termination_reason, exit_code
+                    ),
+                );
+            }
+            Json(response).into_response()
+        }
+        Err(error) => {
+            let error_response = json!({
+                "jsonrpc": "2.0",
+                "id": request_id.clone(),
+                "error": {
+                    "code": -32603,
+                    "message": "Exec RPC worker failed",
+                    "data": {
+                        "stage": "rpc_worker",
+                        "reason": "worker_failed",
+                        "retryable": true,
+                        "suggestion": "重试请求或重启 MCP 运行时"
+                    }
+                }
+            });
+            let response_bytes = serde_json::to_vec(&error_response)
+                .map(|bytes| bytes.len())
+                .unwrap_or_default();
+            state
+                .mcp
+                .usage()
+                .record(request_bytes, response_bytes, method == "tools/call", true);
+            append_profile_log(
+                &profile_id,
+                "mcp-requests.log",
+                &format!(
+                    "[rpc] worker_failed id={} method={} tool={} error={error}",
+                    request_id, method, tool_name
+                ),
+            );
+            Json(error_response).into_response()
+        }
+    }
+}
+
+fn require_mcp_auth(state: &ListenerState, headers: &HeaderMap) -> Option<Response> {
+    if state.auth.bearer_enabled() {
+        let expected = state.bearer_token.as_deref().unwrap_or("");
+        return verify_bearer_header(headers, expected);
+    }
+    if state.auth.oauth_enabled() {
+        if let Some(oauth) = state.oauth.as_ref() {
+            let server_url = resolve_oauth_base(state, headers);
+            if let Some(mut response) = verify_oauth_bearer_header(headers, oauth, &server_url) {
+                if response.status() == StatusCode::UNAUTHORIZED {
+                    let metadata_url = protected_resource_metadata_url(&server_url);
+                    if let Ok(value) =
+                        format!("Bearer resource_metadata=\"{metadata_url}\"").parse()
+                    {
+                        response.headers_mut().insert(WWW_AUTHENTICATE, value);
+                    }
+                }
+                return Some(response);
+            }
+        }
+    }
+    None
+}
+
+async fn oauth_authorization_server_metadata(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.auth.oauth_enabled() {
+        return oauth_not_configured();
+    }
+    let base = resolve_oauth_base(&state, &headers);
+    Json(authorization_server_metadata(
+        &base,
+        state.oauth_client_secret.as_deref(),
+    ))
+    .into_response()
+}
+
+async fn oauth_protected_resource_metadata(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.auth.oauth_enabled() {
+        return oauth_not_configured();
+    }
+    Json(protected_resource_metadata(&resolve_oauth_base(
+        &state, &headers,
+    )))
+    .into_response()
+}
+
+async fn oauth_authorize_get(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+    Query(params): Query<AuthorizeParams>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return oauth_not_configured();
+    };
+    authorize_get(
+        oauth,
+        params,
+        Some(state.workspace_path.as_str()),
+        &resolve_oauth_base(&state, &headers),
+    )
+}
+
+async fn oauth_authorize_post(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+    Form(form): Form<AuthorizeForm>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return oauth_not_configured();
+    };
+    authorize_post(oauth, form, &resolve_oauth_base(&state, &headers))
+}
+
+async fn oauth_token_post(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+    Form(form): Form<TokenForm>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unsupported_grant_type" })),
+        )
+            .into_response();
+    };
+    token_exchange(oauth, &headers, form, &resolve_oauth_base(&state, &headers))
+}
+
+fn oauth_not_configured() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "OAuth not configured" })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::header::CACHE_CONTROL;
+    use axum::response::IntoResponse;
+
+    use super::{bind_listener, mcp_discovery, mcp_discovery_payload};
+
+    #[test]
+    fn bind_listener_reports_port_conflict_synchronously() {
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("占用测试端口");
+        let port = occupied.local_addr().expect("读取测试端口").port();
+
+        assert!(bind_listener(port, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_the_current_package_version() {
+        let discovery = mcp_discovery_payload();
+
+        assert_eq!(discovery["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn discovery_prevents_stale_tool_catalog_caching() {
+        let response = mcp_discovery().await.into_response();
+
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+    }
+}

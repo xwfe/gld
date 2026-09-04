@@ -1,0 +1,37 @@
+[package]
+name = "gld"
+description = "gld — command line front-end for the workspace-first MCP / GPT Actions runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gld"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gld"
+path = "src/main.rs"
+
+[dependencies]
+gld-core = { workspace = true }
+gld-daemon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive", "wrap_help", "env"] }
+clap_complete = "4"
+unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+# 只用来把 SIGPIPE 恢复成系统默认，见 main.rs。
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# OAuth 集成测试要自己算 PKCE 的 S256 challenge，版本跟 core 保持一致，
+# 不会给 Cargo.lock 添新条目。
+base64 = "0.22"
+sha2 = "0.10"

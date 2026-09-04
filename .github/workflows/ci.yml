@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: 格式与 Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: 测试 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 集成测试会真的拉起守护进程并写数据文件，必须指向临时目录，
+      # 否则会污染 runner 上的 ~/.gld，多个 job 之间还会互相干扰。
+      - name: cargo test
+        run: |
+          export GLD_HOME="$(mktemp -d)"
+          cargo test --workspace --all-targets --locked
+
+  docs:
+    name: 命令参考是否最新
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      # 改了 cli.rs 里的帮助文本却忘了重新生成 docs/cli.md 时，在这里拦住。
+      - name: 重新生成并比对
+        run: |
+          scripts/gen-cli-docs.sh
+          git diff --exit-code docs/cli.md \
+            || { echo "::error::docs/cli.md 与 --help 不一致，请运行 scripts/gen-cli-docs.sh 后提交"; exit 1; }
+
+  windows:
+    name: Windows 编译检查
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Windows 上守护进程走命名管道，与 Unix domain socket 是两套实现，
+      # 至少要保证它能编过；运行时行为由使用者反馈补充。
+      - run: cargo check --workspace --all-targets --locked

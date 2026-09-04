@@ -1,0 +1,54 @@
+[package]
+name = "gld-core"
+description = "Workspace-first MCP / GPT Actions runtime core (tool kernel, listeners, auth, tunnels)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gld_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+fs2 = { workspace = true }
+axum = { version = "0.8", features = ["form"] }
+tower-http = { version = "0.6", features = ["cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+walkdir = "2"
+regex = "1"
+glob = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+base64 = "0.22"
+jsonwebtoken = "9"
+sha2 = "0.10"
+shlex = "1"
+shell-words = "1"
+which = "7"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

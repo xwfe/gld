@@ -1,0 +1,1407 @@
+use serde_json::{json, Value};
+
+pub const TOOL_API_VERSION: &str = "2";
+
+pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
+    (
+        "harness_status",
+        "Harness status",
+        "Return durable task, workspace, capability, and recovery status.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "operation_log",
+        "Operation log",
+        "Return Workspace-level operation history independent of Task state.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "server_info",
+        "Server info",
+        "Return server, workspace, auth, profile, and exposed-tool metadata.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "history_manage",
+        "History manager",
+        "Stable Tool API v2 entry point for history bootstrap, checkpoint, validation, search, and bounded reads.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "planning_manage",
+        "Planning manager",
+        "Stable Tool API v2 entry point for Goal and Plan state, lifecycle updates, and review requests.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "task_manage",
+        "Task manager",
+        "Stable Tool API v2 entry point for durable task state, lifecycle, events, and change summaries.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "history_session_bootstrap",
+        "Initialize or restore development session",
+        "At the start of every new ChatGPT conversation, call this exactly once before the first response and pass the user's verbatim initial_user_input. It creates or resumes a lossless archive, then returns bounded current state and search/read guidance rather than all history.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "history_session_checkpoint",
+        "Save development checkpoint",
+        "Append an idempotent, redacted development checkpoint. Pass session_key and expected_path exactly as returned by history_session_bootstrap, plus the user's verbatim raw_user_input; the server cannot read ChatGPT transcripts that were not passed as arguments. Changed content for the same turn_id is preserved as a revision.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "history_session_validate",
+        "Validate session archive",
+        "Validate history numbering, files, session mappings, and optionally rebuild the derived index without deleting history.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "history_session_search",
+        "Search session archive",
+        "Search lossless history archives by deterministic keywords and return a bounded page of ranked locations and snippets. Use history_session_read to retrieve exact source text.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "history_session_read",
+        "Read session archive",
+        "Read one lossless numeric Markdown archive by number or a path returned from history_session_search. Responses are UTF-8-safe pages: max_bytes defaults to 16 KiB and is capped at 64 KiB; follow next_cursor to recover the complete source.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "planning_state",
+        "Planning state",
+        "Return project-local Goal and Plan state stored inside the configured workspace.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "capability_health_check",
+        "Capability health check",
+        "Check MCP authentication, workspace access, and exposed tool capability state to distinguish capability mismatch from permission problems.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "create_goal",
+        "Create goal",
+        "AI conversation workflow: create and focus a durable project Goal when the user's request benefits from an explicit objective, success criteria, and constraints. No pre-approval is required.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "update_goal",
+        "Update goal",
+        "Update Goal status, focus, constraints, or completed success criteria.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "create_plan",
+        "Create plan",
+        "AI conversation workflow: create, activate, and focus a durable project Plan, optionally linked to a Goal. No pre-approval is required.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "update_plan",
+        "Update plan",
+        "Update Plan status, focus, and individual step progress.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "request_goal_review",
+        "Request goal review",
+        "Submit a completed Goal to the gld CLI for human acceptance. This does not archive the Goal; only the human operator can accept and archive it.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "request_plan_review",
+        "Request plan review",
+        "Submit a completed Plan to the gld CLI for human acceptance. This does not archive the Plan; only the human operator can accept and archive it.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "project_state",
+        "Project state",
+        "Return the current project, task, change, and verification state.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "start_task",
+        "Start task",
+        "Start a durable coding task and capture the workspace baseline.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "update_task",
+        "Update task",
+        "Update task steps and durable progress.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "pause_task",
+        "Pause task",
+        "Pause the active coding task.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "resume_task",
+        "Resume task",
+        "Resume a paused or failed coding task.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "finish_task",
+        "Finish task",
+        "Finish a task with verification status and change summary.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "task_context",
+        "Task context",
+        "Return a bounded durable task context for a new conversation.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "list_task_events",
+        "List task events",
+        "Read task event history with pagination.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "change_summary",
+        "Change summary",
+        "Explain what changed, why, and what evidence exists.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "check_exec_environment",
+        "Check exec environment",
+        "Return lightweight exec_command sandbox and environment status known to the server.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "exec_health_check",
+        "Exec health check",
+        "Verify the exec worker, session creation, command execution, and stdout/stderr capture.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "get_default_cwd",
+        "Get default cwd",
+        "Return the current default cwd inside the workspace.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "set_default_cwd",
+        "Set default cwd",
+        "Set the default cwd for relative tool paths inside the workspace.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "read_file",
+        "Read file",
+        "Read a UTF-8 text file slice inside the configured workspace.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "list_dir",
+        "List directory",
+        "List directory entries inside the configured workspace.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "list_files",
+        "List files",
+        "List workspace files using glob filters.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "search_text",
+        "Search text",
+        "Search UTF-8 workspace files for text or regex matches.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "grep_text",
+        "Grep workspace text",
+        "Search workspace text with grep-style regex, glob, context, and bounded results.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "apply_patch",
+        "Apply patch",
+        "Apply a patch envelope transactionally inside the workspace.",
+        false,
+        true,
+        false,
+    ),
+    (
+        "patch_check",
+        "Check patch",
+        "Validate a patch without changing the workspace.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "exec_command",
+        "Execute command",
+        "Run a bounded command in the workspace under runtime policy.",
+        false,
+        true,
+        true,
+    ),
+    (
+        "write_stdin",
+        "Write stdin",
+        "Write characters to a server-managed running command session.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "kill_session",
+        "Kill session",
+        "Terminate a server-managed running command session.",
+        false,
+        true,
+        false,
+    ),
+    (
+        "read_output",
+        "Read output",
+        "Read retained stdout or stderr by output_ref with per-stream byte offset pagination.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "list_skills",
+        "List skills",
+        "List skills discovered from the enabled IDE and coding-agent providers. Skill bodies are loaded separately on demand.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "get_skill",
+        "Get skill",
+        "Load one discovered SKILL.md by id or unique name, including its full workflow body.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "git_status",
+        "Git status",
+        "Return git working tree status for the workspace.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "git_diff",
+        "Git diff",
+        "Return unified git diff for workspace changes.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "git_log",
+        "Git log",
+        "Return recent git commits with bounded structured metadata.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "git_show",
+        "Git show",
+        "Return bounded git show output for a revision.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "git_blame",
+        "Git blame",
+        "Return bounded git blame metadata for a workspace file.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "request_permissions",
+        "Request permissions",
+        "Request a scoped permission grant for dangerous runtime operations.",
+        true,
+        false,
+        false,
+    ),
+    (
+        "view_image",
+        "View image",
+        "Return a workspace image as MCP image content.",
+        true,
+        false,
+        false,
+    ),
+];
+
+pub fn tool_api_descriptor() -> Value {
+    json!({
+        "version": TOOL_API_VERSION,
+        "profile": "stable-aggregate",
+        "aggregate_tools": ["history_manage", "planning_manage", "task_manage"],
+        "legacy_compatibility": true
+    })
+}
+
+fn history_manage_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": ["bootstrap", "checkpoint", "validate", "search", "read"] },
+            "workspace_root": { "type": "string", "minLength": 1 },
+            "session_key": { "type": "string", "minLength": 1 },
+            "expected_path": { "type": "string", "minLength": 1 },
+            "history_dir": { "type": "string", "default": "docs/history-session" },
+            "title": { "type": "string" },
+            "initial_user_input": { "type": "string" },
+            "create_if_missing": { "type": "boolean", "default": true },
+            "turn_id": { "type": "string", "minLength": 1 },
+            "timestamp": { "type": "string" },
+            "user_intent": { "type": "string" },
+            "raw_user_input": { "type": "string" },
+            "findings": { "type": "array", "items": { "type": "string" } },
+            "decisions": { "type": "array", "items": { "type": "string" } },
+            "files_changed": { "type": "array", "items": { "type": "string" } },
+            "tests": { "type": "array", "items": { "type": "string" } },
+            "runtime_state": { "type": "array", "items": { "type": "string" } },
+            "remaining_issues": { "type": "array", "items": { "type": "string" } },
+            "next_actions": { "type": "array", "items": { "type": "string" } },
+            "notes": { "type": "string" },
+            "repair": { "type": "boolean", "default": false },
+            "query": { "type": "string", "default": "" },
+            "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "number": { "type": "integer", "minimum": 1 },
+            "path": { "type": "string", "minLength": 1 },
+            "max_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 },
+            "expected_hash": { "type": "string", "minLength": 64, "maxLength": 64 }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
+}
+
+fn planning_manage_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": ["state", "create_goal", "update_goal", "create_plan", "update_plan", "request_goal_review", "request_plan_review"] },
+            "goal_id": { "type": "string", "minLength": 1 },
+            "plan_id": { "type": "string", "minLength": 1 },
+            "title": { "type": "string", "minLength": 1 },
+            "objective": { "type": "string", "minLength": 1 },
+            "success_criteria": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "constraints": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "completed_criteria_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "status": { "type": "string", "enum": ["draft", "active", "paused", "cancelled"] },
+            "focus": { "type": "boolean" },
+            "steps": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "step_updates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "step_id": { "type": "string", "minLength": 1 },
+                        "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "blocked", "skipped"] },
+                        "notes": { "type": "string" }
+                    },
+                    "required": ["step_id", "status"],
+                    "additionalProperties": false
+                }
+            },
+            "summary": { "type": "string", "minLength": 1 }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
+}
+
+fn task_manage_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": ["status", "operation_log", "project_state", "start", "update", "pause", "resume", "finish", "context", "events", "change_summary"] },
+            "task_id": { "type": "string", "minLength": 1 },
+            "objective": { "type": "string", "minLength": 1 },
+            "completed_steps": { "type": "array", "items": { "type": "string" } },
+            "pending_steps": { "type": "array", "items": { "type": "string" } },
+            "summary": { "type": "string" },
+            "allow_unverified": { "type": "boolean", "default": false },
+            "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+            "max_files": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 200 },
+            "max_bytes": { "type": "integer", "minimum": 8192, "maximum": 131072, "default": 32768 },
+            "change_id": { "type": "string" }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
+}
+
+/// Legacy-compatible core surface. It keeps lifecycle-specific tool names while
+/// also exposing the Stable Tool API v2 managers so MCP and Actions can migrate
+/// without a flag day.
+pub const CORE_TOOLS: &[&str] = &[
+    "server_info",
+    "history_manage",
+    "planning_manage",
+    "task_manage",
+    "history_session_bootstrap",
+    "history_session_checkpoint",
+    "history_session_validate",
+    "history_session_search",
+    "history_session_read",
+    "planning_state",
+    "create_goal",
+    "update_goal",
+    "create_plan",
+    "update_plan",
+    "request_goal_review",
+    "request_plan_review",
+    "capability_health_check",
+    "check_exec_environment",
+    "get_default_cwd",
+    "set_default_cwd",
+    "list_skills",
+    "get_skill",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "grep_text",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+    "kill_session",
+    "read_output",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "request_permissions",
+    "view_image",
+];
+
+/// Compact default surface: keep ordinary development tools plus the Stable Tool
+/// API v2 managers while moving lifecycle-specific compatibility tools, skills,
+/// harness internals, and permission helpers to legacy/advanced profiles.
+pub const COMPACT_TOOLS: &[&str] = &[
+    "server_info",
+    "history_manage",
+    "planning_manage",
+    "task_manage",
+    "check_exec_environment",
+    "get_default_cwd",
+    "set_default_cwd",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "grep_text",
+    "apply_patch",
+    "patch_check",
+    "exec_command",
+    "write_stdin",
+    "kill_session",
+    "read_output",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "view_image",
+];
+
+pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
+    "server_info",
+    "planning_state",
+    "check_exec_environment",
+    "get_default_cwd",
+    "list_skills",
+    "get_skill",
+    "set_default_cwd",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "grep_text",
+    "read_output",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "request_permissions",
+    "view_image",
+];
+
+pub const ALLOWED_TOOLS: &[&str] = &[
+    "harness_status",
+    "operation_log",
+    "server_info",
+    "history_manage",
+    "planning_manage",
+    "task_manage",
+    "history_session_bootstrap",
+    "history_session_checkpoint",
+    "history_session_validate",
+    "history_session_search",
+    "history_session_read",
+    "planning_state",
+    "create_goal",
+    "update_goal",
+    "create_plan",
+    "update_plan",
+    "request_goal_review",
+    "request_plan_review",
+    "capability_health_check",
+    "check_exec_environment",
+    "exec_health_check",
+    "get_default_cwd",
+    "set_default_cwd",
+    "list_skills",
+    "get_skill",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "grep_text",
+    "grep",
+    "apply_patch",
+    "patch_check",
+    "exec_command",
+    "write_stdin",
+    "kill_session",
+    "read_output",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "project_state",
+    "start_task",
+    "update_task",
+    "pause_task",
+    "resume_task",
+    "finish_task",
+    "task_context",
+    "list_task_events",
+    "change_summary",
+    "request_permissions",
+    "view_image",
+];
+
+pub const MUTATING_TOOLS: &[&str] = &[
+    "history_manage",
+    "planning_manage",
+    "task_manage",
+    "history_session_bootstrap",
+    "history_session_checkpoint",
+    "history_session_validate",
+    "create_goal",
+    "update_goal",
+    "create_plan",
+    "update_plan",
+    "request_goal_review",
+    "request_plan_review",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+    "kill_session",
+    "set_default_cwd",
+    "start_task",
+    "update_task",
+    "pause_task",
+    "resume_task",
+    "finish_task",
+];
+
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "harness_status",
+    "operation_log",
+    "server_info",
+    "history_session_search",
+    "history_session_read",
+    "planning_state",
+    "check_exec_environment",
+    "exec_health_check",
+    "get_default_cwd",
+    "list_skills",
+    "get_skill",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "grep_text",
+    "grep",
+    "read_output",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "request_permissions",
+    "view_image",
+    "patch_check",
+    "project_state",
+    "task_context",
+    "list_task_events",
+    "change_summary",
+];
+
+pub fn is_allowed_tool(name: &str) -> bool {
+    ALLOWED_TOOLS.contains(&name)
+}
+
+pub fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "grep" => "grep_text",
+        _ => name,
+    }
+}
+
+pub fn normalize_tool_profile(profile: &str) -> &'static str {
+    match profile {
+        "compact" => "compact",
+        "advanced" => "advanced",
+        "read-only" => "read-only",
+        "compat-readonly-all" => "compat-readonly-all",
+        _ => "core",
+    }
+}
+
+pub fn exposed_tool_names(tool_profile: &str) -> Vec<&'static str> {
+    let names = match normalize_tool_profile(tool_profile) {
+        "compact" => COMPACT_TOOLS.to_vec(),
+        "read-only" => CORE_READ_ONLY_TOOLS.to_vec(),
+        "advanced" | "compat-readonly-all" => P0_TOOLS.iter().map(|(name, ..)| *name).collect(),
+        _ => CORE_TOOLS.to_vec(),
+    };
+
+    names
+        .into_iter()
+        .filter(|name| !CLIENT_HIDDEN_TOOLS.contains(name))
+        .collect()
+}
+
+/// Legacy compatibility tools that remain callable by name but must not be advertised to
+/// MCP clients. `request_permissions` cannot persist a grant for ChatGPT in trusted/safe
+/// mode, so advertising it encourages retry loops after policy errors.
+const CLIENT_HIDDEN_TOOLS: &[&str] = &["request_permissions"];
+
+pub fn list_tools() -> Vec<Value> {
+    list_tools_for_profile("full")
+}
+
+fn compact_description<'a>(name: &str, fallback: &'a str) -> &'a str {
+    match name {
+        "server_info" => "Return compact server and workspace metadata.",
+        "history_manage" => "Manage project history through one stable action-based API.",
+        "planning_manage" => "Manage Goal and Plan state through one stable action-based API.",
+        "task_manage" => "Manage durable task state through one stable action-based API.",
+        "history_session_bootstrap" => "Create or resume a history archive when explicitly requested; returns bounded metadata only.",
+        "history_session_checkpoint" => "Append a redacted checkpoint when session recording is enabled; session target may be omitted for lazy initialization.",
+        "history_session_validate" => "Validate or rebuild history indexes without deleting archives.",
+        "history_session_search" => "Search indexed session archives and return bounded matches.",
+        "history_session_read" => "Read a bounded UTF-8 page from one selected session archive.",
+        "read_file" => "Read a bounded UTF-8 text range from a workspace file.",
+        "search_text" | "grep_text" => "Search workspace text with bounded previews.",
+        "apply_patch" => "Apply a workspace patch and return a change summary.",
+        "exec_command" => "Run an allowed workspace command with bounded output.",
+        "write_stdin" => "Write to a running command session with bounded output.",
+        "read_output" => "Read a bounded page from a command output session.",
+        "git_diff" => "Return bounded Git diff output.",
+        _ => fallback,
+    }
+}
+
+pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
+    let compat = tool_profile == "compat-readonly-all";
+    exposed_tool_names(tool_profile)
+        .into_iter()
+        .filter_map(|name| {
+            P0_TOOLS.iter().find(|(n, ..)| *n == name).map(|entry| {
+                let (name, title, description, read_only, destructive, open_world) = *entry;
+                let (read_only, destructive, open_world) = if compat {
+                    (true, false, false)
+                } else {
+                    (read_only, destructive, open_world)
+                };
+                json!({
+                    "name": name,
+                    "title": title,
+                    "description": if tool_profile == "compact" {
+                        compact_description(name, description)
+                    } else {
+                        description
+                    },
+                    "inputSchema": input_schema(name),
+                    "annotations": {
+                        "title": title,
+                        "readOnlyHint": read_only,
+                        "destructiveHint": destructive,
+                        "idempotentHint": read_only,
+                        "openWorldHint": open_world
+                    }
+                })
+            })
+        })
+        .collect()
+}
+
+pub fn input_schema(name: &str) -> Value {
+    match name {
+        "history_manage" => history_manage_schema(),
+        "planning_manage" => planning_manage_schema(),
+        "task_manage" => task_manage_schema(),
+        "list_skills" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "get_skill" => json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "name": { "type": "string", "minLength": 1 }
+            },
+            "description": "Provide either id or name to load a skill. If both are provided, id takes priority.",
+            "additionalProperties": false
+        }),
+        "history_session_bootstrap" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "session_key": { "type": "string", "minLength": 1 },
+                "title": { "type": "string" },
+                "initial_user_input": { "type": "string" },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "create_if_missing": { "type": "boolean", "default": true }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_checkpoint" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "session_key": { "type": "string", "minLength": 1 },
+                "expected_path": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "turn_id": { "type": "string", "minLength": 1 },
+                "timestamp": { "type": "string" },
+                "user_intent": { "type": "string" },
+                "raw_user_input": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "string" } },
+                "decisions": { "type": "array", "items": { "type": "string" } },
+                "files_changed": { "type": "array", "items": { "type": "string" } },
+                "tests": { "type": "array", "items": { "type": "string" } },
+                "runtime_state": { "type": "array", "items": { "type": "string" } },
+                "remaining_issues": { "type": "array", "items": { "type": "string" } },
+                "next_actions": { "type": "array", "items": { "type": "string" } },
+                "notes": { "type": "string" }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_validate" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "repair": { "type": "boolean", "default": false }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_search" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "query": { "type": "string", "default": "" },
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 5 }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_read" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "number": { "type": "integer", "minimum": 1 },
+                "path": { "type": "string", "minLength": 1 },
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 65536, "default": 16384 },
+                "expected_hash": { "type": "string", "minLength": 64, "maxLength": 64 }
+            },
+            "additionalProperties": false
+        }),
+        "planning_state" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "create_goal" => json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "minLength": 1 },
+                "objective": { "type": "string", "minLength": 1 },
+                "success_criteria": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "constraints": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            },
+            "required": ["title", "objective"],
+            "additionalProperties": false
+        }),
+        "update_goal" => json!({
+            "type": "object",
+            "properties": {
+                "goal_id": { "type": "string", "minLength": 1 },
+                "title": { "type": "string", "minLength": 1 },
+                "objective": { "type": "string", "minLength": 1 },
+                "status": { "type": "string", "enum": ["active", "paused", "cancelled"] },
+                "constraints": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "completed_criteria_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "focus": { "type": "boolean" }
+            },
+            "required": ["goal_id"],
+            "additionalProperties": false
+        }),
+        "create_plan" => json!({
+            "type": "object",
+            "properties": {
+                "goal_id": { "type": "string", "minLength": 1 },
+                "title": { "type": "string", "minLength": 1 },
+                "objective": { "type": "string", "minLength": 1 },
+                "steps": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            },
+            "required": ["title", "objective"],
+            "additionalProperties": false
+        }),
+        "update_plan" => json!({
+            "type": "object",
+            "properties": {
+                "plan_id": { "type": "string", "minLength": 1 },
+                "status": { "type": "string", "enum": ["draft", "active", "paused", "cancelled"] },
+                "focus": { "type": "boolean" },
+                "step_updates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step_id": { "type": "string", "minLength": 1 },
+                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "blocked", "skipped"] },
+                            "notes": { "type": "string" }
+                        },
+                        "required": ["step_id", "status"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["plan_id"],
+            "additionalProperties": false
+        }),
+        "request_goal_review" => json!({
+            "type": "object",
+            "properties": {
+                "goal_id": { "type": "string", "minLength": 1 },
+                "summary": { "type": "string", "minLength": 1 }
+            },
+            "required": ["goal_id", "summary"],
+            "additionalProperties": false
+        }),
+        "request_plan_review" => json!({
+            "type": "object",
+            "properties": {
+                "plan_id": { "type": "string", "minLength": 1 },
+                "summary": { "type": "string", "minLength": 1 }
+            },
+            "required": ["plan_id", "summary"],
+            "additionalProperties": false
+        }),
+        "harness_status" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "exec_health_check" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "operation_log" => json!({
+            "type": "object",
+            "properties": {
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+            },
+            "additionalProperties": false
+        }),
+        "project_state" => json!({
+            "type": "object",
+            "properties": {
+                "max_files": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 200 }
+            },
+            "additionalProperties": false
+        }),
+        "start_task" => json!({
+            "type": "object",
+            "properties": {
+                "objective": { "type": "string", "minLength": 1 }
+            },
+            "required": ["objective"],
+            "additionalProperties": false
+        }),
+        "update_task" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "minLength": 1 },
+                "completed_steps": { "type": "array", "items": { "type": "string" } },
+                "pending_steps": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "pause_task" | "resume_task" => json!({
+            "type": "object",
+            "properties": { "task_id": { "type": "string", "minLength": 1 } },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "finish_task" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "minLength": 1 },
+                "summary": { "type": "string" },
+                "allow_unverified": { "type": "boolean", "default": false }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "task_context" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string" },
+                "max_bytes": { "type": "integer", "minimum": 8192, "maximum": 131072, "default": 32768 }
+            },
+            "additionalProperties": false
+        }),
+        "list_task_events" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "minLength": 1 },
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "change_summary" => json!({
+            "type": "object",
+            "properties": { "task_id": { "type": "string" }, "change_id": { "type": "string" } },
+            "additionalProperties": false
+        }),
+        "read_file" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "start_line": { "type": "integer", "minimum": 1, "default": 1 },
+                "end_line": { "type": "integer", "minimum": 1 },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 32768 }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "list_dir" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "recursive": { "type": "boolean", "default": false },
+                "max_depth": { "type": "integer", "minimum": 1, "maximum": 20, "default": 1 },
+                "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 },
+                "include_hidden": { "type": "boolean", "default": false },
+                "include_ignored": { "type": "boolean", "default": false }
+            },
+            "additionalProperties": false
+        }),
+        "list_files" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "patterns": { "type": "array", "items": { "type": "string" } },
+                "glob": { "type": "string", "description": "Alias for a single patterns entry" },
+                "exclude_patterns": { "type": "array", "items": { "type": "string" } },
+                "include_hidden": { "type": "boolean", "default": false },
+                "include_ignored": { "type": "boolean", "default": false },
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 50000, "default": 5000 }
+            },
+            "additionalProperties": false
+        }),
+        "search_text" | "grep_text" | "grep" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1 },
+                "path": { "type": "string", "default": "." },
+                "glob": { "type": "string", "description": "Alias appended to include_globs" },
+                "include_globs": { "type": "array", "items": { "type": "string" } },
+                "exclude_globs": { "type": "array", "items": { "type": "string" } },
+                "regex": { "type": "boolean", "default": false },
+                "case_sensitive": { "type": "boolean", "default": false },
+                "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 0 },
+                "max_preview_bytes": { "type": "integer", "minimum": 64, "maximum": 4096, "default": 256 },
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 100 },
+                "max_file_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 67108864,
+                    "default": 2097152,
+                    "description": "Skip files larger than this many bytes (default 2MiB) to avoid memory spikes"
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "apply_patch" => json!({
+            "type": "object",
+            "properties": {
+                "patch": { "type": "string", "minLength": 1 },
+                "dry_run": { "type": "boolean", "default": false },
+                "confirm": { "type": "boolean", "default": false },
+                "reason": { "type": "string", "default": "" }
+            },
+            "required": ["patch"],
+            "additionalProperties": false
+        }),
+        "patch_check" => json!({
+            "type": "object",
+            "properties": {
+                "patch": { "type": "string", "minLength": 1 }
+            },
+            "required": ["patch"],
+            "additionalProperties": false
+        }),
+        "exec_command" => json!({
+            "type": "object",
+            "properties": {
+                "cmd": { "type": "string", "minLength": 1 },
+                "workdir": { "type": "string", "default": "." },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
+                "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 32768 },
+                "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
+                "tty": { "type": "boolean", "default": false },
+                "stdin": { "type": "string", "default": "" },
+                "confirm": { "type": "boolean", "default": false },
+                "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" },
+                "reason": { "type": "string", "default": "" }
+            },
+            "required": ["cmd"],
+            "additionalProperties": false
+        }),
+        "write_stdin" => json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string", "minLength": 1 },
+                "chars": { "type": "string", "default": "" },
+                "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
+                "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 32768 }
+            },
+            "required": ["session_id"],
+            "additionalProperties": false
+        }),
+        "kill_session" => json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string", "minLength": 1 },
+                "signal": { "type": "string", "enum": ["TERM", "KILL", "INT"], "default": "TERM" },
+                "wait_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 5000 },
+                "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 32768 }
+            },
+            "required": ["session_id"],
+            "additionalProperties": false
+        }),
+        "read_output" => json!({
+            "type": "object",
+            "properties": {
+                "output_ref": { "type": "string", "minLength": 1 },
+                "stream": { "type": "string", "enum": ["stdout", "stderr"] },
+                "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 4096 }
+            },
+            "required": ["output_ref"],
+            "additionalProperties": false
+        }),
+        "git_status" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "include_untracked": { "type": "boolean", "default": true },
+                "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 500 }
+            },
+            "additionalProperties": false
+        }),
+        "git_diff" => json!({
+            "type": "object",
+            "properties": {
+                "paths": { "type": "array", "items": { "type": "string" }, "default": [] },
+                "staged": { "type": "boolean", "default": false },
+                "unstaged": { "type": "boolean", "default": true },
+                "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 3 },
+                "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 65536 }
+            },
+            "additionalProperties": false
+        }),
+        "git_log" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "ref": { "type": "string", "default": "HEAD" },
+                "max_count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                "skip": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 }
+            },
+            "additionalProperties": false
+        }),
+        "git_show" => json!({
+            "type": "object",
+            "properties": {
+                "rev": { "type": "string", "default": "HEAD" },
+                "path": { "type": "string" },
+                "paths": { "type": "array", "items": { "type": "string" } },
+                "include_diff": { "type": "boolean", "default": true },
+                "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 3 },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 }
+            },
+            "additionalProperties": false
+        }),
+        "git_blame" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "rev": { "type": "string" },
+                "start_line": { "type": "integer", "minimum": 1, "default": 1 },
+                "end_line": { "type": "integer", "minimum": 1 },
+                "max_lines": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 200 }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "request_permissions" => json!({
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "enum": ["exec_command", "apply_patch"]
+                },
+                "permission": {
+                    "type": "string",
+                    "enum": [
+                        "network",
+                        "destructive_command",
+                        "long_timeout",
+                        "sensitive_env",
+                        "shell_expansion",
+                        "inline_script",
+                        "privileged_executable",
+                        "write_generated_or_ignored"
+                    ]
+                },
+                "reason": { "type": "string", "minLength": 1 },
+                "arguments": { "type": "object", "additionalProperties": true },
+                "scope": {
+                    "type": "string",
+                    "enum": ["once", "session"],
+                    "default": "once"
+                },
+                "ttl_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3600,
+                    "default": 300
+                }
+            },
+            "required": ["tool_name", "permission", "reason", "arguments"],
+            "additionalProperties": false
+        }),
+        "set_default_cwd" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." }
+            },
+            "additionalProperties": false
+        }),
+        "view_image" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 10485760, "default": 5242880 },
+                "max_width": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2000 },
+                "max_height": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2000 },
+                "auto_resize": { "type": "boolean", "default": true },
+                "output": { "type": "string", "enum": ["mcp_image", "data_url"], "default": "mcp_image" }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        _ => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::{input_schema, list_tools_for_profile, tool_api_descriptor};
+
+    #[test]
+    fn core_catalog_excludes_non_persistent_permission_tool() {
+        let tools = list_tools_for_profile("core");
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        let unique: HashSet<_> = names.iter().copied().collect();
+
+        assert_eq!(tools.len(), 38);
+        assert_eq!(unique.len(), tools.len());
+        assert!(names.contains(&"history_manage"));
+        assert!(names.contains(&"planning_manage"));
+        assert!(names.contains(&"task_manage"));
+        assert!(names.contains(&"history_session_bootstrap"));
+        assert!(names.contains(&"history_session_checkpoint"));
+        assert!(names.contains(&"history_session_validate"));
+        assert!(names.contains(&"history_session_search"));
+        assert!(names.contains(&"history_session_read"));
+        assert!(names.contains(&"planning_state"));
+        assert!(names.contains(&"create_goal"));
+        assert!(names.contains(&"update_goal"));
+        assert!(names.contains(&"create_plan"));
+        assert!(names.contains(&"update_plan"));
+        assert!(names.contains(&"request_goal_review"));
+        assert!(names.contains(&"request_plan_review"));
+        assert!(!names.contains(&"set_planning_mode"));
+        assert!(names.contains(&"grep_text"));
+        assert!(!names.contains(&"grep"));
+        assert!(!names.contains(&"request_permissions"));
+
+        for name in names {
+            let schema = input_schema(name);
+            assert_eq!(schema["type"], "object", "{name} schema type");
+            assert!(schema["properties"].is_object(), "{name} properties");
+            assert!(schema.get("oneOf").is_none(), "{name} oneOf");
+            assert!(schema.get("anyOf").is_none(), "{name} anyOf");
+            assert!(schema.get("$ref").is_none(), "{name} ref");
+        }
+    }
+
+    #[test]
+    fn compact_catalog_uses_stable_v2_aggregate_managers() {
+        let tools = list_tools_for_profile("compact");
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+
+        assert!(names.len() < 30);
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"apply_patch"));
+        assert!(names.contains(&"exec_command"));
+        assert!(names.contains(&"history_manage"));
+        assert!(names.contains(&"planning_manage"));
+        assert!(names.contains(&"task_manage"));
+        assert!(!names.contains(&"history_session_search"));
+        assert!(!names.contains(&"history_session_read"));
+        assert!(!names.contains(&"planning_state"));
+        assert!(!names.contains(&"list_skills"));
+        assert!(!names.contains(&"request_permissions"));
+        assert_eq!(tool_api_descriptor()["version"], "2");
+    }
+}

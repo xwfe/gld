@@ -1,0 +1,117 @@
+name: Release
+
+# 打 v 开头的 tag 就发版；也可以手动触发，只产出构件不建 Release，
+# 用来在真发版之前先确认流水线是通的。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # tag 不会触发 ci.yml（它只盯 main 和 PR），所以发版前在这儿再跑一遍测试。
+  # 没测过的东西不往外发。
+  test:
+    name: 发版前测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: |
+          export GLD_HOME="$(mktemp -d)"
+          cargo test --workspace --all-targets --locked
+
+  build:
+    name: 构建 ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    # optional 的目标编不过不影响发版，其余目标必须全绿。
+    continue-on-error: ${{ matrix.optional || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          # ubuntu-22.04 的 glibc 是 2.35，覆盖 Ubuntu 22.04+ / Debian 12+ / RHEL 9+。
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          # musl 静态链接版：不挑发行版和 glibc 版本，Alpine 上也能跑。
+          #
+          # 依赖里带 C 代码的那几个（ring、zstd-sys、bzip2-sys）能不能在 musl 下
+          # 编过，已经在 rust:alpine 容器里实测过：编得过，产物是纯静态的，能运行。
+          # 这里仍标成 optional，是因为还差一环没验：Ubuntu 上 cc 默认指向 glibc 的
+          # gcc，musl 目标要靠 musl-tools 提供的 musl-gcc 接管。这一环出问题时
+          # 不该把整次发版卡住——上面那个 gnu 版本仍然会正常产出。
+          # 跑通一次之后可以把 optional 去掉。
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            optional: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # ring（TLS 的底层）带 C 代码，编 musl 目标要有 musl-gcc。
+      - name: 安装 musl 工具链
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # 构建和打包都在 scripts/package.sh 里，本地跑的是同一份。
+      # 打包逻辑分成两份的话，本地打出来的包和 Release 页上的包会慢慢分家，
+      # 而两边都"看起来正常"。
+      - name: 构建并打包
+        shell: bash
+        run: VERSION="${GITHUB_REF_NAME}" scripts/package.sh "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: 建 Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      # 这个 job 只收构件、不编译，但仍要 checkout：下面生成校验和用的是
+      # 仓库里的 scripts/package.sh（和 build job 那份是同一个）。
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # 校验和让下载的人能自己确认文件没被换过。同样走 scripts/package.sh，
+      # 本地打完包也能用同一条命令生成。
+      - name: 生成校验和
+        run: scripts/package.sh --checksums
+
+      # 用 gh CLI 而不是第三方 action：它是 runner 自带的，少一层供应链依赖。
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "gld ${GITHUB_REF_NAME}" \
+            --generate-notes
