@@ -6,6 +6,15 @@ use crate::settings::AppSettings;
 
 use super::model::{AppData, LegacyProfilesOnlyFile};
 
+/// 数据目录根下的旧布局：`profiles.json`（只有工作区列表）+ `app_settings.json`
+/// （FRP 配置、代理、密钥）两个文件分开存。现在的布局是把两者合成一份
+/// `data/profiles.json`（[`AppData`]）。
+///
+/// 只在新文件还不存在时读一次，读完 [`maybe_backup_legacy_files`] 会把旧文件
+/// 改名成 `.bak`，所以正常情况下每个数据目录只经历一次。
+///
+/// **删它之前先确认没有用户还停在旧布局上**：这条路径一断，那些人升级上来
+/// 会被当成"还没配过"，工作区和密钥全部读不到——而密钥没有第二份副本。
 const LEGACY_PROFILES_FILE: &str = "profiles.json";
 const LEGACY_SETTINGS_FILE: &str = "app_settings.json";
 

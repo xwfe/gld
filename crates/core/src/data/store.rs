@@ -2,7 +2,6 @@ use std::sync::Mutex;
 
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
-use crate::workspace::legacy_import::import_legacy_profiles_if_empty;
 use crate::workspace::WorkspaceProfile;
 
 use super::migrate::{data_file_path, load_or_migrate, maybe_backup_legacy_files, save};
@@ -32,10 +31,9 @@ impl DataStore {
         let _guard = lock_data_file()?;
         let path = data_file_path()?;
         let existed_before = path.exists();
-        let mut data = load_or_migrate()?;
-        let imported = import_legacy_profiles_if_empty(&mut data)?;
+        let data = load_or_migrate()?;
         let store = Self { data };
-        if !existed_before || imported > 0 {
+        if !existed_before {
             store.persist_unlocked()?;
         }
         if !existed_before {
