@@ -31,6 +31,7 @@
 - [gld ls](#gld-ls)
 - [gld share](#gld-share)
 - [gld upgrade](#gld-upgrade)
+- [gld destroy](#gld-destroy)
 - [gld health](#gld-health)
 - [gld doctor](#gld-doctor)
 - [gld tool](#gld-tool)
@@ -97,13 +98,14 @@ Commands:
   daemon       管理后台守护进程（启动 / 停止 / 状态 / 日志）
   workspace    管理工作区（登记项目目录、查看、修改配置、删除） [alias: ws]
   start        启动 MCP（默认）或 Actions 服务；目录没登记过会自动登记为工作区
-  stop         停止工作区的服务（默认全部）
+  stop         停止服务（默认停当前工作区的全部服务）
   restart      重启工作区的服务（默认全部）
   status       查看服务与隧道状态：不带工作区时列出全部，带工作区时显示详情
   ps           只列出正在运行的服务
   logs         查看工作区日志尾部，或用 -f 持续跟随
   ls           列出工作区的连接信息：地址、认证方式、凭据、隧道
   share        一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
+  destroy      销毁工作区：停掉服务与隧道，删掉它的配置和密钥（项目文件一个字节都不动）
   upgrade      改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
   health       逐项检查本地 / 公网端点与 OAuth 元数据是否可达
   doctor       体检：检查配置是否自洽，并给出每个问题的修复命令
@@ -154,7 +156,8 @@ Options:
   gld ls                                  看地址、凭据与隧道；不指定工作区时列出全部
   gld share                               要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
   gld upgrade --tunnel https://x.com/mcp  改目录 / 公网入口 / 端口 / 认证，改完自动重启
-  gld stop                                停止服务；守护进程仍在后台，可用 gld daemon stop 退出
+  gld stop                                停止服务（--all 停所有工作区的）；配置不动
+  gld destroy                             销毁工作区：连配置和密钥一起删（项目文件不动）
 
 公网入口（--tunnel 在 start / share / upgrade 里通用）：
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
@@ -565,20 +568,52 @@ Options:
 ## gld stop
 
 ```text
-停止工作区的服务（默认全部）
+停止服务（默认停当前工作区的全部服务）
+
+  gld stop              当前工作区的 MCP 和 Actions
+  gld stop -s mcp       只停 MCP
+  gld stop --all        所有工作区的所有服务（守护进程留着，下次 start 照常用）
+
+配置和密钥都不动；连守护进程一起退出用 gld daemon stop。
 
 Usage: gld stop [OPTIONS]
 
 Options:
-  -s, --service <SERVICE>  操作哪个服务；stop / restart 默认 all [possible values: mcp, actions, all]
-  -w, --workspace <WS>     目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
-      --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
-      --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
-      --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
-  -h, --help               Print help
-  -V, --version            Print version
+  -s, --service <SERVICE>
+          停哪个服务（默认 all）
+          
+          [possible values: mcp, actions, all]
+
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+  -a, --all
+          停所有工作区的服务，而不只是当前这个
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
 
 ## gld restart
@@ -866,6 +901,61 @@ Options:
           
           [default: mcp]
           [possible values: mcp, actions]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld destroy
+
+```text
+销毁工作区：停掉服务与隧道，删掉它的配置和密钥（项目文件一个字节都不动）
+
+  gld destroy              当前目录对应的工作区
+  gld destroy api          按名称 / 路径 / id 指定
+  gld destroy --all        全部工作区
+  gld destroy -y           不询问
+
+只是想停服务用 gld stop——那个不删任何东西。
+密钥删了就没了，客户端里存的 token / 口令会全部失效。
+
+Usage: gld destroy [OPTIONS] [WS]
+
+Arguments:
+  [WS]
+          要销毁哪个工作区：目录 / 名称 / id（默认按当前目录推断）
+
+Options:
+  -a, --all
+          销毁全部工作区
+
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+  -y, --yes
+          不询问，直接销毁
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
 
   -h, --help
           Print help (see a summary with '-h')

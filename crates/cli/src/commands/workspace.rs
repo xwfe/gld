@@ -1,12 +1,14 @@
 use std::io::{BufRead, IsTerminal, Write};
 
-use gld_core::app::{workspace_field_catalog, WorkspaceCreateOptions, WorkspaceUpdate};
+use gld_core::app::{
+    workspace_field_catalog, WorkspaceCreateOptions, WorkspaceTarget, WorkspaceUpdate,
+};
 use gld_core::runtime::ServiceKind;
 use gld_core::workspace::WorkspaceProfile;
 use gld_daemon::Request;
 
 use super::Ctx;
-use crate::cli::WorkspaceCmd;
+use crate::cli::{DestroyArgs, WorkspaceCmd};
 use crate::error::{CliError, CliResult};
 use crate::output::yes_no;
 
@@ -48,7 +50,7 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
             }
             if profiles.is_empty() {
                 ctx.out
-                    .line("还没有工作区。执行 `gld workspace add <项目目录>` 添加一个。");
+                    .line("还没有工作区。在项目目录里执行 `gld start` 就会自动登记并启动。");
                 return Ok(());
             }
             let rows: Vec<Vec<String>> = profiles
@@ -92,31 +94,16 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
             Ok(())
         }
         WorkspaceCmd::Remove { yes } => {
-            let profile: WorkspaceProfile = ctx
-                .backend
-                .call_typed(Request::ResolveWorkspace {
-                    target: ctx.target.clone(),
-                })
-                .await?;
-            if !yes
-                && !confirm(&format!(
-                    "确认删除工作区「{}」（{}）？项目文件不会被动。",
-                    profile.name, profile.path
-                ))?
-            {
-                ctx.out.line("已取消。");
-                return Ok(());
-            }
-            let removed: WorkspaceProfile = ctx
-                .backend
-                .call_typed(Request::DeleteWorkspace {
-                    target: gld_core::app::WorkspaceTarget::selector(profile.id.clone()),
-                })
-                .await?;
-            if !ctx.out.json_or(&removed) {
-                ctx.out.line(format!("已删除工作区「{}」。", removed.name));
-            }
-            Ok(())
+            // 和 `gld destroy` 是同一件事，只是入口不同。
+            destroy(
+                ctx,
+                DestroyArgs {
+                    workspace: None,
+                    all: false,
+                    yes,
+                },
+            )
+            .await
         }
         WorkspaceCmd::Set { assignments } => {
             let mut pairs = Vec::with_capacity(assignments.len());
@@ -193,6 +180,74 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
             Ok(())
         }
     }
+}
+
+/// `gld destroy`：停服务、停隧道、删配置与密钥。项目文件不动。
+///
+/// 删掉的是"gld 这边关于这个项目的一切"：端口、认证方式、密钥、隧道配置、
+/// 历史与 Planning 的记账。密钥没有备份，客户端里存着的 token / 口令随之失效，
+/// 所以默认要确认一次，`-y` 是给脚本用的。
+pub async fn destroy(ctx: &mut Ctx, args: DestroyArgs) -> CliResult {
+    let victims = if args.all {
+        ctx.backend.call_typed(Request::ListWorkspaces).await?
+    } else {
+        let target = match &args.workspace {
+            Some(selector) => {
+                if ctx.explicit_workspace {
+                    return Err(CliError::new(format!(
+                        "同时给了 {selector} 和 -w {}，不知道该听哪个。去掉其中一个。",
+                        ctx.target.selector.clone().unwrap_or_default()
+                    )));
+                }
+                WorkspaceTarget::selector(selector.clone())
+            }
+            None => ctx.target.clone(),
+        };
+        let profile: WorkspaceProfile = ctx
+            .backend
+            .call_typed(Request::ResolveWorkspace { target })
+            .await?;
+        vec![profile]
+    };
+
+    if victims.is_empty() {
+        if !ctx.out.json_or(&Vec::<WorkspaceProfile>::new()) {
+            ctx.out.line("没有工作区可销毁。");
+        }
+        return Ok(());
+    }
+
+    if !args.yes {
+        // 一次列清楚要销毁谁：--all 的时候尤其重要，名字看着眼熟不代表就是它。
+        ctx.out.line(format!(
+            "将销毁 {} 个工作区（服务和隧道会先停掉，项目文件不动）：",
+            victims.len()
+        ));
+        for profile in &victims {
+            ctx.out
+                .line(format!("  {}  {}", profile.name, profile.path));
+        }
+        if !confirm("确认销毁？配置和密钥会被删除，且无法恢复。")? {
+            ctx.out.line("已取消。");
+            return Ok(());
+        }
+    }
+
+    let mut removed = Vec::with_capacity(victims.len());
+    for profile in victims {
+        let gone: WorkspaceProfile = ctx
+            .backend
+            .call_typed(Request::DeleteWorkspace {
+                target: WorkspaceTarget::selector(profile.id.clone()),
+            })
+            .await?;
+        if !ctx.out.json {
+            ctx.out.line(format!("已销毁工作区「{}」。", gone.name));
+        }
+        removed.push(gone);
+    }
+    ctx.out.json_or(&removed);
+    Ok(())
 }
 
 /// 把"为了让新配置生效做了什么"讲清楚。

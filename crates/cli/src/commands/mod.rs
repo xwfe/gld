@@ -67,6 +67,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Workspace(command) => workspace::run(&mut ctx, command).await,
         Command::Start(args) => service::start(&mut ctx, args).await,
         Command::Stop(args) => service::stop(&mut ctx, args).await,
+        Command::Destroy(args) => workspace::destroy(&mut ctx, args).await,
         Command::Restart(args) => service::restart(&mut ctx, args).await,
         Command::Status => service::status(&mut ctx).await,
         Command::Ps => service::ps(&mut ctx).await,

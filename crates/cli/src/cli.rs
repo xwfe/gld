@@ -12,7 +12,8 @@ const AFTER_HELP: &str = "\
   gld ls                                  看地址、凭据与隧道；不指定工作区时列出全部
   gld share                               要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
   gld upgrade --tunnel https://x.com/mcp  改目录 / 公网入口 / 端口 / 认证，改完自动重启
-  gld stop                                停止服务；守护进程仍在后台，可用 gld daemon stop 退出
+  gld stop                                停止服务（--all 停所有工作区的）；配置不动
+  gld destroy                             销毁工作区：连配置和密钥一起删（项目文件不动）
 
 公网入口（--tunnel 在 start / share / upgrade 里通用）：
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
@@ -106,8 +107,15 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Start(StartArgs),
 
-    /// 停止工作区的服务（默认全部）
-    Stop(ServiceArgs),
+    /// 停止服务（默认停当前工作区的全部服务）
+    ///
+    ///   gld stop              当前工作区的 MCP 和 Actions
+    ///   gld stop -s mcp       只停 MCP
+    ///   gld stop --all        所有工作区的所有服务（守护进程留着，下次 start 照常用）
+    ///
+    /// 配置和密钥都不动；连守护进程一起退出用 gld daemon stop。
+    #[command(verbatim_doc_comment)]
+    Stop(StopArgs),
 
     /// 重启工作区的服务（默认全部）
     ///
@@ -146,6 +154,18 @@ pub enum Command {
     /// 公网入口意味着"在你电脑上跑命令"这件事对外可达，开之前请读 docs/security.md。
     #[command(verbatim_doc_comment)]
     Share(ShareArgs),
+
+    /// 销毁工作区：停掉服务与隧道，删掉它的配置和密钥（项目文件一个字节都不动）
+    ///
+    ///   gld destroy              当前目录对应的工作区
+    ///   gld destroy api          按名称 / 路径 / id 指定
+    ///   gld destroy --all        全部工作区
+    ///   gld destroy -y           不询问
+    ///
+    /// 只是想停服务用 gld stop——那个不删任何东西。
+    /// 密钥删了就没了，客户端里存的 token / 口令会全部失效。
+    #[command(verbatim_doc_comment)]
+    Destroy(DestroyArgs),
 
     /// 改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
     ///
@@ -311,6 +331,32 @@ pub struct ServiceArgs {
     /// 操作哪个服务；stop / restart 默认 all
     #[arg(short = 's', long, value_enum)]
     pub service: Option<ServiceArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct StopArgs {
+    /// 停哪个服务（默认 all）
+    #[arg(short = 's', long, value_enum)]
+    pub service: Option<ServiceArg>,
+
+    /// 停所有工作区的服务，而不只是当前这个
+    #[arg(short = 'a', long)]
+    pub all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DestroyArgs {
+    /// 要销毁哪个工作区：目录 / 名称 / id（默认按当前目录推断）
+    #[arg(id = "target", value_name = "WS")]
+    pub workspace: Option<String>,
+
+    /// 销毁全部工作区
+    #[arg(short = 'a', long, conflicts_with = "target")]
+    pub all: bool,
+
+    /// 不询问，直接销毁
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]

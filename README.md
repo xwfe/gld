@@ -50,6 +50,13 @@ gld upgrade --tunnel https://new.example.com/mcp
 gld upgrade --path ~/code/my-project-v2
 ```
 
+不用了就收摊：
+
+```bash
+gld stop                      # 停当前工作区的服务（--all 停所有工作区的）
+gld destroy                   # 连配置和密钥一起删掉；项目文件不动
+```
+
 > **开公网入口前请先读 [docs/security.md](docs/security.md)。**
 > 它等于把"以你的身份在你电脑上跑命令"这件事对外开放了。
 

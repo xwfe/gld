@@ -9,7 +9,7 @@ use gld_daemon::Request;
 use serde_json::json;
 
 use super::{share, Ctx};
-use crate::cli::{LsArgs, ServiceArg, ServiceArgs, StartArgs, TunnelService};
+use crate::cli::{LsArgs, ServiceArg, ServiceArgs, StartArgs, StopArgs, TunnelService};
 use crate::error::{CliError, CliResult};
 use crate::output::{human_duration, mask, or_dash, yes_no};
 
@@ -73,7 +73,7 @@ async fn register(
             ensured.profile.name, ensured.profile.path, ensured.profile.runtime.local_port
         ));
         ctx.out
-            .note("登记错了：gld workspace remove -w <名称>（不会动项目文件）。");
+            .note("登记错了：gld destroy <名称>（只删 gld 这边的配置，项目文件不动）。");
     }
     Ok(ensured.profile)
 }
@@ -161,12 +161,15 @@ pub async fn start(ctx: &mut Ctx, args: StartArgs) -> CliResult {
     Ok(())
 }
 
-pub async fn stop(ctx: &mut Ctx, args: ServiceArgs) -> CliResult {
+pub async fn stop(ctx: &mut Ctx, args: StopArgs) -> CliResult {
     if !ctx.backend.is_remote() {
         if !ctx.out.json_or(&Vec::<serde_json::Value>::new()) {
             ctx.out.line("守护进程未运行，没有需要停止的服务。");
         }
         return Ok(());
+    }
+    if args.all {
+        return stop_everything(ctx, args.service).await;
     }
     let mut results = Vec::new();
     for kind in kinds(args.service, ServiceArg::All) {
@@ -194,6 +197,54 @@ pub async fn stop(ctx: &mut Ctx, args: ServiceArgs) -> CliResult {
     }
     if !ctx.out.json_or(&results) && results.is_empty() {
         ctx.out.line("该工作区没有正在运行的服务。");
+    }
+    Ok(())
+}
+
+/// `gld stop --all`：把所有工作区正在跑的服务都停掉（隧道跟着停）。
+///
+/// 和 `gld daemon stop` 的区别：那个连守护进程一起退出，下次任何命令都要重新
+/// 拉一次；这个只是让服务停下来，守护进程还在，`gld start` 立刻就能用。
+/// 配置和密钥都不动——要删得用 `gld destroy`。
+async fn stop_everything(ctx: &mut Ctx, service: Option<ServiceArg>) -> CliResult {
+    let overview: Vec<ServiceOverview> = ctx.backend.call_typed(Request::Overview).await?;
+    let selected = kinds(service, ServiceArg::All);
+
+    let mut results = Vec::new();
+    for item in &overview {
+        for kind in &selected {
+            let current = match kind {
+                ServiceKind::Mcp => &item.mcp,
+                ServiceKind::Actions => &item.actions,
+            };
+            if current.state == "stopped" {
+                continue;
+            }
+            let target = WorkspaceTarget::selector(item.workspace.id.clone());
+            let status: RuntimeStatusDto = ctx
+                .backend
+                .call_typed(Request::StopService {
+                    target,
+                    kind: *kind,
+                })
+                .await?;
+            if !ctx.out.json {
+                ctx.out.line(format!(
+                    "{:12} {}",
+                    item.workspace.name,
+                    format_args!("{} {}", kind.as_str(), ctx.out.state(&status.state))
+                ));
+            }
+            results.push(json!({
+                "workspace": item.workspace.id,
+                "name": item.workspace.name,
+                "service": kind,
+                "status": status,
+            }));
+        }
+    }
+    if !ctx.out.json_or(&results) && results.is_empty() {
+        ctx.out.line("没有正在运行的服务。");
     }
     Ok(())
 }

@@ -48,7 +48,7 @@ printf '{"op":"ping"}\n' | nc -U ~/.gld/daemon.sock
 
 | 需要（没跑就自动拉起） | 不需要（没跑时进程内直接执行） |
 | --- | --- |
-| `start` `stop` `restart` `share` | `workspace *` `settings *` `secret *` `frp *` |
+| `start` `stop` `restart` `share` `destroy` | `workspace *` `settings *` `secret *` `frp *` |
 | `tunnel start/stop/restart/test` | `status` `ps` `logs` `health` `ls` |
 | `gateway start/stop` | `planning *` `history` `usage` `context` |
 

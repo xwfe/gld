@@ -20,7 +20,7 @@ COMMANDS=(
   ""
   "daemon" "daemon start" "daemon stop" "daemon restart" "daemon status" "daemon run" "daemon logs"
   "workspace" "workspace add" "workspace list" "workspace show" "workspace remove" "workspace set" "workspace fields" "workspace use"
-  "start" "stop" "restart" "status" "ps" "logs" "ls" "share" "upgrade" "health" "doctor"
+  "start" "stop" "restart" "status" "ps" "logs" "ls" "share" "upgrade" "destroy" "health" "doctor"
   "tool" "tool list" "tool schema" "tool call"
   "tunnel" "tunnel start" "tunnel stop" "tunnel restart" "tunnel test" "tunnel status" "tunnel snippet"
   "gateway" "gateway show" "gateway set" "gateway start" "gateway stop" "gateway health"
