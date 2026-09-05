@@ -46,11 +46,23 @@ pub fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], bo
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    stream.write_all(head.as_bytes()).unwrap();
-    stream.write_all(body.as_bytes()).unwrap();
+    // 头和体一次写完。分两次 write 的话，服务端可能在只读了头之后就决定
+    // 拒绝（401 直接返回，根本不读 body），随后带着"还没读走的 body"关闭连接——
+    // 这种关闭内核发的是 RST 而不是 FIN，客户端读响应时拿到 ECONNRESET。
+    // 这就是这套测试里那个只在 POST 上偶发的 connection reset。
+    let mut request = head.into_bytes();
+    request.extend_from_slice(body.as_bytes());
+    stream.write_all(&request).unwrap();
 
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).expect("read response");
+    if let Err(error) = stream.read_to_end(&mut raw) {
+        // 已经读到完整响应（含空行分隔的头）时，RST 只是服务端没读完请求体就
+        // 关闭连接的副作用，响应本身是有效的——真实 HTTP 客户端也这么处理。
+        let text = String::from_utf8_lossy(&raw);
+        if !text.contains("\r\n\r\n") {
+            panic!("read response 失败：{error}（已收到 {} 字节）", raw.len());
+        }
+    }
     let text = String::from_utf8_lossy(&raw).into_owned();
     let (head, body) = text
         .split_once("\r\n\r\n")

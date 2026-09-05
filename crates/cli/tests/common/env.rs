@@ -109,6 +109,15 @@ impl Drop for Env {
     fn drop(&mut self) {
         // 测试失败时也别留下后台进程。
         let _ = self.gld(&["daemon", "stop", "--force", "--wait", "5"]);
+        // 失败时把数据目录留在盘上：日志是唯一能说清"服务当时怎么了"的东西，
+        // 跟着 TempDir 一起删掉的话，偶发问题就只剩一句断言失败。
+        if std::thread::panicking() {
+            let home = std::mem::replace(
+                &mut self.home,
+                tempfile::tempdir().expect("placeholder home"),
+            );
+            eprintln!("[env] 失败现场保留在 {}", home.keep().display());
+        }
     }
 }
 
