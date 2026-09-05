@@ -16,19 +16,19 @@
 3. 复制到 gld 的数据目录：
 
    ```bash
-   mkdir -p ~/.gld/data
-   cp "~/Library/Application Support/coding-tools-mcp-desktop/data/profiles.json" ~/.gld/data/profiles.json
-   chmod 600 ~/.gld/data/profiles.json
+   mkdir -p ~/.config/gld/data
+   cp "~/Library/Application Support/coding-tools-mcp-desktop/data/profiles.json" ~/.config/gld/data/profiles.json
+   chmod 600 ~/.config/gld/data/profiles.json
    gld ws list
    ```
 
-**gld 不会自己去桌面版的目录里找数据**——它只读自己的数据目录（`~/.gld`，
+**gld 不会自己去桌面版的目录里找数据**——它只读自己的数据目录（`~/.config/gld`，
 或 `GLD_HOME` 指的地方）。所以这一步的复制是必须的，没有"自动导入"这回事。
 
 工作区、端口、认证方式、密钥、FRP 配置、全局入口设置全部保留。
 frpc / cloudflared 需要你自己装（`brew install frpc` / `brew install cloudflared`）。
 gld 不再代管这两个程序——只要它们在 PATH 里就会被自动认出来。
-桌面版下到 `~/.gld/bin` 的那份也不会再被使用，可以直接删掉。
+桌面版下到 `~/.config/gld/bin` 的那份也不会再被使用，可以直接删掉。
 
 ## 行为差异
 

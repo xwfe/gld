@@ -69,7 +69,7 @@ gld tool call exec_command cmd='cargo test'
 | `同一工作区的 MCP 与 Actions 必须使用同一 FRP 服务器` | 一个工作区只跑一个 frpc，两条线路得连同一台 frps | 让两者用同一个 `frp-profile` |
 | 子域名冲突 | 两个工作区配了相同子域名 | 改其中一个的 `frp-subdomain` |
 | Cloudflare quick 地址每次都变 | quick 模式设计如此 | 用 named 模式 + `gld secret set cloudflare_token` |
-| 工作区删了、frpc 还在 | 上次是 `kill -9` 退出的 | `gld tunnel stop`；仍在的话按 `~/.gld/frpc/<id>/frpc.pid` 里的 pid 手动 kill |
+| 工作区删了、frpc 还在 | 上次是 `kill -9` 退出的 | `gld tunnel stop`；仍在的话按 `~/.config/gld/frpc/<id>/frpc.pid` 里的 pid 手动 kill |
 
 ## 工作区与配置
 
@@ -111,6 +111,6 @@ gld tool call exec_command cmd='cargo test'
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 两套配置互相干扰 | 用了同一个 `~/.gld` | 用 `GLD_HOME=/path/a gld …` 隔离，守护进程也按 `GLD_HOME` 各自一套 |
+| 两套配置互相干扰 | 用了同一个 `~/.config/gld` | 用 `GLD_HOME=/path/a gld …` 隔离，守护进程也按 `GLD_HOME` 各自一套 |
 | socket 出现在 `/tmp` 而不是数据目录 | 数据目录路径太长（>100 字节），Unix socket 放不下 | 正常；`gld daemon status` 里能看到实际路径 |
 | 想看守护进程收到了什么 | — | `gld daemon logs -f`，每个请求一行含耗时；参数不记录（里面可能有密钥） |

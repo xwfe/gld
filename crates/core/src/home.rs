@@ -4,12 +4,12 @@
 //! 都放在同一个目录下：
 //!
 //! 1. 环境变量 `GLD_HOME` 指定的目录（测试和多实例隔离用）；
-//! 2. 否则 `~/.gld`。
+//! 2. 否则 `~/.config/gld`。
 //!
 //! 目录结构：
 //!
 //! ```text
-//! ~/.gld/
+//! ~/.config/gld/
 //! ├── data/profiles.json   工作区、设置、密钥（单一事实来源）
 //! ├── logs/<workspace-id>/ 每个工作区的 MCP / Actions / 隧道日志
 //! ├── logs/daemon.log      守护进程自身日志
@@ -19,6 +19,10 @@
 //! ├── daemon.lock          守护进程单实例锁
 //! └── daemon.json          守护进程 pid / 版本 / 启动时间
 //! ```
+//!
+//! 0.3.0 之前这个目录是 `~/.gld`，**没有兼容读取**：从旧版本升级上来的话，
+//! 先 `mv ~/.gld ~/.config/gld`（守护进程要先停），否则 gld 会当成全新安装，
+//! 而工作区和密钥还在旧目录里躺着。
 
 use std::path::PathBuf;
 
@@ -27,12 +31,17 @@ use crate::error::{AppError, AppResult};
 /// 覆盖数据目录的环境变量名。
 pub const HOME_ENV: &str = "GLD_HOME";
 
-/// 默认数据目录名（位于用户主目录下）。
-pub const DEFAULT_DIR_NAME: &str = ".gld";
+/// 默认数据目录相对用户主目录的位置。
+///
+/// 三个平台都用 `~/.config/gld`，不跟着各自的系统惯例走（macOS 的
+/// `~/Library/Application Support`、Windows 的 `%APPDATA%`）：一份文档、
+/// 一条路径，跨机器同步和排障时不用先问"你在哪个系统上"。
+/// 要放别处用 `GLD_HOME`。
+pub const DEFAULT_DIR_NAME: &str = ".config/gld";
 
 /// 返回数据目录（不保证已存在）。
 pub fn data_home() -> AppResult<PathBuf> {
-    // 单元测试里绝不能落到真实的 `~/.gld`：有些"取路径"的函数会顺手 create_dir_all，
+    // 单元测试里绝不能落到真实的数据目录：有些"取路径"的函数会顺手 create_dir_all，
     // 跑一次 cargo test 就把用户主目录写脏，而且下一轮测试还会读到上一轮的残留。
     // 没有显式设 GLD_HOME 的测试，这里自动兜到临时目录。
     #[cfg(test)]
@@ -114,7 +123,7 @@ pub fn harness_root() -> AppResult<PathBuf> {
     Ok(data_home()?.join("harness"))
 }
 
-/// 测试专用：把数据目录指向一个进程级临时目录，避免单元测试写坏真实的 `~/.gld`。
+/// 测试专用：把数据目录指向一个进程级临时目录，避免单元测试写坏真实的数据目录。
 ///
 /// 同一进程内多次调用共享同一个目录（`cargo test` 并行跑用例时也安全）。
 #[cfg(test)]
@@ -144,10 +153,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_home_lives_under_the_user_home() {
+    fn default_home_lives_under_the_user_config_dir() {
         assert_eq!(
             default_home(std::path::Path::new("/home/someone")),
-            std::path::Path::new("/home/someone/.gld")
+            std::path::Path::new("/home/someone/.config/gld")
         );
     }
 
@@ -177,15 +186,15 @@ mod tests {
         assert!(reject_non_directory(missing.clone()).is_ok());
     }
 
-    /// 没设 GLD_HOME 的单元测试必须落到临时目录，绝不能碰真实的 `~/.gld`。
+    /// 没设 GLD_HOME 的单元测试必须落到临时目录，绝不能碰真实的数据目录。
     ///
     /// 曾经就是这么被写脏的：`managed_frpc_config_path` 这类"取路径"的函数
     /// 顺手 create_dir_all，两个没做隔离的测试在用户主目录里建出了
-    /// `~/.gld/frpc/first-workspace` 这种测试夹具目录。
+    /// `<数据目录>/frpc/first-workspace` 这种测试夹具目录。
     #[test]
     fn unit_tests_never_touch_the_real_home() {
         let home = data_home().expect("home");
         let real = dirs::home_dir().expect("user home").join(DEFAULT_DIR_NAME);
-        assert_ne!(home, real, "测试用的数据目录不该是真实的 ~/.gld");
+        assert_ne!(home, real, "测试用的数据目录不该是真实的 ~/.config/gld");
     }
 }

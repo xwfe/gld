@@ -1,6 +1,6 @@
 //! 运行日志的写入与轮转。
 //!
-//! 每个工作区在 `~/.gld/logs/<workspace-id>/` 下有几个日志文件：
+//! 每个工作区在 `~/.config/gld/logs/<workspace-id>/` 下有几个日志文件：
 //! `mcp-requests.log`（每次 MCP 请求 2-4 行）、`stdout.log`、`stderr.log`，
 //! 用了隧道还会有 `frpc-*.log` / `cloudflared.log`。
 //!

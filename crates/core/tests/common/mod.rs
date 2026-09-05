@@ -124,10 +124,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 把数据目录指到临时目录，别让测试写脏真实的 `~/.gld`。
+/// 把数据目录指到临时目录，别让测试写脏真实的 `~/.config/gld`。
 ///
 /// 集成测试链接的是**非 test 构建**的 core，所以 `home.rs` 里那个 `cfg(test)`
-/// 兜底在这儿不生效：`ToolContext::new` 会去 `~/.gld/harness` 建目录，
+/// 兜底在这儿不生效：`ToolContext::new` 会去 `~/.config/gld/harness` 建目录，
 /// 于是 `cargo test` 会在用户主目录里留下一堆 workspace 状态目录（踩过一次）。
 ///
 /// 已经设了 `GLD_HOME` 就不动它——CI 和冒烟脚本会自己指目录。

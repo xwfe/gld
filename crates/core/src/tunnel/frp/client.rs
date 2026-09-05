@@ -29,7 +29,7 @@ pub struct FrpcHandle {
 /// 注意：这个函数**会顺手把目录建出来**。
 ///
 /// 下面几个 `*_path` 都基于它，所以"只是取个路径"其实是有副作用的。
-/// 单元测试调到它们时必须先隔离数据目录，否则会在真实的 `~/.gld` 里
+/// 单元测试调到它们时必须先隔离数据目录，否则会在真实的 `~/.config/gld` 里
 /// 留下测试夹具目录（踩过一次）。
 fn managed_frpc_dir(workspace_id: &str) -> AppResult<PathBuf> {
     let dir = crate::home::data_home()?
@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn managed_config_paths_are_isolated_by_workspace() {
-        // 这些 *_path 会建目录，不隔离就写到真实的 ~/.gld 里去了。
+        // 这些 *_path 会建目录，不隔离就写到真实的 ~/.config/gld 里去了。
         crate::home::isolate_for_tests();
         let first = managed_frpc_config_path("first-workspace").unwrap();
         let second = managed_frpc_config_path("second-workspace").unwrap();

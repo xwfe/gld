@@ -1,7 +1,7 @@
 //! 命令行与守护进程之间的请求 / 响应类型。
 //!
 //! 编码：每条消息是一行 JSON（末尾 `\n`），一个连接只处理一个请求。
-//! 这样用 `nc -U ~/.gld/daemon.sock` 就能手工调试，也不需要任何帧格式。
+//! 这样用 `nc -U ~/.config/gld/daemon.sock` 就能手工调试，也不需要任何帧格式。
 //!
 //! 兼容性：`Request` 用 `op` 字段区分变体。升级二进制后旧守护进程仍可能
 //! 在跑，命令行会先比较 [`DaemonInfo::protocol`] 与 [`PROTOCOL_VERSION`]，

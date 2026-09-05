@@ -9,7 +9,7 @@ use crate::workspace::WorkspaceProfile;
 
 /// 找不到隧道二进制时的报错。
 ///
-/// gld 不自己下载这两个东西了（以前会往 `~/.gld/bin` 下，frpc 甚至是在你
+/// gld 不自己下载这两个东西了（以前会往 `~/.config/gld/bin` 下，frpc 甚至是在你
 /// `tunnel start` 的时候偷偷去 GitHub 拉一份）。理由：多一套镜像 / 代理 /
 /// 版本管理的配置要维护，而 brew / winget / apt 早就做得比这好；
 /// 用户还得先知道有 `gld software` 这么个命令才用得上。

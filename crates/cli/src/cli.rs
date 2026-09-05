@@ -27,7 +27,7 @@ const AFTER_HELP: &str = "\
   只有一个工作区时直接使用它。
 
 数据目录：
-  默认 ~/.gld，可用 --home 或环境变量 GLD_HOME 覆盖。里面有配置、密钥、日志，
+  默认 ~/.config/gld，可用 --home 或环境变量 GLD_HOME 覆盖。里面有配置、密钥、日志，
   以及守护进程的 socket 与 pid 文件。frpc / cloudflared 由你自己安装，gld 从 PATH 里找。
 
 更多：docs/cli.md（完整命令参考）、docs/daemon.md（后台进程说明）";
@@ -77,7 +77,7 @@ pub struct GlobalOpts {
     #[arg(long, global = true, value_name = "SECS")]
     pub timeout: Option<u64>,
 
-    /// 数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+    /// 数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
     #[arg(long, global = true, env = "GLD_HOME", value_name = "DIR")]
     pub home: Option<PathBuf>,
 

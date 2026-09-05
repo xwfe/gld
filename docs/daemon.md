@@ -38,7 +38,7 @@ MCP 监听器和 frpc / cloudflared 子进程必须活在某个进程里。命�
 （协议见 `crates/daemon/src/protocol.rs`）。可以手工调试：
 
 ```bash
-printf '{"op":"ping"}\n' | nc -U ~/.gld/daemon.sock
+printf '{"op":"ping"}\n' | nc -U ~/.config/gld/daemon.sock
 # {"status":"ok","result":"pong"}
 ```
 
@@ -65,7 +65,7 @@ printf '{"op":"ping"}\n' | nc -U ~/.gld/daemon.sock
 
 ## 文件
 
-都在数据目录（默认 `~/.gld`）下：
+都在数据目录（默认 `~/.config/gld`）下：
 
 | 文件 | 作用 | 什么时候会出问题 |
 | --- | --- | --- |

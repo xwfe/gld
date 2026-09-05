@@ -1,7 +1,7 @@
 //! 跑真实 `gld` 二进制的测试环境。
 //!
 //! 每个 [`Env`] 一套独立的 `GLD_HOME` 和临时项目目录，互不干扰，也不会碰
-//! 真实的 `~/.gld`——集成测试是真的会拉起守护进程、真的会写数据文件的。
+//! 真实的 `~/.config/gld`——集成测试是真的会拉起守护进程、真的会写数据文件的。
 
 use std::net::TcpListener;
 use std::process::{Command, Output};

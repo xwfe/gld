@@ -137,7 +137,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -171,7 +171,7 @@ Options:
   只有一个工作区时直接使用它。
 
 数据目录：
-  默认 ~/.gld，可用 --home 或环境变量 GLD_HOME 覆盖。里面有配置、密钥、日志，
+  默认 ~/.config/gld，可用 --home 或环境变量 GLD_HOME 覆盖。里面有配置、密钥、日志，
   以及守护进程的 socket 与 pid 文件。frpc / cloudflared 由你自己安装，gld 从 PATH 里找。
 
 更多：docs/cli.md（完整命令参考）、docs/daemon.md（后台进程说明）
@@ -197,7 +197,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -215,7 +215,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -235,7 +235,7 @@ Options:
       --wait <SECS>     等待退出的秒数 [default: 20]
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -254,7 +254,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -272,7 +272,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -291,7 +291,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -311,7 +311,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -338,7 +338,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -362,7 +362,7 @@ Options:
       --actions-port <PORT>  Actions 端口（默认从 8787 起找空闲）
       --no-autostart         守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>       等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>           数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>           数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color             关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help                 Print help
   -V, --version              Print version
@@ -380,7 +380,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -398,7 +398,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -417,7 +417,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -452,7 +452,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -479,7 +479,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -497,7 +497,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -551,7 +551,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -602,7 +602,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -647,7 +647,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -673,7 +673,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -691,7 +691,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -712,7 +712,7 @@ Options:
   -f, --follow             持续跟随（Ctrl-C 退出）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help               Print help
   -V, --version            Print version
@@ -754,7 +754,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -819,7 +819,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -879,7 +879,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -952,7 +952,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -978,7 +978,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -996,7 +996,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1019,7 +1019,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1037,7 +1037,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1058,7 +1058,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1105,7 +1105,7 @@ Options:
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
 
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
 
@@ -1139,7 +1139,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1158,7 +1158,7 @@ Options:
       --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help               Print help
   -V, --version            Print version
@@ -1177,7 +1177,7 @@ Options:
       --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help               Print help
   -V, --version            Print version
@@ -1196,7 +1196,7 @@ Options:
       --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help               Print help
   -V, --version            Print version
@@ -1215,7 +1215,7 @@ Options:
       --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help               Print help
   -V, --version            Print version
@@ -1234,7 +1234,7 @@ Options:
       --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help               Print help
   -V, --version            Print version
@@ -1254,7 +1254,7 @@ Options:
       --reveal             输出真实的 frps token（默认是占位符，避免贴聊天窗口时泄露）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help               Print help
   -V, --version            Print version
@@ -1279,7 +1279,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1297,7 +1297,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1320,7 +1320,7 @@ Options:
       --public-url <URL>        手动公网地址（tunnel=none 时使用）
       --timeout <SECS>          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --frp-profile <ID>        FRP 服务器配置 id
-      --home <DIR>              数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>              数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --frp-subdomain <SUB>     FRP 子域名
       --no-color                关闭彩色输出（也可设置环境变量 NO_COLOR）
       --use-proxy <true|false>  隧道是否套用全局代理 [possible values: true, false]
@@ -1340,7 +1340,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1358,7 +1358,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1376,7 +1376,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1401,7 +1401,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1423,7 +1423,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1445,7 +1445,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1466,7 +1466,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1489,7 +1489,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1507,7 +1507,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1531,7 +1531,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1549,7 +1549,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1571,7 +1571,7 @@ Options:
       --port <PORT>      [default: 7000]
       --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --token <TOKEN>    frps token（保存在数据目录，不会出现在 list 输出里）
-      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help             Print help
   -V, --version          Print version
@@ -1596,7 +1596,7 @@ Options:
       --port <PORT>      
       --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --token <TOKEN>    
-      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help             Print help
   -V, --version          Print version
@@ -1618,7 +1618,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1641,7 +1641,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1659,7 +1659,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1679,7 +1679,7 @@ Options:
       --url <URL>       manual 模式的代理地址，例如 http://127.0.0.1:7890
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1710,7 +1710,7 @@ Options:
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --home <DIR>
-          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --instruction-sources <INSTRUCTION_SOURCES>
           全局说明文件来源，逗号分隔（如 cursor,claude,codex）
       --no-color
@@ -1745,7 +1745,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1763,7 +1763,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1784,7 +1784,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1806,7 +1806,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1826,7 +1826,7 @@ Options:
       --no-autostart              守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --constraint <CONSTRAINTS>  
       --timeout <SECS>            等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>                数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>                数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color                  关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help                      Print help
   -V, --version                   Print version
@@ -1851,7 +1851,7 @@ Options:
       --constraint <CONSTRAINTS>  
       --timeout <SECS>            等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --done <DONE>               已完成的验收项 id，逗号分隔
-      --home <DIR>                数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>                数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --focus <FOCUS>             [possible values: true, false]
       --no-color                  关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help                      Print help
@@ -1873,7 +1873,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1895,7 +1895,7 @@ Options:
       --json                 以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart         守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>       等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>           数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>           数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color             关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help                 Print help
   -V, --version              Print version
@@ -1917,7 +1917,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -1937,7 +1937,7 @@ Options:
       --no-autostart           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --step <STEPS>           可多次给出
       --timeout <SECS>         等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>             数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>             数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color               关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help                   Print help
   -V, --version                Print version
@@ -1961,7 +1961,7 @@ Options:
       --focus <FOCUS>    [possible values: true, false]
       --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help             Print help
   -V, --version          Print version
@@ -1980,7 +1980,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -2000,7 +2000,7 @@ Options:
       --json                 以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart         守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>       等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>           数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>           数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color             关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help                 Print help
   -V, --version              Print version
@@ -2018,7 +2018,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -2036,7 +2036,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -2055,7 +2055,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
@@ -2077,7 +2077,7 @@ Options:
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version

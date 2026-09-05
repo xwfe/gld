@@ -285,10 +285,10 @@ impl Workspace {
         }
     }
 
-    /// 挡住对 gld 自己数据目录（`GLD_HOME`，默认 `~/.gld`）的读取。
+    /// 挡住对 gld 自己数据目录（`GLD_HOME`，默认 `~/.config/gld`）的读取。
     ///
     /// 读工具本来就允许读 Workspace 外面的东西——这是从桌面版继承的行为，
-    /// 方便读隔壁仓库、读系统头文件。但 `~/.gld/data/profiles.json` 是个特例：
+    /// 方便读隔壁仓库、读系统头文件。但 `~/.config/gld/data/profiles.json` 是个特例：
     /// 它以明文存着**每个**工作区的 bearer_token、oauth_password、
     /// oauth_token_secret、actions_api_key。也就是说，谁能读一个工作区的文件，
     /// 谁就拿到了所有工作区的钥匙——一次提示词注入就能横向打穿全部连接器。
@@ -466,7 +466,7 @@ impl Workspace {
         // 遍历类工具（list_dir / list_files / search_text）的统一出口。
         // 单靠 resolve_read_path 挡不住这条路：那里只校验用户给的起点，
         // 之后 WalkDir 会自己走下去。`search_text path=~ include_hidden=true`
-        // 就能直接从 `~/.gld/data/profiles.json` 里搜出所有工作区的密钥。
+        // 就能直接从 `~/.config/gld/data/profiles.json` 里搜出所有工作区的密钥。
         if self.is_gld_data_home_path(path) {
             return true;
         }

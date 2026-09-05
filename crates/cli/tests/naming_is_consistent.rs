@@ -164,10 +164,10 @@ fn the_release_workflow_delegates_to_the_packaging_script() {
 
 /// 数据目录的环境变量和默认目录名要跟着项目名走。
 ///
-/// 这两个是用户直接接触的（`GLD_HOME=... gld ...`、`~/.gld`），
+/// 这两个是用户直接接触的（`GLD_HOME=... gld ...`、`~/.config/gld`），
 /// 文档里到处在写。改名漏了这里，文档说的和程序读的就是两回事。
 #[test]
 fn the_data_home_env_and_directory_follow_the_project_name() {
     assert_eq!(gld_core::home::HOME_ENV, "GLD_HOME");
-    assert_eq!(gld_core::home::DEFAULT_DIR_NAME, ".gld");
+    assert_eq!(gld_core::home::DEFAULT_DIR_NAME, ".config/gld");
 }

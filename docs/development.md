@@ -15,7 +15,7 @@ Rust 1.85+。没有 Node、没有 Tauri 依赖。
 GLD_HOME=$(mktemp -d) cargo test --workspace
 ```
 
-`GLD_HOME` 指向临时目录是为了不碰你真实的 `~/.gld`：core 里有少数测试会写数据文件，
+`GLD_HOME` 指向临时目录是为了不碰你真实的 `~/.config/gld`：core 里有少数测试会写数据文件，
 `crates/cli/tests/daemon_lifecycle.rs` 会真的拉起一个守护进程、起 MCP、走 TCP 请求再停掉。
 不设也能跑（core 的写文件测试自己会切到临时目录），但集成测试会用你的真实数据目录。
 

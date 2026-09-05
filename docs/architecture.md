@@ -41,7 +41,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
 | `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的模型与读写 |
 | `platform/` | 端口占用查询、进程存活 / 终止、可执行文件查找，按 OS 分实现 |
-| `home.rs` | 数据目录解析（`GLD_HOME` / `~/.gld`），全项目唯一的路径来源 |
+| `home.rs` | 数据目录解析（`GLD_HOME` / `~/.config/gld`），全项目唯一的路径来源 |
 | `async_rt.rs` | tokio 运行时垫片：工具内核是同步 API，内部需要 `spawn` / `block_on` |
 | **`app/`** | **应用服务层**：`App` 持有 `DataStore`、`RuntimeSupervisor` 和命令行工具调用的 `ToolContext` 缓存，每个子模块是一组用例；`app/doctor.rs` 的纯配置检查不依赖磁盘，可直接单测 |
 

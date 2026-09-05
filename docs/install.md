@@ -59,6 +59,19 @@ gld daemon restart
 > 注意别和 `gld upgrade` 搞混：那条命令改的是**工作区配置**（目录、公网入口、
 > 端口、认证），不升级 gld 自己。升级 gld 只有"换二进制 + `gld daemon restart`"这一条路。
 
+### 从 0.3.0 之前升级：数据目录搬了家
+
+数据目录从 `~/.gld` 换到了 `~/.config/gld`，**没有兼容读取**。不搬的话 gld 会
+当成全新安装：`gld list` 说没有工作区，而配置和密钥还在旧目录里躺着。
+
+```bash
+gld daemon stop            # socket 和锁文件正被占着，先停
+mv ~/.gld ~/.config/gld
+gld list                   # 工作区应该都回来了
+```
+
+密钥没有第二份副本，搬之前别删旧目录。
+
 **这一步不能省。** 服务住在一个常驻的守护进程里，换了二进制它还在跑旧代码。
 命令行会核对版本，不一致时直接报错并提示重启，而不是发一个对方不认识的请求
 （退出码 4）。
@@ -79,9 +92,9 @@ Windows 上守护进程走的是命名管道，和 Unix domain socket 是两套�
 ```bash
 gld daemon stop            # 先停掉后台进程和它持有的服务、隧道
 rm /usr/local/bin/gld      # 或 cargo uninstall gld
-rm -rf ~/.gld              # 配置和密钥，删了就找不回来了
+rm -rf ~/.config/gld              # 配置和密钥，删了就找不回来了
 ```
 
-`~/.gld/data/profiles.json` 是所有密钥的唯一副本，删之前想清楚——
+`~/.config/gld/data/profiles.json` 是所有密钥的唯一副本，删之前想清楚——
 细节见 [security.md](security.md#密钥存在哪丢了会怎样)。
 项目目录里的 `.gld/` 和 `docs/history-session/` 属于项目本身，不在这里删。

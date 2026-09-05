@@ -48,13 +48,13 @@ gld ws set confine-reads=false      # Actions 侧写全 actions.confine-reads
 比较的是 `canonicalize` 之后的真实路径，所以工作区里放一个指向外面的软链
 也绕不过去。
 
-**gld 自己的数据目录是另一道独立的门**（`~/.gld`，或 `GLD_HOME` 指的地方），
+**gld 自己的数据目录是另一道独立的门**（`~/.config/gld`，或 `GLD_HOME` 指的地方），
 **关掉上面那个开关也读不到**，返回 `GLD_DATA_HOME_DENIED`。
-因为 `~/.gld/data/profiles.json` 里明文存着**每个**工作区的 `bearer_token`、
+因为 `~/.config/gld/data/profiles.json` 里明文存着**每个**工作区的 `bearer_token`、
 `oauth_password`、`actions_api_key`——不挡的话，读到一个工作区的文件就等于
 拿到了你全部连接器的钥匙。
 
-这两道门都只对文件类工具生效。`exec_command` 里 `cat ~/.gld/data/profiles.json`
+这两道门都只对文件类工具生效。`exec_command` 里 `cat ~/.config/gld/data/profiles.json`
 照样能读到——它本来就是"以你的身份执行任意代码"，没有再挡一层的意义。
 真要收紧执行能力看下面第 2、3 条。
 
@@ -145,7 +145,7 @@ gld secret regen oauth_password
 
 ## 密钥存在哪、丢了会怎样
 
-全部在 `~/.gld/data/profiles.json`，明文，文件权限 600（创建时就设好了）。
+全部在 `~/.config/gld/data/profiles.json`，明文，文件权限 600（创建时就设好了）。
 每个工作区 7 把 + 一个共享池。
 
 这些值是随机生成的，**没有第二份副本**。文件丢了 = 每个 ChatGPT 连接器、
@@ -158,12 +158,12 @@ gld secret regen oauth_password
 想留个后手就自己备份：
 
 ```bash
-cp ~/.gld/data/profiles.json ~/.gld/data/profiles.json.bak
+cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 ```
 
 ## 本机 IPC 通道
 
-守护进程的控制通道是 `~/.gld/daemon.sock`（Windows 是命名管道），权限 0600，
+守护进程的控制通道是 `~/.config/gld/daemon.sock`（Windows 是命名管道），权限 0600，
 只有你自己能连。这条通道上会传密钥，所以别把数据目录放到共享目录里。
 
 数据目录路径超过约 100 字节时，socket 会自动退到 `$TMPDIR/gld-<hash>.sock`
