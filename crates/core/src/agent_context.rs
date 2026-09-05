@@ -174,7 +174,7 @@ pub fn discover(
 }
 
 pub fn scan_global_agent_context() -> GlobalAgentContextScan {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = home_dir() else {
         return GlobalAgentContextScan {
             sources: Vec::new(),
             detected_instruction_sources: Vec::new(),
@@ -248,7 +248,7 @@ pub fn discover_instructions(
                 ));
             }
             "cursor" => {
-                let global_rules = dirs::home_dir().map(|home| home.join(".cursor/rules"));
+                let global_rules = home_dir().map(|home| home.join(".cursor/rules"));
                 if let Some(rules) = global_rules.filter(|rules| rules.is_dir()) {
                     for entry in WalkDir::new(rules)
                         .max_depth(6)
@@ -769,6 +769,19 @@ fn infer_skill_provider(workspace_root: &Path, path: &Path) -> String {
     "auto".into()
 }
 
+/// 用户主目录。全局说明和 Skill 都是从这里往下找的。
+///
+/// 单独包一层是为了让单元测试能换掉它：扫描全局说明时，跑测试那台机器上
+/// 有没有 `~/.codex/AGENTS.md` 会直接改变结果——同一份代码，装过 Codex 的人
+/// 那里红、CI 的干净镜像里绿，而这跟被测的规则毫无关系。
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = tests::home_override() {
+        return Some(path);
+    }
+    dirs::home_dir()
+}
+
 fn normalize_provider(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "github" | "github-copilot" | "github_copilot" => "copilot".into(),
@@ -783,7 +796,7 @@ fn add_home_candidate(
     provider: &str,
     path: &str,
 ) {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home_dir() {
         candidates.push((provider.to_string(), home.join(path), "global"));
     }
 }
@@ -802,7 +815,7 @@ fn add_home_skill_root(
     provider: &str,
     path: &str,
 ) {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home_dir() {
         roots.push((provider.to_string(), home.join(path), "global"));
     }
 }
@@ -915,13 +928,13 @@ fn split_config_paths(value: &str) -> Vec<String> {
 
 fn resolve_config_path(workspace_root: &Path, value: &str) -> PathBuf {
     if value == "~" {
-        return dirs::home_dir().unwrap_or_else(|| workspace_root.to_path_buf());
+        return home_dir().unwrap_or_else(|| workspace_root.to_path_buf());
     }
     if let Some(rest) = value
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home.join(rest);
         }
     }
@@ -947,6 +960,30 @@ fn hex_hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static HOME_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// [`super::home_dir`] 用它替换真实主目录。thread_local 而不是全局变量：
+    /// 测试是并行跑的，一个测试改掉全局主目录会连累另一个。
+    pub(super) fn home_override() -> Option<PathBuf> {
+        HOME_OVERRIDE.with(|cell| cell.borrow().clone())
+    }
+
+    /// 在一个空的临时主目录里跑一段代码。
+    ///
+    /// 凡是会扫全局说明 / Skill 的测试都得套上它：开发机上 `~/.codex/AGENTS.md`、
+    /// `~/.claude/CLAUDE.md` 很可能真的存在，扫到了就多出几份文档，
+    /// 而断言写的是"只有工作区里那一份"。
+    fn with_empty_home<T>(run: impl FnOnce() -> T) -> T {
+        let home = tempfile::tempdir().expect("empty home");
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.path().to_path_buf()));
+        let result = run();
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        result
+    }
 
     #[test]
     fn source_lists_are_normalized_and_deduplicated() {
@@ -983,17 +1020,40 @@ mod tests {
         );
     }
 
+    /// codex / opencode / zcode 都指向工作区里的同一份 AGENTS.md，只能注入一次。
     #[test]
     fn duplicate_instruction_files_are_injected_once() {
         let root = tempfile::tempdir().expect("root");
         fs::write(root.path().join("AGENTS.md"), "shared instructions").expect("agents");
-        let docs = discover_instructions(
-            root.path(),
-            &["codex".into(), "opencode".into(), "zcode".into()],
-            "",
-        );
-        assert_eq!(docs.len(), 1);
+        let docs = with_empty_home(|| {
+            discover_instructions(
+                root.path(),
+                &["codex".into(), "opencode".into(), "zcode".into()],
+                "",
+            )
+        });
+        assert_eq!(docs.len(), 1, "同一份文件被注入了多次：{docs:?}");
         assert_eq!(docs[0].content, "shared instructions");
+    }
+
+    /// 主目录里的全局说明和工作区里的各算一份，两份都要在。
+    ///
+    /// 上面那条测试把主目录清空了，只验了"去重"；这条反过来验"该扫的确实在扫"——
+    /// 只有前一条的话，把全局扫描整个删掉它也照样绿。
+    #[test]
+    fn a_global_instruction_file_is_picked_up_alongside_the_workspace_one() {
+        let root = tempfile::tempdir().expect("root");
+        fs::write(root.path().join("AGENTS.md"), "workspace instructions").expect("agents");
+        let home = tempfile::tempdir().expect("home");
+        fs::create_dir_all(home.path().join(".codex")).expect("codex dir");
+        fs::write(home.path().join(".codex/AGENTS.md"), "global instructions").expect("global");
+
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.path().to_path_buf()));
+        let docs = discover_instructions(root.path(), &["codex".into()], "");
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+
+        let scopes: Vec<&str> = docs.iter().map(|doc| doc.scope.as_str()).collect();
+        assert_eq!(scopes, vec!["global", "workspace"], "{docs:?}");
     }
 
     #[test]
