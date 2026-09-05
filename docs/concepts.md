@@ -248,7 +248,14 @@ MCP 客户端可以拿这两个标注决定要不要弹确认框、要不要限�
 ## Planning 三种模式
 
 给"让 AI 改代码之前先说清楚要干什么"用的闸门。状态存在项目里的
-`.gld/planning/state.json`，跟着 Git 走。
+`.gld/planning/state.json`。
+
+**这个目录默认不进版本库**：gld 第一次建 `.gld/` 时会在里面放一个只忽略它自己的
+`.gitignore`（内容就一行 `*`），免得 AI 每动一次 Planning，你的 `git status`
+里就多一条改动。它不碰项目根的 `.gitignore`。
+
+想让团队共享 Goal / Plan，把 `.gld/.gitignore` 删掉即可——它只在目录被创建的
+那一刻写一次，之后不会再补回来。
 
 ```bash
 gld planning mode plan      # 切换

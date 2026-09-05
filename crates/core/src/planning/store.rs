@@ -68,6 +68,27 @@ impl PlanningStore {
         Ok(result)
     }
 
+    /// 在 `.gld/` 里放一个只忽略它自己的 `.gitignore`。
+    ///
+    /// 这个目录是 gld 在项目里的落脚点，默认不该进版本库——不然每次 AI 动一下
+    /// Planning 状态，用户的 `git status` 里就多一条改动。
+    ///
+    /// 为什么不去改项目根的 `.gitignore`：那是用户的文件（gld 自己把它列为
+    /// "关键文件"，连 AI 用 patch 改都要 confirm），工具不该偷偷往里加行；
+    /// 而且没有 `.gitignore` 的项目还得凭空建一个。放在自己目录里，效果一样，
+    /// 谁都不碰。
+    ///
+    /// 想让团队共享 Goal / Plan 的话，把这个文件删掉即可：它只在 `.gld/`
+    /// 被创建的那一刻写一次，之后不会再补回来。
+    fn ignore_self_in_git(gld_dir: &std::path::Path) {
+        let marker = gld_dir.join(".gitignore");
+        if marker.exists() {
+            return;
+        }
+        // 失败不影响正事：状态照样存，只是没被忽略。
+        let _ = fs::write(&marker, "# gld 在这个项目里的本地状态，默认不进版本库\n*\n");
+    }
+
     fn load_unlocked(&self) -> AppResult<PlanningState> {
         if !self.path.exists() {
             return Ok(PlanningState::default());
@@ -78,7 +99,15 @@ impl PlanningStore {
 
     fn save_unlocked(&self, state: &PlanningState) -> AppResult<()> {
         if let Some(parent) = self.path.parent() {
+            // 只在第一次建出 `.gld/` 时放忽略文件。目录已经在了就不碰——
+            // 用户可能是有意删掉它来让 Goal / Plan 进版本库的，每次都补回去
+            // 等于不让人改主意。
+            let gld_dir = parent.parent().unwrap_or(parent);
+            let first_time = !gld_dir.exists();
             fs::create_dir_all(parent)?;
+            if first_time {
+                Self::ignore_self_in_git(gld_dir);
+            }
         }
         let raw = serde_json::to_string_pretty(state)?;
         // 先写临时文件再改名。直接 fs::write 会先把原文件截断成 0 字节，
@@ -124,6 +153,33 @@ mod tests {
             WRITERS,
             "每次 update 都该在上一次的基础上 +1；数值偏小说明有更新被覆盖了"
         );
+    }
+
+    /// `.gld/` 默认不进版本库：项目里不该因为 AI 动了下 Planning 就多出改动。
+    #[test]
+    fn the_state_directory_ignores_itself_in_git() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PlanningStore::new(dir.path());
+
+        store.update(|_| Ok(())).expect("写状态");
+
+        let marker = dir.path().join(".gld/.gitignore");
+        let content = fs::read_to_string(&marker).expect("应当写了忽略文件");
+        assert!(content.contains('*'), "忽略规则不对：{content}");
+    }
+
+    /// 删掉它就是"我要把 Goal / Plan 提交上去"，不能每次写状态又给补回来。
+    #[test]
+    fn removing_the_ignore_file_is_respected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PlanningStore::new(dir.path());
+        store.update(|_| Ok(())).expect("第一次写");
+        let marker = dir.path().join(".gld/.gitignore");
+        fs::remove_file(&marker).expect("删掉忽略文件");
+
+        store.update(|_| Ok(())).expect("再写一次");
+
+        assert!(!marker.exists(), "被删掉的忽略文件又被补回来了");
     }
 
     /// 落盘要么是完整的旧内容，要么是完整的新内容，不存在中间态。
