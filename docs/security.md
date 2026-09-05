@@ -10,7 +10,7 @@
 
 ```bash
 gld status                 # 哪些服务在跑、有没有公网地址
-gld connect                # 客户端要用的地址和认证方式（--reveal 才显示密钥）
+gld ls                     # 客户端要用的地址、认证方式与隧道（--reveal 才显示密钥）
 gld doctor                 # 配置自洽性；认证缺密钥这类会报 ✗
 ```
 
@@ -74,7 +74,7 @@ gld ws set confine-reads=false      # Actions 侧写全 actions.confine-reads
 ### 1. 不需要公网就别开隧道
 
 ```bash
-gld expose --off
+gld share --off
 ```
 
 本机客户端（Claude Code、Cursor、Codex）走 `http://127.0.0.1:<port>/mcp` 就够，

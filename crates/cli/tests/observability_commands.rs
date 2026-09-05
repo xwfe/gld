@@ -37,7 +37,7 @@ fn completions_work_for_every_shell_without_a_workspace_or_daemon() {
         );
         // 补全脚本要能补到子命令，否则等于没有。
         assert!(
-            script.contains("workspace") && script.contains("expose"),
+            script.contains("workspace") && script.contains("share"),
             "{shell} 的补全脚本里没有子命令"
         );
     }

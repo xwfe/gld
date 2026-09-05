@@ -51,7 +51,7 @@ const ACTIONS_KEYS: &[&str] = &[
 ///
 /// 勾了 shared-secrets 之后，工作区里存的那份就完全不参与了。谁想告诉用户
 /// "你的凭据是什么"，都得先问这里——否则给出去的值客户端用不了，
-/// 表现成一直 401，而 `gld connect` 又显示着另一个值，两边对不上。
+/// 表现成一直 401，而 `gld ls` 又显示着另一个值，两边对不上。
 pub fn reads_from_shared_pool(profile: &WorkspaceProfile, key: &str) -> bool {
     if !SHARED_SECRET_KEYS.contains(&key) {
         return false;

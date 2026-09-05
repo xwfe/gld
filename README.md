@@ -4,17 +4,13 @@
 AI 客户端（ChatGPT、Claude Code、Cursor…）连上来就能读文件、改代码、跑命令、
 看 Git 状态，并把进度保存到项目里。
 
-单个 Rust 二进制，没有运行时依赖。它是
-[Coding Tools MCP 桌面版](https://github.com/lengsukq/coding-tools-mcp) 的命令行重构：
-去掉 Tauri / WebView，核心运行时原样保留，服务改由一个后台守护进程持有。
-
 ## 装
 
 到 [Releases](../../releases) 拿对应平台的包，解压后把 `gld` 放进 PATH：
 
 ```bash
 tar xzf gld-*-aarch64-apple-darwin.tar.gz
-sudo mv gld-*/gld /usr/local/bin/
+sudo mv gld-*/gld /usr/local/bin/   # ~/.local/bin
 gld --version
 ```
 
@@ -24,19 +20,34 @@ macOS 第一次运行会被 Gatekeeper 拦。其他平台、校验和、从源�
 ## 用
 
 ```bash
-cd ~/code/my-project
-gld workspace add .        # 登记项目：自动分配端口、生成密钥，什么都不用填
-gld start                  # 启动 MCP（守护进程会自动在后台拉起）
-gld connect                # 拿到给客户端用的地址和凭据
+gld start ~/code/my-project   # 登记 + 启动：自动分配端口、生成密钥，什么都不用填
+gld ls                        # 拿到给客户端用的地址、凭据和隧道状态
 ```
 
-本机客户端（Claude Code、Cursor、Codex）直接填 `gld connect` 给出的**本地地址**。
+`gld start` 不带目录就是当前目录。目录没登记过会自动登记，
+并在输出第一行告诉你；登记错了用 `gld workspace remove -w <名称>` 撤掉，
+项目文件不会被动。守护进程会自动在后台拉起，关掉终端服务照常在。
+
+本机客户端（Claude Code、Cursor、Codex）直接填 `gld ls` 给出的**本地地址**。
 
 ChatGPT 跑在 OpenAI 的服务器上，只能连公网 HTTPS，`127.0.0.1` 填进去连不上。
-一条命令拿公网地址：
+已经有公网地址（自建反代、公司域名）就在启动时一起给：
 
 ```bash
-gld expose                 # Cloudflare 临时地址；需要 cloudflared 在 PATH 里
+gld start ~/code/my-project --tunnel https://mcp.example.com/mcp
+```
+
+没有的话，一条命令借一个：
+
+```bash
+gld share                     # Cloudflare 临时地址；需要 cloudflared 在 PATH 里
+```
+
+地址后来变了、项目换了目录、端口要改——`gld upgrade` 改完自动重启：
+
+```bash
+gld upgrade --tunnel https://new.example.com/mcp
+gld upgrade --path ~/code/my-project-v2
 ```
 
 > **开公网入口前请先读 [docs/security.md](docs/security.md)。**
@@ -59,6 +70,6 @@ gld expose                 # Cloudflare 临时地址；需要 cloudflared 在 PA
 | 从桌面版迁移过来 | [migrate-from-desktop.md](docs/migrate-from-desktop.md) |
 | 改这个项目的代码 | [architecture.md](docs/architecture.md)、[development.md](docs/development.md) |
 
-## License
+## Credits
 
-Apache-2.0
+[lengsukq/Coding Tools MCP](https://github.com/lengsukq/coding-tools-mcp)

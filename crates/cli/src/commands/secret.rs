@@ -45,7 +45,7 @@ pub async fn run(ctx: &mut Ctx, command: SecretCmd) -> CliResult {
         SecretCmd::Show { key, reveal } => {
             // 勾了 shared-secrets 的工作区，服务读的是共享池，工作区自己那份
             // 完全不参与。这里必须给"真正生效的那个"，否则用户照着配客户端
-            // 会一直 401——而 gld connect 显示的又是对的，两边对不上更难查。
+            // 会一直 401——而 gld ls 显示的又是对的，两边对不上更难查。
             let profile: WorkspaceProfile = ctx
                 .backend
                 .call_typed(Request::ResolveWorkspace {

@@ -3,7 +3,6 @@
 
 mod daemon;
 mod doctor;
-mod expose;
 mod frp;
 mod gateway;
 mod inspect;
@@ -12,8 +11,10 @@ mod planning;
 mod secret;
 mod service;
 mod settings;
+mod share;
 mod tool;
 mod tunnel;
+mod upgrade;
 mod workspace;
 
 use std::time::Duration;
@@ -70,8 +71,9 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Status => service::status(&mut ctx).await,
         Command::Ps => service::ps(&mut ctx).await,
         Command::Logs(args) => logs::workspace_logs(&mut ctx, args).await,
-        Command::Connect(args) => service::connect(&mut ctx, args).await,
-        Command::Expose(args) => expose::run(&mut ctx, args).await,
+        Command::Ls(args) => service::ls(&mut ctx, args).await,
+        Command::Share(args) => share::run(&mut ctx, args).await,
+        Command::Upgrade(args) => upgrade::run(&mut ctx, args).await,
         Command::Health => inspect::health(&mut ctx).await,
         Command::Doctor => doctor::run(&mut ctx).await,
         Command::Tool(command) => tool::run(&mut ctx, command).await,

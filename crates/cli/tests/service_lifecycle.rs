@@ -229,7 +229,7 @@ fn regenerating_a_secret_restarts_the_service_with_the_new_value() {
 ///
 /// 工作区勾了 shared-secrets 之后，服务读的是共享池，工作区里存的那份完全
 /// 不参与。之前 `secret show` 一直报工作区那份——照着它配客户端会一直 401，
-/// 而 `gld connect` 显示的又是对的，两边对不上，排障时根本不知道该信谁。
+/// 而 `gld ls` 显示的又是对的，两边对不上，排障时根本不知道该信谁。
 /// 排障文档里"401 就去 secret show"那条，正好把人引到错的那个值上。
 #[test]
 fn secret_show_reports_the_credential_that_actually_works() {

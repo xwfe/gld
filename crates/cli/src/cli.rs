@@ -7,12 +7,19 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const AFTER_HELP: &str = "\
 快速上手：
-  gld workspace add ~/code/my-project     把项目目录登记为工作区
-  gld start                               启动该工作区的 MCP（守护进程会自动在后台拉起）
-  gld connect                             查看给本机客户端用的地址与凭据
-  gld expose                              要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
-  gld status                              看所有工作区的服务与隧道状态
+  gld start ~/code/my-project             启动 MCP；目录没登记过会自动登记（守护进程自动在后台拉起）
+  gld start                               同上，作用于当前目录
+  gld ls                                  看地址、凭据与隧道；不指定工作区时列出全部
+  gld share                               要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
+  gld upgrade --tunnel https://x.com/mcp  改目录 / 公网入口 / 端口 / 认证，改完自动重启
   gld stop                                停止服务；守护进程仍在后台，可用 gld daemon stop 退出
+
+公网入口（--tunnel 在 start / share / upgrade 里通用）：
+  --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
+  --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
+  --tunnel cf:named                       Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
+  --tunnel off                            关掉公网入口，只留本地地址
 
 工作区定位：
   大多数命令接受 -w/--workspace <id|id前缀|名称|路径>。不给时按当前目录归属推断；
@@ -88,8 +95,16 @@ pub enum Command {
     #[command(subcommand, visible_alias = "ws")]
     Workspace(WorkspaceCmd),
 
-    /// 启动工作区的 MCP（默认）或 Actions 服务；必要时自动拉起守护进程
-    Start(ServiceArgs),
+    /// 启动 MCP（默认）或 Actions 服务；目录没登记过会自动登记为工作区
+    ///
+    ///   gld start                          当前目录
+    ///   gld start ~/code/api               指定目录
+    ///   gld start ~/code/api --tunnel https://mcp.example.com/mcp
+    ///                                      顺带配好公网入口，起完直接打印连接信息
+    ///
+    /// 守护进程没在跑会自动拉起，之后关掉终端服务也照常在。
+    #[command(verbatim_doc_comment)]
+    Start(StartArgs),
 
     /// 停止工作区的服务（默认全部）
     Stop(ServiceArgs),
@@ -110,21 +125,38 @@ pub enum Command {
     /// 查看工作区日志尾部，或用 -f 持续跟随
     Logs(LogsArgs),
 
-    /// 打印给 ChatGPT / MCP 客户端用的连接信息（地址、认证方式、凭据）
-    Connect(ConnectArgs),
+    /// 列出工作区的连接信息：地址、认证方式、凭据、隧道
+    ///
+    ///   gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情
+    ///   gld ls -w api         看指定工作区的详情
+    ///   gld ls --all          在工作区目录里也强制列出全部
+    ///   gld ls --reveal       凭据显示明文（默认脱敏）
+    #[command(verbatim_doc_comment)]
+    Ls(LsArgs),
 
     /// 一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
     ///
     /// 它把「配隧道 → 启动服务 → 查连接信息」三步合成一步：
-    ///   gld expose                       Cloudflare 临时地址，零配置，重启会变
-    ///   gld expose --named               Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
-    ///   gld expose --frp 公司            FRP 固定域名，子域名默认取工作区名
-    ///   gld expose --url https://x.com   已经有公网地址（自建反代等），只登记不起隧道
-    ///   gld expose --off                 关掉公网入口，只留本地地址
+    ///   gld share                             Cloudflare 临时地址（等价 --tunnel cf）
+    ///   gld share --tunnel cf:named           Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+    ///   gld share --tunnel frp:公司           FRP 固定域名，子域名默认取工作区名
+    ///   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
+    ///   gld share --off                       关掉公网入口，只留本地地址
     ///
     /// 公网入口意味着"在你电脑上跑命令"这件事对外可达，开之前请读 docs/security.md。
     #[command(verbatim_doc_comment)]
-    Expose(ExposeArgs),
+    Share(ShareArgs),
+
+    /// 改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
+    ///
+    ///   gld upgrade --tunnel https://new.example.com/mcp   换公网地址
+    ///   gld upgrade --path ~/code/api-v2                   项目搬了目录
+    ///   gld upgrade api --port 30001 --auth bearer         按名称指定工作区
+    ///   gld upgrade --off                                  关掉公网入口
+    ///
+    /// 只改这几项常用配置；全部字段见 gld workspace fields 与 gld workspace set。
+    #[command(verbatim_doc_comment)]
+    Upgrade(UpgradeArgs),
 
     /// 逐项检查本地 / 公网端点与 OAuth 元数据是否可达
     Health,
@@ -276,9 +308,87 @@ pub enum ServiceArg {
 
 #[derive(Debug, Args)]
 pub struct ServiceArgs {
-    /// 操作哪个服务；start 默认 mcp，stop / restart 默认 all
+    /// 操作哪个服务；stop / restart 默认 all
     #[arg(short = 's', long, value_enum)]
     pub service: Option<ServiceArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct StartArgs {
+    /// 项目目录（默认当前目录）；没登记过会自动登记为工作区
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// 公网入口：https://… | cf | cf:named | frp:<配置名> | off
+    #[arg(long, value_name = "TUNNEL")]
+    pub tunnel: Option<TunnelSpec>,
+
+    /// FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
+    #[arg(long, value_name = "SUB")]
+    pub subdomain: Option<String>,
+
+    /// 本地监听端口（默认自动挑一个空闲的；端口被别的程序占了时用它换一个）
+    #[arg(long, value_name = "PORT")]
+    pub port: Option<u16>,
+
+    /// 启动哪个服务（默认 mcp）
+    #[arg(short = 's', long, value_enum)]
+    pub service: Option<ServiceArg>,
+}
+
+/// `--tunnel` 的取值：一句话说清"公网地址从哪来"。
+///
+/// 以前这里是四个互斥选项（`--url` / `--named` / `--frp` / `--off`），
+/// 每加一种入口就多一个开关，而它们表达的是同一件事的不同取值。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelSpec {
+    /// 已经有公网地址：只登记，不起隧道。
+    Url(String),
+    /// Cloudflare：临时地址（quick）或固定域名（named）。
+    Cloudflare { named: bool },
+    /// FRP，带一个 `gld frp list` 里的配置名或 id。
+    Frp { profile: String },
+    /// 关掉公网入口。
+    Off,
+}
+
+impl std::str::FromStr for TunnelSpec {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let value = raw.trim();
+        let lower = value.to_ascii_lowercase();
+        if value.starts_with("http://") || value.starts_with("https://") {
+            return Ok(Self::Url(value.to_string()));
+        }
+        // cloudflare 全称也收：字段表里写的是 mcp.tunnel=cloudflare，
+        // 两处对不上会让人以为自己记错了。
+        let (head, tail) = lower.split_once(':').unwrap_or((lower.as_str(), ""));
+        match head {
+            "off" | "none" => Ok(Self::Off),
+            "cf" | "cloudflare" => match tail {
+                "" | "quick" => Ok(Self::Cloudflare { named: false }),
+                "named" => Ok(Self::Cloudflare { named: true }),
+                other => Err(format!(
+                    "cf 后面只能跟 quick 或 named，收到「{other}」（cf 本身就是 cf:quick）"
+                )),
+            },
+            "frp" if !tail.is_empty() => Ok(Self::Frp {
+                // 配置名可能有大小写和中文，不能用小写化之后的那份。
+                profile: value[head.len() + 1..].trim().to_string(),
+            }),
+            "frp" => {
+                Err("frp 要带配置名，例如 --tunnel frp:公司（`gld frp list` 看有哪些）".into())
+            }
+            _ => Err(format!(
+                "看不懂的公网入口「{value}」。可用写法：\n  \
+                 https://mcp.example.com/mcp   已有的公网地址\n  \
+                 cf / cf:named                 Cloudflare 临时地址 / 固定域名\n  \
+                 frp:<配置名>                  FRP（gld frp list 看有哪些）\n  \
+                 off                           关掉公网入口"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -300,36 +410,79 @@ pub enum LogService {
     Actions,
 }
 
-#[derive(Debug, Args)]
-pub struct ConnectArgs {
+#[derive(Debug, Default, Args)]
+pub struct LsArgs {
     /// 明文显示密钥（默认脱敏）
     #[arg(long)]
     pub reveal: bool,
+
+    /// 列出全部工作区（在工作区目录里执行时用它看全局）
+    #[arg(short = 'a', long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]
-pub struct ExposeArgs {
-    /// 用 FRP：填 `gld frp list` 里的名称或 id（需要一台跑着 frps 的公网机器）
-    #[arg(long, value_name = "名称|ID", conflicts_with_all = ["url", "off", "named"])]
-    pub frp: Option<String>,
+pub struct ShareArgs {
+    /// 项目目录（默认当前目录）；没登记过会自动登记为工作区
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// 公网入口：https://… | cf | cf:named | frp:<配置名> | off（默认 cf）
+    #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
+    pub tunnel: Option<TunnelSpec>,
 
     /// FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则取工作区名
-    #[arg(long, value_name = "SUB", requires = "frp")]
+    #[arg(long, value_name = "SUB")]
     pub subdomain: Option<String>,
 
-    /// Cloudflare 固定域名模式；先 gld secret set cloudflare_token <token>
-    #[arg(long, conflicts_with_all = ["url", "off"])]
-    pub named: bool,
-
-    /// 已经有公网地址（自建反向代理等）：只登记，不起隧道
-    #[arg(long, value_name = "URL", conflicts_with = "off")]
-    pub url: Option<String>,
-
-    /// 关掉公网入口，只留本地地址
+    /// 关掉公网入口，只留本地地址（等价 --tunnel off）
     #[arg(long)]
     pub off: bool,
 
     /// 暴露哪个服务
+    #[arg(short = 's', long, value_enum, default_value = "mcp")]
+    pub service: TunnelService,
+}
+
+#[derive(Debug, Args)]
+pub struct UpgradeArgs {
+    /// 要更新哪个工作区：目录 / 名称 / id（默认按当前目录推断）
+    #[arg(id = "target", value_name = "WS")]
+    pub workspace: Option<String>,
+
+    /// 换项目根目录（目录要已存在）
+    #[arg(long, value_name = "DIR")]
+    pub path: Option<PathBuf>,
+
+    /// 换公网入口：https://… | cf | cf:named | frp:<配置名> | off
+    #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
+    pub tunnel: Option<TunnelSpec>,
+
+    /// FRP 子域名（配合 --tunnel frp:<配置名>）
+    #[arg(long, value_name = "SUB")]
+    pub subdomain: Option<String>,
+
+    /// 关掉公网入口（等价 --tunnel off）
+    #[arg(long)]
+    pub off: bool,
+
+    /// 换显示名称
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// 换 MCP 端口
+    #[arg(long, value_name = "PORT")]
+    pub port: Option<u16>,
+
+    /// 换 Actions 端口
+    #[arg(long, value_name = "PORT")]
+    pub actions_port: Option<u16>,
+
+    /// 换 MCP 认证方式：oauth | bearer | noauth
+    #[arg(long, value_name = "AUTH")]
+    pub auth: Option<String>,
+
+    /// 改哪个服务的公网入口
     #[arg(short = 's', long, value_enum, default_value = "mcp")]
     pub service: TunnelService,
 }

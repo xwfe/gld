@@ -3,8 +3,8 @@
 先启动服务、再看连接信息，所有客户端都从这里取值：
 
 ```bash
-gld start
-gld connect            # 加 --reveal 显示凭据明文
+gld start              # 或 gld start ~/code/my-project，目录没登记过会自动登记
+gld ls                 # 加 --reveal 显示凭据明文
 ```
 
 > 名词看不懂（共享密钥池、工具集、全局入口…）先翻 [concepts.md](concepts.md)。
@@ -53,14 +53,17 @@ Cursor（`.cursor/mcp.json`）：
 
 ChatGPT 在 OpenAI 的服务器上，必须通过**公网 HTTPS** 地址访问，`127.0.0.1` 填进去会连不上。
 
-`gld expose` 负责整件事：配好隧道、把服务拉起来、起隧道、打印地址和凭据。
-底下四种走法，选一种：
+`gld share` 负责整件事：配好隧道、把服务拉起来、起隧道、打印地址和凭据。
+公网入口用一个 `--tunnel` 参数表达，底下四种走法选一种。
+
+（这四种写法在 `gld start` 和 `gld upgrade` 上完全一样：
+启动时就想连公网用 `gld start <目录> --tunnel …`，之后要换地址用 `gld upgrade --tunnel …`。）
 
 ### 办法一：Cloudflare 临时地址（零配置，先试试用）
 
 ```bash
 brew install cloudflared   # Windows: winget install Cloudflare.cloudflared
-gld expose                 # 公网地址形如 https://xxx.trycloudflare.com/mcp
+gld share                  # 公网地址形如 https://xxx.trycloudflare.com/mcp（等价 --tunnel cf）
 ```
 
 **每次重启地址都会变**，ChatGPT 里要跟着改。适合试用，不适合长期。
@@ -71,7 +74,7 @@ gld expose                 # 公网地址形如 https://xxx.trycloudflare.com/mc
 
 ```bash
 gld secret set cloudflare_token <隧道 token>
-gld expose --named
+gld share --tunnel cf:named
 ```
 
 ### 办法三：FRP 固定域名（自己有公网机器）
@@ -82,10 +85,10 @@ gld 生成的是 TOML 配置，更早的版本只认 INI）：
 ```bash
 brew install frpc          # Windows / Linux 见 https://github.com/fatedier/frp/releases
 gld frp add --name 公司 --server frp.example.com --port 7000 --token <frps-token>
-gld expose --frp 公司      # 子域名默认取工作区名，要指定就加 --subdomain myproj
+gld share --tunnel frp:公司   # 子域名默认取工作区名，要指定就加 --subdomain myproj
 ```
 
-`--frp` 填的是上一步的名称（也认 id）。填了不存在的名字会当场报错并列出已有的配置。
+`frp:` 后面填的是上一步的名称（也认 id）。填了不存在的名字会当场报错并列出已有的配置。
 
 frps 侧需要 `subdomain_host = frp.example.com` 并把 `*.frp.example.com` 解析到 frps，
 HTTPS 由 frps 前面的反向代理（Caddy / Nginx）终结。
@@ -99,33 +102,36 @@ frps 那边要配什么见 frp 官方文档。
 只要知道对外地址是什么（它要写进 OAuth 元数据和 OpenAPI 文档里）：
 
 ```bash
-gld expose --url https://mcp.example.com
+gld share --tunnel https://mcp.example.com/mcp
 ```
+
+地址末尾那个 `/mcp` 写不写都行：存下来的是基地址，端点是拼出来的，
+所以从客户端复制过来的完整地址可以直接粘，不会变成 `…/mcp/mcp`。
 
 ### 关掉公网入口
 
 ```bash
-gld expose --off           # 停隧道、清掉公网地址，本地地址照常可用
+gld share --off            # 停隧道、清掉公网地址，本地地址照常可用
 ```
 
 ### 多个项目共用一个域名：全局入口
 
 不想每个工作区都配子域名时，开一个全局入口，所有工作区走 `/w/<工作区id>` 前缀。
-这条路不走 `gld expose`（入口是全局的，不属于某个工作区）：
+这条路不走 `gld share`（入口是全局的，不属于某个工作区）：
 
 ```bash
 gld gateway set --enabled true --tunnel cloudflare        # 或 --tunnel frp --frp-profile <id> --frp-subdomain hub
 gld ws set global-gateway=true                            # 自动重启，start 时会把全局入口一起拉起来
-gld connect                                               # 公网地址变成 https://<入口域名>/w/<id>/mcp
+gld ls                                                    # 公网地址变成 https://<入口域名>/w/<id>/mcp
 ```
 
 ### 在 ChatGPT 里配置
 
 1. 设置 → 账户安全与登录 → 打开“开发人员模式”（允许添加未验证的 MCP 连接器）。
-2. 左侧“插件” → `+` 新建 → 选 MCP，粘贴 `gld connect` 里的**公网地址**（以 `/mcp` 结尾）。
+2. 左侧“插件” → `+` 新建 → 选 MCP，粘贴 `gld ls` 里的**公网地址**（以 `/mcp` 结尾）。
 3. 认证方式和工作区一致：
    - `oauth`（默认）：ChatGPT 支持动态注册，通常不用填 Client ID / Secret；
-     保存后进入授权页，输入 `gld connect --reveal` 里的**授权口令**（`oauth_password`）。
+     保存后进入授权页，输入 `gld ls --reveal` 里的**授权口令**（`oauth_password`）。
    - `bearer`：选 Bearer，填 `bearer_token`。
 4. 新建一个启用了该插件的对话，发送：
    “请调用 server_info、get_default_cwd 和 git_status，告诉我当前工作区、目录和 Git 状态。”
@@ -139,16 +145,16 @@ gld connect                                               # 公网地址变成 h
 
 ```bash
 gld start -s actions
-gld connect                       # 看 “GPT Actions” 段的 OpenAPI 地址与 API Key
+gld ls                            # 看 “GPT Actions” 段的 OpenAPI 地址与 API Key
 ```
 
 在 GPT 编辑器的 Actions 页面 “Import from URL” 粘贴 OpenAPI 地址；
 认证选 API Key（Bearer），值为 `actions_api_key`。
 
-Actions 也要公网地址时，`gld expose` 加 `-s actions`（上面四种走法都适用）：
+Actions 也要公网地址时，`gld share` 加 `-s actions`（上面四种走法都适用）：
 
 ```bash
-gld expose -s actions
+gld share -s actions
 ```
 
 ## 认证方式对照

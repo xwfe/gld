@@ -33,7 +33,7 @@ gld 不再代管这两个程序——只要它们在 PATH 里就会被自动认�
 | --- | --- |
 | `read_file` 等读工具可以给绝对路径读工作区外的任何文件 | **默认只读工作区内**（`mcp.confine-reads=true`）。桌面版那样的服务能挂公网给 ChatGPT 用，仓库里一段注入文字就能让模型去读 `~/.ssh/id_rsa`。要恢复旧行为：`gld ws set confine-reads=false` |
 | 关掉窗口 = 服务停止（除非最小化到托盘） | 服务由守护进程持有，关终端不影响；`gld daemon stop` 才会停 |
-| 新工作区默认隧道类型 frp | 默认 none，需要公网时一条 `gld expose`（见 [connect-clients.md](connect-clients.md)） |
+| 新工作区默认隧道类型 frp | 默认 none，需要公网时一条 `gld share`（见 [connect-clients.md](connect-clients.md)） |
 | 应用启动时按设置恢复上次运行的服务 | 同样的设置（`gld settings runtime --restore-on-launch true`），在守护进程启动时生效 |
 | 界面里的“历史上下文”多选 | `gld ws set history-context=1,3` |
 | Goal / Plan 人工验收按钮 | `gld planning goal accept <id>`、`gld planning plan accept <id>` |

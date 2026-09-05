@@ -45,17 +45,19 @@ impl Output {
         eprintln!("{}", self.dim(text.as_ref()));
     }
 
-    pub fn kv(&self, rows: &[(&str, String)]) {
+    /// 键名接受 `&str` 与 `String`：详情里的凭据标签是拼出来的（要缩进对齐）。
+    pub fn kv<K: AsRef<str>>(&self, rows: &[(K, String)]) {
         if self.json {
             return;
         }
         let width = rows
             .iter()
-            .map(|(key, _)| UnicodeWidthStr::width(*key))
+            .map(|(key, _)| UnicodeWidthStr::width(key.as_ref()))
             .max()
             .unwrap_or(0);
         for (key, value) in rows {
-            let pad = width - UnicodeWidthStr::width(*key);
+            let key = key.as_ref();
+            let pad = width - UnicodeWidthStr::width(key);
             let mut lines = value.lines();
             let first = lines.next().unwrap_or("");
             println!("{}{}  {}", self.dim(key), " ".repeat(pad), first);

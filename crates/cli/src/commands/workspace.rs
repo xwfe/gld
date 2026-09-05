@@ -8,7 +8,7 @@ use gld_daemon::Request;
 use super::Ctx;
 use crate::cli::WorkspaceCmd;
 use crate::error::{CliError, CliResult};
-use crate::output::{or_dash, yes_no};
+use crate::output::yes_no;
 
 pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
     match command {
@@ -253,8 +253,9 @@ pub fn show_profile(ctx: &Ctx, p: &WorkspaceProfile) {
         ("MCP 工具集", p.runtime.tool_profile.clone()),
         (
             "MCP 隧道",
-            describe_tunnel(
+            super::service::tunnel_config_label(
                 &p.tunnel.tunnel_type,
+                &p.tunnel.cloudflare_mode,
                 &p.tunnel.frp_subdomain,
                 &p.tunnel.public_url,
                 p.tunnel.use_global_gateway,
@@ -271,8 +272,9 @@ pub fn show_profile(ctx: &Ctx, p: &WorkspaceProfile) {
         ),
         (
             "Actions 隧道",
-            describe_tunnel(
+            super::service::tunnel_config_label(
                 &p.actions.tunnel_type,
+                &p.actions.cloudflare_mode,
                 &p.actions.frp_subdomain,
                 &p.actions.public_url,
                 p.actions.use_global_gateway,
@@ -280,17 +282,6 @@ pub fn show_profile(ctx: &Ctx, p: &WorkspaceProfile) {
         ),
         ("历史记录", yes_no(p.runtime.history_recording).to_string()),
     ]);
-}
-
-fn describe_tunnel(kind: &str, subdomain: &str, public_url: &str, gateway: bool) -> String {
-    if gateway {
-        return "全局入口（/w/<id>）".into();
-    }
-    match kind {
-        "frp" => format!("frp（子域名 {}）", or_dash(subdomain)),
-        "cloudflare" => "cloudflare".into(),
-        _ => format!("none（公网地址 {}）", or_dash(public_url)),
-    }
 }
 
 fn confirm(question: &str) -> CliResult<bool> {

@@ -52,7 +52,7 @@ gld tool call exec_command cmd='cargo test'
 | ChatGPT 提示无法连接 | 填了 `127.0.0.1` 地址，或隧道没通 | 必须是公网 HTTPS；`gld health` 看“公网 /mcp”那一行 |
 | `gld health` 本地 /mcp 返回 502 | 环境里有 `HTTP_PROXY`，本地探测被代理吃了（0.3.0 起本地探测已绕过代理；旧版会有此问题） | 升级；或临时 `NO_PROXY=127.0.0.1` |
 | 公网 /mcp 显示 `FRP 未挂载代理（返回 frp 404 页）` | frps 收到请求但没有对应子域名的代理 | `gld tunnel status` 看隧道是否 running；`gld tunnel restart` |
-| OAuth 授权失败 | Client ID / 口令来自不同工作区，或客户端里存的是旧值 | `gld connect --reveal` 重新核对（改密钥会自动重启服务，服务端一定是新值） |
+| OAuth 授权失败 | Client ID / 口令来自不同工作区，或客户端里存的是旧值 | `gld ls --reveal` 重新核对（改密钥会自动重启服务，服务端一定是新值） |
 | 401 Unauthorized | Bearer Token 不对，或改了 token 客户端没更新 | `gld secret show bearer_token --reveal` |
 | `gld health` 显示 `HTTP 404（这个端口上应答的不是 gld 的服务）` | 这个端口上跑着别的程序（Actions 默认端口 8787 很容易被撞） | `gld ws set actions.port=<其他端口>`（会自动重启）；`gld doctor` 会告诉你占用者是谁 |
 | 工具列表是旧的 | 客户端缓存 | 断开重连插件 / 新开对话；服务端 `/mcp` 已带 `Cache-Control: no-store` |
@@ -62,7 +62,7 @@ gld tool call exec_command cmd='cargo test'
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `FRP 模式需要选择全局配置或填写服务器域名` | 隧道类型是 frp 但没配服务器 | `gld frp add --name <名称> …` 然后 `gld expose --frp <名称>`；不需要公网就 `gld expose --off` |
+| `FRP 模式需要选择全局配置或填写服务器域名` | 隧道类型是 frp 但没配服务器 | `gld frp add --name <名称> …` 然后 `gld share --tunnel frp:<名称>`；不需要公网就 `gld share --off` |
 | `隧道状态是 …，但没拿到公网地址` | 隧道进程起来了却没报出地址（网络被挡、frps 拒绝、token 不对） | `gld logs -n 30` 看隧道那几行输出 |
 | `未找到 frpc` / `未找到 cloudflared` | 没装，或装的位置不在 PATH 里 | `brew install frpc` / `brew install cloudflared`（Windows: `winget install Cloudflare.cloudflared`）。装在别处就用 `gld settings runtime --executable-paths <目录>` 补上 |
 | `… 是 frp 0.44，太老了` | gld 生成的是 TOML 配置，frp 0.52 以前用 INI 格式 | `brew upgrade frpc`，或从 releases 换 ≥0.52 的版本 |
@@ -82,7 +82,7 @@ gld tool call exec_command cmd='cargo test'
 | `新配置已经保存，但服务没能用它起来` | 自动重启用新配置起服务时失败了，最常见是新端口被别的程序占着 | 上一行错误里写着具体原因；修好后 `gld restart` |
 | 改了配置没反应 | 只有受影响的那一侧会自动重启：改 `actions.*` 不会动 MCP；值没变（`auth=oauth` 设成本来就是 oauth）则不重启 | `gld ws show` 确认值真的变了；仍不对就 `gld restart` |
 | `没有名为「…」的 FRP 配置` | `frp-profile` 填了不存在的名称 / id | 报错里列出了已有的配置，照抄名称即可；一个都没有就先 `gld frp add` |
-| `FRP 配置「…」还在被这些地方用着` | 想删的配置还有工作区指着它 | 报错里列出了是谁在用；改到别的配置或 `gld expose --off`，确定要留悬空引用就 `gld frp remove <id> --force` |
+| `FRP 配置「…」还在被这些地方用着` | 想删的配置还有工作区指着它 | 报错里列出了是谁在用；改到别的配置或 `gld share --off`，确定要留悬空引用就 `gld frp remove <id> --force` |
 | `引用的 FRP 配置 … 不存在` | 之前用 `--force` 删过，或手工改过 `profiles.json` | `gld frp list` 看现有的，再 `gld ws set frp-profile=<名称>` |
 | `mcp.frp-subdomain 无效` | 子域名要拼进 `https://<子域名>.<frps 域名>`，只能用小写字母、数字和中间的连字符 | 去掉点、空格、大写 |
 | `mcp.public-url 无效：…（要带协议头）` | 手动公网地址写成了 `example.com` | 写成 `https://example.com` |

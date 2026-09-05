@@ -1,14 +1,14 @@
-//! `gld expose`：从"刚登记完项目"到"手里有个能贴进 ChatGPT 的公网地址"。
+//! `gld share`：从"刚登记完项目"到"手里有个能贴进 ChatGPT 的公网地址"。
 //!
 //! 这条路以前要三条命令，中间那条 `gld restart` 忘了就是"配了没反应"。
 //! 合成一条之后，值得盯住的是三件在真实使用中最容易出岔子的事：
 //!
-//! 1. 服务本来没在跑，expose 得自己把它拉起来——隧道把本地端口转出去，
+//! 1. 服务本来没在跑，share 得自己把它拉起来——隧道把本地端口转出去，
 //!    本地没人听的话公网地址拿到了也只是 502；
 //! 2. 隧道起不来必须当场报错。start 内部那次隧道尝试是"失败只写日志"的
-//!    （不能让隧道问题把服务一起拖垮），照搬到 expose 上就会变成
+//!    （不能让隧道问题把服务一起拖垮），照搬到 share 上就会变成
 //!    "报告成功、但没有地址"；
-//! 3. 关掉之后不能留残值：从有地址切到 --off，`gld connect` 不该还显示
+//! 3. 关掉之后不能留残值：从有地址切到 --off，`gld ls` 不该还显示
 //!    那个已经失效的地址。
 
 mod common;
@@ -21,13 +21,13 @@ use common::env::{free_port, Env};
 /// `Registered tunnel connection` 那行才算连上（只看到地址不算，
 /// UDP 被挡的网络里地址照打但永远连不上）。
 const FAKE_CLOUDFLARED: &str = "#!/bin/sh
-echo 'INF |  https://gld-expose-test.trycloudflare.com  |'
+echo 'INF |  https://gld-share-test.trycloudflare.com  |'
 echo 'INF Registered tunnel connection connIndex=0'
 while true; do sleep 1; done
 ";
 
 #[test]
-fn expose_takes_a_fresh_workspace_all_the_way_to_a_public_url() {
+fn share_takes_a_fresh_workspace_all_the_way_to_a_public_url() {
     let mut env = Env::new();
     env.fake_binary("cloudflared", FAKE_CLOUDFLARED);
     let port = free_port();
@@ -41,10 +41,10 @@ fn expose_takes_a_fresh_workspace_all_the_way_to_a_public_url() {
         &port.to_string(),
     ]);
 
-    // 服务此刻没在跑，一条 expose 要负责起服务 + 起隧道 + 报地址。
-    let text = env.ok(&["expose"]);
+    // 服务此刻没在跑，一条 share 要负责起服务 + 起隧道 + 报地址。
+    let text = env.ok(&["share"]);
     assert!(
-        text.contains("https://gld-expose-test.trycloudflare.com/mcp"),
+        text.contains("https://gld-share-test.trycloudflare.com/mcp"),
         "没拿到公网地址：{text}"
     );
 
@@ -52,23 +52,35 @@ fn expose_takes_a_fresh_workspace_all_the_way_to_a_public_url() {
     assert_eq!(
         overview.as_array().map(Vec::len),
         Some(1),
-        "expose 应当把服务拉起来：{overview}"
+        "share 应当把服务拉起来：{overview}"
     );
 
-    // --off 要把地址清干净，不能留一个已经失效的值在 connect 里显示。
-    env.ok(&["expose", "--off"]);
-    let after = env.json(&["--json", "connect"]);
+    // --off 要把地址清干净，不能留一个已经失效的值在 ls 里显示。
+    env.ok(&["share", "--off"]);
+    let after = env.json(&["--json", "ls"]);
     assert_eq!(
         after["mcp"]["public_url"], "",
         "关掉之后还留着旧地址：{after}"
     );
 }
 
-/// 没装 cloudflared 时，expose 必须当场把安装办法给出来。
+/// 没装 cloudflared 时，share 必须当场把安装办法给出来。
 ///
-/// 这里不放假二进制，PATH 里就是没有——和用户第一次跑到这一步时一模一样。
+/// 本机真的装了 cloudflared 时这条测试没法跑，直接跳过。
+///
+/// gld 找隧道程序不只看 PATH，还会直接探 `/opt/homebrew/bin/cloudflared`、
+/// `/usr/local/bin/cloudflared`（GUI 启动时 PATH 常常不全，所以有这层兜底）。
+/// 也就是说装过的机器上没有任何环境变量能造出"没装"这个场景，硬跑只会得到
+/// 一条与本测试无关的红色——而 CI 的干净镜像里它照常有效。
 #[test]
-fn expose_reports_the_missing_binary_instead_of_a_silent_no_url() {
+fn share_reports_the_missing_binary_instead_of_a_silent_no_url() {
+    if let Ok(found) = gld_core::tunnel::resolve_cloudflared() {
+        eprintln!(
+            "跳过：本机装着 cloudflared（{}），造不出没装的场景",
+            found.display()
+        );
+        return;
+    }
     let env = Env::new();
     env.ok(&[
         "ws",
@@ -80,7 +92,7 @@ fn expose_reports_the_missing_binary_instead_of_a_silent_no_url() {
         &free_port().to_string(),
     ]);
 
-    let output = env.gld(&["expose"]);
+    let output = env.gld(&["share"]);
     assert!(!output.status.success(), "没有隧道却报成功了");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -93,12 +105,12 @@ fn expose_reports_the_missing_binary_instead_of_a_silent_no_url() {
     );
 }
 
-/// `--url` 是"我自己已经有公网地址了"：只登记，不去起隧道。
+/// `--tunnel <地址>` 是"我自己已经有公网地址了"：只登记，不去起隧道。
 ///
 /// 自建反向代理的人走这条路，机器上根本不会装 cloudflared，
 /// 所以这里绝不能因为找不到隧道程序而失败。
 #[test]
-fn expose_with_a_ready_made_url_does_not_need_any_tunnel_binary() {
+fn a_ready_made_url_does_not_need_any_tunnel_binary() {
     let env = Env::new();
     env.ok(&[
         "ws",
@@ -110,17 +122,41 @@ fn expose_with_a_ready_made_url_does_not_need_any_tunnel_binary() {
         &free_port().to_string(),
     ]);
 
-    env.ok(&["expose", "--url", "https://mcp.example.com/"]);
-    let connect = env.json(&["--json", "connect"]);
+    env.ok(&["share", "--tunnel", "https://mcp.example.com/"]);
+    let ls = env.json(&["--json", "ls"]);
     assert_eq!(
-        connect["mcp"]["public_url"], "https://mcp.example.com/mcp",
-        "登记的公网地址没生效：{connect}"
+        ls["mcp"]["public_url"], "https://mcp.example.com/mcp",
+        "登记的公网地址没生效：{ls}"
+    );
+}
+
+/// 用户手里的地址通常是从客户端复制来的完整端点，末尾就带着 `/mcp`。
+///
+/// 存下去前不把它去掉，配置里是 `https://x.com/mcp`，而端点是拼出来的，
+/// 客户端拿到的就成了 `https://x.com/mcp/mcp`——404，且看不出哪里错了。
+#[test]
+fn a_pasted_endpoint_does_not_end_up_doubled() {
+    let env = Env::new();
+    env.ok(&[
+        "ws",
+        "add",
+        ".",
+        "--name",
+        "pasted",
+        "--mcp-port",
+        &free_port().to_string(),
+    ]);
+
+    env.ok(&["share", "--tunnel", "https://mcp.example.com/mcp"]);
+    assert_eq!(
+        env.json(&["--json", "ls"])["mcp"]["public_url"],
+        "https://mcp.example.com/mcp"
     );
 }
 
 /// FRP 配置填了个不存在的名字，要在这一步就拦住并把已有的列出来。
 #[test]
-fn expose_rejects_an_unknown_frp_profile_up_front() {
+fn share_rejects_an_unknown_frp_profile_up_front() {
     let env = Env::new();
     env.ok(&[
         "ws",
@@ -140,13 +176,44 @@ fn expose_rejects_an_unknown_frp_profile_up_front() {
         "frp.example.com",
     ]);
 
-    let output = env.gld(&["expose", "--frp", "nope"]);
+    let output = env.gld(&["share", "--tunnel", "frp:nope"]);
     assert!(!output.status.success(), "不存在的 FRP 配置被接受了");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("没有名为「nope」"), "{stderr}");
     assert!(
         stderr.contains("office"),
         "报错里要列出已有的配置：{stderr}"
+    );
+}
+
+/// `--tunnel` 写错时要在动配置之前就退出，并把可用写法摆出来。
+#[test]
+fn a_malformed_tunnel_value_is_rejected_before_anything_changes() {
+    let env = Env::new();
+    env.ok(&[
+        "ws",
+        "add",
+        ".",
+        "--name",
+        "bad",
+        "--mcp-port",
+        &free_port().to_string(),
+    ]);
+
+    // 忘了协议头是最常见的写法错误，不能被当成某种模式名默默吃掉。
+    let output = env.gld(&["share", "--tunnel", "mcp.example.com"]);
+    assert_eq!(output.status.code(), Some(2), "参数错误应当是退出码 2");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("看不懂的公网入口"), "{stderr}");
+    assert!(
+        stderr.contains("frp:<配置名>"),
+        "报错要列出可用写法：{stderr}"
+    );
+
+    assert_eq!(
+        env.json(&["--json", "ls"])["mcp"]["public_url"],
+        "",
+        "被拒绝的参数不该改到配置"
     );
 }
 

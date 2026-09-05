@@ -494,7 +494,7 @@ fn auth_checks(
                     scope,
                     "MCP 认证",
                     format!("noauth 但{reason}：任何人都能读写这个项目并执行命令"),
-                    format!("gld ws set -w {scope} auth=bearer；或 gld expose --off -w {scope} 收回公网入口"),
+                    format!("gld ws set -w {scope} auth=bearer；或 gld share --off -w {scope} 收回公网入口"),
                 )
             } else if settings.allow_lan_access {
                 DoctorCheck::fail(
@@ -623,7 +623,7 @@ fn tunnel_checks(
                         format!("引用的 FRP 配置 {profile_id} 不存在（多半是被 gld frp remove --force 删掉了）"),
                         format!(
                             "gld frp list 看现有的，再 gld ws set -w {scope} {field_prefix}frp-profile=<名称>；\
-                             不要公网就 gld expose --off -w {scope}{expose_service}"
+                             不要公网就 gld share --off -w {scope}{expose_service}"
                         ),
                     ));
                 } else if known_profile.is_none() {

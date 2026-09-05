@@ -14,14 +14,20 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 
 ## 工作区（workspace）
 
-**一个工作区 = 一个本地项目目录 + 一套只属于它的配置。** `gld workspace add ~/code/api`
+**一个工作区 = 一个本地项目目录 + 一套只属于它的配置。** `gld start ~/code/api`
 之后，这个目录就有了自己的端口、认证方式、密钥、隧道、工具集、命令白名单。
 
 AI 通过 MCP 连上来之后，**能读能写的范围就是这个目录**。换句话说，工作区既是
 "哪个项目"，也是"边界到哪儿"。
 
-**端口是自动挑的。** MCP 从 28766 起、Actions 从 8787 起往上找空闲端口，
-所以连着 add 三个项目会拿到 28766 / 28767 / 28768，不用你操心冲突。
+**不用先登记再启动。** `gld start <目录>`（或在目录里直接 `gld start`）发现这个
+目录还没登记过，就当场登记，并在输出第一行写明"已登记工作区「x」"。
+登记错了：`gld workspace remove -w <名称>`，项目文件不会被动。
+想只登记不启动，仍然可以用 `gld workspace add`。
+
+**端口是自动挑的。** MCP 从 28766 起、Actions 从 8787 起往上找空闲端口——
+既避开别的工作区，也避开机器上其他程序正在监听的端口。撞上了要自己指定：
+`gld start --port 30000`，或对已有工作区 `gld upgrade --port 30000`。
 
 **大多数命令不用写 `-w`：**
 
@@ -30,6 +36,9 @@ AI 通过 MCP 连上来之后，**能读能写的范围就是这个目录**。�
 3. 还定不了，但你**总共只有一个**工作区 —— 就用它。
 
 所以单项目用户基本永远不用打 `-w`；多项目的话 `cd` 进去就行。
+
+> 第 3 条对 `start` / `share` 不适用：在一个还没登记的目录里启动，要的是这个
+> 目录，而不是碰巧唯一的那个别的项目——所以它们走"登记当前目录"，不走这条回退。
 
 > 名称重复时 `-w api` 会报"匹配到多个工作区"并列出来，改用 id 前缀即可。
 
@@ -127,13 +136,15 @@ ChatGPT 跑在 OpenAI 的服务器上，只能连公网 HTTPS，`127.0.0.1` 填�
 前两种要装 `cloudflared` 或 `frpc`（gld 不代管，PATH 里有就自动认）。
 
 ```bash
-gld expose                       # 独立隧道（Cloudflare 临时地址）
-gld expose --frp 公司            # 独立隧道（FRP 固定域名）
-gld expose --url https://x.com   # 手动地址
-gld expose --off                 # 都关掉
+gld share                              # 独立隧道（Cloudflare 临时地址，等价 --tunnel cf）
+gld share --tunnel frp:公司            # 独立隧道（FRP 固定域名）
+gld share --tunnel https://x.com/mcp   # 手动地址
+gld share --off                        # 都关掉
 ```
 
-全局入口不走 `gld expose`（它是全局的，不属于某个工作区），见
+同样的 `--tunnel` 写法在 `gld start`（启动时一起配）和 `gld upgrade`（事后换）上通用。
+
+全局入口不走 `gld share`（它是全局的，不属于某个工作区），见
 [connect-clients.md](connect-clients.md#多个项目共用一个域名全局入口)。
 
 **cloudflare quick 和 named 的区别：** quick 零配置但**每次重启地址都会变**，

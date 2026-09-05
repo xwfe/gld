@@ -28,8 +28,9 @@
 - [gld status](#gld-status)
 - [gld ps](#gld-ps)
 - [gld logs](#gld-logs)
-- [gld connect](#gld-connect)
-- [gld expose](#gld-expose)
+- [gld ls](#gld-ls)
+- [gld share](#gld-share)
+- [gld upgrade](#gld-upgrade)
 - [gld health](#gld-health)
 - [gld doctor](#gld-doctor)
 - [gld tool](#gld-tool)
@@ -95,14 +96,15 @@ Usage: gld [OPTIONS] <COMMAND>
 Commands:
   daemon       管理后台守护进程（启动 / 停止 / 状态 / 日志）
   workspace    管理工作区（登记项目目录、查看、修改配置、删除） [alias: ws]
-  start        启动工作区的 MCP（默认）或 Actions 服务；必要时自动拉起守护进程
+  start        启动 MCP（默认）或 Actions 服务；目录没登记过会自动登记为工作区
   stop         停止工作区的服务（默认全部）
   restart      重启工作区的服务（默认全部）
   status       查看服务与隧道状态：不带工作区时列出全部，带工作区时显示详情
   ps           只列出正在运行的服务
   logs         查看工作区日志尾部，或用 -f 持续跟随
-  connect      打印给 ChatGPT / MCP 客户端用的连接信息（地址、认证方式、凭据）
-  expose       一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
+  ls           列出工作区的连接信息：地址、认证方式、凭据、隧道
+  share        一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
+  upgrade      改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
   health       逐项检查本地 / 公网端点与 OAuth 元数据是否可达
   doctor       体检：检查配置是否自洽，并给出每个问题的修复命令
   tool         直接调用工具内核：不接 AI 客户端也能验证 Agent 会看到什么
@@ -147,12 +149,19 @@ Options:
           Print version
 
 快速上手：
-  gld workspace add ~/code/my-project     把项目目录登记为工作区
-  gld start                               启动该工作区的 MCP（守护进程会自动在后台拉起）
-  gld connect                             查看给本机客户端用的地址与凭据
-  gld expose                              要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
-  gld status                              看所有工作区的服务与隧道状态
+  gld start ~/code/my-project             启动 MCP；目录没登记过会自动登记（守护进程自动在后台拉起）
+  gld start                               同上，作用于当前目录
+  gld ls                                  看地址、凭据与隧道；不指定工作区时列出全部
+  gld share                               要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
+  gld upgrade --tunnel https://x.com/mcp  改目录 / 公网入口 / 端口 / 认证，改完自动重启
   gld stop                                停止服务；守护进程仍在后台，可用 gld daemon stop 退出
+
+公网入口（--tunnel 在 start / share / upgrade 里通用）：
+  --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
+  --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
+  --tunnel cf:named                       Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
+  --tunnel off                            关掉公网入口，只留本地地址
 
 工作区定位：
   大多数命令接受 -w/--workspace <id|id前缀|名称|路径>。不给时按当前目录归属推断；
@@ -494,21 +503,63 @@ Options:
 ## gld start
 
 ```text
-启动工作区的 MCP（默认）或 Actions 服务；必要时自动拉起守护进程
+启动 MCP（默认）或 Actions 服务；目录没登记过会自动登记为工作区
 
-Usage: gld start [OPTIONS]
+  gld start                          当前目录
+  gld start ~/code/api               指定目录
+  gld start ~/code/api --tunnel https://mcp.example.com/mcp
+                                     顺带配好公网入口，起完直接打印连接信息
+
+守护进程没在跑会自动拉起，之后关掉终端服务也照常在。
+
+Usage: gld start [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]
+          项目目录（默认当前目录）；没登记过会自动登记为工作区
 
 Options:
-  -s, --service <SERVICE>  操作哪个服务；start 默认 mcp，stop / restart 默认 all [possible values: mcp, actions,
-                           all]
-  -w, --workspace <WS>     目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
-      --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
-      --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --timeout <SECS>     等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>         数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
-      --no-color           关闭彩色输出（也可设置环境变量 NO_COLOR）
-  -h, --help               Print help
-  -V, --version            Print version
+      --tunnel <TUNNEL>
+          公网入口：https://… | cf | cf:named | frp:<配置名> | off
+
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --subdomain <SUB>
+          FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --port <PORT>
+          本地监听端口（默认自动挑一个空闲的；端口被别的程序占了时用它换一个）
+
+  -s, --service <SERVICE>
+          启动哪个服务（默认 mcp）
+          
+          [possible values: mcp, actions, all]
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
 
 ## gld stop
@@ -519,8 +570,7 @@ Options:
 Usage: gld stop [OPTIONS]
 
 Options:
-  -s, --service <SERVICE>  操作哪个服务；start 默认 mcp，stop / restart 默认 all [possible values: mcp, actions,
-                           all]
+  -s, --service <SERVICE>  操作哪个服务；stop / restart 默认 all [possible values: mcp, actions, all]
   -w, --workspace <WS>     目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json               以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart       守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
@@ -543,7 +593,7 @@ Usage: gld restart [OPTIONS]
 
 Options:
   -s, --service <SERVICE>
-          操作哪个服务；start 默认 mcp，stop / restart 默认 all
+          操作哪个服务；stop / restart 默认 all
           
           [possible values: mcp, actions, all]
 
@@ -633,44 +683,77 @@ Options:
   -V, --version            Print version
 ```
 
-## gld connect
+## gld ls
 
 ```text
-打印给 ChatGPT / MCP 客户端用的连接信息（地址、认证方式、凭据）
+列出工作区的连接信息：地址、认证方式、凭据、隧道
 
-Usage: gld connect [OPTIONS]
+  gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情
+  gld ls -w api         看指定工作区的详情
+  gld ls --all          在工作区目录里也强制列出全部
+  gld ls --reveal       凭据显示明文（默认脱敏）
+
+Usage: gld ls [OPTIONS]
 
 Options:
-      --reveal          明文显示密钥（默认脱敏）
-  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
-      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
-      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld） [env: GLD_HOME=]
-      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
-  -h, --help            Print help
-  -V, --version         Print version
+      --reveal
+          明文显示密钥（默认脱敏）
+
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+  -a, --all
+          列出全部工作区（在工作区目录里执行时用它看全局）
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
 
-## gld expose
+## gld share
 
 ```text
 一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
 
 它把「配隧道 → 启动服务 → 查连接信息」三步合成一步：
-  gld expose                       Cloudflare 临时地址，零配置，重启会变
-  gld expose --named               Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
-  gld expose --frp 公司            FRP 固定域名，子域名默认取工作区名
-  gld expose --url https://x.com   已经有公网地址（自建反代等），只登记不起隧道
-  gld expose --off                 关掉公网入口，只留本地地址
+  gld share                             Cloudflare 临时地址（等价 --tunnel cf）
+  gld share --tunnel cf:named           Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  gld share --tunnel frp:公司           FRP 固定域名，子域名默认取工作区名
+  gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
+  gld share --off                       关掉公网入口，只留本地地址
 
 公网入口意味着"在你电脑上跑命令"这件事对外可达，开之前请读 docs/security.md。
 
-Usage: gld expose [OPTIONS]
+Usage: gld share [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]
+          项目目录（默认当前目录）；没登记过会自动登记为工作区
 
 Options:
-      --frp <名称|ID>
-          用 FRP：填 `gld frp list` 里的名称或 id（需要一台跑着 frps 的公网机器）
+      --tunnel <TUNNEL>
+          公网入口：https://… | cf | cf:named | frp:<配置名> | off（默认 cf）
 
   -w, --workspace <WS>
           目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
@@ -683,31 +766,103 @@ Options:
       --subdomain <SUB>
           FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则取工作区名
 
-      --named
-          Cloudflare 固定域名模式；先 gld secret set cloudflare_token <token>
-
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
+      --off
+          关掉公网入口，只留本地地址（等价 --tunnel off）
+
+  -s, --service <SERVICE>
+          暴露哪个服务
+          
+          [default: mcp]
+          [possible values: mcp, actions]
+
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-
-      --url <URL>
-          已经有公网地址（自建反向代理等）：只登记，不起隧道
 
       --home <DIR>
           数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
           
           [env: GLD_HOME=]
 
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld upgrade
+
+```text
+改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
+
+  gld upgrade --tunnel https://new.example.com/mcp   换公网地址
+  gld upgrade --path ~/code/api-v2                   项目搬了目录
+  gld upgrade api --port 30001 --auth bearer         按名称指定工作区
+  gld upgrade --off                                  关掉公网入口
+
+只改这几项常用配置；全部字段见 gld workspace fields 与 gld workspace set。
+
+Usage: gld upgrade [OPTIONS] [WS]
+
+Arguments:
+  [WS]
+          要更新哪个工作区：目录 / 名称 / id（默认按当前目录推断）
+
+Options:
+      --path <DIR>
+          换项目根目录（目录要已存在）
+
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --tunnel <TUNNEL>
+          换公网入口：https://… | cf | cf:named | frp:<配置名> | off
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --subdomain <SUB>
+          FRP 子域名（配合 --tunnel frp:<配置名>）
+
       --off
-          关掉公网入口，只留本地地址
+          关掉公网入口（等价 --tunnel off）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.gld）
+          
+          [env: GLD_HOME=]
+
+      --name <NAME>
+          换显示名称
 
       --no-color
           关闭彩色输出（也可设置环境变量 NO_COLOR）
 
+      --port <PORT>
+          换 MCP 端口
+
+      --actions-port <PORT>
+          换 Actions 端口
+
+      --auth <AUTH>
+          换 MCP 认证方式：oauth | bearer | noauth
+
   -s, --service <SERVICE>
-          暴露哪个服务
+          改哪个服务的公网入口
           
           [default: mcp]
           [possible values: mcp, actions]
@@ -1841,6 +1996,7 @@ Options:
 ```text
 字段                      取值                                                         说明
 name                      文本                                                         显示名称
+path                      已存在的目录                                                 项目根目录；换目录后服务会重启到新目录（旧目录里的历史档案留在原地）
 port                      1-65535                                                      MCP 本地监听端口
 auth                      oauth | bearer | noauth                                      MCP 认证方式
 oauth-client-id           文本                                                         MCP OAuth 静态 Client ID

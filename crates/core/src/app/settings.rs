@@ -126,7 +126,7 @@ impl App {
                     return Err(AppError::Message(format!(
                         "FRP 配置「{name}」还在被这些地方用着：\n{}\n\
                          先把它们改到别的配置（gld ws set -w <工作区> frp-profile=<名称>）\
-                         或收回公网入口（gld expose --off -w <工作区>）；\
+                         或收回公网入口（gld share --off -w <工作区>）；\
                          确定要留下悬空引用就加 --force。",
                         users.join("\n")
                     )));
