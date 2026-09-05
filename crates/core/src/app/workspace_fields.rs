@@ -188,10 +188,10 @@ const FIELDS: &[Field] = &[
     ),
     field!(
         "mcp.tunnel",
-        "frp | cloudflare | none",
-        "MCP 公网隧道类型",
+        "frp | cf | none",
+        "MCP 公网隧道类型（cf 即 cloudflare，两种写法都收）",
         |p, v| {
-            p.tunnel.tunnel_type = parse_choice(v, &["frp", "cloudflare", "none"])?;
+            p.tunnel.tunnel_type = parse_tunnel_type(v)?;
             Ok(())
         }
     ),
@@ -306,10 +306,10 @@ const FIELDS: &[Field] = &[
     ),
     field!(
         "actions.tunnel",
-        "frp | cloudflare | none",
-        "Actions 公网隧道类型",
+        "frp | cf | none",
+        "Actions 公网隧道类型（cf 即 cloudflare）",
         |p, v| {
-            p.actions.tunnel_type = parse_choice(v, &["frp", "cloudflare", "none"])?;
+            p.actions.tunnel_type = parse_tunnel_type(v)?;
             Ok(())
         }
     ),
@@ -459,6 +459,22 @@ fn parse_bool(value: &str) -> AppResult<bool> {
         "false" | "no" | "off" | "0" => Ok(false),
         other => Err(AppError::Message(format!(
             "布尔值无效：{other}（接受 true/false/yes/no/on/off/1/0）"
+        ))),
+    }
+}
+
+/// 隧道类型：命令行的 `--tunnel` 收 cf / off，这里收同样的词。
+///
+/// 同一个概念以前有两套写法——命令行写 `--tunnel cf`，字段写
+/// `tunnel=cloudflare`，抄错一处就是"取值无效"。存下去的仍是规范值，
+/// 配置文件和别处的匹配逻辑不受影响。
+fn parse_tunnel_type(value: &str) -> AppResult<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cf" | "cloudflare" => Ok("cloudflare".into()),
+        "off" | "none" => Ok("none".into()),
+        "frp" => Ok("frp".into()),
+        other => Err(AppError::Message(format!(
+            "隧道类型无效：{other}（可选：frp | cf | none；cloudflare / off 也收）"
         ))),
     }
 }
@@ -784,6 +800,29 @@ mod tests {
                 .to_string();
             assert!(error.contains("子域名"), "{bad} → {error}");
         }
+    }
+
+    /// 隧道类型三处写法必须互通：命令行 `--tunnel cf`、字段 `tunnel=cloudflare`、
+    /// 全局入口 `gateway set --tunnel cf`，抄哪一处过来都得认。
+    #[test]
+    fn tunnel_type_accepts_both_the_short_and_the_long_spelling() {
+        let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
+        for (written, stored) in [
+            ("cf", "cloudflare"),
+            ("cloudflare", "cloudflare"),
+            ("CF", "cloudflare"),
+            ("off", "none"),
+            ("none", "none"),
+            ("frp", "frp"),
+        ] {
+            set(&mut profile, "tunnel", written).unwrap();
+            // 存进配置文件的永远是规范值，别处的匹配逻辑不用跟着改。
+            assert_eq!(profile.tunnel.tunnel_type, stored, "{written}");
+        }
+        let error = set(&mut profile, "tunnel", "quick")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("frp | cf | none"), "{error}");
     }
 
     /// 换项目目录时必须当场确认目录存在，否则服务会起在一个空目录上。

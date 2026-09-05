@@ -120,7 +120,7 @@ gld share --off            # 停隧道、清掉公网地址，本地地址照常
 这条路不走 `gld share`（入口是全局的，不属于某个工作区）：
 
 ```bash
-gld gateway set --enabled true --tunnel cloudflare        # 或 --tunnel frp --frp-profile <id> --frp-subdomain hub
+gld gateway set --enabled true --tunnel cf                 # 或 --tunnel frp --frp-profile <id> --frp-subdomain hub
 gld ws set global-gateway=true                            # 自动重启，start 时会把全局入口一起拉起来
 gld ls                                                    # 公网地址变成 https://<入口域名>/w/<id>/mcp
 ```

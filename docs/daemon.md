@@ -11,7 +11,7 @@ gld daemon status
 ```text
 状态          运行中
 pid           9363
-版本          0.3.0（协议 1）
+版本          0.3.0（协议 2）
 运行时长      2h 13m
 运行中的服务  2
 数据目录      /Users/you/.gld
@@ -48,11 +48,15 @@ printf '{"op":"ping"}\n' | nc -U ~/.gld/daemon.sock
 
 | 需要（没跑就自动拉起） | 不需要（没跑时进程内直接执行） |
 | --- | --- |
-| `start` `stop` `restart` `share` `destroy` | `workspace *` `settings *` `secret *` `frp *` |
-| `tunnel start/stop/restart/test` | `status` `ps` `logs` `health` `ls` |
+| `start` `stop` `restart` `share` | `workspace *` `settings *` `secret *` `frp *` |
+| `tunnel start/stop/restart/test` | `status` `ps` `logs` `health` `ls` `destroy` |
 | `gateway start/stop` | `planning *` `history` `usage` `context` |
 
 `upgrade` 两边都沾：只改配置时不需要，改到公网入口且服务正在跑时会去重连隧道。
+
+`destroy` 在"不需要"那列不是笔误：服务只活在守护进程里，它没跑就等于没有服务
+要停，剩下的删配置删密钥都是文件操作。守护进程在跑时它照样转发过去，
+先停服务再删。
 
 守护进程在跑时，**所有**命令都转发给它——它是内存里运行状态和 `profiles.json` 的唯一写入者，
 这样不会出现命令行改了文件、守护进程用旧数据把它覆盖回去的情况。

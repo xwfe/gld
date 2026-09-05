@@ -1314,7 +1314,7 @@ Options:
       --json                    以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --port <PORT>             本地端口
       --no-autostart            守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --tunnel <TYPE>           隧道类型：none | cloudflare | frp
+      --tunnel <TYPE>           隧道类型：cf（Cloudflare）| frp | off（配合 --public-url 用现成地址）
       --public-url <URL>        手动公网地址（tunnel=none 时使用）
       --timeout <SECS>          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --frp-profile <ID>        FRP 服务器配置 id
@@ -2099,7 +2099,7 @@ allowed-commands          逗号分隔                                          
 confine-reads             true | false                                                 读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
 executable-paths          路径列表（换行或分号分隔）                                   额外的可执行文件搜索路径
 ai-instructions           文本                                                         注入 Agent 的工作区级说明
-tunnel                    frp | cloudflare | none                                      MCP 公网隧道类型
+tunnel                    frp | cf | none                                              MCP 公网隧道类型（cf 即 cloudflare，两种写法都收）
 frp-profile               FRP 配置的名称或 id，或空                                    使用哪个 FRP 服务器配置（见 gld frp list）
 frp-subdomain             子域名（小写字母 / 数字 / 连字符）                           FRP 子域名，公网地址为 https://<子域名>.<服务器>
 cloudflare-mode           quick | named                                                Cloudflare 隧道模式
@@ -2112,7 +2112,7 @@ actions.oauth-client-id   文本                                                
 actions.shared-secrets    true | false                                                 Actions 使用共享密钥池
 actions.confine-reads     true | false                                                 Actions 侧同上（默认 true）
 actions.allowed-commands  逗号分隔                                                     Actions 侧同上（追加；only: 前缀表示只允许这些）
-actions.tunnel            frp | cloudflare | none                                      Actions 公网隧道类型
+actions.tunnel            frp | cf | none                                              Actions 公网隧道类型（cf 即 cloudflare）
 actions.frp-profile       FRP 配置的名称或 id，或空                                    Actions 使用的 FRP 服务器配置
 actions.frp-subdomain     子域名（小写字母 / 数字 / 连字符）                           Actions FRP 子域名
 actions.cloudflare-mode   quick | named                                                Actions Cloudflare 隧道模式

@@ -41,8 +41,8 @@ gld tool call exec_command cmd='cargo test'
 | `已有另一个守护进程持有 …/daemon.lock` | 同一数据目录已有实例（可能是别的用户 / 别的 shell 起的） | `gld daemon status` 看 pid；确认它已死才可删 lock 文件 |
 | `守护进程（pid N）存在但不响应` | 进程活着但 socket 没在听：正在启动、或卡死 | 等几秒重试；仍不行 `gld daemon stop --force` |
 | `守护进程版本 x 与命令行版本 y 不一致`（退出码 4） | 升级了 `gld`，旧进程还在跑 | `gld daemon restart` |
-| `gld start` 后 `gld status` 显示 error | 端口被占、或监听器起来后立刻退出 | 错误信息里有占用者的路径与 pid；`gld ws set port=<其他端口>`（会自动重启） |
-| `本地 MCP 端口 28766 已被占用：/path/to/other` | 别的程序占了这个端口 | 换端口，或停掉那个程序 |
+| `gld start` 后 `gld status` 显示 error | 端口被占、或监听器起来后立刻退出 | 错误信息里有占用者的路径与 pid；`gld upgrade --port <其他端口>`（会自动重启） |
+| `本地 MCP 端口 28766 已被占用：/path/to/other` | 别的程序占了这个端口。新登记的工作区会自动避开机器上已被监听的端口，所以这多半是**之前**登记的工作区，或那个程序是后来才起来的 | `gld upgrade --port <其他端口>`；第一次启动就撞上可以直接 `gld start <目录> --port <端口>` |
 | `…仍被本进程上一次的服务占用` | 上一次的监听器还没退干净。注意这**不是**"服务已经在跑"——服务在跑时再敲 `gld start` 会直接告诉你 running，不会报错 | 等几秒重试；反复出现 `gld daemon restart` |
 
 ## 客户端连不上
@@ -75,9 +75,10 @@ gld tool call exec_command cmd='cargo test'
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `未指定工作区` / `当前目录不属于任何工作区` | 有多个工作区，当前目录又不在任何一个里面 | 加 `-w <名称或id前缀>`，或 `cd` 进项目目录 |
+| `未指定工作区` / `当前目录不属于任何工作区` | 有多个工作区，当前目录又不在任何一个里面。注意 `start` / `share` 不会报这个——它们会把当前目录登记成新工作区 | 加 `-w <名称或id前缀>`，或 `cd` 进项目目录 |
+| 多出来一个没印象的工作区 | 在某个目录里敲过 `gld start`，它自动登记了。输出第一行有"已登记工作区「x」" | `gld ls --all` 看都有谁；不要的 `gld destroy <名称>`（只删 gld 这边的配置） |
 | `「api」匹配到多个工作区` | 名称重复 | 用 id 前缀（≥4 位） |
-| `该目录已经是工作区` | 重复 add | `gld ws list` 查看 |
+| `该目录已经是工作区「x」` | 重复 `gld ws add`，或 `gld upgrade --path` 指到了别的工作区的目录 | 一个目录只能属于一个工作区。想用它直接 `gld start <目录>`（会复用那个工作区，不会重复登记）；确实要腾出来先 `gld destroy` 掉占着的那个 |
 | `未知字段「…」` | `ws set` 的 key 写错 | `gld ws fields` 列出全部。不写前缀就是改 MCP（`port` = `mcp.port`），改 Actions 要写全 `actions.port` |
 | `新配置已经保存，但服务没能用它起来` | 自动重启用新配置起服务时失败了，最常见是新端口被别的程序占着 | 上一行错误里写着具体原因；修好后 `gld restart` |
 | 改了配置没反应 | 只有受影响的那一侧会自动重启：改 `actions.*` 不会动 MCP；值没变（`auth=oauth` 设成本来就是 oauth）则不重启 | `gld ws show` 确认值真的变了；仍不对就 `gld restart` |

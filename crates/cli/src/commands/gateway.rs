@@ -94,11 +94,22 @@ fn apply(config: &mut GlobalGatewayConfig, args: GatewaySetArgs) -> CliResult {
         config.local_port = port;
     }
     if let Some(tunnel) = args.tunnel {
-        let tunnel = tunnel.to_ascii_lowercase();
-        if !matches!(tunnel.as_str(), "none" | "cloudflare" | "frp") {
-            return Err(CliError::new("隧道类型只能是 none | cloudflare | frp"));
-        }
-        config.tunnel_type = tunnel;
+        // 和工作区那边的 `--tunnel` 收同样的词：那边写 cf / off，这边只认
+        // cloudflare / none 的话，同一个参数名两套规则，抄过来就报错。
+        // 全局入口没有 frp:<配置名> 和 URL 那两种写法——服务器和地址是
+        // --frp-profile / --public-url 单独给的。
+        config.tunnel_type = match tunnel.trim().to_ascii_lowercase().as_str() {
+            "cf" | "cloudflare" => "cloudflare".to_string(),
+            "off" | "none" => "none".to_string(),
+            "frp" => "frp".to_string(),
+            other => {
+                return Err(CliError::new(format!(
+                    "隧道类型只能是 cf（Cloudflare）| frp | off，收到「{other}」。\n\
+                     FRP 的服务器和子域名用 --frp-profile / --frp-subdomain 给；\
+                     已有公网地址用 --tunnel off --public-url <地址>。"
+                )))
+            }
+        };
     }
     if let Some(url) = args.public_url {
         config.public_url = url.trim().trim_end_matches('/').to_string();
