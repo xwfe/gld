@@ -560,6 +560,17 @@ impl RuntimeSupervisor {
                             port
                         )
                     };
+                    // 这一步会真的把服务关掉（丢掉 shutdown sender、abort 任务）。
+                    // 不写日志的话，用户和排障的人看到的只有"服务莫名其妙没了"，
+                    // 而工作区日志里只剩监听器自己那句 listener stopped。
+                    append_profile_log(
+                        &profile.id,
+                        stderr_log_name(kind),
+                        &format!(
+                            "[refresh] 连续 {} 次在端口 {port} 上查不到监听者，判定服务已死并关闭它",
+                            entry.missing_port_checks
+                        ),
+                    );
                     entry.phase = RuntimePhase::Error;
                     entry.error_message = Some(message);
                     entry.started_at = None;

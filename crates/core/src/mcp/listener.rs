@@ -188,9 +188,20 @@ async fn serve(
             local_network::bind_host(allow_lan_access)
         ),
     );
+    let shutdown_profile = profile_id.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = shutdown.await;
+        .with_graceful_shutdown(async move {
+            // 分清两件事：收到停止信号（有人停它）和发送端被丢弃（没人停它，
+            // 但持有它的那条运行记录没了）。后者是 bug 的征兆，日志里必须能看出来。
+            let reason = match shutdown.await {
+                Ok(()) => "收到停止信号",
+                Err(_) => "停止信号的发送端被丢弃——没有人显式停止它",
+            };
+            append_profile_log(
+                &shutdown_profile,
+                "stderr.log",
+                &format!("[mcp] 开始优雅关闭：{reason}"),
+            );
         })
         .await?;
     Ok(())
