@@ -14,6 +14,10 @@ fi
 
 export NO_COLOR=1
 export COLUMNS=100
+# clap 会把 env 参数的**当前值**印进帮助里（`[env: GLD_HOME=/你的/路径]`）。
+# 在设过这些变量的 shell 里生成，产出的 cli.md 就带上了本机路径：CI 那道
+# `git diff --exit-code docs/cli.md` 会挂，而且等于把自己的家目录提交进文档。
+unset GLD_HOME GLD_WORKSPACE
 
 # 命令树：一行一个，子命令用空格分隔。
 COMMANDS=(
