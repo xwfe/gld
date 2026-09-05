@@ -9,6 +9,7 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 - [共享密钥池](#共享密钥池shared-secrets) · [拿公网地址的三种方式](#拿公网地址的三种方式)
 - [工具集 tool-profile](#工具集tool-profile) · [权限模式 permission-mode](#权限模式permission-mode)
 - [Planning 三种模式](#planning-三种模式) · [历史会话档案](#历史会话档案与-history-context)
+- [Durable Task 的工作区基线](#durable-task-的工作区基线)
 
 ---
 
@@ -299,6 +300,23 @@ gld ws set history-context=        # 清空，恢复"什么都不注入"
 
 **代价是每次新会话都要付这些 token。** 只点名真正需要跨会话记住的那一两份，
 不要把所有档案都列上。
+
+---
+
+## Durable Task 的工作区基线
+
+开了 Durable Task（`task_manage action=start`）之后，写类工具（`exec_command`、
+`apply_patch`）每次执行前会比一次**工作区指纹**：任务开始时记一份，之后每次工具
+自己写完再记一份。对不上就拒绝执行并报 `FILE_CHANGED_EXTERNALLY`——意思是
+"有人在 AI 的记账之外改了文件，它手上的认知已经过期了"。
+
+不计入指纹的：`.git/`、`node_modules/`、`target/`、`dist/`、`build/` 这类，
+以及 **gld 自己在项目里的状态目录 `.gld/`**（Planning 状态存在这儿，而它每次
+工具调用都可能被写）。History 档案（`docs/history-session/`）计入指纹，但
+history 工具写完会自动把指纹记上账。
+
+> 这两条都是 0.3.0 修的。之前它们都算进指纹，而工具自己就会写它们——
+> 结果是一开任务，第一次写操作就被判成"外部修改"，任务模式整个用不了。
 
 ---
 

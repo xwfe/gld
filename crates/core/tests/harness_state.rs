@@ -110,3 +110,44 @@ fn project_state包含分支任务和脏状态摘要() {
     assert!(!state.files.is_empty());
     assert!(state.task.is_some());
 }
+
+/// gld 自己在项目里的状态目录不算工作区变化。
+///
+/// `.gld/planning/state.json` 由 dispatch 的公共路径 load-or-create——每一次
+/// 工具调用都可能写它。算进指纹的话就是自己锁死自己：`task_manage start` 记下
+/// 基线的同时创建了这个文件，紧接着第一次 `exec_command` 就被判成
+/// FILE_CHANGED_EXTERNALLY。开了任务反而什么都干不了，而报错让人去查一个
+/// 根本不存在的"外部修改"。
+///
+/// `.coding-tools` 是它改名前的叫法，老项目里还留着，一并跳过。
+#[test]
+fn gld自己的状态目录不计入基线() {
+    let (_temp, workspace, harness_root) = fixture();
+    let harness = Harness::new(workspace.clone(), harness_root).expect("创建 Harness");
+    let task = harness
+        .start_task("验证状态目录不干扰基线")
+        .expect("启动任务");
+
+    for relative in [
+        ".gld/planning/state.json",
+        ".coding-tools/planning/state.json",
+    ] {
+        let path = workspace.join(relative);
+        fs::create_dir_all(path.parent().expect("父目录")).expect("建目录");
+        fs::write(&path, r#"{"mode":"direct"}"#).expect("写状态文件");
+
+        harness
+            .check_baseline(&task.id)
+            .unwrap_or_else(|error| panic!("{relative} 被当成了外部修改：{}", error.code()));
+    }
+
+    // 反向：真的改了项目文件仍然要报出来，别把检测能力一起关掉。
+    fs::write(workspace.join("README.md"), "外部改的\n").expect("模拟外部修改");
+    assert_eq!(
+        harness
+            .check_baseline(&task.id)
+            .expect_err("外部修改必须仍被识别")
+            .code(),
+        "FILE_CHANGED_EXTERNALLY"
+    );
+}

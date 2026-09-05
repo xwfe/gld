@@ -104,6 +104,8 @@ gld tool call exec_command cmd='cargo test'
 | 工作区外文件写入被拒 | Workspace-first：写入永远只在工作区内 | 把目标目录登记成工作区，或把文件放进工作区 |
 | `READS_CONFINED_TO_WORKSPACE`（升级到 0.3.0 后 Agent 突然读不了外部文件） | 0.3.0 起读也默认限制在工作区内，老配置升级上来一样收紧 | 确实要读外面：`gld ws set confine-reads=false`（Actions 侧 `actions.confine-reads`）。先读一下 [security.md](security.md) 再决定 |
 | `GLD_DATA_HOME_DENIED` | 想用文件工具读 gld 自己的数据目录 | 有意挡的，**关掉 confine-reads 也不给读**：那里明文存着所有工作区的密钥。要看密钥用 `gld secret show <key> --reveal` |
+| `FILE_CHANGED_EXTERNALLY`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹，发现任务开始后有它没记账的文件变化 | 确实是你在编辑器里改了文件的话，这是它该做的事——让 AI 重新读一遍再动手。要是你什么都没改却一直报，看下一行 |
+| 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
 
 ## 数据目录与环境
 

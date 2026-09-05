@@ -522,6 +522,17 @@ pub fn capture_baseline(root: &Path) -> ProjectBaseline {
     }
 }
 
+/// 指纹要盯的是"用户的工作区内容"，不包括 gld 自己在项目里的状态目录。
+///
+/// `.gld/`（老项目里是 `.coding-tools/`）存的是 Planning 状态，而它由 dispatch
+/// 的公共路径 load-or-create——也就是**每一次工具调用**都可能写它。算进指纹的话
+/// 就是自己把自己锁死：
+///
+///   task_manage start   → 记下 baseline，同时创建 .gld/planning/state.json
+///   exec_command        → 指纹对不上 → FILE_CHANGED_EXTERNALLY，写操作被拒
+///
+/// 开了任务反而什么都干不了，而报错说的是"外部文件变化"——去查外部改了什么，
+/// 永远查不到。
 fn should_skip(path: &Path, root: &Path) -> bool {
     path.strip_prefix(root)
         .ok()
@@ -532,6 +543,8 @@ fn should_skip(path: &Path, root: &Path) -> bool {
             matches!(
                 name,
                 ".git"
+                    | ".gld"
+                    | ".coding-tools"
                     | ".mcp-probe-kit"
                     | "node_modules"
                     | "target"

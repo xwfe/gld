@@ -530,6 +530,16 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         if succeeded {
             let _ = ctx.harness.refresh_expected_state(task_id);
         }
+    } else if writes_workspace_archives(name)
+        && output.get("ok").and_then(Value::as_bool) == Some(true)
+    {
+        // History 档案写在项目里（`docs/history-session/`），是用户会提交的内容，
+        // 不能像 `.gld/` 那样整体排除出指纹。但它是**工具自己写的**，写完必须记上账，
+        // 否则下一次 exec_command / apply_patch 会把它当成外部修改而拒绝执行——
+        // 症状是"存了个检查点，然后就什么都干不了了"。
+        if let Ok(Some(task)) = ctx.harness.current_task() {
+            let _ = ctx.harness.refresh_expected_state(&task.id);
+        }
     }
     if let Some(operation) = operation {
         let succeeded = output.get("ok").and_then(Value::as_bool) == Some(true);
@@ -736,6 +746,22 @@ fn prefix_patch_paths(base: &str, patch: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 这些工具会往工作区里写自己的档案，写完要把指纹记上账。
+///
+/// 和 `requires_write_baseline` 的区别：那批（exec_command / apply_patch）是替
+/// 用户改代码，动手前要先确认工作区没被外部动过；这批是工具自己的记账动作，
+/// 不该被基线拦住，但它们确实改了工作区文件，所以事后必须刷新。
+///
+/// Planning 不在这里：它的状态在 `.gld/` 下，那个目录整个不进指纹
+/// （见 `harness::state::should_skip`）。
+///
+/// 代价说清楚：如果用户正好在这次调用之前手工改了别的文件，这次刷新会把那笔
+/// 变化一起吸收掉，后面就不再报 FILE_CHANGED_EXTERNALLY 了。相比"存个检查点就
+/// 把自己锁死"，这个代价值得。
+fn writes_workspace_archives(name: &str) -> bool {
+    name.starts_with("history_")
 }
 
 fn requires_write_baseline(name: &str, args: &Value) -> bool {
