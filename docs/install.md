@@ -84,4 +84,4 @@ rm -rf ~/.gld              # 配置和密钥，删了就找不回来了
 
 `~/.gld/data/profiles.json` 是所有密钥的唯一副本，删之前想清楚——
 细节见 [security.md](security.md#密钥存在哪丢了会怎样)。
-项目目录里的 `.coding-tools/` 和 `docs/history-session/` 属于项目本身，不在这里删。
+项目目录里的 `.gld/` 和 `docs/history-session/` 属于项目本身，不在这里删。

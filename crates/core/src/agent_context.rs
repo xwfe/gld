@@ -722,7 +722,7 @@ fn auto_scan_entry_allowed(entry: &walkdir::DirEntry) -> bool {
     !matches!(
         name,
         ".git"
-            | ".coding-tools"
+            | ".gld"
             | "node_modules"
             | "target"
             | "build"

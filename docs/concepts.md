@@ -247,7 +247,7 @@ MCP 客户端可以拿这两个标注决定要不要弹确认框、要不要限�
 ## Planning 三种模式
 
 给"让 AI 改代码之前先说清楚要干什么"用的闸门。状态存在项目里的
-`.coding-tools/planning/state.json`，跟着 Git 走。
+`.gld/planning/state.json`，跟着 Git 走。
 
 ```bash
 gld planning mode plan      # 切换

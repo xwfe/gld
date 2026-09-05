@@ -8,4 +8,4 @@ pub use model::{
 };
 pub use service::{ExecutionLedgerUpdate, PlanningService};
 
-pub const PLANNING_RELATIVE_PATH: &str = ".coding-tools/planning/state.json";
+pub const PLANNING_RELATIVE_PATH: &str = ".gld/planning/state.json";
