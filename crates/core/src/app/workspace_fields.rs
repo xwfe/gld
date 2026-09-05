@@ -28,7 +28,7 @@ pub struct FieldContext {
 
 /// 不写前缀时补哪个。
 ///
-/// 一个工作区里 MCP 是主服务（`gld start` 默认起它、`gld connect` 默认展示它），
+/// 一个工作区里 MCP 是主服务（`gld start` 默认起它、`gld ls` 默认展示它），
 /// Actions 是可选的第二条线路。所以 `port=30000` 补成 `mcp.port`，改 Actions
 /// 才需要写全 `actions.port`——常见的那一半不用打前缀，少一半噪音。
 const IMPLIED_PREFIX: &str = "mcp.";
@@ -64,6 +64,15 @@ const FIELDS: &[Field] = &[
         p.name = v.trim().into();
         Ok(())
     }),
+    field!(
+        "path",
+        "已存在的目录",
+        "项目根目录；换目录后服务会重启到新目录（旧目录里的历史档案留在原地）",
+        |p, v| {
+            p.path = parse_workspace_path(v)?;
+            Ok(())
+        }
+    ),
     field!("mcp.port", "1-65535", "MCP 本地监听端口", |p, v| {
         p.runtime.local_port = parse_port(v)?;
         Ok(())
@@ -490,6 +499,39 @@ fn parse_subdomain(key: &str, value: &str) -> AppResult<String> {
     Ok(value.to_string())
 }
 
+/// 项目根目录：展开 `~`、转成绝对路径，并确认它真的存在。
+///
+/// 不校验的话，路径写错（少一层目录、拼错字母）会被原样存下来，表现是服务照常
+/// 起来、Agent 却看到一个空项目——错在配置里，日志里一行异常都没有。
+fn parse_workspace_path(value: &str) -> AppResult<String> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return Err(AppError::Message(
+            "path 不能为空（要换目录就给一个已存在的目录）".into(),
+        ));
+    }
+    let expanded = match raw.strip_prefix("~/") {
+        // shell 只在少数位置展开 `~`，`gld ws set path=~/code/x` 里它常常原样传进来。
+        Some(rest) => dirs::home_dir()
+            .ok_or_else(|| AppError::Message("无法确定用户主目录，请写绝对路径".into()))?
+            .join(rest),
+        None => std::path::PathBuf::from(raw),
+    };
+    let canonical = expanded.canonicalize().map_err(|error| {
+        AppError::Message(format!(
+            "目录不存在或无法访问：{}（{error}）",
+            expanded.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(AppError::Message(format!(
+            "不是目录：{}",
+            canonical.display()
+        )));
+    }
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
 /// 手动公网地址必须是个 URL；写成 `example.com` 客户端连不上，且没有任何提示。
 fn parse_public_url(key: &str, value: &str) -> AppResult<String> {
     let value = value.trim().trim_end_matches('/');
@@ -742,6 +784,27 @@ mod tests {
                 .to_string();
             assert!(error.contains("子域名"), "{bad} → {error}");
         }
+    }
+
+    /// 换项目目录时必须当场确认目录存在，否则服务会起在一个空目录上。
+    #[test]
+    fn a_workspace_path_must_point_at_a_real_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
+
+        set(&mut profile, "path", temp.path().to_str().unwrap()).unwrap();
+        // 存下来的是规范化后的绝对路径（macOS 上 /var 是 /private/var 的软链）。
+        assert_eq!(
+            std::path::Path::new(&profile.path).canonicalize().unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
+
+        let missing = temp.path().join("nope");
+        let error = set(&mut profile, "path", missing.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("目录不存在"), "{error}");
+        assert!(set(&mut profile, "path", "").is_err());
     }
 
     /// 手动公网地址不带协议头，客户端连不上而且没有任何提示。

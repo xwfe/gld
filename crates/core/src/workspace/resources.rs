@@ -51,6 +51,19 @@ pub fn assign_free_workspace_ports(
     profiles: &[WorkspaceProfile],
     candidate: &mut WorkspaceProfile,
 ) -> AppResult<()> {
+    assign_free_workspace_ports_with(profiles, candidate, port_is_bindable)
+}
+
+/// 同上，但"这个端口能不能用"由调用方决定。
+///
+/// 单元测试要的是"避开别的工作区"这条规则本身；真去 bind 一下的话，
+/// 结果就取决于跑测试那台机器上谁正好占着 28766，同一份代码在两台机器上
+/// 一红一绿——而它跟这条规则毫无关系。
+fn assign_free_workspace_ports_with(
+    profiles: &[WorkspaceProfile],
+    candidate: &mut WorkspaceProfile,
+    usable: impl Fn(u16) -> bool,
+) -> AppResult<()> {
     let reserved: std::collections::HashSet<u16> = profiles
         .iter()
         .filter(|profile| profile.id != candidate.id)
@@ -58,20 +71,24 @@ pub fn assign_free_workspace_ports(
         .map(|claim| claim.local_port)
         .collect();
 
-    let mcp_port = next_free_port(candidate.runtime.local_port, &reserved)?;
+    let mcp_port = next_free_port(candidate.runtime.local_port, &reserved, &usable)?;
     let mut reserved_with_mcp = reserved;
     reserved_with_mcp.insert(mcp_port);
-    let actions_port = next_free_port(candidate.actions.local_port, &reserved_with_mcp)?;
+    let actions_port = next_free_port(candidate.actions.local_port, &reserved_with_mcp, &usable)?;
 
     candidate.runtime.local_port = mcp_port;
     candidate.actions.local_port = actions_port;
     Ok(())
 }
 
-fn next_free_port(preferred: u16, reserved: &std::collections::HashSet<u16>) -> AppResult<u16> {
+fn next_free_port(
+    preferred: u16,
+    reserved: &std::collections::HashSet<u16>,
+    usable: impl Fn(u16) -> bool,
+) -> AppResult<u16> {
     let start = if preferred == 0 { 1 } else { preferred };
     for port in start..=u16::MAX {
-        if reserved.contains(&port) {
+        if reserved.contains(&port) || !usable(port) {
             continue;
         }
         return Ok(port);
@@ -79,6 +96,18 @@ fn next_free_port(preferred: u16, reserved: &std::collections::HashSet<u16>) -> 
     Err(AppError::Message(format!(
         "无法从端口 {preferred} 起找到可用本地端口"
     )))
+}
+
+/// 这个端口现在能不能监听。
+///
+/// 只看别的工作区占没占是不够的：28766 可能正被机器上另一个程序（桌面版
+/// 自己、别的开发服务）听着。分配时不查，问题会推迟到 `gld start` 那一刻
+/// 才炸——而那时用户以为自己只是"启动一下"，不会想到是登记时挑错了端口。
+///
+/// 探测和真正监听之间当然有窗口期，撞上了 `start` 会报"端口已被占用"，
+/// 带着占用者的 pid，够查了。
+fn port_is_bindable(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 /// Validate an update without blocking a repair because another, unchanged
@@ -305,7 +334,7 @@ fn subdomain_conflict_error(target: ServiceClaim<'_>, owner: ServiceClaim<'_>) -
 #[cfg(test)]
 mod tests {
     use super::{
-        assign_free_workspace_ports, validate_service_start, validate_workspace_resources,
+        assign_free_workspace_ports_with, validate_service_start, validate_workspace_resources,
         validate_workspace_resources_update, WorkspaceService,
     };
     use crate::workspace::WorkspaceProfile;
@@ -339,14 +368,36 @@ mod tests {
         assert!(message.contains("MCP"));
     }
 
+    /// 端口分配的单元测试只管"避开别的工作区"，不关心本机此刻谁在监听。
+    fn any_port(_port: u16) -> bool {
+        true
+    }
+
     #[test]
     fn assign_free_ports_keeps_defaults_when_available() {
         let mut candidate = WorkspaceProfile::new("C:/workspace/new".into(), Some("new".into()));
 
-        assign_free_workspace_ports(&[], &mut candidate).expect("assign");
+        assign_free_workspace_ports_with(&[], &mut candidate, any_port).expect("assign");
 
         assert_eq!(candidate.runtime.local_port, 28_766);
         assert_eq!(candidate.actions.local_port, 8_787);
+    }
+
+    /// 机器上别的程序（桌面版、另一个开发服务）占着默认端口时，登记就得换一个。
+    ///
+    /// 不换的话问题会推迟到 `gld start` 才炸："端口 28766 已被占用"——
+    /// 而用户以为自己只是启动一下，不会想到是登记那一刻挑错了端口。
+    #[test]
+    fn assign_free_ports_skips_ports_the_machine_is_already_listening_on() {
+        let mut candidate = WorkspaceProfile::new("C:/workspace/new".into(), Some("new".into()));
+
+        assign_free_workspace_ports_with(&[], &mut candidate, |port| {
+            port != 28_766 && port != 8_787
+        })
+        .expect("assign");
+
+        assert_eq!(candidate.runtime.local_port, 28_767);
+        assert_eq!(candidate.actions.local_port, 8_788);
     }
 
     #[test]
@@ -354,7 +405,8 @@ mod tests {
         let owner = profile("owner", 28_766, 8_787);
         let mut candidate = WorkspaceProfile::new("C:/workspace/new".into(), Some("new".into()));
 
-        assign_free_workspace_ports(std::slice::from_ref(&owner), &mut candidate).expect("assign");
+        assign_free_workspace_ports_with(std::slice::from_ref(&owner), &mut candidate, any_port)
+            .expect("assign");
 
         assert_eq!(candidate.runtime.local_port, 28_767);
         assert_eq!(candidate.actions.local_port, 8_788);
@@ -367,7 +419,8 @@ mod tests {
         let owner = profile("owner", 8_787, 9_001);
         let mut candidate = WorkspaceProfile::new("C:/workspace/new".into(), Some("new".into()));
 
-        assign_free_workspace_ports(std::slice::from_ref(&owner), &mut candidate).expect("assign");
+        assign_free_workspace_ports_with(std::slice::from_ref(&owner), &mut candidate, any_port)
+            .expect("assign");
 
         assert_eq!(candidate.runtime.local_port, 28_766);
         assert_eq!(candidate.actions.local_port, 8_788);

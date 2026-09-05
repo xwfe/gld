@@ -43,6 +43,7 @@ pub async fn dispatch(
         R::ListWorkspaces => ok(&app.list_workspaces()?),
         R::ResolveWorkspace { target } => ok(&app.resolve_workspace(&target)?),
         R::CreateWorkspace { path, options } => ok(&app.create_workspace(&path, options)?),
+        R::EnsureWorkspace { path, options } => ok(&app.ensure_workspace(&path, options)?),
         R::SetWorkspaceFields {
             target,
             assignments,

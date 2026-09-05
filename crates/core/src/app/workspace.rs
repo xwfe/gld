@@ -38,6 +38,17 @@ impl WorkspaceTarget {
     }
 }
 
+/// [`App::ensure_workspace`] 的结果：目录对应的工作区，以及它是不是刚建出来的。
+///
+/// `created` 是给调用方提示用的——自动登记必须让人看见，否则在一个随手进的
+/// 目录里敲 `gld start`，工作区就悄悄多了一个，而用户以为自己启动的是别的项目。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsuredWorkspace {
+    pub profile: WorkspaceProfile,
+    pub created: bool,
+}
+
 /// 创建工作区时可选的覆盖项。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkspaceCreateOptions {
@@ -144,6 +155,34 @@ impl App {
         })
     }
 
+    /// 按目录拿工作区：这个目录（或它的上层）已经登记过就返回它，否则当场登记。
+    ///
+    /// `gld start ~/code/x` 走这条路。以前必须先 `workspace add` 再 `start`，
+    /// 两条命令之间没有任何判断——第一条的唯一作用就是让第二条别报
+    /// "当前目录不属于任何工作区"。
+    ///
+    /// 归属判断用的是和 [`Self::resolve_workspace`] 同一套目录规则（在
+    /// `~/code/x/src/` 里也算 `~/code/x`），但**不带**"只有一个工作区就用它"
+    /// 那条回退：在一个全新的目录里敲 `gld start`，要的是这个目录，
+    /// 而不是碰巧唯一的那个别的项目。
+    pub fn ensure_workspace(
+        &self,
+        path: &Path,
+        options: WorkspaceCreateOptions,
+    ) -> AppResult<EnsuredWorkspace> {
+        let root = normalize_workspace_root(path)?;
+        if let Ok(existing) = resolve_by_dir(&self.list_workspaces()?, &root) {
+            return Ok(EnsuredWorkspace {
+                profile: existing,
+                created: false,
+            });
+        }
+        Ok(EnsuredWorkspace {
+            profile: self.create_workspace(&root, options)?,
+            created: true,
+        })
+    }
+
     /// 按 `key=value` 修改若干字段后保存；任一字段非法则整体不写。
     ///
     /// 字段表见 [`super::workspace_field_catalog`]。
@@ -207,6 +246,7 @@ impl App {
                 .cloned()
                 .ok_or_else(|| AppError::Message(format!("workspace not found: {}", profile.id)))?;
             validate_workspace_resources_update(store.list(), &current, &profile)?;
+            validate_unique_path(store.list(), &profile)?;
             store.update(profile.clone())?;
             Ok(profile)
         })?;
@@ -262,11 +302,39 @@ impl App {
     }
 }
 
+/// 两个工作区指向同一个目录会让人分不清自己连的是谁：`gld ls` 里两行
+/// 路径一模一样，历史档案和 Planning 台账还会互相覆盖。创建时已经拦了一道，
+/// 改 `path` 是另一条能撞上的路。
+fn validate_unique_path(
+    profiles: &[WorkspaceProfile],
+    candidate: &WorkspaceProfile,
+) -> AppResult<()> {
+    let Ok(root) = Path::new(&candidate.path).canonicalize() else {
+        return Ok(());
+    };
+    for profile in profiles {
+        if profile.id == candidate.id {
+            continue;
+        }
+        if same_path(&profile.path, &root) {
+            return Err(AppError::Message(format!(
+                "目录 {} 已经是工作区「{}」（id {}）。同一个目录只能属于一个工作区。",
+                root.display(),
+                profile.name,
+                profile.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// 这一侧的配置有没有真的变。
 ///
 /// 用 JSON 比而不是 `PartialEq`：这些结构体没派生 Eq，而且字段还在长，
 /// 漏比一个新字段的后果是"改了不重启"，比多派生一个 trait 难查得多。
 /// `name` 不属于任何一侧，改名不重启——它不影响服务怎么监听。
+/// `path` 相反：两侧服务都在那个目录上跑工具，换了目录不重启的话，
+/// 配置里写着新路径，Agent 读到的还是旧仓库。
 fn service_config_changed(
     before: &WorkspaceProfile,
     after: &WorkspaceProfile,
@@ -275,10 +343,13 @@ fn service_config_changed(
     let snapshot = |profile: &WorkspaceProfile| match kind {
         // MCP 那条线路由 runtime（端口 / 工具集 / 策略）、auth（认证）和
         // tunnel（公网入口）三段共同决定。
-        ServiceKind::Mcp => {
-            serde_json::to_value((&profile.runtime, &profile.auth, &profile.tunnel))
-        }
-        ServiceKind::Actions => serde_json::to_value(&profile.actions),
+        ServiceKind::Mcp => serde_json::to_value((
+            &profile.path,
+            &profile.runtime,
+            &profile.auth,
+            &profile.tunnel,
+        )),
+        ServiceKind::Actions => serde_json::to_value((&profile.path, &profile.actions)),
     };
     match (snapshot(before), snapshot(after)) {
         (Ok(left), Ok(right)) => left != right,

@@ -201,4 +201,3 @@ fn terminate_pid(pid: u32) -> AppResult<()> {
         Ok(())
     }
 }
-

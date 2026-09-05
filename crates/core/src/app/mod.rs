@@ -45,5 +45,7 @@ pub use secrets::{reads_from_shared_pool, SHARED_SECRET_KEYS, WORKSPACE_SECRET_K
 pub use settings::{FrpProfileDto, GlobalRuntimeSettingsDto};
 pub use state::App;
 pub use tunnel::TunnelTestResult;
-pub use workspace::{RestartFailure, WorkspaceCreateOptions, WorkspaceTarget, WorkspaceUpdate};
+pub use workspace::{
+    EnsuredWorkspace, RestartFailure, WorkspaceCreateOptions, WorkspaceTarget, WorkspaceUpdate,
+};
 pub use workspace_fields::{actions_field_suffixes, workspace_field_catalog, WorkspaceFieldDoc};

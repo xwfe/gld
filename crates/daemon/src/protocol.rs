@@ -56,6 +56,11 @@ pub enum Request {
         path: PathBuf,
         options: WorkspaceCreateOptions,
     },
+    /// 按目录取工作区，没登记过就当场登记（`gld start <目录>` 用）。
+    EnsureWorkspace {
+        path: PathBuf,
+        options: WorkspaceCreateOptions,
+    },
     SetWorkspaceFields {
         target: WorkspaceTarget,
         assignments: Vec<(String, String)>,
