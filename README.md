@@ -21,7 +21,7 @@ macOS 第一次运行会被 Gatekeeper 拦。其他平台、校验和、从源�
 
 ```bash
 gld start ~/code/my-project   # 登记 + 启动：自动分配端口、生成密钥，什么都不用填
-gld ls                        # 拿到给客户端用的地址、凭据和隧道状态
+gld ls                        # 拿到给客户端用的地址、凭据和隧道状态（gld list 也行）
 ```
 
 `gld start` 不带目录就是当前目录。目录没登记过会自动登记，
@@ -40,7 +40,8 @@ gld start ~/code/my-project --tunnel https://mcp.example.com/mcp
 没有的话，一条命令借一个：
 
 ```bash
-gld share                     # Cloudflare 临时地址；需要 cloudflared 在 PATH 里
+gld share                              # Cloudflare 临时地址；需要 cloudflared 在 PATH 里
+gld share --tunnel cf:mcp.example.com  # 自己有域名和 Cloudflare 隧道时，地址固定
 ```
 
 地址后来变了、项目换了目录、端口要改——`gld upgrade` 改完自动重启：

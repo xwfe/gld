@@ -34,11 +34,14 @@ pub async fn run(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
     // 后面每一步都锁死同一个工作区：中途按目录重新推断的话，
     // 配置和启动有可能落到两个工作区上。
     let target = WorkspaceTarget::selector(profile.id.clone());
-    // 不带参数就是"给我个能贴进 ChatGPT 的地址"——Cloudflare 临时隧道零配置。
     let spec = match (args.off, args.tunnel) {
         (true, _) => TunnelSpec::Off,
         (false, Some(spec)) => spec,
-        (false, None) => TunnelSpec::Cloudflare { named: false },
+        // 不带参数就是"给我个能贴进 ChatGPT 的地址"——Cloudflare 临时隧道零配置。
+        (false, None) => TunnelSpec::Cloudflare {
+            named: false,
+            domain: None,
+        },
     };
 
     configure(
@@ -204,16 +207,45 @@ fn assignments(
             pairs.push(field("frp-subdomain", sub));
             pairs.push(field("public-url", String::new()));
         }
-        TunnelSpec::Cloudflare { named } => {
+        TunnelSpec::Cloudflare { named: false, .. } => {
             pairs.push(field("tunnel", "cloudflare".into()));
-            pairs.push(field(
-                "cloudflare-mode",
-                if *named { "named" } else { "quick" }.into(),
-            ));
+            pairs.push(field("cloudflare-mode", "quick".into()));
+            // quick 的地址是每次启动现拿的，留着上一种模式的固定地址只会让
+            // `gld ls` 显示一个早就失效的域名。
             pairs.push(field("public-url", String::new()));
+        }
+        TunnelSpec::Cloudflare {
+            named: true,
+            domain,
+        } => {
+            pairs.push(field("tunnel", "cloudflare".into()));
+            pairs.push(field("cloudflare-mode", "named".into()));
+            match domain {
+                // cf:<域名>：这次顺手把它定下来。
+                Some(domain) => pairs.push(field("public-url", public_base(domain, service))),
+                // cf:named：沿用已经配好的那个，绝不能清掉——named 模式没有
+                // 对外地址就起不来（cloudflared 要拿它建 ingress，OAuth 元数据
+                // 和 OpenAPI 文档里也要写它）。
+                None if current_public_url(profile, service).is_empty() => {
+                    return Err(CliError::new(
+                        "Cloudflare 固定域名模式需要一个对外域名。连域名一起给：\n  \
+                         gld share --tunnel cf:mcp.example.com\n\
+                         临时地址（每次重启都会变）用：gld share --tunnel cf",
+                    ))
+                }
+                None => {}
+            }
         }
     }
     Ok(pairs)
+}
+
+/// 这条线路当前配着的固定公网地址。
+fn current_public_url(profile: &WorkspaceProfile, service: TunnelService) -> &str {
+    match service {
+        TunnelService::Mcp => profile.tunnel.public_url.trim(),
+        TunnelService::Actions => profile.actions.public_url.trim(),
+    }
 }
 
 /// 用户贴过来的地址 → 配置里要存的"基地址"。
@@ -223,13 +255,20 @@ fn assignments(
 /// `https://x.com/mcp/mcp`——客户端 404，且看不出哪里错了。
 fn public_base(url: &str, service: TunnelService) -> String {
     let trimmed = url.trim().trim_end_matches('/');
+    // `cf:mcp.example.com` 里的域名是裸的。配置字段要求带协议头（不带的话
+    // 客户端连不上而且没有任何提示），这里补上——公网入口一律按 https 算。
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
     let suffix = match service {
         TunnelService::Mcp => "/mcp",
         TunnelService::Actions => "/openapi.json",
     };
-    trimmed
+    with_scheme
         .strip_suffix(suffix)
-        .unwrap_or(trimmed)
+        .unwrap_or(&with_scheme)
         .trim_end_matches('/')
         .to_string()
 }
@@ -299,16 +338,42 @@ mod tests {
         );
         assert_eq!(
             parse("cf").unwrap(),
-            TunnelSpec::Cloudflare { named: false }
+            TunnelSpec::Cloudflare {
+                named: false,
+                domain: None
+            }
         );
+        // 光写 named = 沿用工作区里已经配好的域名。
         assert_eq!(
             parse("cf:named").unwrap(),
-            TunnelSpec::Cloudflare { named: true }
+            TunnelSpec::Cloudflare {
+                named: true,
+                domain: None
+            }
+        );
+        // cf:<域名> = 固定域名模式，顺手把域名定下来。
+        assert_eq!(
+            parse("cf:mcp.example.com").unwrap(),
+            TunnelSpec::Cloudflare {
+                named: true,
+                domain: Some("mcp.example.com".into())
+            }
+        );
+        // 带协议头的写法也认；域名里的大写要原样留着。
+        assert_eq!(
+            parse("cf:https://MCP.Example.com").unwrap(),
+            TunnelSpec::Cloudflare {
+                named: true,
+                domain: Some("https://MCP.Example.com".into())
+            }
         );
         // 字段表里写的是 tunnel=cloudflare，全称也得认，否则两处对不上。
         assert_eq!(
             parse("cloudflare").unwrap(),
-            TunnelSpec::Cloudflare { named: false }
+            TunnelSpec::Cloudflare {
+                named: false,
+                domain: None
+            }
         );
         assert_eq!(
             parse("frp:公司").unwrap(),
@@ -321,7 +386,9 @@ mod tests {
 
         // 光写 frp 没法知道用哪台服务器，要当场说清楚怎么补。
         assert!(parse("frp").unwrap_err().contains("frp:公司"));
-        assert!(parse("cf:whatever").unwrap_err().contains("named"));
+        // 手滑拼错的模式名不能被当成域名默默吃下去——它不含点，不像域名。
+        let error = parse("cf:nmaed").unwrap_err();
+        assert!(error.contains("quick、named 或一个固定域名"), "{error}");
         // 忘了协议头的地址不能被当成模式名默默吃掉。
         assert!(parse("mcp.example.com").unwrap_err().contains("看不懂"));
     }
@@ -357,7 +424,10 @@ mod tests {
     fn a_subdomain_without_frp_is_rejected_instead_of_silently_dropped() {
         let profile = WorkspaceProfile::new("/tmp/x".into(), Some("api".into()));
         let error = assignments(
-            &TunnelSpec::Cloudflare { named: false },
+            &TunnelSpec::Cloudflare {
+                named: false,
+                domain: None,
+            },
             Some("demo"),
             &profile,
             "mcp.",
@@ -375,7 +445,14 @@ mod tests {
         for spec in [
             TunnelSpec::Off,
             TunnelSpec::Url("https://x.com/mcp".into()),
-            TunnelSpec::Cloudflare { named: true },
+            TunnelSpec::Cloudflare {
+                named: false,
+                domain: None,
+            },
+            TunnelSpec::Cloudflare {
+                named: true,
+                domain: Some("mcp.example.com".into()),
+            },
             TunnelSpec::Frp {
                 profile: "office".into(),
             },
@@ -387,5 +464,82 @@ mod tests {
             assert!(keys.contains(&"mcp.tunnel"), "{spec:?} → {keys:?}");
             assert!(keys.contains(&"mcp.public-url"), "{spec:?} → {keys:?}");
         }
+    }
+
+    fn public_url_of(pairs: &[(String, String)]) -> Option<&str> {
+        pairs
+            .iter()
+            .find(|(key, _)| key == "mcp.public-url")
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// `cf:<域名>` 一步把固定域名定下来；裸域名要补上协议头。
+    ///
+    /// 不补的话字段校验会以"要带协议头"拒绝，而用户只是照着 `--tunnel cf:<域名>`
+    /// 的提示写的。
+    #[test]
+    fn cf_with_a_domain_stores_it_with_a_scheme() {
+        let profile = WorkspaceProfile::new("/tmp/x".into(), Some("api".into()));
+        for written in ["mcp.example.com", "https://mcp.example.com/mcp"] {
+            let pairs = assignments(
+                &TunnelSpec::Cloudflare {
+                    named: true,
+                    domain: Some(written.into()),
+                },
+                None,
+                &profile,
+                "mcp.",
+                TunnelService::Mcp,
+            )
+            .expect("assignments");
+            assert_eq!(
+                public_url_of(&pairs),
+                Some("https://mcp.example.com"),
+                "{written}"
+            );
+        }
+    }
+
+    /// `cf:named` 沿用已经配好的域名——绝不能像别的模式那样清掉它。
+    ///
+    /// 这里曾经无条件写空：切到固定域名模式的同时把域名抹了，隧道必然起不来，
+    /// 报的还是"命名隧道模式需要填写固定公网地址"——而用户刚刚才配过它。
+    #[test]
+    fn cf_named_keeps_the_domain_that_is_already_configured() {
+        let mut profile = WorkspaceProfile::new("/tmp/x".into(), Some("api".into()));
+        profile.tunnel.public_url = "https://mcp.example.com".into();
+
+        let pairs = assignments(
+            &TunnelSpec::Cloudflare {
+                named: true,
+                domain: None,
+            },
+            None,
+            &profile,
+            "mcp.",
+            TunnelService::Mcp,
+        )
+        .expect("assignments");
+
+        assert_eq!(public_url_of(&pairs), None, "不该去动已经配好的域名");
+    }
+
+    /// 一个域名都没有时当场说清楚怎么给，而不是等 cloudflared 报一句没头没脑的错。
+    #[test]
+    fn cf_named_without_any_domain_says_how_to_give_one() {
+        let profile = WorkspaceProfile::new("/tmp/x".into(), Some("api".into()));
+        let error = assignments(
+            &TunnelSpec::Cloudflare {
+                named: true,
+                domain: None,
+            },
+            None,
+            &profile,
+            "mcp.",
+            TunnelService::Mcp,
+        )
+        .unwrap_err()
+        .message;
+        assert!(error.contains("cf:mcp.example.com"), "{error}");
     }
 }

@@ -18,7 +18,7 @@ const AFTER_HELP: &str = "\
 公网入口（--tunnel 在 start / share / upgrade 里通用）：
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
-  --tunnel cf:named                       Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  --tunnel cf:mcp.example.com             Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
   --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
   --tunnel off                            关掉公网入口，只留本地地址
 
@@ -135,18 +135,18 @@ pub enum Command {
 
     /// 列出工作区的连接信息：地址、认证方式、凭据、隧道
     ///
-    ///   gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情
+    ///   gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情（gld list 是同一条命令）
     ///   gld ls -w api         看指定工作区的详情
     ///   gld ls --all          在工作区目录里也强制列出全部
     ///   gld ls --reveal       凭据显示明文（默认脱敏）
-    #[command(verbatim_doc_comment)]
+    #[command(verbatim_doc_comment, visible_alias = "list")]
     Ls(LsArgs),
 
     /// 一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
     ///
     /// 它把「配隧道 → 启动服务 → 查连接信息」三步合成一步：
     ///   gld share                             Cloudflare 临时地址（等价 --tunnel cf）
-    ///   gld share --tunnel cf:named           Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+    ///   gld share --tunnel cf:mcp.example.com Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
     ///   gld share --tunnel frp:公司           FRP 固定域名，子域名默认取工作区名
     ///   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
     ///   gld share --off                       关掉公网入口，只留本地地址
@@ -365,7 +365,7 @@ pub struct StartArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// 公网入口：https://… | cf | cf:named | frp:<配置名> | off
+    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
     #[arg(long, value_name = "TUNNEL")]
     pub tunnel: Option<TunnelSpec>,
 
@@ -391,7 +391,11 @@ pub enum TunnelSpec {
     /// 已经有公网地址：只登记，不起隧道。
     Url(String),
     /// Cloudflare：临时地址（quick）或固定域名（named）。
-    Cloudflare { named: bool },
+    ///
+    /// named 模式必须知道对外域名——它要写进 OAuth 元数据和 OpenAPI 文档，
+    /// cloudflared 那边也拿它建 ingress。`domain` 是这次顺带把域名定下来，
+    /// `None` 表示沿用工作区里已经配好的那个。
+    Cloudflare { named: bool, domain: Option<String> },
     /// FRP，带一个 `gld frp list` 里的配置名或 id。
     Frp { profile: String },
     /// 关掉公网入口。
@@ -413,10 +417,25 @@ impl std::str::FromStr for TunnelSpec {
         match head {
             "off" | "none" => Ok(Self::Off),
             "cf" | "cloudflare" => match tail {
-                "" | "quick" => Ok(Self::Cloudflare { named: false }),
-                "named" => Ok(Self::Cloudflare { named: true }),
+                "" | "quick" => Ok(Self::Cloudflare {
+                    named: false,
+                    domain: None,
+                }),
+                // 光写 named 表示"用工作区里已经配好的那个域名"。
+                "named" => Ok(Self::Cloudflare {
+                    named: true,
+                    domain: None,
+                }),
+                // cf:<域名> 一步到位。域名可能含大写，取原串而不是小写化的那份。
+                candidate if looks_like_domain(candidate) => Ok(Self::Cloudflare {
+                    named: true,
+                    domain: Some(value[head.len() + 1..].trim().to_string()),
+                }),
                 other => Err(format!(
-                    "cf 后面只能跟 quick 或 named，收到「{other}」（cf 本身就是 cf:quick）"
+                    "cf 后面只能跟 quick、named 或一个固定域名，收到「{other}」。\n  \
+                     cf                       临时地址（每次重启都会变）\n  \
+                     cf:mcp.example.com       固定域名，顺手把它配上\n  \
+                     cf:named                 固定域名，沿用已经配好的那个"
                 )),
             },
             "frp" if !tail.is_empty() => Ok(Self::Frp {
@@ -429,12 +448,24 @@ impl std::str::FromStr for TunnelSpec {
             _ => Err(format!(
                 "看不懂的公网入口「{value}」。可用写法：\n  \
                  https://mcp.example.com/mcp   已有的公网地址\n  \
-                 cf / cf:named                 Cloudflare 临时地址 / 固定域名\n  \
+                 cf                            Cloudflare 临时地址\n  \
+                 cf:mcp.example.com            Cloudflare 固定域名\n  \
                  frp:<配置名>                  FRP（gld frp list 看有哪些）\n  \
                  off                           关掉公网入口"
             )),
         }
     }
+}
+
+/// `cf:` 后面这一段像不像域名。
+///
+/// 只认带点的（`mcp.example.com`）和带协议头的。这样 `cf:nmaed` 这种手滑
+/// 会撞上"只能跟 quick、named 或域名"的报错，而不是被当成域名默默存进去，
+/// 等到起隧道时才由 cloudflared 报一个不知所云的错。
+fn looks_like_domain(value: &str) -> bool {
+    value.starts_with("http://")
+        || value.starts_with("https://")
+        || (value.contains('.') && !value.ends_with('.'))
 }
 
 #[derive(Debug, Args)]
@@ -473,7 +504,7 @@ pub struct ShareArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// 公网入口：https://… | cf | cf:named | frp:<配置名> | off（默认 cf）
+    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off（默认 cf）
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 
@@ -500,7 +531,7 @@ pub struct UpgradeArgs {
     #[arg(long, value_name = "DIR")]
     pub path: Option<PathBuf>,
 
-    /// 换公网入口：https://… | cf | cf:named | frp:<配置名> | off
+    /// 换公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 

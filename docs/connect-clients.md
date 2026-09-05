@@ -70,12 +70,19 @@ gld share                  # 公网地址形如 https://xxx.trycloudflare.com/mc
 
 ### 办法二：Cloudflare 固定域名
 
-需要一个 Cloudflare 账号和一条已创建的 Named Tunnel：
+需要一个 Cloudflare 账号和一条已创建的 Named Tunnel，域名连着一起给：
 
 ```bash
 gld secret set cloudflare_token <隧道 token>
-gld share --tunnel cf:named
+gld share --tunnel cf:mcp.example.com
 ```
+
+**域名必须给。** 固定域名模式下 gld 不像 quick 那样能从 cloudflared 的输出里
+读回地址——这个地址要写进 OAuth 元数据和 OpenAPI 文档，cloudflared 那边也拿它
+建 ingress。所以不给的话会当场报错告诉你怎么写，而不是等隧道起不来。
+
+域名配过一次之后，`--tunnel cf:named` 就是"沿用已经配好的那个"；
+`gld upgrade --tunnel cf:<新域名>` 换一个。写不写 `https://` 都行。
 
 ### 办法三：FRP 固定域名（自己有公网机器）
 

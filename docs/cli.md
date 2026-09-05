@@ -103,7 +103,7 @@ Commands:
   status       查看服务与隧道状态：不带工作区时列出全部，带工作区时显示详情
   ps           只列出正在运行的服务
   logs         查看工作区日志尾部，或用 -f 持续跟随
-  ls           列出工作区的连接信息：地址、认证方式、凭据、隧道
+  ls           列出工作区的连接信息：地址、认证方式、凭据、隧道 [alias: list]
   share        一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
   destroy      销毁工作区：停掉服务与隧道，删掉它的配置和密钥（项目文件一个字节都不动）
   upgrade      改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
@@ -162,7 +162,7 @@ Options:
 公网入口（--tunnel 在 start / share / upgrade 里通用）：
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
-  --tunnel cf:named                       Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  --tunnel cf:mcp.example.com             Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
   --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
   --tunnel off                            关掉公网入口，只留本地地址
 
@@ -523,7 +523,7 @@ Arguments:
 
 Options:
       --tunnel <TUNNEL>
-          公网入口：https://… | cf | cf:named | frp:<配置名> | off
+          公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
 
   -w, --workspace <WS>
           目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
@@ -723,7 +723,7 @@ Options:
 ```text
 列出工作区的连接信息：地址、认证方式、凭据、隧道
 
-  gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情
+  gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情（gld list 是同一条命令）
   gld ls -w api         看指定工作区的详情
   gld ls --all          在工作区目录里也强制列出全部
   gld ls --reveal       凭据显示明文（默认脱敏）
@@ -773,7 +773,7 @@ Options:
 
 它把「配隧道 → 启动服务 → 查连接信息」三步合成一步：
   gld share                             Cloudflare 临时地址（等价 --tunnel cf）
-  gld share --tunnel cf:named           Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  gld share --tunnel cf:mcp.example.com Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
   gld share --tunnel frp:公司           FRP 固定域名，子域名默认取工作区名
   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
   gld share --off                       关掉公网入口，只留本地地址
@@ -788,7 +788,7 @@ Arguments:
 
 Options:
       --tunnel <TUNNEL>
-          公网入口：https://… | cf | cf:named | frp:<配置名> | off（默认 cf）
+          公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off（默认 cf）
 
   -w, --workspace <WS>
           目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
@@ -862,7 +862,7 @@ Options:
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
       --tunnel <TUNNEL>
-          换公网入口：https://… | cf | cf:named | frp:<配置名> | off
+          换公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
