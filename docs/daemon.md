@@ -49,7 +49,7 @@ printf '{"op":"ping"}\n' | nc -U ~/.gld/daemon.sock
 | 需要（没跑就自动拉起） | 不需要（没跑时进程内直接执行） |
 | --- | --- |
 | `start` `stop` `restart` `share` | `workspace *` `settings *` `secret *` `frp *` |
-| `tunnel start/stop/restart/test` | `status` `ps` `logs` `health` `ls` `destroy` |
+| `tunnel start/stop/restart/test` | `status` `ps` `logs` `health` `list` `destroy` |
 | `gateway start/stop` | `planning *` `history` `usage` `context` |
 
 `upgrade` 两边都沾：只改配置时不需要，改到公网入口且服务正在跑时会去重连隧道。

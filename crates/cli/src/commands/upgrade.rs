@@ -11,7 +11,7 @@ use gld_core::workspace::WorkspaceProfile;
 use gld_daemon::Request;
 
 use super::{service, share, Ctx};
-use crate::cli::{LsArgs, TunnelSpec, UpgradeArgs};
+use crate::cli::{ListArgs, TunnelSpec, UpgradeArgs};
 use crate::error::{CliError, CliResult};
 
 pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
@@ -114,7 +114,7 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
         }
     }
 
-    service::show_detail(ctx, &target, LsArgs::default()).await
+    service::show_detail(ctx, &target, ListArgs::default()).await
 }
 
 /// 位置参数给了就按它找，否则按当前目录 / `-w` 推断。

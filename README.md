@@ -21,14 +21,14 @@ macOS 第一次运行会被 Gatekeeper 拦。其他平台、校验和、从源�
 
 ```bash
 gld start ~/code/my-project   # 登记 + 启动：自动分配端口、生成密钥，什么都不用填
-gld ls                        # 拿到给客户端用的地址、凭据和隧道状态（gld list 也行）
+gld list                      # 拿到给客户端用的地址、凭据和隧道状态（gld ls 也行）
 ```
 
 `gld start` 不带目录就是当前目录。目录没登记过会自动登记，
 并在输出第一行告诉你；登记错了用 `gld destroy <名称>` 撤掉，
 项目文件不会被动。守护进程会自动在后台拉起，关掉终端服务照常在。
 
-本机客户端（Claude Code、Cursor、Codex）直接填 `gld ls` 给出的**本地地址**。
+本机客户端（Claude Code、Cursor、Codex）直接填 `gld list` 给出的**本地地址**。
 
 ChatGPT 跑在 OpenAI 的服务器上，只能连公网 HTTPS，`127.0.0.1` 填进去连不上。
 已经有公网地址（自建反代、公司域名）就在启动时一起给：

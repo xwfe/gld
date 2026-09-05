@@ -8,7 +8,7 @@
 //! 2. 隧道起不来必须当场报错。start 内部那次隧道尝试是"失败只写日志"的
 //!    （不能让隧道问题把服务一起拖垮），照搬到 share 上就会变成
 //!    "报告成功、但没有地址"；
-//! 3. 关掉之后不能留残值：从有地址切到 --off，`gld ls` 不该还显示
+//! 3. 关掉之后不能留残值：从有地址切到 --off，`gld list` 不该还显示
 //!    那个已经失效的地址。
 
 mod common;
@@ -57,7 +57,7 @@ fn share_takes_a_fresh_workspace_all_the_way_to_a_public_url() {
 
     // --off 要把地址清干净，不能留一个已经失效的值在 ls 里显示。
     env.ok(&["share", "--off"]);
-    let after = env.json(&["--json", "ls"]);
+    let after = env.json(&["--json", "list"]);
     assert_eq!(
         after["mcp"]["public_url"], "",
         "关掉之后还留着旧地址：{after}"
@@ -123,7 +123,7 @@ fn a_ready_made_url_does_not_need_any_tunnel_binary() {
     ]);
 
     env.ok(&["share", "--tunnel", "https://mcp.example.com/"]);
-    let ls = env.json(&["--json", "ls"]);
+    let ls = env.json(&["--json", "list"]);
     assert_eq!(
         ls["mcp"]["public_url"], "https://mcp.example.com/mcp",
         "登记的公网地址没生效：{ls}"
@@ -149,7 +149,7 @@ fn a_pasted_endpoint_does_not_end_up_doubled() {
 
     env.ok(&["share", "--tunnel", "https://mcp.example.com/mcp"]);
     assert_eq!(
-        env.json(&["--json", "ls"])["mcp"]["public_url"],
+        env.json(&["--json", "list"])["mcp"]["public_url"],
         "https://mcp.example.com/mcp"
     );
 }
@@ -211,7 +211,7 @@ fn a_malformed_tunnel_value_is_rejected_before_anything_changes() {
     );
 
     assert_eq!(
-        env.json(&["--json", "ls"])["mcp"]["public_url"],
+        env.json(&["--json", "list"])["mcp"]["public_url"],
         "",
         "被拒绝的参数不该改到配置"
     );

@@ -1,4 +1,4 @@
-//! `gld start <目录>` / `gld ls` / `gld upgrade`：一条命令从零到能用。
+//! `gld start <目录>` / `gld list` / `gld upgrade`：一条命令从零到能用。
 //!
 //! 这三条命令合起来替掉了以前的四步（`workspace add` → `start` → `connect`
 //! → `ws set` + `restart`）。合并之后新出现的风险都在"到底作用在哪个工作区"上：
@@ -152,12 +152,12 @@ fn start_with_a_tunnel_lands_on_a_usable_public_endpoint() {
     );
     assert!(text.contains("认证方式"), "没打印连接信息：{text}");
     assert_eq!(
-        env.json(&["--json", "ls"])["mcp"]["public_url"],
+        env.json(&["--json", "list"])["mcp"]["public_url"],
         "https://mcp.example.com/mcp"
     );
 }
 
-/// `gld ls`：属于某个工作区时给详情，否则列出全部。
+/// `gld list`：属于某个工作区时给详情，否则列出全部。
 #[test]
 fn ls_shows_one_workspace_in_detail_and_many_as_a_list() {
     let env = Env::new();
@@ -168,18 +168,21 @@ fn ls_shows_one_workspace_in_detail_and_many_as_a_list() {
         &free_port().to_string(),
     ]);
 
-    let detail = env.ok(&["ls"]);
+    let detail = env.ok(&["list"]);
     assert!(detail.contains("MCP（ChatGPT 连接器"), "{detail}");
     // 隧道信息是这次要求补上的：没配也要说清楚"没有公网入口"。
     assert!(detail.contains("隧道"), "详情里没有隧道那一行：{detail}");
 
     // --all 在工作区目录里也强制给列表。
-    let list = env.ok(&["ls", "--all"]);
+    let list = env.ok(&["list", "--all"]);
     assert!(list.contains("工作区") && list.contains("隧道"), "{list}");
     assert!(
-        env.json(&["--json", "ls", "--all"]).is_array(),
+        env.json(&["--json", "list", "--all"]).is_array(),
         "--json --all 该是数组"
     );
+
+    // ls 是同一条命令的别名，敲惯了的人不该撞上 "unrecognized subcommand"。
+    assert_eq!(env.ok(&["ls"]), detail);
 }
 
 /// `gld upgrade --tunnel`：换地址，并且把旧值清干净。
@@ -197,18 +200,18 @@ fn upgrade_replaces_the_public_entry_point() {
 
     env.ok(&["upgrade", "--tunnel", "https://new.example.com/mcp"]);
     assert_eq!(
-        env.json(&["--json", "ls"])["mcp"]["public_url"],
+        env.json(&["--json", "list"])["mcp"]["public_url"],
         "https://new.example.com/mcp"
     );
 
     env.ok(&["upgrade", "--off"]);
-    assert_eq!(env.json(&["--json", "ls"])["mcp"]["public_url"], "");
+    assert_eq!(env.json(&["--json", "list"])["mcp"]["public_url"], "");
 }
 
 /// `gld upgrade --path`：项目搬了目录，服务要跟着搬。
 ///
 /// 光把配置里的路径改掉是不够的——正在跑的服务持有的还是旧目录，
-/// 表现是 `gld ls` 显示新路径，而 Agent 读到的仍是旧仓库的文件。
+/// 表现是 `gld list` 显示新路径，而 Agent 读到的仍是旧仓库的文件。
 #[test]
 fn upgrade_moves_the_workspace_and_the_running_service_follows() {
     let env = Env::new();

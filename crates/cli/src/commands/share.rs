@@ -21,7 +21,7 @@ use gld_core::workspace::{RuntimeStatusDto, WorkspaceProfile};
 use gld_daemon::Request;
 
 use super::{service, Ctx};
-use crate::cli::{LsArgs, ShareArgs, TunnelService, TunnelSpec};
+use crate::cli::{ListArgs, ShareArgs, TunnelService, TunnelSpec};
 use crate::error::{CliError, CliResult};
 
 pub async fn run(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
@@ -79,8 +79,8 @@ pub async fn run(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
 
     ensure_tunnel_up(ctx, &target, &spec, args.service).await?;
 
-    // 地址、认证方式、凭据统一由 ls 渲染：两处各印一份迟早对不上。
-    service::show_detail(ctx, &target, LsArgs::default()).await
+    // 地址、认证方式、凭据统一由 list 渲染：两处各印一份迟早对不上。
+    service::show_detail(ctx, &target, ListArgs::default()).await
 }
 
 pub fn service_kind(service: TunnelService) -> ServiceKind {
@@ -165,7 +165,7 @@ pub async fn ensure_tunnel_up(
 ///
 /// 每一种模式都会显式写全三件事（隧道类型、公网地址、走不走全局入口），
 /// 否则从别的模式切过来会留下上一次的残值——例如从 frp 换到 cloudflare，
-/// 旧的 public_url 还挂在那里，`gld ls` 会显示一个已经失效的地址。
+/// 旧的 public_url 还挂在那里，`gld list` 会显示一个已经失效的地址。
 fn assignments(
     spec: &TunnelSpec,
     subdomain: Option<&str>,
@@ -211,7 +211,7 @@ fn assignments(
             pairs.push(field("tunnel", "cloudflare".into()));
             pairs.push(field("cloudflare-mode", "quick".into()));
             // quick 的地址是每次启动现拿的，留着上一种模式的固定地址只会让
-            // `gld ls` 显示一个早就失效的域名。
+            // `gld list` 显示一个早就失效的域名。
             pairs.push(field("public-url", String::new()));
         }
         TunnelSpec::Cloudflare {

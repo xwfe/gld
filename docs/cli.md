@@ -28,7 +28,7 @@
 - [gld status](#gld-status)
 - [gld ps](#gld-ps)
 - [gld logs](#gld-logs)
-- [gld ls](#gld-ls)
+- [gld list](#gld-list)
 - [gld share](#gld-share)
 - [gld upgrade](#gld-upgrade)
 - [gld destroy](#gld-destroy)
@@ -103,7 +103,7 @@ Commands:
   status       查看服务与隧道状态：不带工作区时列出全部，带工作区时显示详情
   ps           只列出正在运行的服务
   logs         查看工作区日志尾部，或用 -f 持续跟随
-  ls           列出工作区的连接信息：地址、认证方式、凭据、隧道 [alias: list]
+  list         列出工作区的连接信息：地址、认证方式、凭据、隧道 [alias: ls]
   share        一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
   destroy      销毁工作区：停掉服务与隧道，删掉它的配置和密钥（项目文件一个字节都不动）
   upgrade      改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
@@ -153,7 +153,7 @@ Options:
 快速上手：
   gld start ~/code/my-project             启动 MCP；目录没登记过会自动登记（守护进程自动在后台拉起）
   gld start                               同上，作用于当前目录
-  gld ls                                  看地址、凭据与隧道；不指定工作区时列出全部
+  gld list                                看地址、凭据与隧道；不指定工作区时列出全部
   gld share                               要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
   gld upgrade --tunnel https://x.com/mcp  改目录 / 公网入口 / 端口 / 认证，改完自动重启
   gld stop                                停止服务（--all 停所有工作区的）；配置不动
@@ -718,17 +718,19 @@ Options:
   -V, --version            Print version
 ```
 
-## gld ls
+## gld list
 
 ```text
 列出工作区的连接信息：地址、认证方式、凭据、隧道
 
-  gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情（gld list 是同一条命令）
-  gld ls -w api         看指定工作区的详情
-  gld ls --all          在工作区目录里也强制列出全部
-  gld ls --reveal       凭据显示明文（默认脱敏）
+  gld list                不指定工作区时列出全部；在工作区目录里则显示这一个的详情
+  gld list -w api         看指定工作区的详情
+  gld list --all          在工作区目录里也强制列出全部
+  gld list --reveal       凭据显示明文（默认脱敏）
 
-Usage: gld ls [OPTIONS]
+敲惯了 ls 的话，gld ls 是同一条命令。
+
+Usage: gld list [OPTIONS]
 
 Options:
       --reveal

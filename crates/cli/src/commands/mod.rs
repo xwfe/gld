@@ -72,7 +72,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Status => service::status(&mut ctx).await,
         Command::Ps => service::ps(&mut ctx).await,
         Command::Logs(args) => logs::workspace_logs(&mut ctx, args).await,
-        Command::Ls(args) => service::ls(&mut ctx, args).await,
+        Command::List(args) => service::list(&mut ctx, args).await,
         Command::Share(args) => share::run(&mut ctx, args).await,
         Command::Upgrade(args) => upgrade::run(&mut ctx, args).await,
         Command::Health => inspect::health(&mut ctx).await,

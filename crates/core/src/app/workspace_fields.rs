@@ -28,7 +28,7 @@ pub struct FieldContext {
 
 /// 不写前缀时补哪个。
 ///
-/// 一个工作区里 MCP 是主服务（`gld start` 默认起它、`gld ls` 默认展示它），
+/// 一个工作区里 MCP 是主服务（`gld start` 默认起它、`gld list` 默认展示它），
 /// Actions 是可选的第二条线路。所以 `port=30000` 补成 `mcp.port`，改 Actions
 /// 才需要写全 `actions.port`——常见的那一半不用打前缀，少一半噪音。
 const IMPLIED_PREFIX: &str = "mcp.";

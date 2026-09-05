@@ -10,7 +10,7 @@
 
 ```bash
 gld status                 # 哪些服务在跑、有没有公网地址
-gld ls                     # 客户端要用的地址、认证方式与隧道（--reveal 才显示密钥）
+gld list                   # 客户端要用的地址、认证方式与隧道（--reveal 才显示密钥）
 gld doctor                 # 配置自洽性；认证缺密钥这类会报 ✗
 ```
 

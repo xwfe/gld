@@ -9,7 +9,7 @@ const AFTER_HELP: &str = "\
 快速上手：
   gld start ~/code/my-project             启动 MCP；目录没登记过会自动登记（守护进程自动在后台拉起）
   gld start                               同上，作用于当前目录
-  gld ls                                  看地址、凭据与隧道；不指定工作区时列出全部
+  gld list                                看地址、凭据与隧道；不指定工作区时列出全部
   gld share                               要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
   gld upgrade --tunnel https://x.com/mcp  改目录 / 公网入口 / 端口 / 认证，改完自动重启
   gld stop                                停止服务（--all 停所有工作区的）；配置不动
@@ -135,12 +135,14 @@ pub enum Command {
 
     /// 列出工作区的连接信息：地址、认证方式、凭据、隧道
     ///
-    ///   gld ls                不指定工作区时列出全部；在工作区目录里则显示这一个的详情（gld list 是同一条命令）
-    ///   gld ls -w api         看指定工作区的详情
-    ///   gld ls --all          在工作区目录里也强制列出全部
-    ///   gld ls --reveal       凭据显示明文（默认脱敏）
-    #[command(verbatim_doc_comment, visible_alias = "list")]
-    Ls(LsArgs),
+    ///   gld list                不指定工作区时列出全部；在工作区目录里则显示这一个的详情
+    ///   gld list -w api         看指定工作区的详情
+    ///   gld list --all          在工作区目录里也强制列出全部
+    ///   gld list --reveal       凭据显示明文（默认脱敏）
+    ///
+    /// 敲惯了 ls 的话，gld ls 是同一条命令。
+    #[command(verbatim_doc_comment, visible_alias = "ls")]
+    List(ListArgs),
 
     /// 一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
     ///
@@ -488,7 +490,7 @@ pub enum LogService {
 }
 
 #[derive(Debug, Default, Args)]
-pub struct LsArgs {
+pub struct ListArgs {
     /// 明文显示密钥（默认脱敏）
     #[arg(long)]
     pub reveal: bool,

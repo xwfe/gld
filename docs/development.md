@@ -27,7 +27,7 @@ GLD_HOME=$(mktemp -d) cargo test --workspace
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |
 | 端到端 | `crates/cli/tests/daemon_lifecycle.rs` | 真实二进制：add → 自动拉起守护进程 → start → TCP 请求 → stop → daemon stop |
 | 排障命令 | `crates/cli/tests/tool_and_doctor.rs` | `gld tool` 三种参数写法与失败退出码、`gld doctor` 的通过 / 失败判定 |
-| 一步到位的入口 | `crates/cli/tests/start_and_upgrade.rs` | `gld start <目录>` 的自动登记与归属判断、`gld ls` 的详情 / 列表、`gld upgrade` 换目录换地址 |
+| 一步到位的入口 | `crates/cli/tests/start_and_upgrade.rs` | `gld start <目录>` 的自动登记与归属判断、`gld list` 的详情 / 列表、`gld upgrade` 换目录换地址 |
 | 公网入口 | `crates/cli/tests/share_one_command.rs` | `gld share` 的四种 `--tunnel` 走法、缺隧道程序时的报错 |
 | 收摊 | `crates/cli/tests/destroy_and_stop_all.rs` | `gld stop --all` 不删东西、`gld destroy` 删干净且必须确认 |
 | 文档与提示 | `docs_commands_exist.rs`、`messages_name_real_commands.rs`、`doctor_fixes_are_real_commands.rs` | 文档示例、源码里的提示、doctor 的修复命令必须都是真命令 |

@@ -52,7 +52,7 @@ gld tool call exec_command cmd='cargo test'
 | ChatGPT 提示无法连接 | 填了 `127.0.0.1` 地址，或隧道没通 | 必须是公网 HTTPS；`gld health` 看“公网 /mcp”那一行 |
 | `gld health` 本地 /mcp 返回 502 | 环境里有 `HTTP_PROXY`，本地探测被代理吃了（0.3.0 起本地探测已绕过代理；旧版会有此问题） | 升级；或临时 `NO_PROXY=127.0.0.1` |
 | 公网 /mcp 显示 `FRP 未挂载代理（返回 frp 404 页）` | frps 收到请求但没有对应子域名的代理 | `gld tunnel status` 看隧道是否 running；`gld tunnel restart` |
-| OAuth 授权失败 | Client ID / 口令来自不同工作区，或客户端里存的是旧值 | `gld ls --reveal` 重新核对（改密钥会自动重启服务，服务端一定是新值） |
+| OAuth 授权失败 | Client ID / 口令来自不同工作区，或客户端里存的是旧值 | `gld list --reveal` 重新核对（改密钥会自动重启服务，服务端一定是新值） |
 | 401 Unauthorized | Bearer Token 不对，或改了 token 客户端没更新 | `gld secret show bearer_token --reveal` |
 | `gld health` 显示 `HTTP 404（这个端口上应答的不是 gld 的服务）` | 这个端口上跑着别的程序（Actions 默认端口 8787 很容易被撞） | `gld ws set actions.port=<其他端口>`（会自动重启）；`gld doctor` 会告诉你占用者是谁 |
 | 工具列表是旧的 | 客户端缓存 | 断开重连插件 / 新开对话；服务端 `/mcp` 已带 `Cache-Control: no-store` |
@@ -76,7 +76,7 @@ gld tool call exec_command cmd='cargo test'
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `未指定工作区` / `当前目录不属于任何工作区` | 有多个工作区，当前目录又不在任何一个里面。注意 `start` / `share` 不会报这个——它们会把当前目录登记成新工作区 | 加 `-w <名称或id前缀>`，或 `cd` 进项目目录 |
-| 多出来一个没印象的工作区 | 在某个目录里敲过 `gld start`，它自动登记了。输出第一行有"已登记工作区「x」" | `gld ls --all` 看都有谁；不要的 `gld destroy <名称>`（只删 gld 这边的配置） |
+| 多出来一个没印象的工作区 | 在某个目录里敲过 `gld start`，它自动登记了。输出第一行有"已登记工作区「x」" | `gld list --all` 看都有谁；不要的 `gld destroy <名称>`（只删 gld 这边的配置） |
 | `「api」匹配到多个工作区` | 名称重复 | 用 id 前缀（≥4 位） |
 | `该目录已经是工作区「x」` | 重复 `gld ws add`，或 `gld upgrade --path` 指到了别的工作区的目录 | 一个目录只能属于一个工作区。想用它直接 `gld start <目录>`（会复用那个工作区，不会重复登记）；确实要腾出来先 `gld destroy` 掉占着的那个 |
 | `未知字段「…」` | `ws set` 的 key 写错 | `gld ws fields` 列出全部。不写前缀就是改 MCP（`port` = `mcp.port`），改 Actions 要写全 `actions.port` |

@@ -216,7 +216,7 @@ fn global_gateway_routes_only_the_workspaces_that_opted_in() {
     );
 
     // 给用户看的公网地址要带上 /w/<id> 前缀，否则粘到 ChatGPT 里连不上。
-    let listing = env.json(&["--json", "ls"]);
+    let listing = env.json(&["--json", "list"]);
     assert_eq!(
         listing["mcp"]["public_url"],
         format!("https://gw.example.com/w/{id}/mcp")
@@ -241,7 +241,7 @@ fn global_gateway_routes_only_the_workspaces_that_opted_in() {
 }
 
 fn connect_openapi_url(env: &Env) -> String {
-    env.json(&["--json", "ls"])["actions"]["openapi_url"]
+    env.json(&["--json", "list"])["actions"]["openapi_url"]
         .as_str()
         .unwrap_or_default()
         .to_string()

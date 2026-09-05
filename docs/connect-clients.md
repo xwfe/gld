@@ -4,7 +4,7 @@
 
 ```bash
 gld start              # 或 gld start ~/code/my-project，目录没登记过会自动登记
-gld ls                 # 加 --reveal 显示凭据明文
+gld list               # 加 --reveal 显示凭据明文
 ```
 
 > 名词看不懂（共享密钥池、工具集、全局入口…）先翻 [concepts.md](concepts.md)。
@@ -129,16 +129,16 @@ gld share --off            # 停隧道、清掉公网地址，本地地址照常
 ```bash
 gld gateway set --enabled true --tunnel cf                 # 或 --tunnel frp --frp-profile <id> --frp-subdomain hub
 gld ws set global-gateway=true                            # 自动重启，start 时会把全局入口一起拉起来
-gld ls                                                    # 公网地址变成 https://<入口域名>/w/<id>/mcp
+gld list                                                  # 公网地址变成 https://<入口域名>/w/<id>/mcp
 ```
 
 ### 在 ChatGPT 里配置
 
 1. 设置 → 账户安全与登录 → 打开“开发人员模式”（允许添加未验证的 MCP 连接器）。
-2. 左侧“插件” → `+` 新建 → 选 MCP，粘贴 `gld ls` 里的**公网地址**（以 `/mcp` 结尾）。
+2. 左侧“插件” → `+` 新建 → 选 MCP，粘贴 `gld list` 里的**公网地址**（以 `/mcp` 结尾）。
 3. 认证方式和工作区一致：
    - `oauth`（默认）：ChatGPT 支持动态注册，通常不用填 Client ID / Secret；
-     保存后进入授权页，输入 `gld ls --reveal` 里的**授权口令**（`oauth_password`）。
+     保存后进入授权页，输入 `gld list --reveal` 里的**授权口令**（`oauth_password`）。
    - `bearer`：选 Bearer，填 `bearer_token`。
 4. 新建一个启用了该插件的对话，发送：
    “请调用 server_info、get_default_cwd 和 git_status，告诉我当前工作区、目录和 Git 状态。”
@@ -152,7 +152,7 @@ gld ls                                                    # 公网地址变成 h
 
 ```bash
 gld start -s actions
-gld ls                            # 看 “GPT Actions” 段的 OpenAPI 地址与 API Key
+gld list                          # 看 “GPT Actions” 段的 OpenAPI 地址与 API Key
 ```
 
 在 GPT 编辑器的 Actions 页面 “Import from URL” 粘贴 OpenAPI 地址；

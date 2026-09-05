@@ -9,7 +9,7 @@ use gld_daemon::Request;
 use serde_json::json;
 
 use super::{share, Ctx};
-use crate::cli::{LsArgs, ServiceArg, ServiceArgs, StartArgs, StopArgs, TunnelService};
+use crate::cli::{ListArgs, ServiceArg, ServiceArgs, StartArgs, StopArgs, TunnelService};
 use crate::error::{CliError, CliResult};
 use crate::output::{human_duration, mask, or_dash, yes_no};
 
@@ -152,11 +152,11 @@ pub async fn start(ctx: &mut Ctx, args: StartArgs) -> CliResult {
         share::ensure_tunnel_up(ctx, &target, spec, tunnel_service).await?;
         // 配了公网入口就是奔着"连上去"来的，直接把地址和凭据摆出来。
         // （`--json` 下这里是唯一一份输出，上面的服务状态不再单独打印。）
-        return show_detail(ctx, &target, LsArgs::default()).await;
+        return show_detail(ctx, &target, ListArgs::default()).await;
     }
     if !ctx.out.json_or(&results) {
         ctx.out
-            .note("守护进程在后台持有服务；`gld ls` 查看连接信息，`gld stop` 停止。");
+            .note("守护进程在后台持有服务；`gld list` 查看连接信息，`gld stop` 停止。");
     }
     Ok(())
 }
@@ -388,7 +388,7 @@ pub async fn status(ctx: &mut Ctx) -> CliResult {
     ctx.out.line("");
     ctx.out.line(
         ctx.out
-            .dim("详情：gld status -w <工作区>；连接信息：gld ls -w <工作区>"),
+            .dim("详情：gld status -w <工作区>；连接信息：gld list -w <工作区>"),
     );
     Ok(())
 }
@@ -518,11 +518,11 @@ fn print_workspace_detail(ctx: &Ctx, item: &ServiceOverview) {
     }
 }
 
-/// `gld ls`：一个工作区就看详情，多个就先列出来。
+/// `gld list`：一个工作区就看详情，多个就先列出来。
 ///
 /// 不指定工作区时的两种情形读者要的东西不一样：在项目目录里敲，想要的是
 /// "这个项目的地址和凭据"；在别处敲，想要的是"我都有哪些工作区、谁在跑"。
-pub async fn ls(ctx: &mut Ctx, args: LsArgs) -> CliResult {
+pub async fn list(ctx: &mut Ctx, args: ListArgs) -> CliResult {
     if args.all {
         return show_list(ctx).await;
     }
@@ -617,13 +617,13 @@ async fn show_list(ctx: &mut Ctx) -> CliResult {
     ctx.out.line("");
     ctx.out.line(
         ctx.out
-            .dim("详情与凭据：gld ls -w <工作区>；换公网入口：gld upgrade --tunnel <地址>"),
+            .dim("详情与凭据：gld list -w <工作区>；换公网入口：gld upgrade --tunnel <地址>"),
     );
     Ok(())
 }
 
 /// 一个工作区的连接信息：地址、认证、凭据、隧道。
-pub async fn show_detail(ctx: &mut Ctx, target: &WorkspaceTarget, args: LsArgs) -> CliResult {
+pub async fn show_detail(ctx: &mut Ctx, target: &WorkspaceTarget, args: ListArgs) -> CliResult {
     let profile: WorkspaceProfile = ctx
         .backend
         .call_typed(Request::ResolveWorkspace {
@@ -820,7 +820,7 @@ pub async fn show_detail(ctx: &mut Ctx, target: &WorkspaceTarget, args: LsArgs) 
 
 /// 配置里的公网入口长什么样（不含运行状态）。
 ///
-/// `gld ls`、`gld workspace show` 都用它，措辞只有一处。这里不重复地址本身——
+/// `gld list`、`gld workspace show` 都用它，措辞只有一处。这里不重复地址本身——
 /// 它就在同一屏的"公网地址"那一行 / 那一列里。
 pub fn tunnel_config_label(
     kind: &str,
