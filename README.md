@@ -10,7 +10,7 @@ AI 客户端（ChatGPT、Claude Code、Cursor…）连上来就能读文件、�
 
 ```bash
 tar xzf gld-*-aarch64-apple-darwin.tar.gz
-sudo mv gld-*/gld /usr/local/bin/   # ~/.local/bin
+sudo mv gld-*/gld ~/.local/bin  # /usr/local/bin/
 gld --version
 ```
 
