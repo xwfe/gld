@@ -10,11 +10,12 @@ use crate::error::{CliError, CliResult};
 
 /// 追问一个敏感值。终端上输入时不回显（Unix），读完换行。
 ///
-/// 非交互环境直接报错：`hint` 要写清楚"不交互的话该怎么给这个值"，
-/// 否则脚本作者只看到一句"需要输入"，却不知道往哪儿填。
+/// 非交互环境不问，直接拿 `hint` 报错——所以 `hint` 必须自成一段完整的话：
+/// 缺的是什么、不交互的话该怎么给。`question` 是交互时的提示语，末尾通常带
+/// 冒号，直接当报错标题读起来不像句子。
 pub fn secret(question: &str, hint: &str) -> CliResult<String> {
     if !std::io::stdin().is_terminal() {
-        return Err(CliError::new(format!("{question}\n{hint}")));
+        return Err(CliError::new(hint));
     }
     eprint!("{question} ");
     std::io::stderr().flush()?;
