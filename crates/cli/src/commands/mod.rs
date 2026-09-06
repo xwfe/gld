@@ -17,6 +17,7 @@ mod tunnel;
 mod upgrade;
 mod workspace;
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::CommandFactory;
@@ -88,6 +89,20 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Usage => inspect::usage(&mut ctx).await,
         Command::Context(args) => inspect::context(&mut ctx, args).await,
     }
+}
+
+/// 用户给的路径 → 绝对路径。符号链接不在这里解析，那是 core 的事。
+///
+/// **所有要发给守护进程的路径都得先过这里。** 守护进程的工作目录是数据目录
+/// （`~/.config/gld`），相对路径原样发过去它就按那儿解析：`gld start ../ccnm`
+/// 在守护进程眼里是 `~/.config/ccnm`——那个目录碰巧存在的话（很多工具都在
+/// `~/.config` 下放配置），gld 会一声不吭地把它登记成工作区，用户看到的现象是
+/// "同一条命令跑两次，冒出两个工作区"，而第二个指向一个完全不相干的目录。
+pub fn absolutize(path: &Path) -> CliResult<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(path))
 }
 
 /// 逗号分隔列表 → Vec，去空白与空项。

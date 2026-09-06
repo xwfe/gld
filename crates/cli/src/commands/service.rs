@@ -42,7 +42,7 @@ pub async fn resolve_or_register(
                 ctx.target.selector.clone().unwrap_or_default()
             )));
         }
-        return register(ctx, path.to_path_buf(), options).await;
+        return register(ctx, super::absolutize(path)?, options).await;
     }
     if ctx.explicit_workspace {
         // -w 写了却没解析到 = 名字拼错了，把原始报错（带候选列表）给用户。

@@ -88,7 +88,7 @@ impl App {
         let profiles = self.list_workspaces()?;
         if let Some(selector) = target.selector.as_deref().map(str::trim) {
             if !selector.is_empty() {
-                return resolve_by_selector(&profiles, selector);
+                return resolve_by_selector(&profiles, selector, target.cwd.as_deref());
             }
         }
         if let Some(cwd) = target.cwd.as_deref() {
@@ -386,9 +386,11 @@ fn same_path(stored: &str, candidate: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 按 selector 找工作区。`base` 是调用方所在目录，用来解析相对路径形式的 selector。
 fn resolve_by_selector(
     profiles: &[WorkspaceProfile],
     selector: &str,
+    base: Option<&Path>,
 ) -> AppResult<WorkspaceProfile> {
     if let Some(profile) = profiles.iter().find(|profile| profile.id == selector) {
         return Ok(profile.clone());
@@ -413,7 +415,7 @@ fn resolve_by_selector(
         return Ok(unique.clone());
     }
 
-    if let Ok(canonical) = Path::new(selector).canonicalize() {
+    if let Some(canonical) = selector_as_path(selector, base) {
         if let Some(profile) = profiles
             .iter()
             .find(|profile| same_path(&profile.path, &canonical))
@@ -438,6 +440,22 @@ fn resolve_by_selector(
     Err(AppError::Message(format!(
         "未找到工作区「{selector}」。可用 `gld workspace list` 查看，selector 支持 id、id 前缀（≥4 位）、名称或路径。"
     )))
+}
+
+/// 把 selector 当路径解析。相对路径按**调用方**目录算，不是当前进程的。
+///
+/// 守护进程的工作目录是数据目录（`~/.config/gld`），拿它去解析 `-w ../ccnm`
+/// 会得到 `~/.config/ccnm`——那儿碰巧有目录的话就指到一个毫不相干的地方去了。
+/// 拿不到调用方目录时（内部按 id 调用的场景）直接放弃路径匹配：猜一个基准
+/// 目录只会错得更隐蔽。
+fn selector_as_path(selector: &str, base: Option<&Path>) -> Option<PathBuf> {
+    let path = Path::new(selector);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base?.join(path)
+    };
+    absolute.canonicalize().ok()
 }
 
 fn resolve_by_dir(profiles: &[WorkspaceProfile], cwd: &Path) -> AppResult<WorkspaceProfile> {
@@ -498,34 +516,55 @@ mod tests {
             profile("abcd9999", "web", "/tmp/does-not-exist-b"),
         ];
         assert_eq!(
-            resolve_by_selector(&profiles, "abcd1234").unwrap().name,
+            resolve_by_selector(&profiles, "abcd1234", None).unwrap().name,
             "api"
         );
         assert_eq!(
-            resolve_by_selector(&profiles, "web").unwrap().id,
+            resolve_by_selector(&profiles, "web", None).unwrap().id,
             "abcd9999"
         );
         assert_eq!(
-            resolve_by_selector(&profiles, "WEB").unwrap().id,
+            resolve_by_selector(&profiles, "WEB", None).unwrap().id,
             "abcd9999"
         );
         assert_eq!(
-            resolve_by_selector(&profiles, "abcd99").unwrap().name,
+            resolve_by_selector(&profiles, "abcd99", None).unwrap().name,
             "web"
         );
-        let ambiguous = resolve_by_selector(&profiles, "abcd")
+        let ambiguous = resolve_by_selector(&profiles, "abcd", None)
             .unwrap_err()
             .to_string();
         assert!(ambiguous.contains("多个工作区"));
-        assert!(resolve_by_selector(&profiles, "nope").is_err());
+        assert!(resolve_by_selector(&profiles, "nope", None).is_err());
     }
 
     #[test]
     fn selector_matches_a_real_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let profiles = vec![profile("id1", "one", temp.path().to_str().unwrap())];
-        let found = resolve_by_selector(&profiles, temp.path().to_str().unwrap()).unwrap();
+        let found = resolve_by_selector(&profiles, temp.path().to_str().unwrap(), None).unwrap();
         assert_eq!(found.id, "id1");
+    }
+
+    /// 相对路径要按调用方目录算，不是按当前进程的工作目录。
+    ///
+    /// 守护进程的工作目录是数据目录，用它解析 `-w ../ccnm` 会指到
+    /// `~/.config/ccnm`——那儿刚好有目录的话就静默匹配到别人家去了。
+    #[test]
+    fn a_relative_selector_resolves_against_the_callers_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("ccnm");
+        std::fs::create_dir_all(&project).unwrap();
+        let profiles = vec![profile("id1", "one", project.to_str().unwrap())];
+
+        assert_eq!(
+            resolve_by_selector(&profiles, "ccnm", Some(temp.path()))
+                .unwrap()
+                .id,
+            "id1"
+        );
+        // 没有调用方目录就不做路径匹配：猜一个基准只会错得更隐蔽。
+        assert!(resolve_by_selector(&profiles, "ccnm", None).is_err());
     }
 
     #[test]

@@ -104,6 +104,52 @@ fn start_inside_a_subdirectory_reuses_the_workspace_that_owns_it() {
     );
 }
 
+/// 相对路径要按用户敲命令时所在的目录算，不能按守护进程的工作目录算。
+///
+/// 守护进程的工作目录是数据目录。以前 CLI 把 `../ccnm` 原样转发过去，守护进程
+/// 就按数据目录去解析——`~/.config` 底下正好有个同名目录的话（很多工具都往那儿
+/// 放配置），gld 会一声不吭地把别人的配置目录登记成工作区。用户看到的现象是
+/// 「同一条命令跑两次，冒出两个工作区」，而第二个指着一个毫不相干的目录。
+#[test]
+fn a_relative_path_is_resolved_where_the_user_typed_it() {
+    let env = Env::new();
+    // 守护进程必须先跑起来：它没跑的时候请求在 CLI 进程里就地执行，
+    // 那时的工作目录本来就是对的，复现不出问题。
+    env.ok(&["daemon", "start"]);
+
+    let real = env.project.path().join("ccnm");
+    std::fs::create_dir_all(&real).expect("project dir");
+    // 陷阱：数据目录旁边放一个同名目录，解析基准错了就会命中它。
+    std::fs::create_dir_all(env.home.path().join("ccnm")).expect("decoy dir");
+
+    env.ok(&[
+        "ws",
+        "add",
+        "ccnm",
+        "--name",
+        "proj",
+        "--mcp-port",
+        &free_port().to_string(),
+    ]);
+
+    let list = env.json(&["--json", "ws", "list"]);
+    let registered = list[0]["path"].as_str().expect("path").to_string();
+    assert_eq!(
+        std::path::Path::new(&registered),
+        real.canonicalize().expect("canonical project dir"),
+        "登记到了别的目录去"
+    );
+
+    // selector 也一样：`gld destroy ccnm` 里的 ccnm 是相对路径，
+    // 名字（proj）对不上，只能靠路径匹配。
+    env.ok(&["destroy", "ccnm", "-y"]);
+    assert_eq!(
+        env.json(&["--json", "ws", "list"]).as_array().map(Vec::len),
+        Some(0),
+        "相对路径 selector 没匹配上"
+    );
+}
+
 /// `-w` 写了个不存在的名字 = 打字错误，要报错并列候选，而不是建一个新的。
 #[test]
 fn a_typo_in_dash_w_is_an_error_not_a_new_workspace() {

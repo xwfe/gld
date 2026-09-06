@@ -23,7 +23,7 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
             let profile: WorkspaceProfile = ctx
                 .backend
                 .call_typed(Request::CreateWorkspace {
-                    path,
+                    path: super::absolutize(&path)?,
                     options: WorkspaceCreateOptions {
                         name,
                         mcp_port,
@@ -199,7 +199,9 @@ pub async fn destroy(ctx: &mut Ctx, args: DestroyArgs) -> CliResult {
                         ctx.target.selector.clone().unwrap_or_default()
                     )));
                 }
-                WorkspaceTarget::selector(selector.clone())
+                // 带上当前目录：selector 可以是相对路径（`gld destroy ../ccnm`），
+                // 而守护进程的工作目录是数据目录，它自己解析会指到别处。
+                WorkspaceTarget::new(Some(selector.clone()), ctx.target.cwd.clone())
             }
             None => ctx.target.clone(),
         };

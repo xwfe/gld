@@ -56,7 +56,8 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
 
     let mut assignments: Vec<(String, String)> = Vec::new();
     if let Some(path) = &args.path {
-        assignments.push(("path".into(), path.to_string_lossy().into_owned()));
+        let absolute = super::absolutize(path)?;
+        assignments.push(("path".into(), absolute.to_string_lossy().into_owned()));
     }
     if let Some(name) = &args.name {
         assignments.push(("name".into(), name.clone()));
@@ -129,11 +130,11 @@ async fn resolve(ctx: &mut Ctx, selector: Option<&str>) -> CliResult<WorkspacePr
                 ctx.target.selector.clone().unwrap_or_default()
             )));
         }
+        // 带上当前目录：selector 可以是相对路径，而守护进程的工作目录是数据目录。
+        let target = WorkspaceTarget::new(Some(selector.to_string()), ctx.target.cwd.clone());
         return ctx
             .backend
-            .call_typed(Request::ResolveWorkspace {
-                target: WorkspaceTarget::selector(selector),
-            })
+            .call_typed(Request::ResolveWorkspace { target })
             .await;
     }
     ctx.backend
