@@ -129,7 +129,8 @@ impl App {
             {
                 return Err(AppError::Message(format!(
                     "该目录已经是工作区「{}」（id {}）",
-                    existing.name, existing.id
+                    existing.name,
+                    crate::short_id(&existing.id)
                 )));
             }
             let mut profile =

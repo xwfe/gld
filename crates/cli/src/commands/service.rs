@@ -72,8 +72,12 @@ async fn register(
             "已登记工作区「{}」（{}），MCP 端口 {}。",
             ensured.profile.name, ensured.profile.path, ensured.profile.runtime.local_port
         ));
-        ctx.out
-            .note("登记错了：gld destroy <名称>（只删 gld 这边的配置，项目文件不动）。");
+        // 措辞是「不想要它的话」而不是「登记错了」：后者读起来像在报错，
+        // 而这一步其实是成功的——用户反馈说「为啥总提示登记错了，但又成功了」。
+        ctx.out.note(format!(
+            "不想要它的话：gld destroy {}（只删 gld 这边的配置，项目文件不动）。",
+            ensured.profile.name
+        ));
     }
     Ok(ensured.profile)
 }
@@ -480,8 +484,10 @@ fn print_daemon_line(ctx: &Ctx, probe: &DaemonProbe) {
 
 fn print_workspace_detail(ctx: &Ctx, item: &ServiceOverview) {
     let ws = &item.workspace;
-    ctx.out
-        .line(ctx.out.bold(&format!("{}  ({})", ws.name, ws.id)));
+    ctx.out.line(
+        ctx.out
+            .bold(&format!("{}  ({})", ws.name, gld_core::short_id(&ws.id))),
+    );
     ctx.out.line(format!("路径  {}", ws.path));
     ctx.out.line("");
     for (label, status, tunnel, port) in [

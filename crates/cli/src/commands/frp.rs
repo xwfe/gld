@@ -24,7 +24,7 @@ pub async fn run(ctx: &mut Ctx, command: FrpCmd) -> CliResult {
                 .iter()
                 .map(|p| {
                     vec![
-                        p.id.clone(),
+                        gld_core::short_id(&p.id).to_string(),
                         p.name.clone(),
                         format!("{}:{}", p.server, p.server_port),
                         yes_no(p.has_token).into(),
@@ -51,11 +51,14 @@ pub async fn run(ctx: &mut Ctx, command: FrpCmd) -> CliResult {
             if !ctx.out.json_or(&saved) {
                 ctx.out.line(format!(
                     "已添加 FRP 配置「{}」，id {}",
-                    saved.name, saved.id
+                    saved.name,
+                    gld_core::short_id(&saved.id)
                 ));
+                // 接入时写名称就够（`mcp.frp-profile=` 认名称、完整 id 和 ≥4 位前缀），
+                // 名称是用户自己起的，比 id 好认也好记。
                 ctx.out.line(format!(
                     "工作区接入：gld ws set mcp.tunnel=frp mcp.frp-profile={} mcp.frp-subdomain=<子域名>",
-                    saved.id
+                    saved.name
                 ));
             }
             Ok(())

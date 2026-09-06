@@ -41,3 +41,14 @@ pub use error::{AppError, AppResult};
 
 /// 当前 crate 版本；MCP `serverInfo.version` 与命令行 `--version` 共用。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// id 的短形式，给人看的：像 git 的短 commit hash，取前 8 位。
+///
+/// 工作区和 FRP 配置的 id 都是 32 位十六进制，整串打出来会把同一行里真正
+/// 有用的信息（名称、路径、状态）挤到看不见。短 id 能直接当参数用——
+/// `-w`、`gld destroy`、`mcp.frp-profile=` 都支持 ≥4 位的 id 前缀。
+///
+/// 只用于显示。`--json` 里始终给完整 id：脚本要拿它做精确匹配。
+pub fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}

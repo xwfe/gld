@@ -57,7 +57,7 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
                 .iter()
                 .map(|p| {
                     vec![
-                        p.id.chars().take(8).collect(),
+                        gld_core::short_id(&p.id).to_string(),
                         p.name.clone(),
                         p.runtime.local_port.to_string(),
                         p.actions.local_port.to_string(),
@@ -174,7 +174,8 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
             if !ctx.out.json_or(&profile) {
                 ctx.out.line(format!(
                     "已记住最近使用的工作区：{}（{}）",
-                    profile.name, profile.id
+                    profile.name,
+                    gld_core::short_id(&profile.id)
                 ));
             }
             Ok(())
@@ -296,7 +297,7 @@ fn service_label(kind: ServiceKind) -> &'static str {
 pub fn show_profile(ctx: &Ctx, p: &WorkspaceProfile) {
     ctx.out.kv(&[
         ("名称", p.name.clone()),
-        ("ID", p.id.clone()),
+        ("ID", gld_core::short_id(&p.id).to_string()),
         ("路径", p.path.clone()),
         ("MCP 端口", p.runtime.local_port.to_string()),
         (
