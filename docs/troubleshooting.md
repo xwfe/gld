@@ -68,7 +68,7 @@ gld tool call exec_command cmd='cargo test'
 | `… 是 frp 0.44，太老了` | gld 生成的是 TOML 配置，frp 0.52 以前用 INI 格式 | `brew upgrade frpc`，或从 releases 换 ≥0.52 的版本 |
 | `同一工作区的 MCP 与 Actions 必须使用同一 FRP 服务器` | 一个工作区只跑一个 frpc，两条线路得连同一台 frps | 让两者用同一个 `frp-profile` |
 | 子域名冲突 | 两个工作区配了相同子域名 | 改其中一个的 `frp-subdomain` |
-| Cloudflare quick 地址每次都变 | quick 模式设计如此 | 用 named 模式 + `gld secret set cloudflare_token` |
+| Cloudflare quick 地址每次都变 | quick 模式设计如此 | 改用 named 模式：`gld share --tunnel cf:<你的域名>`（会问你要 Tunnel Token） |
 | 工作区删了、frpc 还在 | 上次是 `kill -9` 退出的 | `gld tunnel stop`；仍在的话按 `~/.config/gld/frpc/<id>/frpc.pid` 里的 pid 手动 kill |
 
 ## 工作区与配置

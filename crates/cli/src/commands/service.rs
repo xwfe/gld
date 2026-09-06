@@ -128,6 +128,7 @@ pub async fn start(ctx: &mut Ctx, args: StartArgs) -> CliResult {
             &profile,
             spec,
             args.subdomain.as_deref(),
+            args.tunnel_token.as_deref(),
             tunnel_service,
         )
         .await?;

@@ -162,7 +162,9 @@ Options:
 公网入口（--tunnel 在 start / share / upgrade 里通用）：
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
-  --tunnel cf:mcp.example.com             Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  --tunnel cf:mcp.example.com             Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
+  --tunnel cf:mcp.example.com --tunnel-token <token>
+                                          同上，token 直接写在命令里（会进 shell 历史）
   --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
   --tunnel off                            关掉公网入口，只留本地地址
 
@@ -533,19 +535,17 @@ Options:
       --json
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
-      --subdomain <SUB>
-          FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
+      --tunnel-token <TOKEN>
+          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
+      --subdomain <SUB>
+          FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
+
       --port <PORT>
           本地监听端口（默认自动挑一个空闲的；端口被别的程序占了时用它换一个）
-
-  -s, --service <SERVICE>
-          启动哪个服务（默认 mcp）
-          
-          [possible values: mcp, actions, all]
 
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
@@ -554,6 +554,11 @@ Options:
           数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
+
+  -s, --service <SERVICE>
+          启动哪个服务（默认 mcp）
+          
+          [possible values: mcp, actions, all]
 
       --no-color
           关闭彩色输出（也可设置环境变量 NO_COLOR）
@@ -775,7 +780,7 @@ Options:
 
 它把「配隧道 → 启动服务 → 查连接信息」三步合成一步：
   gld share                             Cloudflare 临时地址（等价 --tunnel cf）
-  gld share --tunnel cf:mcp.example.com Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  gld share --tunnel cf:mcp.example.com Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
   gld share --tunnel frp:公司           FRP 固定域名，子域名默认取工作区名
   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
   gld share --off                       关掉公网入口，只留本地地址
@@ -800,20 +805,17 @@ Options:
       --json
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
-      --subdomain <SUB>
-          FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则取工作区名
+      --tunnel-token <TOKEN>
+          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
+      --subdomain <SUB>
+          FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则取工作区名
+
       --off
           关掉公网入口，只留本地地址（等价 --tunnel off）
-
-  -s, --service <SERVICE>
-          暴露哪个服务
-          
-          [default: mcp]
-          [possible values: mcp, actions]
 
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
@@ -822,6 +824,12 @@ Options:
           数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
+
+  -s, --service <SERVICE>
+          暴露哪个服务
+          
+          [default: mcp]
+          [possible values: mcp, actions]
 
       --no-color
           关闭彩色输出（也可设置环境变量 NO_COLOR）
@@ -869,11 +877,11 @@ Options:
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
+      --tunnel-token <TOKEN>
+          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+
       --subdomain <SUB>
           FRP 子域名（配合 --tunnel frp:<配置名>）
-
-      --off
-          关掉公网入口（等价 --tunnel off）
 
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
@@ -882,6 +890,9 @@ Options:
           数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
+
+      --off
+          关掉公网入口（等价 --tunnel off）
 
       --name <NAME>
           换显示名称

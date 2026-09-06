@@ -11,6 +11,7 @@ pub mod cli;
 pub mod commands;
 pub mod error;
 pub mod output;
+pub mod prompt;
 
 pub use cli::Cli;
 pub use commands::run;

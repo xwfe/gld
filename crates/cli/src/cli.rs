@@ -18,7 +18,9 @@ const AFTER_HELP: &str = "\
 公网入口（--tunnel 在 start / share / upgrade 里通用）：
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
-  --tunnel cf:mcp.example.com             Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+  --tunnel cf:mcp.example.com             Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
+  --tunnel cf:mcp.example.com --tunnel-token <token>
+                                          同上，token 直接写在命令里（会进 shell 历史）
   --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
   --tunnel off                            关掉公网入口，只留本地地址
 
@@ -148,7 +150,7 @@ pub enum Command {
     ///
     /// 它把「配隧道 → 启动服务 → 查连接信息」三步合成一步：
     ///   gld share                             Cloudflare 临时地址（等价 --tunnel cf）
-    ///   gld share --tunnel cf:mcp.example.com Cloudflare 固定域名（先 gld secret set cloudflare_token <token>）
+    ///   gld share --tunnel cf:mcp.example.com Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
     ///   gld share --tunnel frp:公司           FRP 固定域名，子域名默认取工作区名
     ///   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
     ///   gld share --off                       关掉公网入口，只留本地地址
@@ -371,6 +373,10 @@ pub struct StartArgs {
     #[arg(long, value_name = "TUNNEL")]
     pub tunnel: Option<TunnelSpec>,
 
+    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+    #[arg(long, value_name = "TOKEN")]
+    pub tunnel_token: Option<String>,
+
     /// FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
     #[arg(long, value_name = "SUB")]
     pub subdomain: Option<String>,
@@ -510,6 +516,10 @@ pub struct ShareArgs {
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 
+    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+    #[arg(long, value_name = "TOKEN")]
+    pub tunnel_token: Option<String>,
+
     /// FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则取工作区名
     #[arg(long, value_name = "SUB")]
     pub subdomain: Option<String>,
@@ -536,6 +546,10 @@ pub struct UpgradeArgs {
     /// 换公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
+
+    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+    #[arg(long, value_name = "TOKEN")]
+    pub tunnel_token: Option<String>,
 
     /// FRP 子域名（配合 --tunnel frp:<配置名>）
     #[arg(long, value_name = "SUB")]

@@ -517,7 +517,9 @@ mod tests {
             profile("abcd9999", "web", "/tmp/does-not-exist-b"),
         ];
         assert_eq!(
-            resolve_by_selector(&profiles, "abcd1234", None).unwrap().name,
+            resolve_by_selector(&profiles, "abcd1234", None)
+                .unwrap()
+                .name,
             "api"
         );
         assert_eq!(

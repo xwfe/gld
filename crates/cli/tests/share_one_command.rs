@@ -154,6 +154,68 @@ fn a_pasted_endpoint_does_not_end_up_doubled() {
     );
 }
 
+/// 缺 Tunnel Token 要在动手之前拦住，并说清楚怎么补上。
+///
+/// 以前这个值只能事先 `gld secret set cloudflare_token`，忘了的话整条命令会
+/// 一路打成功——登记工作区、写配置、起服务——直到最后一步才蹦出
+/// "需要填写 Tunnel Token"。前面全是成功，用户只会以为整条命令失败了。
+#[test]
+fn a_named_cloudflare_tunnel_refuses_before_it_starts_anything() {
+    let env = Env::new();
+    let output = env.gld(&[
+        "start",
+        ".",
+        "--port",
+        &free_port().to_string(),
+        "--tunnel",
+        "cf:mcp.example.com",
+    ]);
+
+    assert!(!output.status.success(), "没有 token 却报成功了");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Tunnel Token"), "没说缺什么：{stderr}");
+    assert!(
+        stderr.contains("--tunnel-token"),
+        "报错要给出怎么补上：{stderr}"
+    );
+    assert_eq!(
+        env.json(&["--json", "ps"]).as_array().map(Vec::len),
+        Some(0),
+        "拦截发生得太晚，服务已经起来了"
+    );
+}
+
+/// `--tunnel-token` 让固定域名一步到位，不用先记着去 secret set。
+#[test]
+fn the_tunnel_token_can_be_given_on_the_command_line() {
+    let env = Env::new();
+    env.ok(&[
+        "ws",
+        "add",
+        ".",
+        "--name",
+        "named",
+        "--mcp-port",
+        &free_port().to_string(),
+    ]);
+
+    // 服务没在跑，upgrade 只写配置不去起隧道——这里要验的是 token 有没有落到位。
+    env.ok(&[
+        "upgrade",
+        "--tunnel",
+        "cf:mcp.example.com",
+        "--tunnel-token",
+        "tok-abc123",
+    ]);
+
+    let secret = env.json(&["--json", "secret", "show", "cloudflare_token", "--reveal"]);
+    assert_eq!(secret["value"], "tok-abc123", "token 没存进去：{secret}");
+    assert_eq!(
+        env.json(&["--json", "list"])["mcp"]["public_url"],
+        "https://mcp.example.com/mcp"
+    );
+}
+
 /// FRP 配置填了个不存在的名字，要在这一步就拦住并把已有的列出来。
 #[test]
 fn share_rejects_an_unknown_frp_profile_up_front() {

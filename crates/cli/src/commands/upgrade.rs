@@ -45,6 +45,7 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
             &profile,
             spec,
             args.subdomain.as_deref(),
+            args.tunnel_token.as_deref(),
             args.service,
         )
         .await?;

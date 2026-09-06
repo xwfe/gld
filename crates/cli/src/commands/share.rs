@@ -50,6 +50,7 @@ pub async fn run(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
         &profile,
         &spec,
         args.subdomain.as_deref(),
+        args.tunnel_token.as_deref(),
         args.service,
     )
     .await?;
@@ -104,8 +105,12 @@ pub async fn configure(
     profile: &WorkspaceProfile,
     spec: &TunnelSpec,
     subdomain: Option<&str>,
+    token: Option<&str>,
     service: TunnelService,
 ) -> CliResult<()> {
+    // token 必须赶在写配置之前落实：配置一写进去，正在跑的服务就会带着新的
+    // named 模式重启，而那一步没有 token 是起不来的。
+    ensure_cloudflare_token(ctx, target, spec, token, service).await?;
     let prefix = match service {
         TunnelService::Mcp => "mcp.",
         TunnelService::Actions => "actions.",
@@ -127,6 +132,73 @@ pub async fn configure(
             "隧道配置已保存，但服务没能重启起来。按上面的错误修好后重试。",
         ));
     }
+    Ok(())
+}
+
+/// Cloudflare 固定域名要用的 Tunnel Token：命令行给了就存下来，没给也没配过就当场问。
+///
+/// 以前这个值只能事先 `gld secret set cloudflare_token <token>`，忘了的话
+/// `gld start <目录> --tunnel cf:<域名>` 会一路成功到最后一步才炸：工作区登记了、
+/// 配置写了、服务起来了，然后"错误：Cloudflare 命名隧道模式需要填写 Tunnel Token"。
+/// 前面每一步都打的是成功，用户只会以为整条命令失败了，于是原样再跑一遍。
+async fn ensure_cloudflare_token(
+    ctx: &mut Ctx,
+    target: &WorkspaceTarget,
+    spec: &TunnelSpec,
+    token: Option<&str>,
+    service: TunnelService,
+) -> CliResult<()> {
+    let named = matches!(spec, TunnelSpec::Cloudflare { named: true, .. });
+    if !named {
+        if token.is_some() {
+            return Err(CliError::new(
+                "--tunnel-token 是 Cloudflare 固定域名用的，配合 --tunnel cf:<域名>。\n  \
+                 临时地址（--tunnel cf）不需要它；FRP 的 token 配在 gld frp add --token 里。",
+            ));
+        }
+        return Ok(());
+    }
+
+    let key = match service {
+        TunnelService::Mcp => "cloudflare_token",
+        TunnelService::Actions => "actions_cloudflare_token",
+    };
+    let value = match token {
+        Some(given) => given.trim().to_string(),
+        None => {
+            let saved: Option<String> = ctx
+                .backend
+                .call_typed(Request::WorkspaceSecret {
+                    target: target.clone(),
+                    key: key.into(),
+                })
+                .await?;
+            if saved.is_some_and(|value| !value.trim().is_empty()) {
+                return Ok(());
+            }
+            crate::prompt::secret(
+                "Cloudflare Tunnel Token（Zero Trust 后台复制，输入不显示）：",
+                &format!(
+                    "Cloudflare 固定域名要 Tunnel Token。非交互环境这样给：\n  \
+                     gld secret set {key} <token>\n  \
+                     或者在命令里带上：--tunnel-token <token>"
+                ),
+            )?
+        }
+    };
+    if value.is_empty() {
+        return Err(CliError::new(
+            "Tunnel Token 是空的，没往下走。临时地址不需要 token：--tunnel cf",
+        ));
+    }
+
+    ctx.backend
+        .call(Request::SetWorkspaceSecret {
+            target: target.clone(),
+            key: key.into(),
+            value,
+        })
+        .await?;
     Ok(())
 }
 

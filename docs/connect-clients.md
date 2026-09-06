@@ -73,9 +73,18 @@ gld share                  # 公网地址形如 https://xxx.trycloudflare.com/mc
 需要一个 Cloudflare 账号和一条已创建的 Named Tunnel，域名连着一起给：
 
 ```bash
-gld secret set cloudflare_token <隧道 token>
 gld share --tunnel cf:mcp.example.com
 ```
+
+token 没配过的话，这条命令会当场问你要（输入不显示）。不想交互——比如写在
+脚本里——就直接带上：
+
+```bash
+gld share --tunnel cf:mcp.example.com --tunnel-token <隧道 token>
+```
+
+写在命令行里的 token 会进 shell 历史，介意的话事先存起来：
+`gld secret set cloudflare_token <隧道 token>`。
 
 **域名必须给。** 固定域名模式下 gld 不像 quick 那样能从 cloudflared 的输出里
 读回地址——这个地址要写进 OAuth 元数据和 OpenAPI 文档，cloudflared 那边也拿它
