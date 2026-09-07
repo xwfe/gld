@@ -19,7 +19,7 @@ const AFTER_HELP: &str = "\
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
   --tunnel cf:mcp.example.com             Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
-  --tunnel cf:mcp.example.com --tunnel-token <token>
+  --tunnel cf:mcp.example.com --token <token>
                                           同上，token 直接写在命令里（会进 shell 历史）
   --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
   --tunnel off                            关掉公网入口，只留本地地址
@@ -374,15 +374,20 @@ pub struct StartArgs {
     pub tunnel: Option<TunnelSpec>,
 
     /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
-    #[arg(long, value_name = "TOKEN")]
+    #[arg(
+        long = "token",
+        alias = "tunnel-token",
+        value_name = "TOKEN",
+        requires = "tunnel"
+    )]
     pub tunnel_token: Option<String>,
 
     /// FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
     #[arg(long, value_name = "SUB")]
     pub subdomain: Option<String>,
 
-    /// 本地监听端口（默认自动挑一个空闲的；端口被别的程序占了时用它换一个）
-    #[arg(long, value_name = "PORT")]
+    /// 本地监听端口；Cloudflare 固定隧道需与云端回源端口一致（不会自动修改云端配置）
+    #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
 
     /// 启动哪个服务（默认 mcp）
@@ -517,7 +522,12 @@ pub struct ShareArgs {
     pub tunnel: Option<TunnelSpec>,
 
     /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
-    #[arg(long, value_name = "TOKEN")]
+    #[arg(
+        long = "token",
+        alias = "tunnel-token",
+        value_name = "TOKEN",
+        requires = "tunnel"
+    )]
     pub tunnel_token: Option<String>,
 
     /// FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则取工作区名
@@ -548,7 +558,12 @@ pub struct UpgradeArgs {
     pub tunnel: Option<TunnelSpec>,
 
     /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
-    #[arg(long, value_name = "TOKEN")]
+    #[arg(
+        long = "token",
+        alias = "tunnel-token",
+        value_name = "TOKEN",
+        requires = "tunnel"
+    )]
     pub tunnel_token: Option<String>,
 
     /// FRP 子域名（配合 --tunnel frp:<配置名>）

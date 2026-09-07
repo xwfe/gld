@@ -152,7 +152,7 @@ async fn ensure_cloudflare_token(
     if !named {
         if token.is_some() {
             return Err(CliError::new(
-                "--tunnel-token 是 Cloudflare 固定域名用的，配合 --tunnel cf:<域名>。\n  \
+                "--token 是 Cloudflare 固定域名用的，配合 --tunnel cf:<域名>。\n  \
                  临时地址（--tunnel cf）不需要它；FRP 的 token 配在 gld frp add --token 里。",
             ));
         }
@@ -181,7 +181,7 @@ async fn ensure_cloudflare_token(
                 &format!(
                     "Cloudflare 固定域名要 Tunnel Token。非交互环境这样给：\n  \
                      gld secret set {key} <token>\n  \
-                     或者在命令里带上：--tunnel-token <token>"
+                     或者在命令里带上：--token <token>"
                 ),
             )?
         }
@@ -230,6 +230,45 @@ pub async fn ensure_tunnel_up(
             tunnel.state
         )));
     }
+    verify_named_public(ctx, target, service).await
+}
+
+pub async fn verify_named_public(
+    ctx: &mut Ctx,
+    target: &WorkspaceTarget,
+    service: TunnelService,
+) -> CliResult<()> {
+    // 重新读取：start --port / upgrade 可能已变更了传入 configure 的旧快照。
+    let profile: WorkspaceProfile = ctx
+        .backend
+        .call_typed(Request::ResolveWorkspace {
+            target: target.clone(),
+        })
+        .await?;
+    let named = match service {
+        TunnelService::Mcp => {
+            !profile.tunnel.use_global_gateway
+                && profile.tunnel.tunnel_type == "cloudflare"
+                && profile.tunnel.cloudflare_mode == "named"
+        }
+        TunnelService::Actions => {
+            !profile.actions.use_global_gateway
+                && profile.actions.tunnel_type == "cloudflare"
+                && profile.actions.cloudflare_mode == "named"
+        }
+    };
+    if !named {
+        return Ok(());
+    }
+    let check = gld_core::health::check_public_endpoint(&profile, service_kind(service)).await;
+    if !check.ok {
+        return Err(CliError::new(format!(
+            "公网检查未通过：{}\n{}\n配置已保存，本次检查不会停止本地服务或隧道，无需重新登记或输入 Token；修正后用 gld health 复查。",
+            check.detail, check.hint
+        )));
+    }
+    ctx.out
+        .note("公网端点已响应；这不代表 OAuth 登录和工具调用已验证。");
     Ok(())
 }
 
@@ -296,8 +335,8 @@ fn assignments(
                 // cf:<域名>：这次顺手把它定下来。
                 Some(domain) => pairs.push(field("public-url", public_base(domain, service))),
                 // cf:named：沿用已经配好的那个，绝不能清掉——named 模式没有
-                // 对外地址就起不来（cloudflared 要拿它建 ingress，OAuth 元数据
-                // 和 OpenAPI 文档里也要写它）。
+                // 对外地址就起不来（OAuth 元数据和 OpenAPI 文档里要写它；
+                // cloudflared 的 ingress 则由云端独立配置）。
                 None if current_public_url(profile, service).is_empty() => {
                     return Err(CliError::new(
                         "Cloudflare 固定域名模式需要一个对外域名。连域名一起给：\n  \

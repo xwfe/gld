@@ -101,18 +101,20 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
 
     // 换了隧道模式就得真的把新隧道拉起来，否则配置是新的、跑着的还是旧的，
     // 而 ls 会照着配置显示一个还没生效的地址。
-    if let Some(spec) = &spec {
-        let running = ctx
-            .backend
-            .call_typed::<gld_core::workspace::RuntimeStatusDto>(Request::ServiceStatus {
-                target: target.clone(),
-                kind: share::service_kind(args.service),
-            })
-            .await?
-            .state
-            != "stopped";
-        if running {
+    let running = ctx
+        .backend
+        .call_typed::<gld_core::workspace::RuntimeStatusDto>(Request::ServiceStatus {
+            target: target.clone(),
+            kind: share::service_kind(args.service),
+        })
+        .await?
+        .state
+        != "stopped";
+    if running {
+        if let Some(spec) = &spec {
             share::ensure_tunnel_up(ctx, &target, spec, args.service).await?;
+        } else {
+            share::verify_named_public(ctx, &target, args.service).await?;
         }
     }
 

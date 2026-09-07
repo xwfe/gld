@@ -169,6 +169,55 @@ fn well_known_url(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
 
+/// 只探测目标服务，不让未启用的 Actions 或 OAuth 项影响隧道启动判断。
+/// 边缘刚注册时路由可能尚未生效；最多三次，每次四秒、间隔一秒。
+pub async fn check_public_endpoint(
+    profile: &WorkspaceProfile,
+    kind: crate::runtime::ServiceKind,
+) -> HealthItem {
+    let (url, origin, service) = match kind {
+        crate::runtime::ServiceKind::Mcp => (
+            profile.public_endpoint(),
+            format!("http://127.0.0.1:{}", profile.runtime.local_port),
+            "mcp",
+        ),
+        crate::runtime::ServiceKind::Actions => (
+            profile.actions_openapi_url(),
+            profile.actions_local_base_url(),
+            "actions",
+        ),
+    };
+    // 不把 Access 登录页的重定向当成 MCP/Actions 入口响应。
+    let mut builder = reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none());
+    if is_loopback_url(&url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().expect("failed to build HTTP client");
+    let mut detail = String::new();
+    for attempt in 0..3 {
+        let (ok, result) = check_url(&client, &url).await;
+        detail = result;
+        if ok {
+            return health_item("公网端点", true, detail, "");
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    health_item(
+        "公网端点",
+        false,
+        format!("{url}: {detail}"),
+        &format!(
+            "Cloudflare 固定隧道的回源由云端配置控制，gld 不会自动修改它。\n\
+             请核对该域名的回源服务为 {origin}（HTTP，不附加 /mcp）；\n\
+             或用 gld start --service {service} --port <回源端口> 对齐本地端口。若端口一致，再检查域名、路径、网络和访问策略。"
+        ),
+    )
+}
+
 pub async fn run_health_checks(profile: &WorkspaceProfile) -> Vec<HealthItem> {
     let clients = Clients::new();
     let mcp_public = profile.effective_public_url();
@@ -298,10 +347,14 @@ mod tests {
     /// 起一个只回固定状态码的假服务器，返回它的地址。
     /// 用它来冒充"占了端口的别的程序"。
     fn server_that_answers(status: &'static str) -> String {
+        server_with_responses(vec![status])
+    }
+
+    fn server_with_responses(statuses: Vec<&'static str>) -> String {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            for stream in listener.incoming().take(1) {
+            for (stream, status) in listener.incoming().zip(statuses) {
                 let mut stream = match stream {
                     Ok(stream) => stream,
                     Err(_) => continue,
@@ -325,6 +378,37 @@ mod tests {
         // 404 不算：我们自己的服务不会在这些固定路径上回 404。
         assert!(!endpoint_ok(404));
         assert!(!endpoint_ok(502));
+    }
+
+    #[tokio::test]
+    async fn public_start_probe_accepts_auth_challenge_for_both_services() {
+        for kind in [
+            crate::runtime::ServiceKind::Mcp,
+            crate::runtime::ServiceKind::Actions,
+        ] {
+            let url = server_that_answers("401 Unauthorized");
+            let mut profile = WorkspaceProfile::new(".".into(), None);
+            let base = url.trim_end_matches("/health").to_string();
+            profile.tunnel.public_url = base.clone();
+            profile.actions.public_url = base;
+            let result = check_public_endpoint(&profile, kind).await;
+            assert!(result.ok, "{}", result.detail);
+        }
+    }
+
+    #[tokio::test]
+    async fn public_start_probe_retries_and_rejects_redirects() {
+        for (statuses, expected) in [
+            (vec!["502 Bad Gateway", "200 OK"], true),
+            (vec!["302 Found"; 3], false),
+            (vec!["404 Not Found"; 3], false),
+        ] {
+            let url = server_with_responses(statuses);
+            let mut profile = WorkspaceProfile::new(".".into(), None);
+            profile.tunnel.public_url = url.trim_end_matches("/health").into();
+            let result = check_public_endpoint(&profile, crate::runtime::ServiceKind::Mcp).await;
+            assert_eq!(result.ok, expected, "{}", result.detail);
+        }
     }
 
     /// 端口被别的程序占着时（Actions 默认端口 8787 很容易撞上），

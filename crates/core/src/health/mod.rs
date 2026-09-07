@@ -1,3 +1,3 @@
 mod checker;
 
-pub use checker::{run_health_checks, HealthItem};
+pub use checker::{check_public_endpoint, run_health_checks, HealthItem};

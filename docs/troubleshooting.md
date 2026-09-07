@@ -64,6 +64,7 @@ gld tool call exec_command cmd='cargo test'
 | --- | --- | --- |
 | `FRP 模式需要选择全局配置或填写服务器域名` | 隧道类型是 frp 但没配服务器 | `gld frp add --name <名称> …` 然后 `gld share --tunnel frp:<名称>`；不需要公网就 `gld share --off` |
 | `隧道状态是 …，但没拿到公网地址` | 隧道进程起来了却没报出地址（网络被挡、frps 拒绝、token 不对） | `gld logs -n 30` 看隧道那几行输出 |
+| 固定隧道 `running`，但公网 502 / `公网检查未通过` | 隧道进程状态不等于回源可用，常见原因是云端回源端口与本地监听端口不一致 | 对照错误中的预期回源地址检查云端配置；启动端口和 Token 用法见 [README](../README.md#用) |
 | `未找到 frpc` / `未找到 cloudflared` | 没装，或装的位置不在 PATH 里 | `brew install frpc` / `brew install cloudflared`（Windows: `winget install Cloudflare.cloudflared`）。装在别处就用 `gld settings runtime --executable-paths <目录>` 补上 |
 | `… 是 frp 0.44，太老了` | gld 生成的是 TOML 配置，frp 0.52 以前用 INI 格式 | `brew upgrade frpc`，或从 releases 换 ≥0.52 的版本 |
 | `同一工作区的 MCP 与 Actions 必须使用同一 FRP 服务器` | 一个工作区只跑一个 frpc，两条线路得连同一台 frps | 让两者用同一个 `frp-profile` |

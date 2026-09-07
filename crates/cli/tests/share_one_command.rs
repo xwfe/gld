@@ -174,10 +174,7 @@ fn a_named_cloudflare_tunnel_refuses_before_it_starts_anything() {
     assert!(!output.status.success(), "没有 token 却报成功了");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Tunnel Token"), "没说缺什么：{stderr}");
-    assert!(
-        stderr.contains("--tunnel-token"),
-        "报错要给出怎么补上：{stderr}"
-    );
+    assert!(stderr.contains("--token"), "报错要给出怎么补上：{stderr}");
     assert_eq!(
         env.json(&["--json", "ps"]).as_array().map(Vec::len),
         Some(0),

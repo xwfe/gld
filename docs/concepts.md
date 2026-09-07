@@ -158,7 +158,7 @@ gld share --off                        # 都关掉
 **cloudflare quick 和 named 的区别：** quick 零配置但**每次重启地址都会变**，
 ChatGPT 里得跟着改，适合试用；named 要你在 Cloudflare 建一条隧道拿到 token，
 地址固定，用 `gld share --tunnel cf:<你的域名>` 一次把域名定下来——token
-没配过会当场问，脚本里用 `--tunnel-token <token>` 直接给。
+没配过会当场问，脚本里用 `--token <token>` 直接给。
 
 **开公网入口前请读 [security.md](security.md)。** 那不是客套话——它等于把
 "以你的身份在你电脑上跑命令"这件事对外开放了。

@@ -44,6 +44,20 @@ gld share                              # Cloudflare 临时地址；需要 cloudf
 gld share --tunnel cf:mcp.example.com  # 自己有域名和 Cloudflare 隧道时，地址固定
 ```
 
+固定隧道的回源地址由 Cloudflare 云端配置控制，Tunnel Token 只用于连接隧道，
+不会自动把云端端口改成 gld 的端口。假设云端回源为 `http://127.0.0.1:28767`，启动时明确对齐：
+
+```bash
+gld start ~/code/my-project --port 28767 --tunnel cf:mcp.example.com
+```
+
+首次运行会安全询问 Token；脚本可加 `--token <token>`（会进入 shell 历史）。
+`start`、`share`、`upgrade` 统一使用 `--token`，旧 `--tunnel-token` 仍兼容。
+`--port` 只设置本地监听端口，不修改云端；已有本地客户端也要同步换端口。
+固定隧道启动后会检查公网响应，失败返回非零退出码并给出预期回源地址，
+已启动的本地服务和隧道保留，方便修正配置后复查；公网响应不等于 OAuth 全流程通过。
+`gld ls` 的隧道 `running` 仍是进程状态，不是实时公网健康状态；需要时执行 `gld health`。
+
 地址后来变了、项目换了目录、端口要改——`gld upgrade` 改完自动重启：
 
 ```bash

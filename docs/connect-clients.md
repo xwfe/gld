@@ -80,7 +80,7 @@ token 没配过的话，这条命令会当场问你要（输入不显示）。�
 脚本里——就直接带上：
 
 ```bash
-gld share --tunnel cf:mcp.example.com --tunnel-token <隧道 token>
+gld share --tunnel cf:mcp.example.com --token <隧道 token>
 ```
 
 写在命令行里的 token 会进 shell 历史，介意的话事先存起来：

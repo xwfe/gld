@@ -163,7 +163,7 @@ Options:
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
   --tunnel cf:mcp.example.com             Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
-  --tunnel cf:mcp.example.com --tunnel-token <token>
+  --tunnel cf:mcp.example.com --token <token>
                                           同上，token 直接写在命令里（会进 shell 历史）
   --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
   --tunnel off                            关掉公网入口，只留本地地址
@@ -535,7 +535,7 @@ Options:
       --json
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
-      --tunnel-token <TOKEN>
+      --token <TOKEN>
           Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
 
       --no-autostart
@@ -545,7 +545,7 @@ Options:
           FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
 
       --port <PORT>
-          本地监听端口（默认自动挑一个空闲的；端口被别的程序占了时用它换一个）
+          本地监听端口；Cloudflare 固定隧道需与云端回源端口一致（不会自动修改云端配置）
 
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
@@ -805,7 +805,7 @@ Options:
       --json
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
-      --tunnel-token <TOKEN>
+      --token <TOKEN>
           Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
 
       --no-autostart
@@ -877,7 +877,7 @@ Options:
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
-      --tunnel-token <TOKEN>
+      --token <TOKEN>
           Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
 
       --subdomain <SUB>

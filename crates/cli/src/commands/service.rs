@@ -110,13 +110,19 @@ pub async fn start(ctx: &mut Ctx, args: StartArgs) -> CliResult {
             profile.runtime.local_port
         };
         if current != port {
-            let _: gld_core::app::WorkspaceUpdate = ctx
+            let update: gld_core::app::WorkspaceUpdate = ctx
                 .backend
                 .call_typed(Request::SetWorkspaceFields {
                     target: target.clone(),
                     assignments: vec![(key.into(), port.to_string())],
                 })
                 .await?;
+            if let Some(failure) = update.restart_failures.first() {
+                return Err(CliError::new(format!(
+                    "端口配置已保存，但服务重启失败：{}",
+                    failure.error
+                )));
+            }
         }
     }
 
@@ -158,6 +164,13 @@ pub async fn start(ctx: &mut Ctx, args: StartArgs) -> CliResult {
         // 配了公网入口就是奔着"连上去"来的，直接把地址和凭据摆出来。
         // （`--json` 下这里是唯一一份输出，上面的服务状态不再单独打印。）
         return show_detail(ctx, &target, ListArgs::default()).await;
+    }
+    for kind in kinds(args.service, ServiceArg::Mcp) {
+        let service = match kind {
+            ServiceKind::Mcp => TunnelService::Mcp,
+            ServiceKind::Actions => TunnelService::Actions,
+        };
+        share::verify_named_public(ctx, &target, service).await?;
     }
     if !ctx.out.json_or(&results) {
         ctx.out
