@@ -161,13 +161,42 @@ gld list                                                  # 公网地址变成 h
 拿到的一定是临时地址（保存配置时会提醒一次）。不知道这件事就照着配，
 客户端里填的地址会在下次重启后失效，症状是连接器突然连不上而配置看着没动过。
 
-要固定地址又只想用 Cloudflare，就自己跑那条 Named Tunnel：在 Cloudflare 那边把回源
-指到全局入口的本地端口（默认 28765），本机 `cloudflared tunnel run`，
-然后只告诉 gld 对外地址是什么：
+#### 用 Cloudflare 固定域名接全局入口
 
-```bash
-gld gateway set --enabled true --tunnel off --public-url https://hub.example.com
-```
+要固定地址又只想用 Cloudflare，就自己跑那条 Named Tunnel——gld 不代管它，
+只需要知道对外地址是什么。四步：
+
+1. **在 Cloudflare 控制台建一条 Tunnel**，起个名字。建完它会给一条安装命令，
+   里面那串 `eyJ...` 就是这条隧道的 token。
+   （控制台里的位置：`Networking` → `Tunnels`。这个路径 Cloudflare 改过几次，
+   以官方的[创建隧道文档](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)为准。）
+2. **在本机把那条安装命令跑掉。** 它会把 cloudflared 装成系统服务并连上——
+   跟着开机自启，不用你每次手动 `cloudflared tunnel run`。
+3. **给这条隧道加一条路由**：域名填 `hub.example.com`，
+   **回源地址（Service URL）填 `http://127.0.0.1:28765`**——28765 是全局入口的
+   默认本地端口，改过 `gld gateway set --port` 就填你改成的那个。
+   写 `127.0.0.1` 而不是 `localhost`：入口只监听 IPv4 的 127.0.0.1，
+   而 `localhost` 在不少机器上先解析成 IPv6 的 `::1`，那边没人听，
+   cloudflared 会一直报 connection refused，看着像服务没起来。
+   这一步最容易错：填成某个工作区的 MCP 端口（28766 之类），请求就绕过了入口、
+   直接打到那一个工作区的服务上，而它不认 `/w/<id>` 这段前缀。症状是
+   `gld list` 给你的那个地址一直 404，把 `/w/<id>` 去掉反而通——
+   于是看着像 gld 把地址拼错了，其实是回源指错了端口。
+4. **告诉 gld 对外地址**：
+
+   ```bash
+   gld gateway set --enabled true --tunnel off --public-url https://hub.example.com
+   gld gateway start
+   gld gateway health          # 本地和公网 /health 分别通不通
+   ```
+
+`--tunnel off` 的意思是"隧道不用 gld 起"，不是"没有公网入口"——地址由
+`--public-url` 给。自建 Caddy / Nginx 反代也走这一套，把反代指到
+`127.0.0.1:28765` 即可。
+
+> **回源为什么填本机地址而不是你的域名**：cloudflared 跟全局入口跑在同一台机器上，
+> 它是从本机连过去的。填公网域名会绕一圈回到 Cloudflare，轻则变慢，
+> 重则自己转给自己转成死循环。
 
 入口自己的配置也归 `gld doctor` 管：引用的 FRP 配置被删了、选了 frp 却没填子域名、
 入口开着却既没隧道也没手动地址——这几种都会在「全局入口」那一节报出来，
