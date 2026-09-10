@@ -35,7 +35,7 @@ pub enum DoctorLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorCheck {
-    /// 归属：`环境` 或工作区名称。
+    /// 归属：`环境`、`全局入口` 或工作区名称。
     pub scope: String,
     pub label: String,
     pub level: DoctorLevel,
@@ -308,6 +308,7 @@ pub fn config_checks(
 
     checks.extend(duplicate_port_checks(profiles));
     checks.extend(duplicate_subdomain_checks(profiles));
+    checks.extend(gateway_checks(settings));
 
     for profile in profiles {
         let scope = profile.name.as_str();
@@ -335,6 +336,77 @@ pub fn config_checks(
 
         checks.extend(auth_checks(profile, settings, secret_present));
         checks.extend(tunnel_checks(profile, settings, secret_present));
+    }
+
+    checks
+}
+
+/// 全局入口自身的配置。
+///
+/// 它不属于任何工作区，所以逐工作区的那轮检查看不到它。最典型的漏网之鱼是
+/// `gld frp remove --force`：入口引用的 FRP 配置被删掉之后，工作区那边全绿，
+/// 只有 `gld gateway start` 会失败，而那时的报错只说隧道起不来。
+fn gateway_checks(settings: &AppSettings) -> Vec<DoctorCheck> {
+    const SCOPE: &str = "全局入口";
+    let gateway = &settings.global_gateway;
+    let mut checks = Vec::new();
+    if !gateway.enabled {
+        return checks;
+    }
+
+    match gateway.tunnel_type.as_str() {
+        "frp" => {
+            let profile_id = gateway.frp_profile_id.trim();
+            if profile_id.is_empty() {
+                checks.push(DoctorCheck::fail(
+                    SCOPE,
+                    "FRP 配置",
+                    "隧道类型是 frp，但没有选择 FRP 配置",
+                    "gld frp list 看有哪些，再 gld gateway set --frp-profile <名称>",
+                ));
+            } else if settings.find_frp_profile(profile_id).is_none() {
+                checks.push(DoctorCheck::fail(
+                    SCOPE,
+                    "FRP 配置",
+                    format!(
+                        "引用的 FRP 配置 {profile_id} 不存在（多半是被 gld frp remove --force 删掉了）"
+                    ),
+                    "gld frp list 看现有的，再 gld gateway set --frp-profile <名称>",
+                ));
+            } else if gateway.frp_subdomain.trim().is_empty() {
+                checks.push(DoctorCheck::fail(
+                    SCOPE,
+                    "子域名",
+                    "选了 FRP 配置但没有填子域名，公网地址无法生成",
+                    "gld gateway set --frp-subdomain <小写字母 / 数字 / 连字符>",
+                ));
+            } else {
+                checks.push(DoctorCheck::ok(
+                    SCOPE,
+                    "隧道",
+                    format!("frp · 子域名 {}", gateway.frp_subdomain),
+                ));
+            }
+        }
+        // quick 是它唯一支持的 Cloudflare 模式，地址每次重启都变。这不算错，
+        // 但得说出来：用户来跑 doctor 常常就是因为"地址昨天还好好的"。
+        "cloudflare" => checks.push(DoctorCheck::ok(
+            SCOPE,
+            "隧道",
+            "cloudflare quick：地址每次重启都会变，客户端要跟着改",
+        )),
+        _ if gateway.public_url.trim().is_empty() => checks.push(DoctorCheck::fail(
+            SCOPE,
+            "公网地址",
+            "入口已启用，但既没有隧道也没有手动地址，接入它的工作区拿不到公网地址",
+            "gld gateway set --tunnel frp --frp-profile <名称> --frp-subdomain <子域名>，\
+             或用现成地址：--tunnel off --public-url <地址>",
+        )),
+        _ => checks.push(DoctorCheck::ok(
+            SCOPE,
+            "公网地址",
+            gateway.public_url.clone(),
+        )),
     }
 
     checks
@@ -919,6 +991,84 @@ mod tests {
         assert_eq!(
             find(&checks, "MCP 公网入口").unwrap().level,
             DoctorLevel::Ok
+        );
+    }
+
+    /// 全局入口不属于任何工作区，逐工作区那轮检查覆盖不到它。
+    /// 少了这条，`gld frp remove --force` 留下的悬空引用在 doctor 里全绿，
+    /// 直到 `gld gateway start` 起不来。
+    #[test]
+    fn a_dangling_frp_reference_in_the_gateway_is_reported() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let item = profile("hub", temp.path().to_str().unwrap());
+        let mut settings = AppSettings::default();
+        settings.global_gateway.enabled = true;
+        settings.global_gateway.tunnel_type = "frp".into();
+        settings.global_gateway.frp_profile_id = "已经没了".into();
+        settings.global_gateway.frp_subdomain = "hub".into();
+
+        let checks = config_checks(std::slice::from_ref(&item), &settings, &all_present);
+        let entry = find(&checks, "FRP 配置").expect("gateway frp check");
+        assert_eq!(entry.level, DoctorLevel::Fail);
+        assert_eq!(entry.scope, "全局入口");
+        assert!(
+            entry.fix.contains("gld gateway set --frp-profile"),
+            "修复命令要指向网关自己的字段，不是 ws set：{}",
+            entry.fix
+        );
+
+        // 配置补回来就该恢复正常。
+        settings.frp_profiles.push(crate::settings::FrpProfile {
+            id: "已经没了".into(),
+            name: "又有了".into(),
+            server: "frp.example.com".into(),
+            server_port: 7000,
+        });
+        let checks = config_checks(std::slice::from_ref(&item), &settings, &all_present);
+        assert_eq!(
+            find(&checks, "隧道").map(|entry| entry.level),
+            Some(DoctorLevel::Ok)
+        );
+    }
+
+    /// 入口开着却没有任何拿地址的办法——接进来的工作区会一直没有公网地址，
+    /// 而它们各自的检查只看"入口启用了没有"，是绿的。
+    #[test]
+    fn an_enabled_gateway_without_any_address_is_reported() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let item = profile("hub", temp.path().to_str().unwrap());
+        let mut settings = AppSettings::default();
+        settings.global_gateway.enabled = true;
+        settings.global_gateway.tunnel_type = "none".into();
+
+        let checks = config_checks(std::slice::from_ref(&item), &settings, &all_present);
+        assert_eq!(
+            find(&checks, "公网地址").map(|entry| entry.level),
+            Some(DoctorLevel::Fail)
+        );
+
+        settings.global_gateway.public_url = "https://hub.example.com".into();
+        let checks = config_checks(std::slice::from_ref(&item), &settings, &all_present);
+        assert_eq!(
+            find(&checks, "公网地址").map(|entry| entry.level),
+            Some(DoctorLevel::Ok)
+        );
+    }
+
+    /// 入口没启用就一句都不该报——大多数人从来不用它，
+    /// 每次 doctor 多几行噪音会把真正的问题埋掉。
+    #[test]
+    fn a_disabled_gateway_says_nothing() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let item = profile("hub", temp.path().to_str().unwrap());
+        let mut settings = AppSettings::default();
+        settings.global_gateway.tunnel_type = "frp".into();
+        settings.global_gateway.frp_profile_id = "已经没了".into();
+
+        let checks = config_checks(&[item], &settings, &all_present);
+        assert!(
+            checks.iter().all(|entry| entry.scope != "全局入口"),
+            "入口没启用时不该有任何全局入口检查：{checks:?}"
         );
     }
 

@@ -83,9 +83,9 @@ gld tool call exec_command cmd='cargo test'
 | `未知字段「…」` | `ws set` 的 key 写错 | `gld ws fields` 列出全部。不写前缀就是改 MCP（`port` = `mcp.port`），改 Actions 要写全 `actions.port` |
 | `新配置已经保存，但服务没能用它起来` | 自动重启用新配置起服务时失败了，最常见是新端口被别的程序占着 | 上一行错误里写着具体原因；修好后 `gld restart` |
 | 改了配置没反应 | 只有受影响的那一侧会自动重启：改 `actions.*` 不会动 MCP；值没变（`auth=oauth` 设成本来就是 oauth）则不重启 | `gld ws show` 确认值真的变了；仍不对就 `gld restart` |
-| `没有名为「…」的 FRP 配置` | `frp-profile` 填了不存在的名称 / id | 报错里列出了已有的配置，照抄名称即可；一个都没有就先 `gld frp add` |
-| `FRP 配置「…」还在被这些地方用着` | 想删的配置还有工作区指着它 | 报错里列出了是谁在用；改到别的配置或 `gld share --off`，确定要留悬空引用就 `gld frp remove <id> --force` |
-| `引用的 FRP 配置 … 不存在` | 之前用 `--force` 删过，或手工改过 `profiles.json` | `gld frp list` 看现有的，再 `gld ws set frp-profile=<名称>` |
+| `没有名为「…」的 FRP 配置` | `ws set frp-profile=` 或 `gateway set --frp-profile` 填了不存在的名称 / id | 报错里列出了已有的配置，照抄名称即可；一个都没有就先 `gld frp add`。两处都认名称、id 和 ≥4 位的 id 前缀 |
+| `FRP 配置「…」还在被这些地方用着` | 想删的配置还有工作区或全局入口指着它 | 报错里列出了是谁在用；改到别的配置或 `gld share --off`，确定要留悬空引用就 `gld frp remove <id> --force` |
+| `引用的 FRP 配置 … 不存在` | 之前用 `--force` 删过，或手工改过 `profiles.json` | `gld frp list` 看现有的，再 `gld ws set frp-profile=<名称>`；悬空的是全局入口就 `gld gateway set --frp-profile <名称>` |
 | `mcp.frp-subdomain 无效` | 子域名要拼进 `https://<子域名>.<frps 域名>`，只能用小写字母、数字和中间的连字符 | 去掉点、空格、大写 |
 | `mcp.public-url 无效：…（要带协议头）` | 手动公网地址写成了 `example.com` | 写成 `https://example.com` |
 | `检测到更新的隧道配置，已拒绝用旧请求覆盖` | 隧道重启失败要回滚时，发现配置已被别处改过 | 属于保护机制；重新 `gld tunnel restart` 即可 |

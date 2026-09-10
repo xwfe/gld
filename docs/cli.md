@@ -1331,7 +1331,7 @@ Options:
                                 用现成地址）
       --public-url <URL>        手动公网地址（tunnel=none 时使用）
       --timeout <SECS>          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --frp-profile <ID>        FRP 服务器配置 id
+      --frp-profile <配置名|id>    FRP 服务器配置：名称、id 或 id 前缀（≥4 位），见 gld frp list
       --home <DIR>              数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --frp-subdomain <SUB>     FRP 子域名
       --no-color                关闭彩色输出（也可设置环境变量 NO_COLOR）

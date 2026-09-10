@@ -708,8 +708,8 @@ pub struct GatewaySetArgs {
     /// 手动公网地址（tunnel=none 时使用）
     #[arg(long, value_name = "URL")]
     pub public_url: Option<String>,
-    /// FRP 服务器配置 id
-    #[arg(long, value_name = "ID")]
+    /// FRP 服务器配置：名称、id 或 id 前缀（≥4 位），见 gld frp list
+    #[arg(long, value_name = "配置名|id")]
     pub frp_profile: Option<String>,
     /// FRP 子域名
     #[arg(long, value_name = "SUB")]

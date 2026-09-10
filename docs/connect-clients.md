@@ -137,11 +137,13 @@ gld share --off            # 停隧道、清掉公网地址，本地地址照常
 （入口是全局的，不属于某个工作区）：
 
 ```bash
-gld frp list                                              # 拿 --frp-profile 要的那个 id
-gld gateway set --enabled true --tunnel frp --frp-profile <id> --frp-subdomain hub
+gld gateway set --enabled true --tunnel frp --frp-profile 公司 --frp-subdomain hub
 gld ws set global-gateway=true                            # 每个要走这条路的工作区都设一次，自动重启
 gld list                                                  # 公网地址变成 https://<入口域名>/w/<id>/mcp
 ```
+
+`--frp-profile` 填 `gld frp add --name` 时给的名字就行（也认 id 和 ≥4 位的 id 前缀，
+`gld frp list` 能看到）。填了不存在的会当场拒绝并列出已有的，不会等到起隧道才报错。
 
 工作区设了 `global-gateway=true` 之后，`gld start` 会把全局入口一起拉起来，
 不用再单独 `gld gateway start`。
@@ -166,6 +168,10 @@ gld list                                                  # 公网地址变成 h
 ```bash
 gld gateway set --enabled true --tunnel off --public-url https://hub.example.com
 ```
+
+入口自己的配置也归 `gld doctor` 管：引用的 FRP 配置被删了、选了 frp 却没填子域名、
+入口开着却既没隧道也没手动地址——这几种都会在「全局入口」那一节报出来，
+每条下面直接写着该跑哪条命令。
 
 **客户端那边仍然是一个工作区一条连接器**，因为每个工作区的 URL 不一样
 （`/w/<id>/mcp` 里的 id 不同）。全局入口省掉的是隧道和域名，不是连接器条目。

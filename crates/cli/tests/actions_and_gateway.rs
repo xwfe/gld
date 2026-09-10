@@ -240,6 +240,92 @@ fn global_gateway_routes_only_the_workspaces_that_opted_in() {
     env.ok(&["stop"]);
 }
 
+/// `gateway set --frp-profile` 收的写法要和工作区那边一模一样。
+///
+/// 用户在 `gld frp add --name 公司` 里给的是名字，`gld ws set frp-profile=公司`
+/// 也认名字。网关这边以前只认 32 位 id：同一个名字在一处能用、在另一处报
+/// "没有名为「公司」的 FRP 配置"，而报错还建议你去 `gld frp add` 再建一个。
+#[test]
+fn the_gateway_takes_an_frp_profile_by_name_just_like_a_workspace_does() {
+    let env = Env::new();
+    env.ok(&[
+        "frp",
+        "add",
+        "--name",
+        "公司",
+        "--server",
+        "frp.example.com",
+        "--port",
+        "7000",
+    ]);
+    let id = env.json(&["--json", "frp", "list"])[0]["id"]
+        .as_str()
+        .expect("frp profile id")
+        .to_string();
+
+    // 名称。
+    env.ok(&["gateway", "set", "--tunnel", "frp", "--frp-profile", "公司"]);
+    assert_eq!(
+        gateway_frp_profile(&env),
+        id,
+        "按名称给的时候，存下来的应当是解析后的 id"
+    );
+
+    // id 前缀（≥4 位，和工作区 selector 同一个口径）。
+    env.ok(&["gateway", "set", "--frp-profile", &id[..4]]);
+    assert_eq!(gateway_frp_profile(&env), id);
+
+    // 完整 id 当然也认。
+    env.ok(&["gateway", "set", "--frp-profile", &id]);
+    assert_eq!(gateway_frp_profile(&env), id);
+
+    // 填错的名字必须当场拒，并且把有哪些可选直接列出来——否则要等到
+    // `gateway start` 才发现，那时的报错只说隧道起不来。
+    let rejected = env.gld(&["gateway", "set", "--frp-profile", "不存在"]);
+    assert!(
+        !rejected.status.success(),
+        "不存在的 FRP 配置不该被静默接受"
+    );
+    let message = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        message.contains("没有名为「不存在」"),
+        "报错要点名是哪个值不对：{message}"
+    );
+    assert!(
+        message.contains("公司") && message.contains(&id),
+        "报错里要能直接看到已有的配置，不用再跑 gld frp list：{message}"
+    );
+    assert_eq!(
+        gateway_frp_profile(&env),
+        id,
+        "被拒的那次不能把原来的值改掉"
+    );
+
+    // 改别的字段不受牵连：命令行是"读旧配置→改给出的项→整体发回"，
+    // frp_profile_id 每次都原样带上。要是每次都重新校验，一个已经失效的
+    // FRP 配置会连改端口都失败，而用户根本没碰那个字段。
+    //
+    // 失效是真会发生的：`frp remove` 平时会拦住还被引用的配置（报错里就点名
+    // 全局入口），但 `--force` 是它自己给的出路，走完就留下一个悬空引用。
+    env.ok(&["frp", "remove", &id, "--force"]);
+    env.ok(&["gateway", "set", "--port", "28999"]);
+    assert_eq!(
+        env.json(&["--json", "gateway", "show"])["config"]["localPort"],
+        28999,
+        "一个失效的 frp-profile 不该拖累无关字段"
+    );
+}
+
+/// 字段名取不到时直接把整段打出来：`unwrap_or_default()` 会把"字段改名了"
+/// 变成一句"期望 abc 实际空字符串"，查起来要重跑一遍才知道是断言写错了。
+fn gateway_frp_profile(env: &Env) -> String {
+    let show = env.json(&["--json", "gateway", "show"]);
+    show["config"]["frpProfileId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("gateway show 里没有 config.frpProfileId：{show}"))
+        .to_string()
+}
+
 fn connect_openapi_url(env: &Env) -> String {
     env.json(&["--json", "list"])["actions"]["openapi_url"]
         .as_str()

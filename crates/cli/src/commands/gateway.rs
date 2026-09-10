@@ -1,5 +1,5 @@
 use gld_core::global_gateway::{GatewayHealthItem, GlobalGatewayStatusDto};
-use gld_core::settings::GlobalGatewayConfig;
+use gld_core::settings::{FrpProfile, GlobalGatewayConfig};
 use gld_daemon::Request;
 use serde_json::json;
 
@@ -21,6 +21,13 @@ pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
             {
                 return Ok(());
             }
+            // 存的是 id，但用户是按名字配的（`--frp-profile 公司`）。只印 id 的话，
+            // 想确认自己选对了没有还得再跑一趟 gld frp list 对一遍。
+            let profiles: Vec<FrpProfile> = ctx
+                .backend
+                .call_typed(Request::ListFrpProfiles)
+                .await
+                .unwrap_or_default();
             ctx.out.kv(&[
                 ("启用", yes_no(config.enabled).to_string()),
                 (
@@ -31,7 +38,10 @@ pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
                 ("公网地址", or_dash(&status.public_url)),
                 ("端口", config.local_port.to_string()),
                 ("隧道", tunnel_display(&config)),
-                ("FRP 配置", or_dash(&config.frp_profile_id)),
+                (
+                    "FRP 配置",
+                    frp_profile_display(&config.frp_profile_id, &profiles),
+                ),
                 ("FRP 子域名", or_dash(&config.frp_subdomain)),
                 ("使用代理", yes_no(config.use_proxy).to_string()),
             ]);
@@ -89,6 +99,21 @@ pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
             }
             Ok(())
         }
+    }
+}
+
+/// 把存下来的 FRP 配置 id 换成"名称（id 前 8 位）"。
+///
+/// 找不到就直接说它没了：这是 `gld frp remove --force` 之后的样子，
+/// 光印一个陌生 id，用户只会以为是自己看花了眼。
+fn frp_profile_display(id: &str, profiles: &[FrpProfile]) -> String {
+    let id = id.trim();
+    if id.is_empty() {
+        return or_dash("");
+    }
+    match profiles.iter().find(|item| item.id == id) {
+        Some(found) => format!("{}（{}）", found.name, &id[..id.len().min(8)]),
+        None => format!("{id}（已不存在，gld gateway set --frp-profile <名称> 改掉）"),
     }
 }
 

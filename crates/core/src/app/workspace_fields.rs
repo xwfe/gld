@@ -200,7 +200,7 @@ const FIELDS: &[Field] = &[
         "FRP 配置的名称或 id，或空",
         "使用哪个 FRP 服务器配置（见 gld frp list）",
         |p, v, ctx| {
-            p.tunnel.frp_profile_id = resolve_frp_profile(v, ctx)?;
+            p.tunnel.frp_profile_id = resolve_frp_profile(v, &ctx.frp_profiles)?;
             Ok(())
         }
     ),
@@ -318,7 +318,7 @@ const FIELDS: &[Field] = &[
         "FRP 配置的名称或 id，或空",
         "Actions 使用的 FRP 服务器配置",
         |p, v, ctx| {
-            p.actions.frp_profile_id = resolve_frp_profile(v, ctx)?;
+            p.actions.frp_profile_id = resolve_frp_profile(v, &ctx.frp_profiles)?;
             Ok(())
         }
     ),
@@ -568,17 +568,19 @@ fn parse_public_url(key: &str, value: &str) -> AppResult<String> {
 /// 以前这里是 `v.trim().into()`：填错名字会被静默接受，`gld start` 之后
 /// 没有公网地址，得跑 `gld doctor` 才知道是这个字段的问题。而且用户在
 /// `gld frp add --name 公司` 里给的是名字，来这里却只能填 id，两边对不上。
-fn resolve_frp_profile(raw: &str, ctx: &FieldContext) -> AppResult<String> {
+///
+/// 全局入口的 `gld gateway set --frp-profile` 也走这里——两处都是"用户给一个
+/// FRP 配置的称呼"，认的写法必须一样，否则同一个名字在工作区能用、在网关报错。
+pub(super) fn resolve_frp_profile(raw: &str, profiles: &[FrpProfile]) -> AppResult<String> {
     let value = raw.trim();
     if value.is_empty() {
         return Ok(String::new());
     }
-    if let Some(found) = ctx.frp_profiles.iter().find(|item| item.id == value) {
+    if let Some(found) = profiles.iter().find(|item| item.id == value) {
         return Ok(found.id.clone());
     }
 
-    let by_name: Vec<&FrpProfile> = ctx
-        .frp_profiles
+    let by_name: Vec<&FrpProfile> = profiles
         .iter()
         .filter(|item| item.name.eq_ignore_ascii_case(value))
         .collect();
@@ -590,8 +592,7 @@ fn resolve_frp_profile(raw: &str, ctx: &FieldContext) -> AppResult<String> {
 
     // 和工作区 selector 同一个口径：id 前缀至少 4 位才允许简写。
     if value.len() >= 4 {
-        let by_prefix: Vec<&FrpProfile> = ctx
-            .frp_profiles
+        let by_prefix: Vec<&FrpProfile> = profiles
             .iter()
             .filter(|item| item.id.starts_with(value))
             .collect();
@@ -602,7 +603,7 @@ fn resolve_frp_profile(raw: &str, ctx: &FieldContext) -> AppResult<String> {
         }
     }
 
-    Err(unknown_frp_profile(value, &ctx.frp_profiles))
+    Err(unknown_frp_profile(value, profiles))
 }
 
 fn unknown_frp_profile(value: &str, profiles: &[FrpProfile]) -> AppError {
