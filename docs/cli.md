@@ -111,7 +111,7 @@ Commands:
   doctor       体检：检查配置是否自洽，并给出每个问题的修复命令
   tool         直接调用工具内核：不接 AI 客户端也能验证 Agent 会看到什么
   tunnel       管理公网隧道（FRP / Cloudflare）
-  gateway      管理全局共享公网入口（多个工作区共用一个域名，按 /w/<id> 路由）
+  gateway      管理全局共享公网入口（多个工作区共用一个域名，按 /w/<id> 路由） [alias: gw]
   secret       查看 / 设置 / 重新生成密钥（Bearer Token、OAuth 口令、Actions API Key…）
   frp          管理 FRP 服务器配置（多个工作区可复用同一台 frps）
   settings     全局设置：出站代理、局域网访问、启动时恢复、全局 Agent 说明
@@ -1533,7 +1533,7 @@ Options:
 Usage: gld frp [OPTIONS] <COMMAND>
 
 Commands:
-  list    列出 FRP 服务器配置
+  list    列出 FRP 服务器配置 [alias: ls]
   add     新增
   update  修改（只改给出的项）
   remove  删除（还被工作区引用时会拒绝，除非加 --force） [alias: rm]

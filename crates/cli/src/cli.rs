@@ -133,6 +133,10 @@ pub enum Command {
     Ps,
 
     /// 查看工作区日志尾部，或用 -f 持续跟随
+    // 隐藏别名：git 是 log、docker 是 logs，两边习惯的人都不该被一句
+    // "unrecognized subcommand" 拦住。不用 visible_alias 是因为它只防手滑，
+    // 不值得占帮助里的一行。
+    #[command(alias = "log")]
     Logs(LogsArgs),
 
     /// 列出工作区的连接信息：地址、认证方式、凭据、隧道
@@ -197,7 +201,7 @@ pub enum Command {
     Tunnel(TunnelCmd),
 
     /// 管理全局共享公网入口（多个工作区共用一个域名，按 /w/<id> 路由）
-    #[command(subcommand)]
+    #[command(subcommand, visible_alias = "gw")]
     Gateway(GatewayCmd),
 
     /// 查看 / 设置 / 重新生成密钥（Bearer Token、OAuth 口令、Actions API Key…）
@@ -226,6 +230,7 @@ pub enum Command {
     Context(ContextArgs),
 
     /// 生成 shell 补全脚本
+    #[command(alias = "completion")]
     Completions {
         /// bash | zsh | fish | powershell | elvish
         shell: clap_complete::Shell,
@@ -763,6 +768,7 @@ pub enum SharedSecretCmd {
 #[derive(Debug, Subcommand)]
 pub enum FrpCmd {
     /// 列出 FRP 服务器配置
+    #[command(visible_alias = "ls")]
     List,
     /// 新增
     Add {

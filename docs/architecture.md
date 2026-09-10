@@ -116,6 +116,9 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
    若它必须由守护进程执行，加进 `needs_daemon()`；耗时长加进 `is_slow()`。
 3. `daemon/src/dispatch.rs`：新增一个 match 分支（漏了会编译失败）。
 4. `cli/src/cli.rs`：加子命令与帮助文本；`cli/src/commands/workspace.rs`：调用并渲染。
+   子命令叫 `list` / `remove` 就得带上 `visible_alias`（`ls` / `rm`）——
+   `crates/cli/tests/aliases_are_consistent.rs` 守着这条，忘了会红，
+   同一层里两条命令抢同一个名字也会被它拦下来。
 5. `scripts/gen-cli-docs.sh` 的命令表加一行，重新生成 `docs/cli.md`。
 6. 测试：core 里给 `App` 方法写单元测试；命令行行为进 `crates/cli/tests/` 下按主题分的文件
    （生命周期进 `daemon_lifecycle.rs`、工作区入口进 `start_and_upgrade.rs`……），
