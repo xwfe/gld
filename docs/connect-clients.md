@@ -132,14 +132,45 @@ gld share --off            # 停隧道、清掉公网地址，本地地址照常
 
 ### 多个项目共用一个域名：全局入口
 
-不想每个工作区都配子域名时，开一个全局入口，所有工作区走 `/w/<工作区id>` 前缀。
-这条路不走 `gld share`（入口是全局的，不属于某个工作区）：
+不想每个工作区都占一个子域名时，开一个全局入口：一条隧道、一个域名，所有工作区
+按路径分流成 `https://<入口域名>/w/<工作区id>/mcp`。这条路不走 `gld share`
+（入口是全局的，不属于某个工作区）：
 
 ```bash
-gld gateway set --enabled true --tunnel cf                 # 或 --tunnel frp --frp-profile <id> --frp-subdomain hub
-gld ws set global-gateway=true                            # 自动重启，start 时会把全局入口一起拉起来
+gld frp list                                              # 拿 --frp-profile 要的那个 id
+gld gateway set --enabled true --tunnel frp --frp-profile <id> --frp-subdomain hub
+gld ws set global-gateway=true                            # 每个要走这条路的工作区都设一次，自动重启
 gld list                                                  # 公网地址变成 https://<入口域名>/w/<id>/mcp
 ```
+
+工作区设了 `global-gateway=true` 之后，`gld start` 会把全局入口一起拉起来，
+不用再单独 `gld gateway start`。
+
+入口的三种走法，**只有后两种地址是固定的**：
+
+| `--tunnel` | 地址长什么样 | 需要什么 |
+| --- | --- | --- |
+| `cf` | `https://xxx.trycloudflare.com`，**每次重启都变** | `cloudflared` 在 PATH 里，别的什么都不用配 |
+| `frp` | `https://<子域名>.<frps 域名>`，固定 | 一台跑 frps 的公网机器，先 `gld frp add` |
+| `off` + `--public-url` | 你自己定，固定 | 自己的反代或 Named Tunnel，回源到 `127.0.0.1:28765` |
+
+**全局入口的 Cloudflare 没有"固定域名"这一档。** 工作区级的
+`gld share --tunnel cf:mcp.example.com` 能用固定域名，全局入口不行——`--tunnel cf`
+拿到的一定是临时地址（保存配置时会提醒一次）。不知道这件事就照着配，
+客户端里填的地址会在下次重启后失效，症状是连接器突然连不上而配置看着没动过。
+
+要固定地址又只想用 Cloudflare，就自己跑那条 Named Tunnel：在 Cloudflare 那边把回源
+指到全局入口的本地端口（默认 28765），本机 `cloudflared tunnel run`，
+然后只告诉 gld 对外地址是什么：
+
+```bash
+gld gateway set --enabled true --tunnel off --public-url https://hub.example.com
+```
+
+**客户端那边仍然是一个工作区一条连接器**，因为每个工作区的 URL 不一样
+（`/w/<id>/mcp` 里的 id 不同）。全局入口省掉的是隧道和域名，不是连接器条目。
+想让好几个项目共用一条连接器，见
+[concepts.md 一个工作区能不能装多个项目](concepts.md#一个工作区能不能装多个项目)。
 
 ### 在 ChatGPT 里配置
 

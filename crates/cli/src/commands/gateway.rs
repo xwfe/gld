@@ -30,7 +30,7 @@ pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
                 ("本地地址", status.local_url.clone()),
                 ("公网地址", or_dash(&status.public_url)),
                 ("端口", config.local_port.to_string()),
-                ("隧道", config.tunnel_type.clone()),
+                ("隧道", tunnel_display(&config)),
                 ("FRP 配置", or_dash(&config.frp_profile_id)),
                 ("FRP 子域名", or_dash(&config.frp_subdomain)),
                 ("使用代理", yes_no(config.use_proxy).to_string()),
@@ -50,6 +50,15 @@ pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
             if !ctx.out.json_or(&saved) {
                 ctx.out.line(
                     "已保存全局入口配置。若它正在运行，执行 `gld gateway start` 应用新配置。",
+                );
+            }
+            // 全局入口的 cloudflare 只有 quick 一种走法，地址每次重启都变，而客户端
+            // 那边是照着地址配死的。不在保存的当口说，用户要等到重启后连不上才发现。
+            if saved.tunnel_type == "cloudflare" {
+                ctx.out.note(
+                    "注意：全局入口的 Cloudflare 是临时地址（*.trycloudflare.com），每次重启都会变，客户端要跟着改。\n\
+                     要固定地址：--tunnel frp --frp-profile <id> --frp-subdomain <子域名>，\
+                     或自己用反代 / Named Tunnel 回源到本地端口后 --tunnel off --public-url <地址>。",
                 );
             }
             Ok(())
@@ -80,6 +89,16 @@ pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
             }
             Ok(())
         }
+    }
+}
+
+/// 隧道类型后面跟一句地址固不固定——`cloudflare` 这一项光看名字看不出它是临时地址。
+fn tunnel_display(config: &GlobalGatewayConfig) -> String {
+    match config.tunnel_type.as_str() {
+        "cloudflare" => "cloudflare（临时地址，重启就变）".to_string(),
+        "none" | "" if config.public_url.is_empty() => "none（没有公网入口）".to_string(),
+        "none" | "" => "none（用 --public-url 给的现成地址）".to_string(),
+        other => other.to_string(),
     }
 }
 

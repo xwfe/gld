@@ -1327,7 +1327,8 @@ Options:
       --json                    以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --port <PORT>             本地端口
       --no-autostart            守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --tunnel <TYPE>           隧道类型：cf（Cloudflare）| frp | off（配合 --public-url 用现成地址）
+      --tunnel <TYPE>           隧道类型：cf（Cloudflare 临时地址，重启就变）| frp（固定子域名）| off（配合 --public-url
+                                用现成地址）
       --public-url <URL>        手动公网地址（tunnel=none 时使用）
       --timeout <SECS>          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --frp-profile <ID>        FRP 服务器配置 id

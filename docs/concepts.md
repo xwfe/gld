@@ -5,11 +5,11 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 
 各节都能单独看，按需跳：
 
-- [工作区](#工作区workspace) · [MCP 和 Actions 是两条线路](#mcp-和-actions-是两条线路)
-- [共享密钥池](#共享密钥池shared-secrets) · [拿公网地址的三种方式](#拿公网地址的三种方式)
-- [工具集 tool-profile](#工具集tool-profile) · [权限模式 permission-mode](#权限模式permission-mode)
-- [Planning 三种模式](#planning-三种模式) · [历史会话档案](#历史会话档案与-history-context)
-- [Durable Task 的工作区基线](#durable-task-的工作区基线)
+- [工作区](#工作区workspace) · [一个工作区能不能装多个项目](#一个工作区能不能装多个项目)
+- [MCP 和 Actions 是两条线路](#mcp-和-actions-是两条线路) · [共享密钥池](#共享密钥池shared-secrets)
+- [拿公网地址的三种方式](#拿公网地址的三种方式) · [工具集 tool-profile](#工具集tool-profile)
+- [权限模式 permission-mode](#权限模式permission-mode) · [Planning 三种模式](#planning-三种模式)
+- [历史会话档案](#历史会话档案与-history-context) · [Durable Task 的工作区基线](#durable-task-的工作区基线)
 
 ---
 
@@ -48,6 +48,47 @@ AI 通过 MCP 连上来之后，**能读能写的范围就是这个目录**。�
 > 目录，而不是碰巧唯一的那个别的项目——所以它们走"登记当前目录"，不走这条回退。
 
 > 名称重复时 `-w api` 会报"匹配到多个工作区"并列出来，改用 id 前缀即可。
+
+### 一个工作区能不能装多个项目
+
+能。把**父目录**登记成工作区，让 AI 用 `set_default_cwd` 切到某个子项目：
+
+```text
+你：先 set_default_cwd 到 proj-a，再看看 git 状态
+AI：（调 set_default_cwd path=proj-a，然后 git_status）
+```
+
+切过去之后相对路径会自动补前缀：`read_file path=README.md` 读到的是
+`proj-a/README.md`，`git_status` 返回的是 proj-a 那个仓库的分支和改动，
+`exec_command` 的工作目录变成 `<工作区>/proj-a`。子项目各自的 `.git` 照常识别。
+
+好处是**客户端里只配一条连接器**就够了。代价是下面五条：
+
+**1. 它是默认值，不是边界。** 路径以 `..` 开头或写成绝对路径就不加前缀——
+在 proj-b 里执行 `exec_command cmd='cat ../proj-a/README.md'` 照样读得到隔壁项目。
+真正的硬边界只有工作区根，也就是那个父目录。**没有"锁死在 proj-a"这回事**，
+指望 AI 不碰兄弟项目只能靠它自觉。
+
+**2. 整个服务共用一份，不是一个会话一份。** 在 ChatGPT 里切到 proj-a 的同时，
+连着同一个工作区的 Cursor 也跟着切过去了。单人单会话没问题；两个会话同时开着
+各改各的项目，会出现"我明明在 proj-a，读出来的却是 proj-b 的文件"。
+
+**3. 说明文件只读工作区根那一份。** `AGENTS.md` / `CLAUDE.md` 只在父目录里找，
+不往子目录递归，proj-a 自己的 `CLAUDE.md` 不会注入。
+
+**4. Planning 和 History 全混在一起。** `.gld/planning/state.json` 和
+`docs/history-session/` 都落在父目录根上，十个项目的 Goal 和会话档案堆成一堆。
+
+**5. [Durable Task](#durable-task-的工作区基线) 的指纹是整棵树扫。**
+子项目一多，每次写操作前都要重扫一遍父目录，明显变慢。项目多就别开它。
+
+怎么选：
+
+| 情况 | 建议 |
+| --- | --- |
+| 项目不多，边界要清楚 | 一个项目一个工作区，公网入口用[全局入口](connect-clients.md#多个项目共用一个域名全局入口)共享——一条隧道，N 条连接器 |
+| 一堆自己的小项目和脚本 | 父目录做一个工作区，一条连接器，对话开头让 AI 先 `set_default_cwd` |
+| 两者都有 | 主力项目各自独立工作区，杂项归到一个父目录工作区 |
 
 ---
 
@@ -137,7 +178,7 @@ ChatGPT 跑在 OpenAI 的服务器上，只能连公网 HTTPS，`127.0.0.1` 填�
 | 方式 | 地址长什么样 | 谁在转发 | 什么时候选 |
 | --- | --- | --- | --- |
 | **独立隧道** | `https://xxx.trycloudflare.com/mcp` | 本机跑的 cloudflared / frpc 子进程 | 默认选它。一个工作区一条隧道 |
-| **全局入口** | `https://hub.example.com/w/<工作区id>/mcp` | 本机一个反向代理 + 一条隧道，按路径分流 | 项目多、不想每个都占一个子域名 |
+| **全局入口** | `https://hub.example.com/w/<工作区id>/mcp` | 本机一个反向代理 + 一条隧道，按路径分流 | 项目多、不想每个都占一个子域名。**要固定地址只能走 frp 或自建反代，它的 cf 只有临时地址** |
 | **手动地址** | 你自己定 | 你自己的 Caddy / Nginx | 已经有公网机器和反代，不需要 gld 打洞 |
 
 前两种要装 `cloudflared` 或 `frpc`（gld 不代管，PATH 里有就自动认）。

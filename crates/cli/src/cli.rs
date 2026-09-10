@@ -702,7 +702,7 @@ pub struct GatewaySetArgs {
     /// 本地端口
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
-    /// 隧道类型：cf（Cloudflare）| frp | off（配合 --public-url 用现成地址）
+    /// 隧道类型：cf（Cloudflare 临时地址，重启就变）| frp（固定子域名）| off（配合 --public-url 用现成地址）
     #[arg(long, value_name = "TYPE")]
     pub tunnel: Option<String>,
     /// 手动公网地址（tunnel=none 时使用）
