@@ -26,11 +26,17 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
         && args.actions_port.is_none()
         && args.auth.is_none()
     {
-        return Err(CliError::new(
-            "没说要改什么。可改的：--path 项目目录、--tunnel 公网入口、--off 关公网、\n\
+        let selector = args
+            .workspace
+            .as_deref()
+            .or(ctx.target.selector.as_deref())
+            .unwrap_or_default();
+        return Err(CliError::new(format!(
+            "{}没说要改什么。可改的：--path 项目目录、--tunnel 公网入口、--off 关公网、\n\
              --name 名称、--port MCP 端口、--actions-port、--auth 认证方式。\n\
              更多字段：gld workspace fields",
-        ));
+            path_selector_hint(selector)
+        )));
     }
 
     let profile = resolve(ctx, args.workspace.as_deref()).await?;
@@ -125,6 +131,26 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
 ///
 /// 这里不自动登记：`upgrade` 是"改一个已有工作区"，目录没登记过时凭空
 /// 建一个再改它，等于把 `start` 的语义偷偷塞进来。
+/// 用路径挑了工作区、却一个要改的字段都没给时，先说清那个路径是干什么的。
+///
+/// `-w <路径>` 和 `--path <路径>` 都吃路径，方向却相反：一个是"改哪个工作区"，
+/// 一个是"把目录改成这个"。光列出 `--path 项目目录`，刚给过一个路径的人只会
+/// 想"我不是已经给了吗"。只在选择器看着像路径时说——`-w api` 这种没有歧义，
+/// 多一句反而是噪音。
+fn path_selector_hint(selector: &str) -> String {
+    let looks_like_path = selector.contains('/')
+        || selector.contains('\\')
+        || matches!(selector, "." | "..")
+        || selector.starts_with('~');
+    if !looks_like_path {
+        return String::new();
+    }
+    format!(
+        "「{selector}」是在挑要改哪个工作区，不是要把目录改成它。\n\
+         真要换项目目录：gld upgrade --path {selector}\n"
+    )
+}
+
 async fn resolve(ctx: &mut Ctx, selector: Option<&str>) -> CliResult<WorkspaceProfile> {
     if let Some(selector) = selector {
         if ctx.explicit_workspace {

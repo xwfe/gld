@@ -178,6 +178,43 @@ fn a_path_and_dash_w_together_are_refused() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("不知道该听哪个"));
 }
 
+/// 用路径挑了工作区却没说要改什么时，得先讲清那个路径是干什么用的。
+///
+/// `-w <路径>` 和 `--path <路径>` 都收路径，方向却相反：一个是"改哪个工作区"，
+/// 一个是"把目录改成这个"。光回一句"没说要改什么。可改的：--path 项目目录…"，
+/// 刚给过一个路径的人只会想"我不是已经给了吗"，然后卡在同一条命令上。
+#[test]
+fn a_path_used_as_a_selector_is_told_apart_from_dash_dash_path() {
+    let env = Env::new();
+    env.ok(&["ws", "add", ".", "--name", "one"]);
+    let path = env.project.path().to_str().unwrap().to_string();
+
+    for args in [
+        vec!["upgrade", "--workspace", path.as_str()],
+        vec!["upgrade", path.as_str()],
+    ] {
+        let output = env.gld(&args);
+        assert!(!output.status.success(), "{args:?} 该失败：什么都没让它改");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("是在挑要改哪个工作区"),
+            "{args:?} 没解释那个路径的作用：{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("--path {path}")),
+            "{args:?} 没给出真要换目录时该怎么写：{stderr}"
+        );
+    }
+
+    // 选择器不像路径时不该多这一句——`-w one` 本来就没有歧义。
+    let stderr = String::from_utf8_lossy(&env.gld(&["upgrade", "-w", "one"]).stderr).into_owned();
+    assert!(stderr.contains("没说要改什么"), "{stderr}");
+    assert!(
+        !stderr.contains("是在挑要改哪个工作区"),
+        "名称没有歧义，不该多解释一句：{stderr}"
+    );
+}
+
 /// `gld start <目录> --tunnel <地址>`：登记、配公网入口、启动、报连接信息，一步到位。
 #[test]
 fn start_with_a_tunnel_lands_on_a_usable_public_endpoint() {

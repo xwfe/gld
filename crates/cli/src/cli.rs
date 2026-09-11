@@ -554,7 +554,7 @@ pub struct UpgradeArgs {
     #[arg(id = "target", value_name = "WS")]
     pub workspace: Option<String>,
 
-    /// 换项目根目录（目录要已存在）
+    /// 把项目根目录换成这个（要已存在）；挑哪个工作区用上面的 WS 或 -w，不是它
     #[arg(long, value_name = "DIR")]
     pub path: Option<PathBuf>,
 
