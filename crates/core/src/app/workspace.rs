@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::App;
 use crate::error::{AppError, AppResult};
+use crate::logs::append_profile_log;
 use crate::runtime::ServiceKind;
 use crate::tunnel::drop_workspace as drop_tunnel_workspace;
 use crate::workspace::resources::{
@@ -269,6 +270,17 @@ impl App {
             runtime.drop_workspace(&profile);
             Ok(())
         })?;
+        // 已授权客户端的注册表跟着工作区一起走。留着没用：工作区 id 不会复用，
+        // 里面的条目永远不会再被命中，只是把 client_secret 留在磁盘上。
+        for scope in [id.to_string(), format!("{id}-actions")] {
+            if let Err(error) = crate::auth::remove_client_registry(&scope) {
+                append_profile_log(
+                    id,
+                    "stderr.log",
+                    &format!("[oauth] 清不掉客户端注册表 {scope}：{error}"),
+                );
+            }
+        }
         self.with_data(|store| {
             store.remove(id)?;
             store.remove_workspace_secrets(id)?;

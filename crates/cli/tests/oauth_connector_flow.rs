@@ -61,6 +61,152 @@ fn authorize(port: u16, path: &str, client_id: &str, challenge: &str, password: 
     )
 }
 
+/// 把一个连接器从头接进来：动态注册 → 授权页输口令 → 换 token。
+/// 返回 (client_id, access_token, refresh_token, token 端点路径)。
+fn connect_a_connector(port: u16, password: &str) -> (String, String, String, String) {
+    let metadata = get(port, "/.well-known/oauth-authorization-server").json();
+    let register_path = endpoint_path(&metadata, "registration_endpoint");
+    let authorize_path = endpoint_path(&metadata, "authorization_endpoint");
+    let token_path = endpoint_path(&metadata, "token_endpoint");
+
+    let registered = post_json(
+        port,
+        &register_path,
+        &serde_json::json!({
+            "redirect_uris": [REDIRECT],
+            "client_name": "integration-test",
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        })
+        .to_string(),
+        None,
+    );
+    let client_id = registered.json()["client_id"]
+        .as_str()
+        .expect("注册要返回 client_id")
+        .to_string();
+
+    let (verifier, challenge) = pkce();
+    let granted = authorize(port, &authorize_path, &client_id, &challenge, password);
+    let code = query_param(granted.header("location").unwrap_or_default(), "code");
+    let exchanged = post_form(
+        port,
+        &token_path,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", REDIRECT),
+            ("client_id", &client_id),
+            ("code_verifier", &verifier),
+        ],
+    );
+    assert_eq!(exchanged.status, 200, "换 token 失败：{}", exchanged.body);
+    let tokens = exchanged.json();
+    (
+        client_id,
+        tokens["access_token"].as_str().expect("access").to_string(),
+        tokens["refresh_token"]
+            .as_str()
+            .expect("refresh")
+            .to_string(),
+        token_path,
+    )
+}
+
+/// 重启服务不能让已经装好的连接器掉授权。
+///
+/// 这是最常撞上的一条：`gld restart`、改个配置触发的自动重启、重启电脑，
+/// 都会重建 OAuth 运行时。动态注册的客户端只放内存的话，重启后客户端拿着
+/// 没过期的 refresh_token 来续会被判 invalid_client，用户那边表现成
+/// "配置没动过，连接器却突然要重连"，而且只能删掉重建。
+#[test]
+fn connector_survives_a_service_restart() {
+    let env = Env::new();
+    env.write("hello.txt", "restart-marker\n");
+    let port = free_port();
+    env.ok(&[
+        "ws",
+        "add",
+        ".",
+        "--name",
+        "restart",
+        "--mcp-port",
+        &port.to_string(),
+    ]);
+    env.ok(&["start"]);
+
+    let password = env.json(&["--json", "secret", "show", "oauth_password", "--reveal"])["value"]
+        .as_str()
+        .expect("oauth_password")
+        .to_string();
+    let (client_id, access, refresh, token_path) = connect_a_connector(port, &password);
+
+    env.ok(&["stop"]);
+    env.ok(&["start"]);
+
+    // 1. 重启前发的 access token 直接还能用，用户完全无感。
+    let after_restart = post_json(
+        port,
+        "/mcp",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        Some(&access),
+    );
+    assert_eq!(
+        after_restart.status, 200,
+        "重启前发的 access token 重启后应当照常可用：{}",
+        after_restart.body
+    );
+
+    // 2. 到期续命也要能续——这一步才是以前真正断掉的地方。
+    let refreshed = post_form(
+        port,
+        &token_path,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &refresh),
+            ("client_id", &client_id),
+        ],
+    );
+    assert_eq!(
+        refreshed.status, 200,
+        "重启后刷新令牌失败，连接器会要求重新授权：{}",
+        refreshed.body
+    );
+    let renewed = refreshed.json()["access_token"]
+        .as_str()
+        .expect("续期要返回 access_token")
+        .to_string();
+    let with_renewed = post_json(
+        port,
+        "/mcp",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"hello.txt"}}}"#,
+        Some(&renewed),
+    );
+    assert!(
+        with_renewed.body.contains("restart-marker"),
+        "续期后的 token 应当能正常干活：{}",
+        with_renewed.body
+    );
+
+    // 3. 重新授权这条路也要通：注册表还在，老 client_id 直接能进授权页，
+    //    用户只要再输一次口令，不用把连接器删了重建。
+    let metadata = get(port, "/.well-known/oauth-authorization-server").json();
+    let authorize_path = endpoint_path(&metadata, "authorization_endpoint");
+    let (_, challenge) = pkce();
+    let reauthorized = authorize(port, &authorize_path, &client_id, &challenge, &password);
+    let location = reauthorized
+        .header("location")
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !query_param(&location, "code").is_empty(),
+        "重启后老 client_id 应当还能走授权页拿 code：{location}"
+    );
+
+    env.ok(&["stop"]);
+}
+
 #[test]
 fn chatgpt_connector_oauth_flow_works_end_to_end() {
     let env = Env::new();

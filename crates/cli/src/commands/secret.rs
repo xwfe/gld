@@ -106,7 +106,7 @@ pub async fn run(ctx: &mut Ctx, command: SecretCmd) -> CliResult {
                 if shared {
                     warn_if_shadowed_by_pool(ctx, &key, shared);
                 } else {
-                    ctx.out.note("旧值立即失效，记得更新客户端里的配置。");
+                    ctx.out.note(client_impact(&key));
                 }
             }
             Ok(())
@@ -171,9 +171,30 @@ async fn shared(ctx: &mut Ctx, command: SharedSecretCmd) -> CliResult {
                 .await?;
             if !ctx.out.json_or(&json!({ "key": key, "value": value })) {
                 ctx.out.line(format!("共享密钥 {key} 已重新生成：{value}"));
+                ctx.out.note(client_impact(&key));
             }
             Ok(())
         }
+    }
+}
+
+/// 换掉这个密钥之后，已经连好的客户端会怎么样。
+///
+/// 分清楚很要紧：`oauth_token_secret` 把已经发出去的令牌一起作废，
+/// 每个连接器都得重新授权；而 `oauth_password` 只影响"下次授权时填什么"，
+/// 已经授权过的客户端照常能用。以前这两种情况共用一句"记得更新客户端里的配置"，
+/// 而 OAuth 客户端根本没有"配置里的密钥"可更新，照着做只会更迷糊。
+fn client_impact(key: &str) -> &'static str {
+    match key {
+        "oauth_token_secret" | "actions_oauth_token_secret" => {
+            "已经发出去的访问令牌全部作废，每个连上的客户端都要重新授权一次。\
+             ChatGPT 那边不用删连接器：它会自己弹出重新授权，输一次口令就好。"
+        }
+        "oauth_password" | "actions_oauth_password" => {
+            "已经授权过的客户端不受影响，继续能用。只有下次重新授权时，\
+             授权页要填这个新口令。"
+        }
+        _ => "旧值立即失效，记得更新客户端里的配置。",
     }
 }
 

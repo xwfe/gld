@@ -16,8 +16,8 @@ use tower_http::cors::CorsLayer;
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, external_base_url,
     protected_resource_metadata, protected_resource_metadata_url, register_client, token_exchange,
-    verify_bearer_header, verify_oauth_bearer_header, AuthorizeForm, AuthorizeParams,
-    ClientRegistrationRequest, OAuthRuntime, TokenForm,
+    verify_bearer_header, verify_oauth_bearer_header, workspace_audience, AuthorizeForm,
+    AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, TokenForm,
 };
 use crate::local_network;
 use crate::logs::append_profile_log;
@@ -108,13 +108,13 @@ pub fn spawn_listener(
     let oauth = if auth.oauth_enabled() {
         let password = oauth_password.unwrap_or_default();
         let token_secret = oauth_token_secret.unwrap_or_default();
-        let oauth_base = external_base_url(&HeaderMap::new(), port, &configured_public_url);
         Some(Arc::new(OAuthRuntime::new(
-            oauth_base,
+            workspace_audience(&workspace_id),
             auth.oauth_client_id.clone(),
             oauth_client_secret.clone(),
             password,
             token_secret,
+            Arc::new(ClientRegistry::load(&workspace_id, &workspace_id)),
         )))
     } else {
         None

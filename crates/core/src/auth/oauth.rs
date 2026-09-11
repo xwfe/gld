@@ -17,6 +17,22 @@ impl AuthConfig {
     }
 }
 
+/// 令牌里写的 `iss` / `aud`。
+///
+/// 故意不用公网地址：地址是会变的（临时隧道每次重启换一个、换域名、
+/// 开关全局入口），拿它当受众就等于地址一动，已经发出去的令牌全部作废，
+/// 用户得回 ChatGPT 里重新授权。工作区 id 不变，配合每个工作区自己的
+/// `oauth_token_secret`，同样能保证 A 工作区的令牌进不了 B 工作区
+/// （开了共享密钥池、几个工作区共用同一个 token_secret 时，靠的就是这里的 id）。
+pub fn workspace_audience(workspace_id: &str) -> String {
+    format!("gld:ws:{workspace_id}")
+}
+
+/// Actions 服务的受众。和 MCP 分开，免得一边的令牌能打另一边。
+pub fn actions_audience(workspace_id: &str) -> String {
+    format!("gld:actions:{workspace_id}")
+}
+
 /// Resolve the external OAuth/MCP base URL for a request.
 /// Matches the Python server's behavior: prefer configured URL,
 /// then `X-Forwarded-*` / `Host`, then localhost.

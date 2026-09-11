@@ -16,9 +16,9 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::cors::CorsLayer;
 
 use crate::auth::{
-    authorization_server_metadata, authorize_get, authorize_post, external_base_url,
-    register_client, token_exchange, AuthorizeForm, AuthorizeParams, ClientRegistrationRequest,
-    OAuthRuntime, TokenForm,
+    actions_audience, authorization_server_metadata, authorize_get, authorize_post,
+    external_base_url, register_client, token_exchange, AuthorizeForm, AuthorizeParams,
+    ClientRegistrationRequest, ClientRegistry, OAuthRuntime, TokenForm,
 };
 use crate::logs::append_profile_log;
 use crate::tools::{self, is_allowed_tool, policy::PolicySettings, wrap_tool_result, ToolContext};
@@ -82,13 +82,14 @@ pub fn spawn_listener(
 
     let configured_public_url = public_base_url.trim().to_string();
     let oauth = if auth_type == "oauth" {
-        let oauth_base = external_base_url(&HeaderMap::new(), actions_port, &configured_public_url);
+        let registry_scope = format!("{workspace_id}-actions");
         Some(Arc::new(OAuthRuntime::new(
-            oauth_base,
+            actions_audience(workspace_id),
             oauth_client_id,
             oauth_client_secret.clone(),
             oauth_password.unwrap_or_default(),
             oauth_token_secret.unwrap_or_default(),
+            Arc::new(ClientRegistry::load(&registry_scope, workspace_id)),
         )))
     } else {
         None

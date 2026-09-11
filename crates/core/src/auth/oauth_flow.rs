@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::bearer::constant_time_eq_str;
+use super::client_registry::{ClientRegistry, RegisteredClient};
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
 pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
@@ -24,8 +25,14 @@ pub struct OAuthRuntime {
     pub client_secret: Option<String>,
     pub password: String,
     pub token_secret: String,
+    /// 令牌里写的 `iss`/`aud`。用的是工作区标识而不是公网地址——
+    /// 地址是会变的（临时隧道每次重启换一个、换域名、开关全局入口），
+    /// 绑地址就等于地址一动所有已发令牌全废，用户得重新授权。
+    /// 工作区标识不变，加上每个工作区自己的 `token_secret`，
+    /// 已经能保证"A 工作区的令牌进不了 B 工作区"。
+    audience: String,
     pending: Arc<Mutex<HashMap<String, PendingCode>>>,
-    clients: Arc<Mutex<HashMap<String, RegisteredClient>>>,
+    clients: Arc<ClientRegistry>,
 }
 
 fn registration_error(error: &str, description: &str) -> Response {
@@ -45,13 +52,6 @@ fn valid_redirect_uri(uri: &str) -> bool {
 }
 
 #[derive(Clone)]
-struct RegisteredClient {
-    redirect_uris: Vec<String>,
-    token_endpoint_auth_method: String,
-    client_secret: Option<String>,
-}
-
-#[derive(Clone)]
 #[allow(dead_code)]
 struct PendingCode {
     code_challenge: String,
@@ -59,7 +59,6 @@ struct PendingCode {
     redirect_uri: String,
     state: String,
     expires_at: u64,
-    server_url: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,19 +74,21 @@ struct TokenClaims {
 
 impl OAuthRuntime {
     pub fn new(
-        _base_url: String,
+        audience: String,
         client_id: String,
         client_secret: Option<String>,
         password: String,
         token_secret: String,
+        clients: Arc<ClientRegistry>,
     ) -> Self {
         Self {
             client_id,
             client_secret,
             password,
             token_secret,
+            audience,
             pending: Arc::new(Mutex::new(HashMap::new())),
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            clients,
         }
     }
 
@@ -98,12 +99,7 @@ impl OAuthRuntime {
         if self.client_id.is_empty() {
             return true;
         }
-        constant_time_eq_str(client_id, &self.client_id)
-            || self
-                .clients
-                .lock()
-                .expect("oauth clients lock")
-                .contains_key(client_id)
+        constant_time_eq_str(client_id, &self.client_id) || self.clients.contains(client_id)
     }
 
     fn redirect_uri_allowed(&self, client_id: &str, redirect_uri: &str) -> bool {
@@ -111,8 +107,6 @@ impl OAuthRuntime {
             return !redirect_uri.trim().is_empty();
         }
         self.clients
-            .lock()
-            .expect("oauth clients lock")
             .get(client_id)
             .is_some_and(|client| client.redirect_uris.iter().any(|uri| uri == redirect_uri))
     }
@@ -124,8 +118,10 @@ impl OAuthRuntime {
                 .as_deref()
                 .is_none_or(|expected| constant_time_eq_str(client_secret, expected));
         }
-        let clients = self.clients.lock().expect("oauth clients lock");
-        let Some(client) = clients.get(client_id) else {
+        let Some(client) = self.clients.get(client_id) else {
+            // 注册表里没有这个 id：可能是升级前注册的（那时还不落盘），
+            // 也可能是文件损坏后重建的。这里不认，但刷新令牌那条路会另行放行，
+            // 见 refresh_token_exchange。
             return false;
         };
         if client.token_endpoint_auth_method == "none" {
@@ -137,17 +133,30 @@ impl OAuthRuntime {
             .is_some_and(|expected| constant_time_eq_str(client_secret, expected))
     }
 
+    pub fn register(&self, client_id: String, client: RegisteredClient) {
+        self.clients.insert(client_id, client);
+    }
+
     pub fn verify_access_token(&self, token: &str, server_url: &str) -> bool {
-        let server_url = server_url.trim_end_matches('/');
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_audience(&[server_url]);
-        validation.set_issuer(&[server_url]);
-        decode::<TokenClaims>(
-            token,
-            &DecodingKey::from_secret(self.token_secret.as_bytes()),
-            &validation,
-        )
-        .is_ok_and(|data| data.claims.token_use == "access")
+        self.decode_any(token, server_url)
+            .is_some_and(|claims| claims.token_use == "access")
+    }
+
+    /// 先按稳定受众验，再按"当前公网地址"验一次。
+    ///
+    /// 第二次是给升级前签发的令牌留的：那时候 `aud` 写的是地址。没有这一步的话，
+    /// 用户一升级 gld，所有连接器当场全部 401，全得重新授权——正是这次要消灭的事。
+    /// 旧令牌刷新一次就换成新的稳定令牌，之后地址再变也不受影响。
+    fn decode_any(&self, token: &str, server_url: &str) -> Option<TokenClaims> {
+        decode_token_claims(token, &self.token_secret, &self.audience)
+            .ok()
+            .or_else(|| {
+                let legacy = server_url.trim_end_matches('/');
+                if legacy.is_empty() {
+                    return None;
+                }
+                decode_token_claims(token, &self.token_secret, legacy).ok()
+            })
     }
 }
 
@@ -208,12 +217,14 @@ pub fn register_client(oauth: &OAuthRuntime, request: ClientRegistrationRequest)
     };
     let client_id = format!("dcr-{}", uuid::Uuid::new_v4().simple());
     let client_secret = (auth_method != "none").then(|| uuid::Uuid::new_v4().simple().to_string());
-    oauth.clients.lock().expect("oauth clients lock").insert(
+    oauth.register(
         client_id.clone(),
         RegisteredClient {
             redirect_uris: request.redirect_uris.clone(),
             token_endpoint_auth_method: auth_method.to_string(),
             client_secret: client_secret.clone(),
+            client_name: request.client_name.trim().to_string(),
+            created_at: unix_now(),
         },
     );
 
@@ -382,7 +393,6 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
             .into_response();
     }
 
-    let server_url = server_url.trim_end_matches('/').to_string();
     let code = uuid::Uuid::new_v4().to_string().replace('-', "");
     let now = unix_now();
     {
@@ -396,7 +406,6 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
                 redirect_uri: form.redirect_uri.clone(),
                 state: form.state.clone(),
                 expires_at: now + OAUTH_CODE_TTL_SECONDS,
-                server_url: server_url.clone(),
             },
         );
     }
@@ -431,7 +440,7 @@ pub fn token_exchange(
     }
 
     match form.grant_type.as_str() {
-        "authorization_code" => authorization_code_exchange(oauth, form, server_url),
+        "authorization_code" => authorization_code_exchange(oauth, form),
         "refresh_token" => refresh_token_exchange(oauth, form, server_url),
         _ => token_error(
             "unsupported_grant_type",
@@ -440,11 +449,7 @@ pub fn token_exchange(
     }
 }
 
-fn authorization_code_exchange(
-    oauth: &OAuthRuntime,
-    form: TokenForm,
-    server_url: &str,
-) -> Response {
+fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Response {
     if !oauth.client_id_allowed(&form.client_id)
         || !oauth.client_credentials_allowed(&form.client_id, &form.client_secret)
     {
@@ -480,45 +485,50 @@ fn authorization_code_exchange(
         return token_error("invalid_grant", "PKCE verification failed");
     }
 
-    let issuer = if code_data.server_url.trim().is_empty() {
-        server_url.trim_end_matches('/').to_string()
-    } else {
-        code_data.server_url.trim_end_matches('/').to_string()
-    };
-    issue_token_pair(oauth, &issuer, &form.client_id)
+    issue_token_pair(oauth, &form.client_id)
 }
 
 fn refresh_token_exchange(oauth: &OAuthRuntime, mut form: TokenForm, server_url: &str) -> Response {
     if form.refresh_token.is_empty() {
         return token_error("invalid_grant", "refresh_token is required");
     }
-    let issuer = server_url.trim_end_matches('/');
-    let claims = match decode_token_claims(&form.refresh_token, &oauth.token_secret, issuer) {
-        Ok(claims) if claims.token_use == "refresh" => claims,
-        _ => return token_error("invalid_grant", "Invalid refresh_token"),
+    let Some(claims) = oauth
+        .decode_any(&form.refresh_token, server_url)
+        .filter(|claims| claims.token_use == "refresh")
+    else {
+        return token_error("invalid_grant", "Invalid refresh_token");
     };
     if form.client_id.is_empty() {
         form.client_id = claims.client_id.clone();
     }
-    if !constant_time_eq_str(&form.client_id, &claims.client_id)
-        || !oauth.client_id_allowed(&form.client_id)
-        || !oauth.client_credentials_allowed(&form.client_id, &form.client_secret)
-    {
+    if !constant_time_eq_str(&form.client_id, &claims.client_id) {
         return token_error("invalid_client", "Invalid client credentials");
     }
-    issue_token_pair(oauth, issuer, &form.client_id)
+    // 注册表里还认识这个 client，就按它登记的方式校验（机密客户端要带 secret）。
+    //
+    // 不认识就放行：refresh_token 是本服务签的、client_id 就写在令牌里，
+    // 而 ChatGPT 这类客户端注册的是公共客户端（auth_method=none），本来就不需要
+    // 任何 secret——所以这里卡一道并不增加安全性，只会让"注册表丢了"变成
+    // "所有连接器要删掉重建"。真要吊销全部授权，用
+    // `gld secret regen oauth_token_secret`，那是连令牌一起作废的。
+    let known_client = oauth.clients.get(&form.client_id).is_some()
+        || constant_time_eq_str(&form.client_id, &oauth.client_id);
+    if known_client && !oauth.client_credentials_allowed(&form.client_id, &form.client_secret) {
+        return token_error("invalid_client", "Invalid client credentials");
+    }
+    issue_token_pair(oauth, &form.client_id)
 }
 
-fn issue_token_pair(oauth: &OAuthRuntime, issuer: &str, client_id: &str) -> Response {
+fn issue_token_pair(oauth: &OAuthRuntime, client_id: &str) -> Response {
     let access = create_token(
-        issuer,
+        &oauth.audience,
         &oauth.token_secret,
         OAUTH_TOKEN_TTL_SECONDS,
         client_id,
         "access",
     );
     let refresh = create_token(
-        issuer,
+        &oauth.audience,
         &oauth.token_secret,
         OAUTH_REFRESH_TOKEN_TTL_SECONDS,
         client_id,
@@ -703,67 +713,115 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderMap;
 
-    #[test]
-    fn token_exchange_without_client_secret() {
-        use axum::http::HeaderMap;
+    const AUDIENCE: &str = "gld:ws:test-workspace";
+    const PASSWORD: &str = "test-password";
+    const TOKEN_SECRET: &str = "token-signing-secret";
+    const REDIRECT_URI: &str = "https://chatgpt.com/connector/oauth/test";
+    const VERIFIER: &str = "dBjftJeZ4CVP-mB92Kpru-AEJvkQlLgi3ThpmQ45N_Xyo";
 
-        let oauth = OAuthRuntime::new(
-            "https://lb.example.com".into(),
-            "chatgpt-client-test".into(),
+    fn runtime(client_id: &str) -> OAuthRuntime {
+        runtime_with(client_id, Arc::new(ClientRegistry::in_memory()))
+    }
+
+    fn runtime_with(client_id: &str, clients: Arc<ClientRegistry>) -> OAuthRuntime {
+        OAuthRuntime::new(
+            AUDIENCE.into(),
+            client_id.into(),
             None,
-            "test-password".into(),
-            "token-signing-secret".into(),
-        );
-        let verifier = "dBjftJeZ4CVP-mB92Kpru-AEJvkQlLgi3ThpmQ45N_Xyo";
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let redirect_uri = "https://chatgpt.com/connector/oauth/test";
+            PASSWORD.into(),
+            TOKEN_SECRET.into(),
+            clients,
+        )
+    }
+
+    fn challenge() -> String {
+        URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()))
+    }
+
+    fn body_json(response: Response) -> Value {
+        let bytes = crate::async_rt::block_on(async {
+            axum::body::to_bytes(response.into_body(), OAUTH_MAX_BODY_BYTES * 16)
+                .await
+                .expect("read body")
+        });
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// 走完一次授权码流程，返回 (access_token, refresh_token)。
+    fn authorize_and_exchange(
+        oauth: &OAuthRuntime,
+        client_id: &str,
+        base: &str,
+    ) -> (String, String) {
         let redirect = authorize_post(
-            &oauth,
+            oauth,
             AuthorizeForm {
-                client_id: "chatgpt-client-test".into(),
-                redirect_uri: redirect_uri.into(),
-                code_challenge: challenge,
+                client_id: client_id.into(),
+                redirect_uri: REDIRECT_URI.into(),
+                code_challenge: challenge(),
                 code_challenge_method: "S256".into(),
                 state: "state".into(),
-                password: "test-password".into(),
+                password: PASSWORD.into(),
             },
-            "https://lb.example.com",
+            base,
         );
         assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
         let code = {
             let pending = oauth.pending.lock().expect("lock");
-            pending.keys().next().cloned().unwrap()
+            pending.keys().next().cloned().expect("pending code")
         };
-
         let response = token_exchange(
-            &oauth,
+            oauth,
             &HeaderMap::new(),
             TokenForm {
                 grant_type: "authorization_code".into(),
                 code,
-                redirect_uri: redirect_uri.into(),
-                code_verifier: verifier.into(),
-                client_id: "chatgpt-client-test".into(),
-                client_secret: String::new(),
-                refresh_token: String::new(),
+                redirect_uri: REDIRECT_URI.into(),
+                code_verifier: VERIFIER.into(),
+                client_id: client_id.into(),
+                ..TokenForm::default()
             },
-            "https://lb.example.com",
+            base,
         );
         assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response);
+        (
+            body["access_token"].as_str().expect("access").to_string(),
+            body["refresh_token"].as_str().expect("refresh").to_string(),
+        )
+    }
+
+    fn register(oauth: &OAuthRuntime) -> String {
+        let response = register_client(
+            oauth,
+            ClientRegistrationRequest {
+                redirect_uris: vec![REDIRECT_URI.into()],
+                token_endpoint_auth_method: "none".into(),
+                grant_types: vec!["authorization_code".into(), "refresh_token".into()],
+                response_types: vec!["code".into()],
+                client_name: "ChatGPT".into(),
+            },
+        );
+        assert_eq!(response.status(), StatusCode::CREATED);
+        body_json(response)["client_id"]
+            .as_str()
+            .expect("client_id")
+            .to_string()
+    }
+
+    #[test]
+    fn token_exchange_without_client_secret() {
+        let oauth = runtime("chatgpt-client-test");
+        authorize_and_exchange(&oauth, "chatgpt-client-test", "https://lb.example.com");
     }
 
     #[test]
     fn refresh_token_cannot_authenticate_as_an_access_token() {
-        let oauth = OAuthRuntime::new(
-            "https://lb.example.com".into(),
-            "chatgpt-client-test".into(),
-            None,
-            "test-password".into(),
-            "token-signing-secret".into(),
-        );
+        let oauth = runtime("chatgpt-client-test");
         let refresh = create_token(
-            "https://lb.example.com",
+            AUDIENCE,
             &oauth.token_secret,
             OAUTH_REFRESH_TOKEN_TTL_SECONDS,
             "chatgpt-client-test",
@@ -776,49 +834,22 @@ mod tests {
 
     #[test]
     fn pkce_round_trip() {
-        let verifier = "dBjftJeZ4CVP-mB92Kpru-AEJvkQlLgi3ThpmQ45N_Xyo";
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        assert!(verify_pkce(verifier, &challenge));
+        assert!(verify_pkce(VERIFIER, &challenge()));
     }
 
     #[test]
     fn dynamic_registration_restricts_redirect_uri() {
-        let oauth = OAuthRuntime::new(
-            "https://lb.example.com".into(),
-            "legacy-client".into(),
-            None,
-            "test-password".into(),
-            "token-signing-secret".into(),
-        );
-        let response = register_client(
-            &oauth,
-            ClientRegistrationRequest {
-                redirect_uris: vec!["https://chatgpt.com/connector/oauth/test".into()],
-                token_endpoint_auth_method: "none".into(),
-                grant_types: vec!["authorization_code".into(), "refresh_token".into()],
-                response_types: vec!["code".into()],
-                client_name: "ChatGPT".into(),
-            },
-        );
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let clients = oauth.clients.lock().expect("clients");
-        let client_id = clients.keys().next().expect("client id").clone();
-        drop(clients);
-        assert!(oauth.redirect_uri_allowed(&client_id, "https://chatgpt.com/connector/oauth/test"));
+        let oauth = runtime("legacy-client");
+        let client_id = register(&oauth);
+        assert!(oauth.redirect_uri_allowed(&client_id, REDIRECT_URI));
         assert!(!oauth.redirect_uri_allowed(&client_id, "https://attacker.example/callback"));
     }
 
     #[test]
     fn refresh_token_issues_a_new_token_pair() {
-        let oauth = OAuthRuntime::new(
-            "https://lb.example.com".into(),
-            "chatgpt-client-test".into(),
-            None,
-            "test-password".into(),
-            "token-signing-secret".into(),
-        );
+        let oauth = runtime("chatgpt-client-test");
         let refresh = create_token(
-            "https://lb.example.com",
+            AUDIENCE,
             &oauth.token_secret,
             OAUTH_REFRESH_TOKEN_TTL_SECONDS,
             "chatgpt-client-test",
@@ -837,6 +868,116 @@ mod tests {
             "https://lb.example.com",
         );
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// 重启服务不该让已经装好的连接器掉授权。
+    ///
+    /// 这里用"同一份注册表 + 新的 OAuthRuntime"模拟重启：进程内的 pending 表、
+    /// 内存态全丢，只有落盘的注册表还在。
+    #[test]
+    fn restart_keeps_registered_clients_usable() {
+        let clients = Arc::new(ClientRegistry::in_memory());
+        let before = runtime_with("chatgpt-client-test", clients.clone());
+        let client_id = register(&before);
+        let (_, refresh) = authorize_and_exchange(&before, &client_id, "https://lb.example.com");
+
+        let after = runtime_with("chatgpt-client-test", clients);
+        assert!(after.client_id_allowed(&client_id));
+        let response = token_exchange(
+            &after,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: client_id.clone(),
+                refresh_token: refresh,
+                ..TokenForm::default()
+            },
+            "https://lb.example.com",
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// 注册表整个丢了（文件损坏、从旧版本升上来）也要能续命，
+    /// 否则用户得把连接器删了重建——这正是要避免的体验。
+    #[test]
+    fn refresh_still_works_when_the_registry_is_lost() {
+        let before = runtime_with("chatgpt-client-test", Arc::new(ClientRegistry::in_memory()));
+        let client_id = register(&before);
+        let (_, refresh) = authorize_and_exchange(&before, &client_id, "https://lb.example.com");
+
+        // 空注册表 = 文件没了
+        let after = runtime_with("chatgpt-client-test", Arc::new(ClientRegistry::in_memory()));
+        assert!(!after.client_id_allowed(&client_id));
+        let response = token_exchange(
+            &after,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id,
+                refresh_token: refresh,
+                ..TokenForm::default()
+            },
+            "https://lb.example.com",
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// 换域名、临时隧道换地址、开关全局入口——地址变了，令牌照样有效。
+    #[test]
+    fn tokens_survive_a_public_url_change() {
+        let oauth = runtime("chatgpt-client-test");
+        let (access, refresh) =
+            authorize_and_exchange(&oauth, "chatgpt-client-test", "https://old.example.com");
+
+        assert!(oauth.verify_access_token(&access, "https://brand-new.example.com/w/ws1"));
+        let response = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: "chatgpt-client-test".into(),
+                refresh_token: refresh,
+                ..TokenForm::default()
+            },
+            "https://brand-new.example.com/w/ws1",
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// 升级 gld 之前签发的令牌（`aud` 写的是公网地址）不能当场作废，
+    /// 否则一次升级就让所有连接器全部重新授权。
+    #[test]
+    fn tokens_issued_before_the_upgrade_still_verify() {
+        let oauth = runtime("chatgpt-client-test");
+        let legacy_access = create_token(
+            "https://lb.example.com",
+            &oauth.token_secret,
+            OAUTH_TOKEN_TTL_SECONDS,
+            "chatgpt-client-test",
+            "access",
+        )
+        .expect("legacy access token");
+
+        assert!(oauth.verify_access_token(&legacy_access, "https://lb.example.com"));
+        // 但换个地址就不认了——旧令牌本来就是绑地址签的。
+        assert!(!oauth.verify_access_token(&legacy_access, "https://other.example.com"));
+    }
+
+    /// 另一个工作区的令牌不能拿来打这个工作区，哪怕开了共享密钥池
+    /// （几个工作区共用同一个 token_secret，这时只有受众能区分它们）。
+    #[test]
+    fn tokens_from_another_workspace_are_rejected() {
+        let oauth = runtime("chatgpt-client-test");
+        let other_workspace = create_token(
+            "gld:ws:some-other-workspace",
+            TOKEN_SECRET,
+            OAUTH_TOKEN_TTL_SECONDS,
+            "chatgpt-client-test",
+            "access",
+        )
+        .expect("token");
+
+        assert!(!oauth.verify_access_token(&other_workspace, "https://lb.example.com"));
     }
 
     #[test]
