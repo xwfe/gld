@@ -325,3 +325,54 @@ fn concurrent_starts_converge_on_a_single_running_service() {
     env.ok(&["stop"]);
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
 }
+
+/// 改工作区名，跑着的 MCP 要跟着报新名字。
+///
+/// 名字会进 `serverInfo.name`，也就是 MCP 客户端服务器列表里显示的那个。
+/// 决定"要不要重启"的快照里一度没有 name，于是 `gld ws show` 显示新名字、
+/// 服务自报的还是旧的——这种不一致只有连上客户端看列表才发现，
+/// 而那时人只会以为是客户端缓存了。
+#[test]
+fn renaming_a_workspace_updates_the_name_the_server_reports() {
+    let env = Env::new();
+    let port = free_port();
+    env.ok(&[
+        "ws",
+        "add",
+        ".",
+        "--name",
+        "oldname",
+        "--mcp-port",
+        &port.to_string(),
+    ]);
+    env.ok(&["ws", "set", "mcp.auth=noauth"]);
+    env.ok(&["start", "-s", "mcp"]);
+    assert_eq!(common::http::get(port, "/mcp").json()["name"], "oldname");
+
+    env.ok(&["ws", "set", "-w", "oldname", "name=newname"]);
+    assert_eq!(
+        wait_for_reported_name(port, "newname"),
+        "newname",
+        "改完名服务还在自报旧名字：重启判据里少了 name"
+    );
+
+    env.ok(&["stop"]);
+}
+
+/// `ws set` 返回时重启可能还没走完，等它换上新配置。
+fn wait_for_reported_name(port: u16, expected: &str) -> String {
+    for _ in 0..50 {
+        let name = common::http::get(port, "/mcp").json()["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if name == expected {
+            return name;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    common::http::get(port, "/mcp").json()["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}

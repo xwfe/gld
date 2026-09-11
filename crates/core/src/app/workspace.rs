@@ -344,8 +344,13 @@ fn service_config_changed(
     let snapshot = |profile: &WorkspaceProfile| match kind {
         // MCP 那条线路由 runtime（端口 / 工具集 / 策略）、auth（认证）和
         // tunnel（公网入口）三段共同决定。
+        //
+        // name 也算：它会进 serverInfo.name，也就是客户端服务器列表里显示的那个名字。
+        // 不重启的话，改完名 `gld ws show` 是新的、服务自报的还是旧的，
+        // 而这种不一致只有连上客户端才看得见。
         ServiceKind::Mcp => serde_json::to_value((
             &profile.path,
+            &profile.name,
             &profile.runtime,
             &profile.auth,
             &profile.tunnel,
@@ -508,6 +513,25 @@ mod tests {
         let mut profile = WorkspaceProfile::new(path.into(), Some(name.into()));
         profile.id = id.into();
         profile
+    }
+
+    /// 改名要让 MCP 跟着重启：那个名字会进 serverInfo.name。
+    ///
+    /// 漏了这条的表现很隐蔽：`gld ws show` 显示新名字，服务自报的还是旧的，
+    /// 只有连上客户端看服务器列表才发现对不上。Actions 不用工作区名
+    /// （它的 OpenAPI title 是固定的），别跟着白重启一次。
+    #[test]
+    fn renaming_a_workspace_restarts_mcp_but_not_actions() {
+        let before = profile("abcd1234", "old", "/tmp/does-not-exist-a");
+        let mut after = before.clone();
+        after.name = "new".into();
+
+        assert!(service_config_changed(&before, &after, ServiceKind::Mcp));
+        assert!(!service_config_changed(
+            &before,
+            &after,
+            ServiceKind::Actions
+        ));
     }
 
     #[test]
