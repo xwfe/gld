@@ -18,10 +18,26 @@ fn server_info_returns_workspace_and_tools() {
     let ctx = ctx_for(&fx.root);
     let out = invoke(&ctx, "server_info", json!({}));
     let payload = assert_ok(&out);
-    assert_eq!(payload["server"], "coding-tools-mcp");
+    // 命令行直连没有工作区名，回落到项目名。
+    assert_eq!(payload["server"], "gld");
     assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
     assert!(payload["tools"].is_array());
     assert!(payload["tool_count"].as_u64().unwrap_or(0) > 0);
+}
+
+/// 服务名跟着工作区走，别让每个项目都自报同一个名字。
+///
+/// AI 调 `server_info` 是为了知道"我现在在哪个项目里"。这里以前写死
+/// `coding-tools-mcp`（上游项目的名字），同时接三个工作区时，
+/// 无论问哪一个都回同一个答案。
+#[test]
+fn server_info_names_the_workspace() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root).with_workspace_name("api");
+    let out = invoke(&ctx, "server_info", json!({}));
+    let payload = assert_ok(&out);
+    assert_eq!(payload["server"], "api");
+    assert_eq!(payload["title"], "api · gld");
 }
 
 #[test]

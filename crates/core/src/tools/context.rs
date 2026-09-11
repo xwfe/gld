@@ -16,6 +16,9 @@ use crate::tools::workspace::{relative_display, Workspace};
 use crate::usage::ServiceUsage;
 use crate::workspace::AuthConfig;
 
+/// 没有工作区名时用的服务器名（命令行直连、测试）。
+pub const FALLBACK_SERVER_NAME: &str = "gld";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ContextAuditBlock {
     pub kind: String,
@@ -31,6 +34,12 @@ struct ContextAuditState {
 
 pub struct ToolContext {
     pub workspace: Workspace,
+    /// 工作区显示名，用作 MCP `serverInfo.name`。
+    ///
+    /// 客户端的服务器列表里显示的就是它。以前这里写死 `coding-tools-mcp`
+    /// （上游项目的名字），接了三个工作区就是三个同名条目，谁也分不出谁。
+    /// 空字符串表示"没有工作区名"（命令行直连、测试），回落到 [`FALLBACK_SERVER_NAME`]。
+    pub workspace_name: String,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
     pub tool_profile: String,
@@ -101,6 +110,7 @@ impl ToolContext {
         let workspace = workspace.with_confined_reads(policy.confine_reads);
         Self {
             workspace,
+            workspace_name: String::new(),
             auth,
             policy,
             tool_profile: crate::tools::registry::normalize_tool_profile(&tool_profile).into(),
@@ -216,6 +226,26 @@ impl ToolContext {
 
     pub fn workspace_path(&self) -> String {
         self.workspace.root_display()
+    }
+
+    pub fn with_workspace_name(mut self, name: impl Into<String>) -> Self {
+        self.workspace_name = name.into();
+        self
+    }
+
+    /// MCP `serverInfo.name`：客户端服务器列表里显示的那个名字。
+    pub fn server_name(&self) -> &str {
+        let name = self.workspace_name.trim();
+        if name.is_empty() {
+            FALLBACK_SERVER_NAME
+        } else {
+            name
+        }
+    }
+
+    /// `serverInfo.title`：给人看的显示名，带上 gld 以便在一堆 MCP 服务里认出来。
+    pub fn server_title(&self) -> String {
+        format!("{} · gld", self.server_name())
     }
 
     pub fn default_cwd_display(&self) -> String {

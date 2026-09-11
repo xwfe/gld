@@ -94,9 +94,11 @@ fn initialize_result(state: &SharedState) -> Value {
             "tools": { "listChanged": false },
             "logging": {}
         },
+        // 名字用工作区名：客户端的服务器列表里显示的就是它，接了几个工作区
+        // 就该看到几个不同的名字。
         "serverInfo": {
-            "name": "coding-tools-mcp",
-            "title": "Coding Tools MCP",
+            "name": state.server_name(),
+            "title": state.server_title(),
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": instructions

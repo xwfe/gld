@@ -845,8 +845,8 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
     let tools = crate::tools::registry::exposed_tool_names(&ctx.tool_profile);
     let history_context = crate::tools::history::context_snapshot(ctx).ok().flatten();
     Ok(tool_ok(json!({
-        "server": "coding-tools-mcp",
-        "title": "Coding Tools MCP",
+        "server": ctx.server_name(),
+        "title": ctx.server_title(),
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_version": "2025-06-18",
         "workspace": ctx.workspace.root_display(),

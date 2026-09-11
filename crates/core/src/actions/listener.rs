@@ -291,7 +291,7 @@ async fn privacy() -> Html<&'static str> {
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8">
-    <title>Coding Tools Actions Privacy</title>
+    <title>gld Actions Privacy</title>
   </head>
   <body>
     <h1>隐私政策</h1>

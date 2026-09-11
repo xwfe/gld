@@ -24,6 +24,7 @@ use crate::workspace::{AuthConfig, RuntimeConfig};
 /// OAuth Client ID 会被换成共享池里的值。
 pub fn build_tool_context(
     workspace_path: PathBuf,
+    workspace_name: &str,
     auth: AuthConfig,
     runtime: &RuntimeConfig,
     settings: &AppSettings,
@@ -63,6 +64,7 @@ pub fn build_tool_context(
         runtime.history_recording,
         runtime.history_context_sessions.clone(),
     )
+    .with_workspace_name(workspace_name)
     .with_usage(usage))
 }
 
@@ -97,6 +99,7 @@ mod tests {
 
         let ctx = build_tool_context(
             temp.path().to_path_buf(),
+            "api",
             AuthConfig::default(),
             &runtime,
             &settings,

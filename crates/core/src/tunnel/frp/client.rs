@@ -927,11 +927,13 @@ mod tests {
             classify_public_mcp_body(404, body),
             PublicMcpProbe::FrpNotRouted
         );
+        // 探测不能认死服务名：它现在是工作区名，一个工作区一个样。
         assert_eq!(
-            classify_public_mcp_body(
-                200,
-                r#"{"name":"coding-tools-mcp","protocolVersion":"2025-06-18"}"#
-            ),
+            classify_public_mcp_body(200, r#"{"name":"api","protocolVersion":"2025-06-18"}"#),
+            PublicMcpProbe::Healthy
+        );
+        assert_eq!(
+            classify_public_mcp_body(200, r#"{"name":"我的项目","protocolVersion":"2025-06-18"}"#),
             PublicMcpProbe::Healthy
         );
     }

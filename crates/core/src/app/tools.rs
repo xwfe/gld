@@ -53,6 +53,7 @@ impl App {
         let settings = self.settings()?;
         let context = crate::tools::build_tool_context(
             profile.path.clone().into(),
+            &profile.name,
             profile.auth.clone(),
             &profile.runtime,
             &settings,

@@ -367,6 +367,7 @@ impl RuntimeSupervisor {
                     port,
                     PathBuf::from(&profile.path),
                     profile.id.clone(),
+                    profile.name.clone(),
                     auth,
                     profile.effective_public_url(),
                     oauth_client_secret,

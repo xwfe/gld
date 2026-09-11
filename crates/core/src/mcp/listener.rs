@@ -58,6 +58,7 @@ pub fn spawn_listener(
     port: u16,
     workspace_path: PathBuf,
     workspace_id: String,
+    workspace_name: String,
     auth: AuthConfig,
     public_base_url: String,
     oauth_client_secret: Option<String>,
@@ -71,6 +72,7 @@ pub fn spawn_listener(
     // 和命令行 `gld tool call` 共用同一个构建入口，两边看到的工具集与策略必然一致。
     let mcp: SharedState = Arc::new(build_tool_context(
         workspace_path,
+        &workspace_name,
         auth.clone(),
         &runtime,
         &global,
@@ -218,13 +220,17 @@ fn bind_listener(port: u16, allow_lan_access: bool) -> Result<tokio::net::TcpLis
         .map_err(|err| format!("MCP 本地监听器初始化失败: {err}"))
 }
 
-async fn mcp_discovery() -> Response {
-    ([(CACHE_CONTROL, "no-store")], Json(mcp_discovery_payload())).into_response()
+async fn mcp_discovery(State(state): State<ListenerState>) -> Response {
+    (
+        [(CACHE_CONTROL, "no-store")],
+        Json(mcp_discovery_payload(&state)),
+    )
+        .into_response()
 }
 
-fn mcp_discovery_payload() -> Value {
+fn mcp_discovery_payload(state: &ListenerState) -> Value {
     json!({
-        "name": "coding-tools-mcp",
+        "name": state.mcp.server_name(),
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": "2025-06-18"
     })
@@ -493,7 +499,30 @@ mod tests {
     use axum::http::header::CACHE_CONTROL;
     use axum::response::IntoResponse;
 
-    use super::{bind_listener, mcp_discovery, mcp_discovery_payload};
+    use super::{bind_listener, mcp_discovery, mcp_discovery_payload, ListenerState};
+    use crate::tools::ToolContext;
+    use crate::workspace::AuthConfig;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    fn state_named(workspace_name: &str) -> ListenerState {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let harness = tempfile::tempdir().expect("harness");
+        let context = ToolContext::for_test(workspace.keep(), harness.keep())
+            .expect("context")
+            .with_workspace_name(workspace_name);
+        ListenerState {
+            mcp: Arc::new(context),
+            auth: AuthConfig::default(),
+            workspace_id: "w1".into(),
+            workspace_path: "/tmp/x".into(),
+            bind_port: 0,
+            configured_public_url: String::new(),
+            bearer_token: None,
+            oauth: None,
+            oauth_client_secret: None,
+        }
+    }
 
     #[test]
     fn bind_listener_reports_port_conflict_synchronously() {
@@ -505,14 +534,28 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_reports_the_current_package_version() {
-        let discovery = mcp_discovery_payload();
+        let discovery = mcp_discovery_payload(&state_named("api"));
 
         assert_eq!(discovery["version"], env!("CARGO_PKG_VERSION"));
     }
 
+    /// 服务器名要跟着工作区走。
+    ///
+    /// 这里以前写死 `coding-tools-mcp`（上游项目的名字）：接了三个工作区，
+    /// 客户端的服务器列表里就是三个一模一样的条目，谁也分不出谁是哪个项目。
+    #[tokio::test]
+    async fn discovery_names_the_workspace() {
+        assert_eq!(mcp_discovery_payload(&state_named("api"))["name"], "api");
+        // 没有工作区名时（命令行直连、测试）回落到项目名，不能是空串——
+        // 空的 serverInfo.name 在有些客户端那儿直接显示成一行空白。
+        assert_eq!(mcp_discovery_payload(&state_named(""))["name"], "gld");
+    }
+
     #[tokio::test]
     async fn discovery_prevents_stale_tool_catalog_caching() {
-        let response = mcp_discovery().await.into_response();
+        let response = mcp_discovery(State(state_named("api")))
+            .await
+            .into_response();
 
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
     }
