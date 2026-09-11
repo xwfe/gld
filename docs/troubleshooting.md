@@ -56,6 +56,7 @@ gld tool call exec_command cmd='cargo test'
 | 401 Unauthorized | Bearer Token 不对，或改了 token 客户端没更新 | `gld secret show bearer_token --reveal` |
 | `gld health` 显示 `HTTP 404（这个端口上应答的不是 gld 的服务）` | 这个端口上跑着别的程序（Actions 默认端口 8787 很容易被撞） | `gld ws set actions.port=<其他端口>`（会自动重启）；`gld doctor` 会告诉你占用者是谁 |
 | 工具列表是旧的 | 客户端缓存 | 断开重连插件 / 新开对话；服务端 `/mcp` 已带 `Cache-Control: no-store` |
+| ChatGPT 连接器突然要重新连接，配置看着没动过 | 多半是公网地址变了（临时 `cf` 隧道一重启就换地址） | 换固定地址，见 [connect-clients.md 什么时候要重新授权](connect-clients.md#什么时候要重新授权什么时候要删了重建)。重启服务本身不会掉授权 |
 | 局域网另一台机器连不上 | 默认只监听 127.0.0.1 | `gld settings runtime --lan-access true` 后 `gld restart`，并确认认证不是 noauth |
 
 ## 隧道

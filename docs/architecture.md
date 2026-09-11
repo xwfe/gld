@@ -35,7 +35,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | --- | --- |
 | `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。两个唯一入口：`tools::call_tool` 执行工具，`tools::build_tool_context` 构建上下文——MCP 监听器和 `gld tool call` 都走它，所以命令行里试出来的行为就是 AI 看到的行为 |
 | `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具 |
-| `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token |
+| `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
 | `runtime/` | 进程内 MCP / Actions 监听器的启停、端口检测与释放等待 |
 | `tunnel/`、`global_gateway.rs` | frpc / cloudflared 子进程监督，共享公网入口 |
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
