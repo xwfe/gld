@@ -1,3 +1,3 @@
 mod model;
 
-pub use model::{AppSettings, FrpProfile, GlobalGatewayConfig, ProxyConfig};
+pub use model::{AppSettings, FrpProfile, GlobalGatewayConfig, HubConfig, ProxyConfig};

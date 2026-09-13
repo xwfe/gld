@@ -65,6 +65,28 @@ impl SessionStore {
             .cloned()
             .collect()
     }
+
+    /// 结束表里全部会话，返回成功结束的个数。
+    ///
+    /// 会阻塞等进程退出（每个最多 1.5 秒），内部用 `block_on`，
+    /// 不能在 tokio 异步 worker 线程里调。
+    pub fn terminate_all(&self) -> usize {
+        self.session_ids()
+            .into_iter()
+            .filter(|session_id| {
+                kill_session(
+                    self,
+                    &json!({
+                        "session_id": session_id,
+                        "signal": "TERM",
+                        "wait_ms": 1500,
+                        "max_output_bytes": 1024
+                    }),
+                )
+                .is_ok()
+            })
+            .count()
+    }
 }
 
 pub fn register_workspace_session_store(workspace_root: &Path, store: &Arc<SessionStore>) {
@@ -92,27 +114,7 @@ pub fn kill_workspace_sessions(workspace_root: &Path) -> usize {
         })
         .unwrap_or_default();
 
-    stores
-        .into_iter()
-        .map(|store| {
-            store
-                .session_ids()
-                .into_iter()
-                .filter(|session_id| {
-                    kill_session(
-                        &store,
-                        &json!({
-                            "session_id": session_id,
-                            "signal": "TERM",
-                            "wait_ms": 1500,
-                            "max_output_bytes": 1024
-                        }),
-                    )
-                    .is_ok()
-                })
-                .count()
-        })
-        .sum()
+    stores.into_iter().map(|store| store.terminate_all()).sum()
 }
 
 pub struct ExecSession {

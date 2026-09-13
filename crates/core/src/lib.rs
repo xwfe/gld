@@ -24,6 +24,7 @@ pub mod global_gateway;
 pub mod harness;
 pub mod health;
 pub mod home;
+pub mod hub;
 pub mod local_network;
 pub mod logs;
 pub mod mcp;

@@ -128,7 +128,9 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
     Ok(result)
 }
 
-fn tool_arguments(name: &str, params: &Value) -> Value {
+/// 取 `tools/call` 的参数，并把 ChatGPT 带来的会话标识塞给 history 工具。
+/// 单工作区和 hub 共用这一份，经 hub 写的历史档案才会认同一个对话。
+pub(crate) fn tool_arguments(name: &str, params: &Value) -> Value {
     let mut args = params
         .get("arguments")
         .cloned()

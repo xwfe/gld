@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{FrpProfile, GlobalGatewayConfig, ProxyConfig};
+use crate::settings::{FrpProfile, GlobalGatewayConfig, HubConfig, ProxyConfig};
 use crate::workspace::WorkspaceProfile;
 
 /// Unified on-disk payload stored in `data/profiles.json`.
@@ -36,6 +36,8 @@ pub struct AppData {
     pub restore_actions_workspace_ids: Vec<String>,
     #[serde(default)]
     pub global_gateway: GlobalGatewayConfig,
+    #[serde(default)]
+    pub hub: HubConfig,
     #[serde(default)]
     pub shared_secrets: HashMap<String, String>,
     #[serde(default)]

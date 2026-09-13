@@ -78,6 +78,56 @@ impl Default for GlobalGatewayConfig {
     }
 }
 
+/// 聚合入口（hub）：一条 MCP 连接访问多个工作区。
+///
+/// 它是什么、什么时候用、代价是什么见 docs/concepts.md 的「聚合入口」一节。
+/// 这里只有配置；按 `workspace` 参数分发和隔离规则在 `crate::hub`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubConfig {
+    #[serde(default = "default_hub_port")]
+    pub local_port: u16,
+    /// oauth | bearer | noauth，含义和工作区的 `mcp.auth` 一样。
+    #[serde(default = "default_hub_auth_type")]
+    pub auth_type: String,
+    /// hub 列给客户端的工具集。成员自己的工具集照样生效，两边取交集——
+    /// 这里写 advanced 也放不开一个 read-only 的成员。
+    #[serde(default = "default_hub_tool_profile")]
+    pub tool_profile: String,
+    /// 手动公网地址（自建反代时填，不带 `/mcp`）。
+    #[serde(default)]
+    pub public_url: String,
+    /// 经全局入口暴露为 `<入口公网地址>/hub/mcp`。
+    #[serde(default)]
+    pub use_global_gateway: bool,
+    /// 成员工作区 id，按加入顺序。
+    ///
+    /// 存 id 不存名字：工作区改名不该让它悄悄掉出 hub。工作区被 destroy 时
+    /// 会顺手从这里删掉，见 `App::delete_workspace`。
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// 启动 hub 时置为 true，用户主动停掉时置回 false；守护进程启动时据此恢复。
+    ///
+    /// 不跟全局的「启动时恢复」开关走：那个默认关，而 hub 是一条客户端里配死的
+    /// 连接，守护进程重启一次它就没了，用户只会看到连接器报错。
+    #[serde(default)]
+    pub restore_on_launch: bool,
+}
+
+impl Default for HubConfig {
+    fn default() -> Self {
+        Self {
+            local_port: default_hub_port(),
+            auth_type: default_hub_auth_type(),
+            tool_profile: default_hub_tool_profile(),
+            public_url: String::new(),
+            use_global_gateway: false,
+            members: Vec::new(),
+            restore_on_launch: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -114,6 +164,8 @@ pub struct AppSettings {
     pub restore_actions_workspace_ids: Vec<String>,
     #[serde(default)]
     pub global_gateway: GlobalGatewayConfig,
+    #[serde(default)]
+    pub hub: HubConfig,
     /// Shared secrets indexed by key name (e.g. "bearer_token").
     /// Persisted alongside other app settings in app_settings.json.
     #[serde(default)]
@@ -146,6 +198,16 @@ fn default_global_gateway_cloudflare_mode() -> String {
 fn default_global_gateway_use_proxy() -> bool {
     true
 }
+/// 工作区 MCP 从 28766 往上分配、全局入口是 28765，往下错开一个就不会撞。
+fn default_hub_port() -> u16 {
+    28764
+}
+fn default_hub_auth_type() -> String {
+    "oauth".to_string()
+}
+fn default_hub_tool_profile() -> String {
+    "compact".to_string()
+}
 
 impl AppSettings {
     pub fn from_data(data: &AppData) -> Self {
@@ -164,6 +226,7 @@ impl AppSettings {
             restore_mcp_workspace_ids: data.restore_mcp_workspace_ids.clone(),
             restore_actions_workspace_ids: data.restore_actions_workspace_ids.clone(),
             global_gateway: data.global_gateway.clone(),
+            hub: data.hub.clone(),
             shared_secrets: data.shared_secrets.clone(),
             workspace_secrets: data.workspace_secrets.clone(),
             app_secrets: data.app_secrets.clone(),
@@ -185,6 +248,7 @@ impl AppSettings {
         data.restore_mcp_workspace_ids = self.restore_mcp_workspace_ids.clone();
         data.restore_actions_workspace_ids = self.restore_actions_workspace_ids.clone();
         data.global_gateway = self.global_gateway.clone();
+        data.hub = self.hub.clone();
         data.shared_secrets = self.shared_secrets.clone();
         data.workspace_secrets = self.workspace_secrets.clone();
         data.app_secrets = self.app_secrets.clone();
