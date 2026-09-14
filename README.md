@@ -83,6 +83,7 @@ gld destroy                   # 连配置和密钥一起删掉；项目文件不
 | 我想…… | 看这里 |
 | --- | --- |
 | 搞清楚共享密钥池、工具集、Planning 模式这些名词是什么 | [concepts.md](docs/concepts.md) |
+| 客户端里只配一条连接，访问好几个项目且互不串 | [concepts.md 聚合入口](docs/concepts.md#聚合入口hub) |
 | 接到 ChatGPT / Claude Code / Cursor / 自定义 GPT | [connect-clients.md](docs/connect-clients.md) |
 | 知道 AI 到底能碰什么，以及怎么收紧 | [security.md](docs/security.md) |
 | 照着报错找处理办法 | [troubleshooting.md](docs/troubleshooting.md) |

@@ -204,8 +204,8 @@ gld list                                                  # 公网地址变成 h
 
 **客户端那边仍然是一个工作区一条连接器**，因为每个工作区的 URL 不一样
 （`/w/<id>/mcp` 里的 id 不同）。全局入口省掉的是隧道和域名，不是连接器条目。
-想让好几个项目共用一条连接器，见
-[concepts.md 一个工作区能不能装多个项目](concepts.md#一个工作区能不能装多个项目)。
+想让好几个项目共用一条连接器，用[聚合入口](#一条连接接多个工作区聚合入口)——
+它也能挂在全局入口上。
 
 ### 在 ChatGPT 里配置
 
@@ -311,3 +311,60 @@ AI 调 `server_info` 拿到的也是这个名字——它问的就是"我现在�
 
 接了好几个项目、不想在客户端里存好几份凭据时，可以让它们共用同一套 —— 见
 [concepts.md 共享密钥池](concepts.md#共享密钥池shared-secrets)（那里也写了代价）。
+连连接器条目都想合成一条，看下一节。
+
+## 一条连接接多个工作区（聚合入口）
+
+每个工作区一条连接器嫌多，就把它们加进聚合入口，客户端里只配 hub 这一条。
+它怎么保证项目之间不串、代价是什么，见 [concepts.md 聚合入口](concepts.md#聚合入口hub)；
+这里只讲怎么接。
+
+### 本机客户端
+
+```bash
+gld hub add api web          # 名称、id 或路径，一次可以给多个
+gld hub set --auth bearer    # 本机用 bearer，省一次授权跳转
+gld hub start
+gld hub show --reveal        # 地址和 Bearer Token
+```
+
+Claude Code：
+
+```bash
+claude mcp add --transport http gld-hub http://127.0.0.1:28764/mcp \
+  --header "Authorization: Bearer <hub 的 bearer_token>"
+```
+
+**填 hub 自己的 token**（`gld hub show --reveal` 里那个），不是哪个工作区的——
+填成工作区的会一直 401，这是有意的：拿到一个项目的授权不等于拿到全部。
+
+### ChatGPT
+
+hub 一样要公网 HTTPS 地址，两条路选一条：
+
+```bash
+gld hub set --global-gateway true                   # 已经配好全局入口：地址是 https://<入口域名>/hub/mcp
+gld hub set --public-url https://hub.example.com    # 自己的反代，回源到 http://127.0.0.1:28764
+```
+
+hub 默认认证是 oauth。ChatGPT 里新建连接器，粘 `gld hub show` 里的**公网地址**；
+授权页输入 `gld hub show --reveal` 里的**授权口令**。
+
+挂了公网的 hub 改不成 `noauth`，gld 会直接拒。
+
+### 连上之后验证
+
+发给 AI：
+
+> 先调用 list_workspaces，再分别对 api 和 web 调用 git_status，告诉我两个项目各自的分支和路径。
+
+两个结果路径不同就是通了。报错对照见 [troubleshooting.md 聚合入口](troubleshooting.md#聚合入口hub)。
+
+### hub 什么时候要重新授权、什么时候要删了重建
+
+道理和[工作区那张表](#什么时候要重新授权什么时候要删了重建)一样，换成 hub 的操作：
+
+- **什么都不用做**：`gld hub add` / `gld hub rm`、成员改配置、`gld hub start` 重启、守护进程重启。
+- **重新授权**：`gld hub regen oauth_token_secret`。
+- **删掉重建**：hub 的公网地址变了——`--global-gateway` 开关切换、`--public-url` 换了、
+  全局入口用临时 `cf` 地址并重启了。

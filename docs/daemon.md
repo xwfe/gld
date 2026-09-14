@@ -50,7 +50,7 @@ printf '{"op":"ping"}\n' | nc -U ~/.config/gld/daemon.sock
 | --- | --- |
 | `start` `stop` `restart` `share` | `workspace *` `settings *` `secret *` `frp *` |
 | `tunnel start/stop/restart/test` | `status` `ps` `logs` `health` `list` `destroy` |
-| `gateway start/stop` | `planning *` `history` `usage` `context` |
+| `gateway start/stop` `hub start/stop` | `planning *` `history` `usage` `context` `hub show/add/rm/set` |
 
 `upgrade` 两边都沾：只改配置时不需要，改到公网入口且服务正在跑时会去重连隧道。
 
@@ -97,9 +97,11 @@ pid 文件只用于展示和补充判断。
 3. 读取 `data/profiles.json`。文件损坏会在这一步失败，错误写进 `daemon.log`，
    命令行侧表现为“守护进程在 15 秒内没有就绪”。
 4. 写 `daemon.json`。
-5. 如果 `gld settings runtime --restore-on-launch true` 打开了，恢复上次退出前正在跑的
+5. 聚合入口上次 `gld hub start` 过、且没有 `gld hub stop` 的，把它拉起来。**不看**下一步那个开关：
+   hub 是客户端里配死的一条连接，守护进程一重启就没了的话，用户只会看到连接器报错。
+6. 如果 `gld settings runtime --restore-on-launch true` 打开了，恢复上次退出前正在跑的
    MCP / Actions（清单在 `profiles.json` 的 `restore_*_workspace_ids`）。
-6. 进入接受连接的循环，每个连接一个任务，互不阻塞。
+7. 进入接受连接的循环，每个连接一个任务，互不阻塞。
 
 ## 退出时发生什么
 
@@ -107,10 +109,11 @@ pid 文件只用于展示和补充判断。
 
 1. 停止所有 MCP / Actions 监听器，等端口真正释放（最多 3 秒，超时强制 abort）；
 2. 停掉每个工作区的 frpc / cloudflared 子进程；
-3. 停掉全局入口；
+3. 停掉聚合入口和全局入口；
 4. 删除 `daemon.sock` 与 `daemon.json`，释放锁，进程退出。
 
 “下次恢复”清单不会被清空：下一次守护进程启动、且开了 restore-on-launch，服务会回来。
+hub 的恢复标记也不动，只有 `gld hub stop` 会清掉它。
 `kill -9` 跳过以上全部步骤，frpc / cloudflared 可能变成孤儿进程，
 下次启动同一工作区时 supervisor 会按 pid 文件回收它们。
 

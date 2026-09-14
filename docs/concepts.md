@@ -5,7 +5,7 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 
 各节都能单独看，按需跳：
 
-- [工作区](#工作区workspace) · [一个工作区能不能装多个项目](#一个工作区能不能装多个项目)
+- [工作区](#工作区workspace) · [一个工作区能不能装多个项目](#一个工作区能不能装多个项目) · [聚合入口 hub](#聚合入口hub)
 - [MCP 和 Actions 是两条线路](#mcp-和-actions-是两条线路) · [共享密钥池](#共享密钥池shared-secrets)
 - [拿公网地址的三种方式](#拿公网地址的三种方式) · [工具集 tool-profile](#工具集tool-profile)
 - [权限模式 permission-mode](#权限模式permission-mode) · [Planning 三种模式](#planning-三种模式)
@@ -86,9 +86,87 @@ AI：（调 set_default_cwd path=proj-a，然后 git_status）
 
 | 情况 | 建议 |
 | --- | --- |
-| 项目不多，边界要清楚 | 一个项目一个工作区，公网入口用[全局入口](connect-clients.md#多个项目共用一个域名全局入口)共享——一条隧道，N 条连接器 |
-| 一堆自己的小项目和脚本 | 父目录做一个工作区，一条连接器，对话开头让 AI 先 `set_default_cwd` |
-| 两者都有 | 主力项目各自独立工作区，杂项归到一个父目录工作区 |
+| 想一条连接器接好几个项目，边界也要清楚 | [聚合入口](#聚合入口hub)：每个项目还是独立工作区，客户端只配 hub 这一条，上面五条一条都不沾 |
+| 客户端里多配几条无所谓 | 一个项目一个工作区，公网入口用[全局入口](connect-clients.md#多个项目共用一个域名全局入口)共享——一条隧道，N 条连接器 |
+| 一堆自己的小脚本，不在乎上面五条 | 父目录做一个工作区，对话开头让 AI 先 `set_default_cwd` |
+
+---
+
+## 聚合入口（hub）
+
+**客户端里只配一条连接，访问你挑出来的几个工作区；每个工作区照旧各管各的。**
+
+```bash
+gld hub add api web          # 把工作区加进来：名称、id 或路径，立即生效
+gld hub start                # 起在 http://127.0.0.1:28764/mcp
+gld hub show --reveal        # 客户端要填的地址和凭据
+```
+
+具体怎么接 Claude Code / ChatGPT 见
+[connect-clients.md](connect-clients.md#一条连接接多个工作区聚合入口)。
+
+### AI 那边看到什么
+
+- `list_workspaces`：列出 hub 里的成员（名称、id、路径、工具集）。
+- 其余每个工具都多一个**必填**参数 `workspace`，填成员的名称或 id：
+
+  ```text
+  read_file  workspace=api  path=src/main.rs    读的是 api 项目的 src/main.rs
+  read_file  workspace=web  path=src/main.rs    读的是 web 项目的 src/main.rs
+  read_file  path=src/main.rs                   报 WORKSPACE_REQUIRED，报错里列出能填什么
+  ```
+
+- `workspace_context`：取某个工作区自己的说明文件、Skill、历史摘要和 Planning 模式。
+  hub 会提示 AI 第一次进一个工作区前先调它。
+
+名称重复时填名称会报 `WORKSPACE_AMBIGUOUS`，要求改填 id——不会挑一个猜。
+
+### 为什么不会串
+
+和上面[父目录那条路](#一个工作区能不能装多个项目)逐条对比：
+
+| | 父目录 + `set_default_cwd` | 聚合入口 |
+| --- | --- | --- |
+| "当前在哪个项目" | 服务端记着，所有对话共用一份 | **服务端不记**，每次调用自己带；两个对话同时各干各的也不会串。所以 hub 里没有 `set_default_cwd` |
+| 边界 | 父目录，`../proj-a` 照样读得到 | 每个项目自己的根目录，`..` 和绝对路径的规则和单独连这个工作区一样 |
+| 命令会话 | 共用一张表 | 各一张：api 里起的命令，拿它的 `session_id` 去 web 读，报 `SESSION_NOT_FOUND` |
+| Planning / History / Durable Task | 全堆在父目录 | 在各自项目里（本来就存在每个项目的 `.gld/`、`docs/history-session/`） |
+| 说明文件、Skill | 只读父目录那份 | 按工作区单独取，api 的 `AGENTS.md` 不会拿去指导 web |
+| 工具集、命令白名单、读限制 | 父目录一套 | 用每个成员自己的。hub 只收紧不放宽：web 是 `read-only`，经 hub 也写不了（报 `TOOL_NOT_ALLOWED_IN_WORKSPACE`） |
+
+另外三条：
+
+- **凭据不互通。** hub 有自己的一套 token / 口令，工作区的 token 打到 hub 上是 401，反过来也是。
+- **不在 hub 里的工作区，AI 看不见。** 填它的名字和填一个不存在的名字，报错一模一样，
+  `list_workspaces` 里也没有它。
+- **日志各记各的。** 经 hub 对 api 的请求记在 api 自己的请求日志里（带 `[hub]` 前缀，
+  `gld logs -w api` 看得到），web 的日志里没有；hub 自己在数据目录的 `logs/hub/` 里记全部。
+
+### 改了什么要不要重启
+
+| 操作 | hub 要不要重启 |
+| --- | --- |
+| `gld hub add` / `gld hub rm`、成员自己 `gld ws set` | **不用**，下一次调用就生效。hub 每次请求都重新读成员表和成员配置 |
+| `gld hub set`、`gld hub regen` | hub 在跑就自动重启 |
+| 守护进程重启 | hub 自己回来（不看 `restore-on-launch` 开关）；`gld hub stop` 过的不回来 |
+
+被移出的成员、或者改了配置的成员，它经 hub 起的还在跑的命令，会在**下一次有请求进 hub 时**
+被结束——旧的会话表没人能再读到它们，留着就是孤儿进程。
+
+### 代价：一把钥匙开几扇门
+
+拿到 hub 凭据的人能进 **hub 里的全部成员**，而且连上来调一次 `list_workspaces` 就知道有哪几个。
+
+- 只把愿意放在一起的项目加进来；要单独给出去的项目，让它自己连。
+- hub 挂公网（`--global-gateway true` 或 `--public-url`）时，gld 拒绝 `noauth`。
+- 和[共享密钥池](#共享密钥池shared-secrets)不是一回事：共享池是几条连接器共用一把钥匙，
+  地址还是各是各的；hub 是一个地址加一把钥匙。
+
+### 目前没有的
+
+- **按调用者分范围。** 所有拿着 hub 凭据的客户端看到同一组成员；要分开，就别都加进来。
+- **GPT Actions 版。** 聚合入口只有 MCP。
+- **用量统计。** 经 hub 的请求不计入 `gld usage`。
 
 ---
 
@@ -379,5 +457,6 @@ history 工具写完会自动把指纹记上账。
 | `allowed-commands` 和 `only:` 前缀 —— 命令白名单为什么"写了等于没写" | [security.md](security.md) |
 | 守护进程是怎么回事、文件放哪、开机自启 | [daemon.md](daemon.md) |
 | 全局入口怎么配 | [connect-clients.md](connect-clients.md#多个项目共用一个域名全局入口) |
+| 聚合入口怎么接客户端 | [connect-clients.md](connect-clients.md#一条连接接多个工作区聚合入口) |
 | 每个密钥名分别是干什么的 | `gld secret keys` |
 | 每个配置字段的取值 | `gld ws fields`（`--all` 含 Actions 侧） |

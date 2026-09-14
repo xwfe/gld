@@ -109,6 +109,22 @@ gld tool call exec_command cmd='cargo test'
 | `FILE_CHANGED_EXTERNALLY`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹，发现任务开始后有它没记账的文件变化 | 确实是你在编辑器里改了文件的话，这是它该做的事——让 AI 重新读一遍再动手。要是你什么都没改却一直报，看下一行 |
 | 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
 
+## 聚合入口（hub）
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 连 hub 一直 401，同一个 token 连工作区地址却能进 | 填的是工作区的凭据。hub 有自己独立的一套，两边互相打不开是有意的 | `gld hub show --reveal` 取 hub 的 |
+| AI 报 `WORKSPACE_REQUIRED` | 调用没带 `workspace` 参数。hub 不记"当前工作区"，不替它猜 | 报错里列了能填什么，模型一般重试一次就对；反复出现就在对话里说一句"每次调用都带 workspace" |
+| AI 报 `WORKSPACE_NOT_IN_HUB`，工作区明明登记了 | 登记了不等于加进了 hub，或者名字写错 | `gld hub show` 看成员，`gld hub add <工作区>`，立即生效 |
+| AI 报 `WORKSPACE_AMBIGUOUS` | 两个成员同名 | 让 AI 填 id；或给其中一个改名：`gld ws set -w <id> name=<新名字>` |
+| AI 报 `TOOL_NOT_ALLOWED_IN_WORKSPACE` | 这个成员自己的工具集里没有这个工具，hub 不会替它放宽 | 确实要给：`gld ws set -w <成员> tool-profile=compact`（或更全的） |
+| `端口 … 已经分给了工作区「…」` / `已经是全局入口的本地端口` | hub 端口和别的 gld 服务撞了 | `gld hub set --port <端口>` |
+| `hub 挂了公网入口…不能用 noauth` | 有意拦的：无认证的公网 hub 等于把全部成员开放给整个互联网 | `gld hub set --auth oauth` |
+| `hub 设了经全局入口暴露，但全局入口没启用` | `--global-gateway true` 依赖全局入口 | 先配好全局入口（[connect-clients.md](connect-clients.md#多个项目共用一个域名全局入口)）；或 `gld hub set --global-gateway false` |
+| 全局入口上访问 `/hub/mcp` 返回 404 | hub 没声明走入口，入口不替它转 | `gld hub set --global-gateway true` |
+| 移出 hub 的工作区，经 hub 起的命令还在跑 | 这些命令在下一次有请求进 hub 时才被结束 | 随便再调一次 hub；或 `gld hub stop` |
+| `gld hub show` 状态是 `error` | 监听器跑着跑着退了 | 状态后面写着日志位置（数据目录下 `logs/hub/stderr.log`）；修好后 `gld hub start` |
+
 ## 数据目录与环境
 
 | 现象 | 原因 | 处理 |

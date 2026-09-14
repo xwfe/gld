@@ -28,6 +28,11 @@ gld doctor                 # 配置自洽性；认证缺密钥这类会报 ✗
 | 写文件 | 工作区内 | 绝对路径和 `..` 都会被拒；`.git` / `.github` 另外受保护 |
 | 读 Git 历史 | 工作区内 | status / diff / log / show / blame |
 
+**聚合入口（hub）的凭据管的是它的全部成员。** 把上表的"工作区"换成"hub 里的每一个
+成员"——每个成员自己的工具集、白名单、读限制照样生效，但能进哪几个项目只看成员表。
+挂公网的 hub 里别放不想一起暴露的项目，详见
+[concepts.md 聚合入口](concepts.md#聚合入口hub)。
+
 ### 读文件的范围：0.3.0 改了默认值
 
 桌面版和 0.3.0 之前的 gld，`read_file` / `list_dir` / `list_files` /
@@ -157,6 +162,9 @@ gld secret regen oauth_token_secret
 （ChatGPT 那边不用删连接器，它会自己弹出重新授权，输一次口令）。
 笔记本丢了、把公网地址发错了群、怀疑令牌外泄——用这一条，别去改口令。
 
+hub 的凭据是单独一套，换法一样，只是命令换成 `gld hub regen <名字>`（例如
+`gld hub regen oauth_token_secret`）。换工作区的密钥不影响 hub，反过来也一样。
+
 > 为什么不能靠"把注册的客户端删掉"来吊销：ChatGPT 这类连接器注册的是
 > **公共客户端**（OAuth 术语，指没有客户端密钥、只靠 PKCE 的客户端），
 > 它的身份就写在刷新令牌里，拿到令牌的人本来就能续命。真正的开关只有签名密钥。
@@ -164,7 +172,7 @@ gld secret regen oauth_token_secret
 ## 密钥存在哪、丢了会怎样
 
 全部在 `~/.config/gld/data/profiles.json`，明文，文件权限 600（创建时就设好了）。
-每个工作区 7 把 + 一个共享池。
+每个工作区 7 把 + 一个共享池 + 聚合入口一套（4 把，第一次用到 hub 时生成）。
 
 这些值是随机生成的，**没有第二份副本**。文件丢了 = 每个 ChatGPT 连接器、
 每个自定义 GPT 都要重新配一遍。
@@ -172,6 +180,7 @@ gld secret regen oauth_token_secret
 旁边还有一个 `data/oauth-clients/<工作区id>.json`，记的是各个客户端动态注册时
 领走的 client_id 和回调地址（同样 600 权限）。它只影响"重启后要不要重新授权"，
 丢了不致命：已经发出去的令牌照常能刷新，只是下次重新授权时客户端要重新注册一次。
+聚合入口的是 `data/oauth-clients/hub.json`。
 
 从 0.3.0 起，这个文件解析失败时 gld 会整体停机并保留原文件，而不是当成
 "还没配过"然后把空白配置写回去。（旧版会：截断一个字节，下一条命令就把所有
@@ -197,7 +206,8 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
   `mcp.confine-reads` 只管文件类工具，管不住子进程。
 - **`.git` 保护只挡文件工具和明显的命令模式**（`rm -rf .git` 这类）。绕过方式存在。
 - **全局网关不做认证。** `/w/<id>` 的鉴权由各个工作区自己的服务负责，
-  网关只转发。所以别让任何一个接入网关的工作区用 `noauth`。
+  网关只转发。所以别让任何一个接入网关的工作区用 `noauth`。`/hub` 同理由 hub 自己认证，
+  这一条 gld 替你挡了：挂公网的 hub 改不成 `noauth`。
 - **公网地址是靠请求头推断的**（没配 `mcp.public-url` 时）。这是给"你自己架
   nginx / cloudflared 反代"用的。全局网关那条路已经不再透传公网来的
   `X-Forwarded-*`，直连仍然认——因为反代场景需要它。
