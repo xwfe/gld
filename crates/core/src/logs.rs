@@ -1,7 +1,7 @@
 //! 运行日志的写入与轮转。
 //!
 //! 每个工作区在 `~/.config/gld/logs/<workspace-id>/` 下有几个日志文件：
-//! `mcp-requests.log`（每次 MCP 请求 2-4 行）、`stdout.log`、`stderr.log`，
+//! `mcp-requests.log`（每次 MCP 请求 2-4 行，被鉴权挡下的 1 行）、`stdout.log`、`stderr.log`，
 //! 用了隧道还会有 `frpc-*.log` / `cloudflared.log`。
 //!
 //! 守护进程会连续跑几周，这些文件必须有上限，否则一个话痨的客户端能把

@@ -131,6 +131,43 @@ fn logs_show_the_request_that_just_happened() {
     );
 }
 
+/// 被鉴权挡下的请求也得在 `gld logs` 里留一行，但凭据本身不能进日志。
+///
+/// 客户端连不上时第一个要分清的是：请求根本没到（隧道 / 地址的问题），还是到了
+/// 但凭据不对。以前 401 在记日志之前就返回了，两种情况日志都是一片空白。
+/// 日志常被整段贴出去求助，所以连错的 token 也不记——错的往往只差一两个字符。
+#[test]
+fn logs_show_requests_rejected_by_auth_without_the_credential() {
+    let env = Env::new();
+    let port = free_port();
+    env.ok(&[
+        "ws",
+        "add",
+        ".",
+        "--name",
+        "guarded",
+        "--mcp-port",
+        &port.to_string(),
+    ]);
+    env.ok(&["ws", "set", "auth=bearer"]);
+    env.ok(&["start"]);
+    let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
+    let wrong = "almost-the-right-token-0123456789";
+    assert_eq!(post_json(port, "/mcp", body, None).status, 401);
+    assert_eq!(post_json(port, "/mcp", body, Some(wrong)).status, 401);
+
+    let logs = env.ok(&["logs", "-n", "50"]);
+    assert!(
+        logs.contains("[auth] rejected status=401 credential=missing"),
+        "没带凭据的请求没记下来：{logs}"
+    );
+    assert!(
+        logs.contains("[auth] rejected status=401 credential=rejected"),
+        "凭据错误的请求没记下来：{logs}"
+    );
+    assert!(!logs.contains(wrong), "错的 token 进了日志：{logs}");
+}
+
 /// `health` 的本地探测必须绕过 HTTP 代理。
 ///
 /// 很多开发环境设了 `HTTP_PROXY`。不绕过的话 curl 会把 127.0.0.1 也发给代理，

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::extract::{Form, Query, State};
 use axum::http::{
-    header::{CACHE_CONTROL, WWW_AUTHENTICATE},
+    header::{AUTHORIZATION, CACHE_CONTROL, USER_AGENT, WWW_AUTHENTICATE},
     HeaderMap, StatusCode,
 };
 use axum::response::{IntoResponse, Response};
@@ -372,6 +372,7 @@ async fn mcp_post(
     Json(body): Json<Value>,
 ) -> Response {
     if let Some(response) = require_mcp_auth(&state, &headers) {
+        log_rejected(&state.scope, &headers, response.status());
         return response;
     }
     let method = body
@@ -515,6 +516,55 @@ async fn mcp_post(
     }
 }
 
+/// 被鉴权挡下的请求也记一行。
+///
+/// 客户端连不上时第一个要分清的是：请求根本没到 gld（隧道 / 地址的问题），还是到了
+/// 但凭据不对。不记的话两种情况日志都是一片空白。公网上被扫描时也靠这几行看出来。
+///
+/// 只记"带没带凭据"，凭据本身绝不进日志：日志常被整段贴出去求助，而填错的 token
+/// 往往只差一两个字符。`forwarded_for` 来自隧道加的请求头，直连时客户端能随便填，
+/// 只能当线索。
+fn log_rejected(scope: &str, headers: &HeaderMap, status: StatusCode) {
+    let (credential, hint) = if headers.contains_key(AUTHORIZATION) {
+        ("rejected", "请求到了 gld，但凭据不对或已失效")
+    } else {
+        ("missing", "请求到了 gld，但没带凭据")
+    };
+    append_profile_log(
+        scope,
+        "mcp-requests.log",
+        &format!(
+            "[auth] rejected status={} credential={credential} forwarded_for={} user_agent={} （{hint}）",
+            status.as_u16(),
+            header_for_log(headers, &["cf-connecting-ip", "x-forwarded-for", "x-real-ip"]),
+            header_for_log(headers, &[USER_AGENT.as_str()]),
+        ),
+    );
+}
+
+/// 取第一个存在的请求头写进日志：没有就是 `-`，最多 120 个字符，空格和控制字符换成 `_`。
+/// 不换的话，请求方能在 User-Agent 里写一段长得像 `status=200` 的字段，把日志带偏。
+fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
+    names
+        .iter()
+        .find_map(|name| headers.get(*name))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .chars()
+                .take(120)
+                .map(|c| {
+                    if c.is_whitespace() || c.is_control() {
+                        '_'
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
 fn require_mcp_auth(state: &ListenerState, headers: &HeaderMap) -> Option<Response> {
     if state.auth.bearer_enabled() {
         let expected = state.bearer_token.as_deref().unwrap_or("");
@@ -645,6 +695,27 @@ mod tests {
             oauth: None,
             oauth_client_secret: None,
         }
+    }
+
+    /// 请求头是对方随便填的：写进日志前得压成一个字段，不能带空格凒出假字段，也不能无限长。
+    #[test]
+    fn headers_are_squashed_into_one_log_field() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            "curl/8 status=200 credential=ok".parse().unwrap(),
+        );
+        headers.insert("x-forwarded-for", "a".repeat(500).parse().unwrap());
+
+        assert_eq!(
+            super::header_for_log(&headers, &["user-agent"]),
+            "curl/8_status=200_credential=ok"
+        );
+        assert_eq!(
+            super::header_for_log(&headers, &["cf-connecting-ip", "x-forwarded-for"]),
+            "a".repeat(120)
+        );
+        assert_eq!(super::header_for_log(&headers, &["x-real-ip"]), "-");
     }
 
     #[test]

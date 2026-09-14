@@ -53,7 +53,7 @@ gld tool call exec_command cmd='cargo test'
 | `gld health` 本地 /mcp 返回 502 | 环境里有 `HTTP_PROXY`，本地探测被代理吃了（0.3.0 起本地探测已绕过代理；旧版会有此问题） | 升级；或临时 `NO_PROXY=127.0.0.1` |
 | 公网 /mcp 显示 `FRP 未挂载代理（返回 frp 404 页）` | frps 收到请求但没有对应子域名的代理 | `gld tunnel status` 看隧道是否 running；`gld tunnel restart` |
 | OAuth 授权失败 | Client ID / 口令来自不同工作区，或客户端里存的是旧值 | `gld list --reveal` 重新核对（改密钥会自动重启服务，服务端一定是新值） |
-| 401 Unauthorized | Bearer Token 不对，或改了 token 客户端没更新 | `gld secret show bearer_token --reveal` |
+| 401 Unauthorized / 客户端只说连不上 | Bearer Token 不对、改了 token 客户端没更新；或者请求压根没到 gld | 先 `gld logs -n 20` 分清是哪种：有 `[auth] rejected credential=missing` / `credential=rejected` 说明请求到了、是凭据问题，`gld secret show bearer_token --reveal` 核对（OAuth 就重新授权）；客户端一连日志里却什么都没有，说明请求没到，查公网地址和隧道（`gld health`）。日志只记带没带凭据，不记凭据本身 |
 | `gld health` 显示 `HTTP 404（这个端口上应答的不是 gld 的服务）` | 这个端口上跑着别的程序（Actions 默认端口 8787 很容易被撞） | `gld ws set actions.port=<其他端口>`（会自动重启）；`gld doctor` 会告诉你占用者是谁 |
 | 工具列表是旧的 | 客户端缓存 | 断开重连插件 / 新开对话；服务端 `/mcp` 已带 `Cache-Control: no-store` |
 | ChatGPT 连接器突然要重新连接，配置看着没动过 | 多半是公网地址变了（临时 `cf` 隧道一重启就换地址） | 换固定地址，见 [connect-clients.md 什么时候要重新授权](connect-clients.md#什么时候要重新授权什么时候要删了重建)。重启服务本身不会掉授权 |
