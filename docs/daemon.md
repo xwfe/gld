@@ -155,6 +155,18 @@ macOS launchd（`~/Library/LaunchAgents/dev.gld.daemon.plist`）：
 launchctl load ~/Library/LaunchAgents/dev.gld.daemon.plist
 ```
 
+**launchd / systemd 起的守护进程没有你 shell 里的 PATH**：launchd 给的只有 `/usr/bin:/bin:/usr/sbin:/sbin`，
+systemd 多一个 `/usr/local/bin`。
+Homebrew（`/opt/homebrew/bin`）、`~/.cargo/bin`、conda / nvm 装的 node、python、cargo 全都找不到，
+AI 跑命令会报 `Program not found on PATH: node`——而你在终端里 `gld tool call` 复现时一切正常，
+因为那时候守护进程是终端拉起的。把要用的目录配成全局可执行路径，跟谁拉起守护进程就无关了：
+
+```bash
+which node cargo python3        # 先在终端里看它们在哪个目录
+gld settings runtime --executable-paths "/opt/homebrew/bin;$HOME/.cargo/bin"
+gld restart                      # 已经在跑的服务要重启才用上，每个工作区各一次
+```
+
 Linux systemd 用户单元（`~/.config/systemd/user/gld.service`）：
 
 ```ini

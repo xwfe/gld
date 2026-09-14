@@ -103,6 +103,7 @@ gld tool call exec_command cmd='cargo test'
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
 | 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld ws set allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |
 | 收窄了白名单但 `python` 还能跑 | 不带 `only:` 的写法是追加，不是替换 | 改成 `gld ws set allowed-commands=only:…`；细节见 [security.md](security.md) |
+| `Program not found on PATH: node`，终端里明明能跑 | 守护进程是 launchd / systemd 起的，PATH 里没有 Homebrew、`~/.cargo/bin` 这些目录 | 把目录配成全局可执行路径再 `gld restart`，写法见 [daemon.md](daemon.md#开机自启) |
 | 工作区外文件写入被拒 | Workspace-first：写入永远只在工作区内 | 把目标目录登记成工作区，或把文件放进工作区 |
 | `READS_CONFINED_TO_WORKSPACE`（升级到 0.3.0 后 Agent 突然读不了外部文件） | 0.3.0 起读也默认限制在工作区内，老配置升级上来一样收紧 | 确实要读外面：`gld ws set confine-reads=false`（Actions 侧 `actions.confine-reads`）。先读一下 [security.md](security.md) 再决定 |
 | `GLD_DATA_HOME_DENIED` | 想用文件工具读 gld 自己的数据目录 | 有意挡的，**关掉 confine-reads 也不给读**：那里明文存着所有工作区的密钥。要看密钥用 `gld secret show <key> --reveal` |
