@@ -153,14 +153,14 @@ impl Harness {
 
     pub fn check_baseline(&self, task_id: &str) -> HarnessResult<()> {
         let task = self.task(task_id)?;
-        let current = capture_baseline(&self.workspace_root);
-        if current.branch != task.baseline.branch || current.head != task.baseline.head {
+        let (branch, head) = git_position(&self.workspace_root);
+        if branch != task.baseline.branch || head != task.baseline.head {
             return Err(HarnessError::new(
                 "BASELINE_STALE",
                 "Git 分支或 HEAD 已发生变化",
             ));
         }
-        if current.worktree_fingerprint != task.expected_fingerprint {
+        if worktree_fingerprint(&self.workspace_root) != task.expected_fingerprint {
             return Err(HarnessError::new(
                 "FILE_CHANGED_EXTERNALLY",
                 "工作区存在 Harness 未记录的外部文件变化",
@@ -171,7 +171,7 @@ impl Harness {
 
     pub fn refresh_expected_state(&self, task_id: &str) -> HarnessResult<TaskSession> {
         let mut task = self.task(task_id)?;
-        task.expected_fingerprint = capture_baseline(&self.workspace_root).worktree_fingerprint;
+        task.expected_fingerprint = worktree_fingerprint(&self.workspace_root);
         task.updated_at = timestamp();
         self.store.save_task(&task)?;
         Ok(task)
@@ -324,14 +324,18 @@ impl Harness {
     }
 
     pub fn status(&self) -> HarnessResult<HarnessStatus> {
-        let current = capture_baseline(&self.workspace_root);
+        // 这里只拿分支和 HEAD。整棵树的指纹要把工作区每个文件读一遍算 SHA-256，而 status
+        // 挂在每一次失败的工具调用后面——以前工作区里有个 511 MB 的文件，读一个不存在的
+        // 路径就要多等 2 秒。没有活动任务时指纹根本没人用；有任务时也先比分支和 HEAD，
+        // 对得上才算指纹。
+        let (branch, head) = git_position(&self.workspace_root);
         let task = self.current_task()?;
         let (task_id, task_state, task_updated_at, writable, baseline_matches, reason) =
             match task.as_ref() {
                 Some(task) => {
-                    let matches = task.baseline.branch == current.branch
-                        && task.baseline.head == current.head
-                        && task.expected_fingerprint == current.worktree_fingerprint;
+                    let matches = task.baseline.branch == branch
+                        && task.baseline.head == head
+                        && task.expected_fingerprint == worktree_fingerprint(&self.workspace_root);
                     let reason = if matches {
                         "任务可继续执行"
                     } else {
@@ -402,13 +406,13 @@ impl Harness {
         capabilities.insert(
             "git".into(),
             CapabilityStatus {
-                status: if current.branch.is_some() && current.head.is_some() {
+                status: if branch.is_some() && head.is_some() {
                     "available"
                 } else {
                     "degraded"
                 }
                 .into(),
-                reason: if current.branch.is_some() && current.head.is_some() {
+                reason: if branch.is_some() && head.is_some() {
                     "已读取当前分支和 HEAD"
                 } else {
                     "当前工作区不是可读取 Git 状态的仓库"
@@ -448,8 +452,8 @@ impl Harness {
             writable,
             reason,
             recoverable: true,
-            branch: current.branch,
-            head: current.head,
+            branch,
+            head,
             baseline_matches,
             capabilities,
             next_actions,
@@ -480,46 +484,96 @@ impl Harness {
 }
 
 pub fn capture_baseline(root: &Path) -> ProjectBaseline {
+    let entries = worktree_entries(root);
+    let (branch, head) = git_position(root);
+    ProjectBaseline {
+        branch,
+        head,
+        worktree_fingerprint: fingerprint_of(&entries),
+        entries,
+        captured_at: timestamp(),
+    }
+}
+
+fn worktree_fingerprint(root: &Path) -> String {
+    fingerprint_of(&worktree_entries(root))
+}
+
+fn fingerprint_of(entries: &[BaselineEntry]) -> String {
+    let mut fingerprint = Sha256::new();
+    for entry in entries {
+        fingerprint.update(entry.path.as_bytes());
+        fingerprint.update(entry.sha256.as_bytes());
+        fingerprint.update(entry.bytes.to_le_bytes());
+    }
+    format!("{:x}", fingerprint.finalize())
+}
+
+fn git_position(root: &Path) -> (Option<String>, Option<String>) {
+    (
+        git_value(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        git_value(root, &["rev-parse", "HEAD"]),
+    )
+}
+
+/// 工作区里每个文件的路径、大小和 SHA-256，按路径排好序。
+///
+/// 跳过的目录在遍历时就不进去。以前是走到每个文件再判断要不要跳，`node_modules`、
+/// `target` 里几十万个文件照样要逐个 stat 一遍。
+/// 文件内容按固定缓冲流式算哈希：以前整个读进内存，工作区里一个 511 MB 的文件就让
+/// 峰值内存涨到 517 MB。
+fn worktree_entries(root: &Path) -> Vec<BaselineEntry> {
     let mut entries = Vec::new();
-    for item in WalkDir::new(root)
+    let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_map(Result::ok)
-    {
-        let path = item.path();
-        if path == root || should_skip(path, root) || !item.file_type().is_file() {
+        .filter_entry(|item| item.depth() == 0 || !is_skipped_name(item.file_name()));
+    for item in walker.filter_map(Result::ok) {
+        if !item.file_type().is_file() {
             continue;
         }
-        let Ok(bytes) = fs::read(path) else { continue };
+        let path = item.path();
+        let Some((sha256, is_binary, bytes)) = hash_file(path) else {
+            continue;
+        };
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
         entries.push(BaselineEntry {
             path: rel,
             exists: true,
-            is_binary: bytes.contains(&0),
-            sha256: format!("{:x}", hasher.finalize()),
-            bytes: bytes.len() as u64,
+            is_binary,
+            sha256,
+            bytes,
         });
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut fingerprint = Sha256::new();
-    for entry in &entries {
-        fingerprint.update(entry.path.as_bytes());
-        fingerprint.update(entry.sha256.as_bytes());
-        fingerprint.update(entry.bytes.to_le_bytes());
+    entries
+}
+
+/// 流式算 (sha256, 是否含 0 字节, 字节数)。读失败就当这个文件不存在，跟以前一样。
+fn hash_file(path: &Path) -> Option<(String, bool, u64)> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut is_binary = false;
+    let mut total = 0u64;
+    loop {
+        let read = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        let chunk = &buf[..read];
+        is_binary = is_binary || chunk.contains(&0);
+        hasher.update(chunk);
+        total += read as u64;
     }
-    ProjectBaseline {
-        branch: git_value(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        head: git_value(root, &["rev-parse", "HEAD"]),
-        worktree_fingerprint: format!("{:x}", fingerprint.finalize()),
-        entries,
-        captured_at: timestamp(),
-    }
+    Some((format!("{:x}", hasher.finalize()), is_binary, total))
 }
 
 /// 指纹要盯的是"用户的工作区内容"，不包括 gld 自己在项目里的状态目录。
@@ -533,26 +587,37 @@ pub fn capture_baseline(root: &Path) -> ProjectBaseline {
 ///
 /// 开了任务反而什么都干不了，而报错说的是"外部文件变化"——去查外部改了什么，
 /// 永远查不到。
-fn should_skip(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .into_iter()
-        .flat_map(|p| p.components())
-        .filter_map(|component| component.as_os_str().to_str())
-        .any(|name| {
-            matches!(
-                name,
-                ".git"
-                    | ".gld"
-                    | ".coding-tools"
-                    | ".mcp-probe-kit"
-                    | "node_modules"
-                    | "target"
-                    | "dist"
-                    | "build"
-                    | ".svelte-kit"
-            )
-        })
+///
+/// 其余是构建产物、依赖缓存，以及工作区指到用户目录或磁盘根时才会碰到的巨型系统目录
+/// （macOS 的 `Library` 下挂着 iCloud / OneDrive，Windows 的 `AppData`）。它们不计入指纹
+/// 的代价是：有人在这些目录里改东西，任务不会报 FILE_CHANGED_EXTERNALLY。
+/// 名字匹配的是路径里任意一级，文件名也算（一个叫 `build` 的脚本同样被跳过）。
+fn is_skipped_name(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git"
+                | ".gld"
+                | ".coding-tools"
+                | ".mcp-probe-kit"
+                | "node_modules"
+                | "target"
+                | "dist"
+                | "build"
+                | ".svelte-kit"
+                | ".next"
+                | ".turbo"
+                | ".cache"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+                | "coverage"
+                | "Library"
+                | "AppData"
+                | "$Recycle.Bin"
+                | "System Volume Information"
+        )
+    )
 }
 
 fn git_value(root: &Path, args: &[&str]) -> Option<String> {
@@ -627,5 +692,40 @@ mod tests {
             .join(harness.workspace_id())
             .join("snapshots")
             .exists());
+    }
+
+    /// 流式哈希要跟整份读进来算的一样，否则升级后老任务的指纹全部对不上，
+    /// 一写就报 FILE_CHANGED_EXTERNALLY。0 字节故意放在第二块里。
+    #[test]
+    fn worktree_entries_skip_generated_dirs_and_hash_like_a_whole_read() {
+        let workspace = tempdir().expect("workspace");
+        let root = workspace.path();
+        let mut big = vec![b'a'; 200 * 1024];
+        big[100_000] = 0;
+        for (path, content) in [
+            ("src/main.rs", b"fn main() {}\n".to_vec()),
+            ("big.bin", big.clone()),
+            ("node_modules/pkg/index.js", b"x".to_vec()),
+            (".venv/lib/site.py", b"x".to_vec()),
+            ("docs/Library/cache.db", b"x".to_vec()),
+            ("scripts/build", b"#!/bin/sh\n".to_vec()),
+        ] {
+            let full = root.join(path);
+            fs::create_dir_all(full.parent().unwrap()).expect("dir");
+            fs::write(full, content).expect("file");
+        }
+
+        let entries = worktree_entries(root);
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["big.bin", "src/main.rs"]);
+
+        let big_entry = &entries[0];
+        assert_eq!(big_entry.bytes, big.len() as u64);
+        assert!(big_entry.is_binary, "0 字节在第二块也得认出是二进制");
+        assert_eq!(big_entry.sha256, format!("{:x}", Sha256::digest(&big)));
+        assert_eq!(
+            worktree_fingerprint(root),
+            capture_baseline(root).worktree_fingerprint
+        );
     }
 }

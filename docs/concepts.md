@@ -436,10 +436,15 @@ gld ws set history-context=        # 清空，恢复"什么都不注入"
 自己写完再记一份。对不上就拒绝执行并报 `FILE_CHANGED_EXTERNALLY`——意思是
 "有人在 AI 的记账之外改了文件，它手上的认知已经过期了"。
 
-不计入指纹的：`.git/`、`node_modules/`、`target/`、`dist/`、`build/` 这类，
-以及 **gld 自己在项目里的状态目录 `.gld/`**（Planning 状态存在这儿，而它每次
-工具调用都可能被写）。History 档案（`docs/history-session/`）计入指纹，但
-history 工具写完会自动把指纹记上账。
+不计入指纹的：`.git/`、`node_modules/`、`target/`、`dist/`、`build/`、`.venv/`、
+`__pycache__/`、`.next/`、`coverage/` 这类构建产物和依赖缓存，工作区指到用户目录时才会
+碰到的 `Library/`、`AppData/`，以及 **gld 自己在项目里的状态目录 `.gld/`**（Planning
+状态存在这儿，而它每次工具调用都可能被写）。这些目录里的改动任务发现不了。
+History 档案（`docs/history-session/`）计入指纹，但 history 工具写完会自动把指纹记上账。
+
+指纹要把剩下的每个文件完整读一遍算 SHA-256。实测工作区里有一个 511 MB 的文件时，
+每次写操作前多等约 1.8 秒（内存不涨）。大文件放进上面哪个目录里，或者这种工作区别开
+任务。没开任务时不算指纹。
 
 > 这两条都是 0.3.0 修的。之前它们都算进指纹，而工具自己就会写它们——
 > 结果是一开任务，第一次写操作就被判成"外部修改"，任务模式整个用不了。
