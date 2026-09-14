@@ -14,6 +14,15 @@ use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceErr
 const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const BINARY_PEEK_BYTES: usize = 8192;
 
+/// `read_file` 每次从磁盘取多少字节。内存峰值约等于这个缓冲加 `max_bytes`，跟文件多大无关。
+///
+/// 以前是整份读进来、转 UTF-8 时再复制一份、再给全文建行索引：读一个 511 MB 的文件
+/// 哪怕只要 200 字节，峰值也有 1114 MB（改成流式后 6 MB，耗时持平）。AI 连着读几个
+/// 大日志，守护进程就把机器内存吃光了。
+const READ_CHUNK_BYTES: usize = 64 * 1024;
+/// 开头这么多字节里出现 0 字节，就当二进制文件拒绝。
+const BINARY_SNIFF_BYTES: u64 = 4096;
+
 pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let path = args
         .get("path")
@@ -42,30 +51,16 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .and_then(Value::as_u64)
         .map(|v| v as usize);
 
-    let data = fs::read(&resolved.path).map_err(|_| WorkspaceError::not_found("File not found"))?;
-    if data.iter().take(4096).any(|b| *b == 0) {
-        return Err(WorkspaceError::Tool {
-            code: "BINARY_FILE",
-            message: "Binary file read blocked for text tool.".into(),
-            category: "validation",
-            retryable: false,
-        });
-    }
-    let text = String::from_utf8(data).map_err(|_| WorkspaceError::Tool {
-        code: "UNSUPPORTED_ENCODING",
-        message: "File is not valid utf-8.".into(),
-        category: "validation",
-        retryable: false,
-    })?;
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let total_lines = lines.len();
+    let file =
+        File::open(&resolved.path).map_err(|_| WorkspaceError::not_found("File not found"))?;
+    let TextSelection {
+        content,
+        truncated,
+        total_lines,
+        total_bytes,
+    } = read_text_selection(file, READ_CHUNK_BYTES, start_line, end_line, max_bytes)?;
+    let truncated_by = truncated.then_some("bytes");
     let end = end_line.unwrap_or(total_lines).min(total_lines);
-    let selected: String = if end < start_line {
-        String::new()
-    } else {
-        lines[(start_line - 1)..end].concat()
-    };
-    let (content, truncated, truncated_by) = truncate_bytes(&selected, max_bytes);
     let actual_end = if truncated && !content.is_empty() {
         start_line + content.lines().count().saturating_sub(1)
     } else {
@@ -83,7 +78,7 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         "end_line": actual_end,
         "next_start_line": truncated.then_some(actual_end.saturating_add(1)),
         "total_lines": total_lines,
-        "total_bytes": text.len(),
+        "total_bytes": total_bytes,
         "bytes_read": content.len(),
         "truncated": truncated,
         "truncated_by": truncated_by,
@@ -611,16 +606,140 @@ fn collect_dir_entries(
     }
 }
 
-fn truncate_bytes(text: &str, max_bytes: usize) -> (String, bool, Option<&'static str>) {
-    let bytes = text.as_bytes();
-    if bytes.len() <= max_bytes {
-        return (text.to_string(), false, None);
+struct TextSelection {
+    content: String,
+    truncated: bool,
+    total_lines: usize,
+    total_bytes: u64,
+}
+
+/// 流式读一个 UTF-8 文本，只留下第 `start_line..=end_line` 行里的前 `max_bytes` 字节。
+///
+/// 结果跟"整份读进来按 `split_inclusive('\n')` 切行、再在字符边界上截断"逐字节一致，
+/// 测试里拿旧算法对拍。文件仍然要读完：`total_lines` 和"整个文件是不是合法 UTF-8"
+/// 都得看到最后一个字节才知道。
+///
+/// 报错优先级也跟以前一样：开头 4096 字节里有 0 字节就报 `BINARY_FILE`，哪怕更前面
+/// 已经有非法 UTF-8——所以编码错误先记下，等嗅探窗口看完再报。
+fn read_text_selection(
+    mut reader: impl Read,
+    chunk_bytes: usize,
+    start_line: usize,
+    end_line: Option<usize>,
+    max_bytes: usize,
+) -> Result<TextSelection, WorkspaceError> {
+    let mut buf = vec![0u8; chunk_bytes];
+    let mut kept: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    // 已经遇到换行符的行数；最后一行没有换行符时靠 `line_open` 补上。
+    let mut total_lines = 0usize;
+    let mut line_open = false;
+    let mut total_bytes = 0u64;
+    // 上一块末尾没读完整的半个字符。
+    let mut utf8_tail: Vec<u8> = Vec::new();
+    let mut invalid_utf8 = false;
+
+    loop {
+        let read = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(WorkspaceError::not_found("File not found")),
+        };
+        let chunk = &buf[..read];
+        if total_bytes < BINARY_SNIFF_BYTES {
+            let sniff = ((BINARY_SNIFF_BYTES - total_bytes) as usize).min(read);
+            if chunk[..sniff].contains(&0) {
+                return Err(WorkspaceError::Tool {
+                    code: "BINARY_FILE",
+                    message: "Binary file read blocked for text tool.".into(),
+                    category: "validation",
+                    retryable: false,
+                });
+            }
+        }
+        total_bytes += read as u64;
+        if !invalid_utf8 && !utf8_chunk_ok(&mut utf8_tail, chunk) {
+            invalid_utf8 = true;
+        }
+        if invalid_utf8 {
+            if total_bytes >= BINARY_SNIFF_BYTES {
+                break;
+            }
+            continue;
+        }
+
+        // 内容已经截满、或者已经过了 end_line，后面只剩数行。常见的"读大文件开头一段"
+        // 几乎全部时间都在这里，逐行切分会慢一倍。
+        if truncated || end_line.is_some_and(|end| total_lines >= end) {
+            total_lines += chunk.iter().filter(|byte| **byte == b'\n').count();
+            line_open = chunk.last() != Some(&b'\n');
+            continue;
+        }
+        // 合法 UTF-8 的多字节字符里不会出现 b'\n'，所以按字节切行不会把字符切坏。
+        for piece in chunk.split_inclusive(|byte| *byte == b'\n') {
+            let line = total_lines + 1;
+            if line >= start_line && end_line.is_none_or(|end| line <= end) {
+                let room = max_bytes.saturating_sub(kept.len());
+                if piece.len() > room {
+                    kept.extend_from_slice(&piece[..room]);
+                    truncated = true;
+                } else {
+                    kept.extend_from_slice(piece);
+                }
+            }
+            line_open = !piece.ends_with(b"\n");
+            if !line_open {
+                total_lines += 1;
+            }
+        }
     }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+
+    let unsupported_encoding = || WorkspaceError::Tool {
+        code: "UNSUPPORTED_ENCODING",
+        message: "File is not valid utf-8.".into(),
+        category: "validation",
+        retryable: false,
+    };
+    if invalid_utf8 || !utf8_tail.is_empty() {
+        return Err(unsupported_encoding());
     }
-    (text[..end].to_string(), true, Some("bytes"))
+    if line_open {
+        total_lines += 1;
+    }
+    // kept 是合法文本的前缀，只可能在末尾截掉了半个字符，退回到字符边界。
+    if let Err(error) = std::str::from_utf8(&kept) {
+        kept.truncate(error.valid_up_to());
+    }
+    Ok(TextSelection {
+        content: String::from_utf8(kept).map_err(|_| unsupported_encoding())?,
+        truncated,
+        total_lines,
+        total_bytes,
+    })
+}
+
+/// 增量校验 UTF-8。块尾没读完的半个字符（最多 3 字节）留在 `tail` 里。
+///
+/// 只拿下一块开头几个字节把它补完整，不把整块拼进来——整块复制会让读大文件慢一倍。
+fn utf8_chunk_ok(tail: &mut Vec<u8>, mut chunk: &[u8]) -> bool {
+    while let (false, Some((&byte, rest))) = (tail.is_empty(), chunk.split_first()) {
+        tail.push(byte);
+        chunk = rest;
+        match std::str::from_utf8(tail) {
+            Ok(_) => tail.clear(),
+            Err(error) if error.error_len().is_none() => {}
+            Err(_) => return false,
+        }
+    }
+    match std::str::from_utf8(chunk) {
+        Ok(_) => true,
+        Err(error) if error.error_len().is_none() => {
+            tail.extend_from_slice(&chunk[error.valid_up_to()..]);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn string_list_arg(args: &Value, key: &str) -> Vec<String> {
@@ -687,4 +806,125 @@ fn format_mtime(st: Option<SystemTime>) -> Option<String> {
         let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         format!("{}.{:03}Z", d.as_secs(), d.subsec_millis())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 改成流式之前的算法，原样留着当标准答案。
+    fn whole_file_reference(
+        data: &[u8],
+        start_line: usize,
+        end_line: Option<usize>,
+        max_bytes: usize,
+    ) -> Result<(String, bool, usize), &'static str> {
+        if data.iter().take(4096).any(|b| *b == 0) {
+            return Err("BINARY_FILE");
+        }
+        let text = std::str::from_utf8(data).map_err(|_| "UNSUPPORTED_ENCODING")?;
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let total_lines = lines.len();
+        let end = end_line.unwrap_or(total_lines).min(total_lines);
+        let selected: String = if end < start_line {
+            String::new()
+        } else {
+            lines[(start_line - 1)..end].concat()
+        };
+        if selected.len() <= max_bytes {
+            return Ok((selected, false, total_lines));
+        }
+        let mut cut = max_bytes;
+        while cut > 0 && !selected.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        Ok((selected[..cut].to_string(), true, total_lines))
+    }
+
+    fn error_code(error: WorkspaceError) -> &'static str {
+        match error {
+            WorkspaceError::Tool { code, .. } | WorkspaceError::ToolDetails { code, .. } => code,
+        }
+    }
+
+    /// 分块大小故意压到 1、2、3 字节，让多字节字符、换行符、嗅探窗口的边界都落在两块之间。
+    fn assert_same_as_reference(data: &[u8]) {
+        let ranges: &[(usize, Option<usize>)] = &[
+            (1, None),
+            (1, Some(1)),
+            (2, Some(3)),
+            (3, None),
+            (5, Some(3)),
+            (10_000, None),
+        ];
+        for chunk in [1, 2, 3, 5, 4096, READ_CHUNK_BYTES] {
+            for &(start, end) in ranges {
+                for max_bytes in [0, 1, 4, 7, 32, usize::MAX / 2] {
+                    let expected = whole_file_reference(data, start, end, max_bytes);
+                    let actual = read_text_selection(data, chunk, start, end, max_bytes)
+                        .map(|s| {
+                            assert_eq!(s.total_bytes, data.len() as u64);
+                            (s.content, s.truncated, s.total_lines)
+                        })
+                        .map_err(error_code);
+                    assert_eq!(
+                        actual,
+                        expected,
+                        "chunk={chunk} start={start} end={end:?} max_bytes={max_bytes} data={:?}",
+                        String::from_utf8_lossy(&data[..data.len().min(80)])
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_read_matches_the_whole_file_algorithm() {
+        for text in [
+            "",
+            "\n",
+            "\n\n\n",
+            "no newline at all",
+            "a\nbb\nccc\n",
+            "a\nbb\nccc",
+            "crlf\r\nline\r\n",
+            "中文\n混合 emoji 🌬 和 ascii\n最后一行没有换行",
+            "🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬🌬",
+        ] {
+            assert_same_as_reference(text.as_bytes());
+        }
+    }
+
+    #[test]
+    fn streaming_read_reports_the_same_errors_as_before() {
+        let mut nul_inside_sniff = vec![b'a'; 4095];
+        nul_inside_sniff.push(0);
+        let mut nul_after_sniff = vec![b'a'; 4096];
+        nul_after_sniff.push(0);
+        // 非法 UTF-8 在前、0 字节在后（仍在嗅探窗口内）：以前报的是 BINARY_FILE。
+        let mut invalid_then_nul = b"ok\n\xff".to_vec();
+        invalid_then_nul.extend_from_slice(&[b'a'; 100]);
+        invalid_then_nul.push(0);
+
+        for data in [
+            nul_inside_sniff,
+            nul_after_sniff,
+            invalid_then_nul,
+            b"lone continuation \x80 byte\n".to_vec(),
+            // 文件在多字节字符中间结束。
+            "尾巴被截断".as_bytes()[..7].to_vec(),
+        ] {
+            assert_same_as_reference(&data);
+        }
+    }
+
+    #[test]
+    fn a_giant_single_line_is_cut_without_holding_it_in_memory() {
+        let data = "字".repeat(100_000);
+        let selection = read_text_selection(data.as_bytes(), 1024, 1, None, 10).expect("read");
+        assert_eq!(selection.content, "字字字");
+        assert!(selection.truncated);
+        assert_eq!(selection.total_lines, 1);
+        assert_eq!(selection.total_bytes, data.len() as u64);
+    }
 }
