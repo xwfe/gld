@@ -124,6 +124,16 @@ pub async fn dispatch(
         R::GatewayStatus => ok(&app.gateway_status().await),
         R::GatewayHealth => ok(&app.gateway_health().await),
 
+        // ---- 聚合入口 ----
+        R::HubStatus => ok(&app.hub_status().await?),
+        R::SetHubConfig { config } => ok(&app.set_hub_config(config).await?),
+        R::HubAddMembers { targets } => ok(&app.add_hub_members(&targets).await?),
+        R::HubRemoveMembers { targets } => ok(&app.remove_hub_members(&targets).await?),
+        R::HubStart => ok(&app.start_hub().await?),
+        R::HubStop => ok(&app.stop_hub().await?),
+        R::HubSecret { key } => ok(&app.hub_secret(&key)?),
+        R::RegenerateHubSecret { key } => ok(&app.regenerate_hub_secret(&key).await?),
+
         // ---- 密钥 ----
         R::WorkspaceSecret { target, key } => {
             let profile = resolve(app, &target)?;

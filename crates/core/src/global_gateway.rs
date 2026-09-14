@@ -272,7 +272,7 @@ fn status_from_runtime(runtime: &GatewayRuntime) -> GlobalGatewayStatusDto {
         local_url: format!("http://127.0.0.1:{}", runtime.config.local_port),
         public_url: runtime.public_url.clone(),
         detail: format!(
-            "{} · path prefix /w/<workspace-id>",
+            "{} · path prefix /w/<workspace-id>, /hub",
             runtime.config.tunnel_type
         ),
     }
@@ -420,6 +420,24 @@ async fn serve(
         )
         .route("/w/{workspace_id}", any(proxy_root))
         .route("/w/{workspace_id}/{*path}", any(proxy_path))
+        .route(
+            "/.well-known/oauth-protected-resource/hub/mcp",
+            get(proxy_hub_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/hub",
+            get(proxy_hub_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/hub",
+            get(proxy_hub_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/hub/mcp",
+            get(proxy_hub_authorization_server_metadata),
+        )
+        .route("/hub", any(proxy_hub_root))
+        .route("/hub/{*path}", any(proxy_hub_path))
         .with_state(ProxyState { client });
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -511,11 +529,109 @@ async fn proxy(
             format!("/{}", path.trim_start_matches('/')),
         )
     };
-    let upstream_path = if upstream_path == "/" {
-        "/".to_string()
-    } else {
-        upstream_path
+    forward(&state, port, &upstream_path, method, &uri, &headers, body).await
+}
+
+async fn proxy_hub_root(
+    State(state): State<ProxyState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_hub(state, String::new(), method, uri, headers, body).await
+}
+
+async fn proxy_hub_path(
+    State(state): State<ProxyState>,
+    AxumPath(path): AxumPath<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_hub(state, path, method, uri, headers, body).await
+}
+
+async fn proxy_hub_protected_resource_metadata(
+    State(state): State<ProxyState>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    proxy_hub(
+        state,
+        ".well-known/oauth-protected-resource".into(),
+        Method::GET,
+        uri,
+        headers,
+        Bytes::new(),
+    )
+    .await
+}
+
+async fn proxy_hub_authorization_server_metadata(
+    State(state): State<ProxyState>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    proxy_hub(
+        state,
+        ".well-known/oauth-authorization-server".into(),
+        Method::GET,
+        uri,
+        headers,
+        Bytes::new(),
+    )
+    .await
+}
+
+/// `/hub/...` 转给聚合入口的本地端口。
+///
+/// 只在 hub 自己设了经入口暴露时才转，和 `/w/<id>` 要求工作区打开 global-gateway 是一个道理：
+/// 入口是挂在公网上的，没要求暴露的服务不该因为"入口恰好开着"就被人从外面连上。
+async fn proxy_hub(
+    state: ProxyState,
+    path: String,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let hub = match DataStore::read_file(|data| Ok(data.hub.clone())) {
+        Ok(hub) => hub,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
     };
+    if !hub.use_global_gateway {
+        return (
+            StatusCode::NOT_FOUND,
+            "hub is not routed through global gateway",
+        )
+            .into_response();
+    }
+    let upstream_path = format!("/{}", path.trim_start_matches('/'));
+    forward(
+        &state,
+        hub.local_port,
+        &upstream_path,
+        method,
+        &uri,
+        &headers,
+        body,
+    )
+    .await
+}
+
+async fn forward(
+    state: &ProxyState,
+    port: u16,
+    upstream_path: &str,
+    method: Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
     let query = uri
         .query()
         .map(|value| format!("?{value}"))
@@ -523,7 +639,7 @@ async fn proxy(
     let target = format!("http://127.0.0.1:{port}{upstream_path}{query}");
 
     let mut request = state.client.request(method, &target).body(body);
-    for (name, value) in &headers {
+    for (name, value) in headers {
         if !is_hop_header(name.as_str()) && !is_client_supplied_forwarding_header(name.as_str()) {
             request = request.header(name, value);
         }

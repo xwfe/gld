@@ -14,7 +14,7 @@ use gld_core::app::{
 };
 use gld_core::planning::{GoalStatus, PlanStatus, PlanningMode};
 use gld_core::runtime::ServiceKind;
-use gld_core::settings::{FrpProfile, GlobalGatewayConfig, ProxyConfig};
+use gld_core::settings::{FrpProfile, GlobalGatewayConfig, HubConfig, ProxyConfig};
 use gld_core::tunnel::TunnelServiceKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -129,6 +129,26 @@ pub enum Request {
     GatewayStop,
     GatewayStatus,
     GatewayHealth,
+
+    // ---- 聚合入口 ----
+    HubStatus,
+    SetHubConfig {
+        config: HubConfig,
+    },
+    HubAddMembers {
+        targets: Vec<WorkspaceTarget>,
+    },
+    HubRemoveMembers {
+        targets: Vec<WorkspaceTarget>,
+    },
+    HubStart,
+    HubStop,
+    HubSecret {
+        key: String,
+    },
+    RegenerateHubSecret {
+        key: String,
+    },
 
     // ---- 密钥 ----
     WorkspaceSecret {
@@ -292,6 +312,8 @@ impl Request {
                 | Request::TunnelTest { .. }
                 | Request::GatewayStart
                 | Request::GatewayStop
+                | Request::HubStart
+                | Request::HubStop
         )
     }
 
@@ -307,6 +329,10 @@ impl Request {
                 | Request::TunnelRestart { .. }
                 | Request::TunnelTest { .. }
                 | Request::GatewayStart
+                // 这三个在 hub 正跑着时会重启它，走全局入口的还要等入口拿到公网地址。
+                | Request::HubStart
+                | Request::SetHubConfig { .. }
+                | Request::RegenerateHubSecret { .. }
                 | Request::Health { .. }
                 | Request::GatewayHealth
                 // 工具调用可能跑测试或构建，几分钟都算正常。

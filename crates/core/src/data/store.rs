@@ -219,6 +219,24 @@ impl DataStore {
         self.save()
     }
 
+    /// 取应用级密钥，没有就当场生成一个存下。
+    ///
+    /// 给聚合入口这种"第一次用到才需要凭据"的地方用。必须走这里（内存里的这份数据）
+    /// 而不是 `SecretStore` 直接改文件：`App` 下一次保存会拿内存副本整份覆盖文件，
+    /// 绕过它写进去的凭据会被悄悄冲掉，表现是客户端突然 401、凭据又变了一遍。
+    pub fn get_or_create_app_secret(&mut self, scope: &str, item_id: &str) -> AppResult<String> {
+        match self.get_app_secret(scope, item_id) {
+            Some(value) => Ok(value),
+            None => self.regenerate_app_secret(scope, item_id),
+        }
+    }
+
+    pub fn regenerate_app_secret(&mut self, scope: &str, item_id: &str) -> AppResult<String> {
+        let value = shared_value_for_key(item_id);
+        self.set_app_secret(scope, item_id, &value)?;
+        Ok(value)
+    }
+
     pub fn delete_app_secret(&mut self, scope: &str, item_id: &str) -> AppResult<()> {
         if let Some(items) = self.data.app_secrets.get_mut(scope) {
             items.remove(item_id);

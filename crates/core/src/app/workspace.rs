@@ -291,6 +291,8 @@ impl App {
             settings
                 .restore_actions_workspace_ids
                 .retain(|workspace_id| workspace_id != id);
+            // hub 按成员表里的 id 路由，留着没删的 id 只会在 `gld hub show` 里变成谁也认不出的一行。
+            settings.hub.members.retain(|member| member != id);
             if settings.last_workspace_id == id {
                 settings.last_workspace_id.clear();
             }

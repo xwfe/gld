@@ -204,6 +204,16 @@ pub enum Command {
     #[command(subcommand, visible_alias = "gw")]
     Gateway(GatewayCmd),
 
+    /// 聚合入口：客户端只配一条连接，访问多个工作区（每次调用指明工作区，彼此隔离）
+    ///
+    ///   gld hub add api web      把工作区加进来（立即生效，不用重启）
+    ///   gld hub start            启动；之后守护进程重启会自动恢复
+    ///   gld hub show             地址、凭据、成员
+    ///
+    /// 拿到 hub 凭据就能访问它的全部成员：只想单独给出去的项目别加进来。
+    #[command(subcommand, verbatim_doc_comment)]
+    Hub(HubCmd),
+
     /// 查看 / 设置 / 重新生成密钥（Bearer Token、OAuth 口令、Actions API Key…）
     #[command(subcommand)]
     Secret(SecretCmd),
@@ -722,6 +732,64 @@ pub struct GatewaySetArgs {
     /// 隧道是否套用全局代理
     #[arg(long, value_name = "true|false")]
     pub use_proxy: Option<bool>,
+}
+
+// ------------------------------------------------------------------- hub
+
+#[derive(Debug, Subcommand)]
+pub enum HubCmd {
+    /// 显示状态、地址、认证、凭据和成员（凭据默认脱敏）
+    Show {
+        /// 凭据显示明文
+        #[arg(long)]
+        reveal: bool,
+    },
+    /// 把工作区加进 hub：下一次调用立即生效，不用重启
+    Add {
+        /// 工作区：id、id 前缀（≥4 位）、名称或路径，可以一次给多个；不给就是当前目录所属的工作区
+        #[arg(value_name = "WS")]
+        workspaces: Vec<String>,
+    },
+    /// 把工作区移出 hub：下一次调用起就访问不到（工作区本身和项目文件都不动）
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// 工作区：id、id 前缀（≥4 位）、名称或路径；不给就是当前目录所属的工作区
+        #[arg(value_name = "WS")]
+        workspaces: Vec<String>,
+    },
+    /// 修改配置（只改给出的项）；hub 正在运行则自动重启
+    Set(HubSetArgs),
+    /// 启动（已在运行则按当前配置重启）；之后守护进程重启会自动恢复
+    Start,
+    /// 停止；配置、成员和凭据都保留，守护进程重启后不再自动拉起
+    Stop,
+    /// 重新生成凭据并返回新值；hub 在跑会自动重启
+    ///
+    ///   bearer_token         bearer 认证用的 token，客户端里要换成新值
+    ///   oauth_password       授权页口令，只影响下一次授权，已授权的客户端不掉线
+    ///   oauth_token_secret   令牌签名密钥，换了所有已授权的客户端都要重新授权
+    ///   oauth_client_id      静态 Client ID，只影响手填了它的客户端
+    #[command(visible_alias = "regen", verbatim_doc_comment)]
+    Regenerate { key: String },
+}
+
+#[derive(Debug, Args)]
+pub struct HubSetArgs {
+    /// 本地端口（默认 28764）
+    #[arg(long, value_name = "PORT")]
+    pub port: Option<u16>,
+    /// 认证方式：oauth | bearer | noauth
+    #[arg(long, value_name = "TYPE")]
+    pub auth: Option<String>,
+    /// 列给客户端的工具集；成员自己的工具集照样生效，两边取交集
+    #[arg(long, value_name = "PROFILE")]
+    pub tool_profile: Option<String>,
+    /// 已有的公网地址（自建反代回源到本地端口），不带 /mcp；给空串清掉
+    #[arg(long, value_name = "URL")]
+    pub public_url: Option<String>,
+    /// 经全局入口暴露为 <入口公网地址>/hub/mcp（全局入口要先启用）
+    #[arg(long, value_name = "true|false")]
+    pub global_gateway: Option<bool>,
 }
 
 // ---------------------------------------------------------------- secret

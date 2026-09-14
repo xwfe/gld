@@ -5,6 +5,7 @@ mod daemon;
 mod doctor;
 mod frp;
 mod gateway;
+mod hub;
 mod inspect;
 mod logs;
 mod planning;
@@ -81,6 +82,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Tool(command) => tool::run(&mut ctx, command).await,
         Command::Tunnel(command) => tunnel::run(&mut ctx, command).await,
         Command::Gateway(command) => gateway::run(&mut ctx, command).await,
+        Command::Hub(command) => hub::run(&mut ctx, command).await,
         Command::Secret(command) => secret::run(&mut ctx, command).await,
         Command::Frp(command) => frp::run(&mut ctx, command).await,
         Command::Settings(command) => settings::run(&mut ctx, command).await,

@@ -51,6 +51,14 @@
 - [gld gateway start](#gld-gateway-start)
 - [gld gateway stop](#gld-gateway-stop)
 - [gld gateway health](#gld-gateway-health)
+- [gld hub](#gld-hub)
+- [gld hub show](#gld-hub-show)
+- [gld hub add](#gld-hub-add)
+- [gld hub remove](#gld-hub-remove)
+- [gld hub set](#gld-hub-set)
+- [gld hub start](#gld-hub-start)
+- [gld hub stop](#gld-hub-stop)
+- [gld hub regenerate](#gld-hub-regenerate)
 - [gld secret](#gld-secret)
 - [gld secret show](#gld-secret-show)
 - [gld secret set](#gld-secret-set)
@@ -112,6 +120,7 @@ Commands:
   tool         直接调用工具内核：不接 AI 客户端也能验证 Agent 会看到什么
   tunnel       管理公网隧道（FRP / Cloudflare）
   gateway      管理全局共享公网入口（多个工作区共用一个域名，按 /w/<id> 路由） [alias: gw]
+  hub          聚合入口：客户端只配一条连接，访问多个工作区（每次调用指明工作区，彼此隔离）
   secret       查看 / 设置 / 重新生成密钥（Bearer Token、OAuth 口令、Actions API Key…）
   frp          管理 FRP 服务器配置（多个工作区可复用同一台 frps）
   settings     全局设置：出站代理、局域网访问、启动时恢复、全局 Agent 说明
@@ -1392,6 +1401,225 @@ Options:
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
+```
+
+## gld hub
+
+```text
+聚合入口：客户端只配一条连接，访问多个工作区（每次调用指明工作区，彼此隔离）
+
+  gld hub add api web      把工作区加进来（立即生效，不用重启）
+  gld hub start            启动；之后守护进程重启会自动恢复
+  gld hub show             地址、凭据、成员
+
+拿到 hub 凭据就能访问它的全部成员：只想单独给出去的项目别加进来。
+
+Usage: gld hub [OPTIONS] <COMMAND>
+
+Commands:
+  show        显示状态、地址、认证、凭据和成员（凭据默认脱敏）
+  add         把工作区加进 hub：下一次调用立即生效，不用重启
+  remove      把工作区移出 hub：下一次调用起就访问不到（工作区本身和项目文件都不动） [alias: rm]
+  set         修改配置（只改给出的项）；hub 正在运行则自动重启
+  start       启动（已在运行则按当前配置重启）；之后守护进程重启会自动恢复
+  stop        停止；配置、成员和凭据都保留，守护进程重启后不再自动拉起
+  regenerate  重新生成凭据并返回新值；hub 在跑会自动重启 [alias: regen]
+
+Options:
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld hub show
+
+```text
+显示状态、地址、认证、凭据和成员（凭据默认脱敏）
+
+Usage: gld hub show [OPTIONS]
+
+Options:
+      --reveal          凭据显示明文
+  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld hub add
+
+```text
+把工作区加进 hub：下一次调用立即生效，不用重启
+
+Usage: gld hub add [OPTIONS] [WS]...
+
+Arguments:
+  [WS]...  工作区：id、id 前缀（≥4 位）、名称或路径，可以一次给多个；不给就是当前目录所属的工作区
+
+Options:
+  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld hub remove
+
+```text
+把工作区移出 hub：下一次调用起就访问不到（工作区本身和项目文件都不动）
+
+Usage: gld hub remove [OPTIONS] [WS]...
+
+Arguments:
+  [WS]...  工作区：id、id 前缀（≥4 位）、名称或路径；不给就是当前目录所属的工作区
+
+Options:
+  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld hub set
+
+```text
+修改配置（只改给出的项）；hub 正在运行则自动重启
+
+Usage: gld hub set [OPTIONS]
+
+Options:
+      --port <PORT>                  本地端口（默认 28764）
+  -w, --workspace <WS>               目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --auth <TYPE>                  认证方式：oauth | bearer | noauth
+      --json                         以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart                 守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --tool-profile <PROFILE>       列给客户端的工具集；成员自己的工具集照样生效，两边取交集
+      --public-url <URL>             已有的公网地址（自建反代回源到本地端口），不带 /mcp；给空串清掉
+      --timeout <SECS>               等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --global-gateway <true|false>  经全局入口暴露为 <入口公网地址>/hub/mcp（全局入口要先启用） [possible values: true,
+                                     false]
+      --home <DIR>                   数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color                     关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help                         Print help
+  -V, --version                      Print version
+```
+
+## gld hub start
+
+```text
+启动（已在运行则按当前配置重启）；之后守护进程重启会自动恢复
+
+Usage: gld hub start [OPTIONS]
+
+Options:
+  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld hub stop
+
+```text
+停止；配置、成员和凭据都保留，守护进程重启后不再自动拉起
+
+Usage: gld hub stop [OPTIONS]
+
+Options:
+  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld hub regenerate
+
+```text
+重新生成凭据并返回新值；hub 在跑会自动重启
+
+  bearer_token         bearer 认证用的 token，客户端里要换成新值
+  oauth_password       授权页口令，只影响下一次授权，已授权的客户端不掉线
+  oauth_token_secret   令牌签名密钥，换了所有已授权的客户端都要重新授权
+  oauth_client_id      静态 Client ID，只影响手填了它的客户端
+
+Usage: gld hub regenerate [OPTIONS] <KEY>
+
+Arguments:
+  <KEY>
+          
+
+Options:
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
 
 ## gld secret

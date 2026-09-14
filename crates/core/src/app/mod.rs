@@ -11,6 +11,7 @@
 //! | [`runtime`] | 启动 / 停止 / 重启 MCP 与 Actions，恢复上次运行状态 |
 //! | [`tunnel`] | 隧道启停、测试、frpc 配置片段 |
 //! | [`gateway`] | 全局共享公网入口 |
+//! | [`hub`] | 聚合入口：一条 MCP 连接访问多个工作区 |
 //! | [`secrets`] | 工作区 / 共享密钥，变更后自动重启相关服务 |
 //! | [`settings`] | 代理、下载镜像、FRP 服务器配置、全局运行时设置 |
 //! | [`logs`] | 读取工作区日志尾部 |
@@ -22,6 +23,7 @@
 
 mod doctor;
 mod gateway;
+mod hub;
 mod inspect;
 mod logs;
 mod planning;
@@ -38,6 +40,7 @@ pub use doctor::{
     config_checks, port_check, software_check, Diagnosis, DoctorCheck, DoctorLevel, PortOccupant,
     SecretLookup,
 };
+pub use hub::{HubMemberDto, HubMembershipChange, HubStatusDto};
 pub use logs::LogChunk;
 pub use planning::PlanStepUpdate;
 pub use runtime::{RunningService, ServiceOverview};

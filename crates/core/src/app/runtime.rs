@@ -18,7 +18,7 @@ use crate::workspace::resources::validate_service_start;
 use crate::workspace::{RuntimeStatusDto, WorkspaceProfile};
 
 /// 等服务应答的上限。够慢机器上的工具表构建，又不至于让 `gld start` 挂很久。
-const READY_PROBE_BUDGET: Duration = Duration::from_secs(10);
+pub(super) const READY_PROBE_BUDGET: Duration = Duration::from_secs(10);
 
 /// 一个正在运行的服务（用于总览与优雅退出）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +147,12 @@ impl App {
             return Ok(Vec::new());
         }
         let settings = self.settings()?;
+        // hub 不看全局的「启动时恢复」开关，理由见 HubConfig::restore_on_launch。
+        if settings.hub.restore_on_launch {
+            if let Err(error) = self.start_hub_listener().await {
+                eprintln!("恢复聚合入口失败：{error}");
+            }
+        }
         if !settings.restore_runtime_state_on_launch {
             return Ok(Vec::new());
         }
@@ -187,6 +193,8 @@ impl App {
                 );
             }
         }
+        // 不动 restore_on_launch：这是守护进程退出，不是用户要停 hub，下次启动还得恢复。
+        crate::hub::runtime::stop().await;
         if let Err(error) = global_gateway::stop().await {
             eprintln!("停止全局入口失败：{error}");
         }
@@ -366,7 +374,7 @@ fn uses_global_gateway(profile: &WorkspaceProfile, kind: ServiceKind) -> bool {
 ///
 /// 两个探测端点都不计入 usage 统计（`GET /mcp` 是静态发现信息，
 /// `GET /health` 只读 openapi 文档），所以探测不会污染 `gld usage`。
-async fn wait_until_answering(port: u16, kind: ServiceKind, budget: Duration) -> bool {
+pub(super) async fn wait_until_answering(port: u16, kind: ServiceKind, budget: Duration) -> bool {
     let path = match kind {
         ServiceKind::Mcp => "mcp",
         ServiceKind::Actions => "health",
@@ -393,7 +401,7 @@ async fn wait_until_answering(port: u16, kind: ServiceKind, budget: Duration) ->
     }
 }
 
-async fn ensure_port_available(port: u16, service_label: &str) -> AppResult<()> {
+pub(super) async fn ensure_port_available(port: u16, service_label: &str) -> AppResult<()> {
     let Some(pid) = platform().find_pid_listening_on_port(port)? else {
         return Ok(());
     };

@@ -20,6 +20,8 @@
 //! 不给枚举机会；成员的说明文件 / Skill / 历史摘要不在 initialize 里混着注入，
 //! 由 `workspace_context` 按工作区单独取，免得 A 的 AGENTS.md 被拿去指导 B。
 
+pub mod runtime;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -45,6 +47,38 @@ pub const HUB_SCOPE: &str = "hub";
 
 /// `serverInfo.name`。不用任何成员的名字：它代表的是一组工作区。
 pub const SERVER_NAME: &str = "gld-hub";
+
+/// hub 自己的凭据名。存在数据文件的 `app_secrets["hub"]` 里，和任何工作区、
+/// 共享密钥池都不共用——工作区凭据泄露不该连带打开 hub。
+pub const HUB_SECRET_KEYS: &[&str] = &[
+    "bearer_token",
+    "oauth_password",
+    "oauth_token_secret",
+    "oauth_client_id",
+];
+
+/// 启动监听器要的凭据，由调用方（`App`）从它的数据存储里取出来传进来。
+pub struct HubSecrets {
+    pub bearer_token: String,
+    pub oauth_client_id: String,
+    pub oauth_password: String,
+    pub oauth_token_secret: String,
+}
+
+/// hub 对外的基地址（不带 `/mcp`）；没有公网入口时为空串。
+///
+/// 走全局入口时是 `<入口公网地址>/hub`，入口按这个前缀转到 hub 的本地端口；
+/// 入口没启用就退回手动填的 public_url，和工作区 `effective_public_url` 一个口径。
+pub fn public_base_url(settings: &AppSettings) -> String {
+    if settings.hub.use_global_gateway && settings.global_gateway.enabled {
+        let base = settings.global_gateway.public_url.trim_end_matches('/');
+        if base.is_empty() {
+            return String::new();
+        }
+        return format!("{base}/hub");
+    }
+    settings.hub.public_url.trim_end_matches('/').to_string()
+}
 
 /// hub 自己提供的两个工具。列成员不需要 `workspace`，取说明需要。
 pub const LIST_WORKSPACES: &str = "list_workspaces";
@@ -662,6 +696,21 @@ mod tests {
         let mut guard = fixed.lock().expect("fixed members");
         let (profiles, settings) = &mut *guard;
         change(profiles, settings);
+    }
+
+    #[test]
+    fn public_base_url_follows_the_gateway_only_when_it_is_enabled() {
+        let mut settings = AppSettings::default();
+        settings.hub.public_url = "https://hub.example.com/".into();
+        assert_eq!(public_base_url(&settings), "https://hub.example.com");
+
+        settings.hub.use_global_gateway = true;
+        settings.global_gateway.public_url = "https://gw.example.com".into();
+        // 入口没启用：走它也没用，退回手动地址。
+        assert_eq!(public_base_url(&settings), "https://hub.example.com");
+
+        settings.global_gateway.enabled = true;
+        assert_eq!(public_base_url(&settings), "https://gw.example.com/hub");
     }
 
     #[test]

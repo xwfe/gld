@@ -6,7 +6,7 @@ mod oauth_flow;
 pub use bearer::verify_bearer_header;
 pub use client_registry::{remove_scope as remove_client_registry, ClientRegistry};
 pub use oauth::{
-    actions_audience, authorization_server_metadata, external_base_url,
+    actions_audience, authorization_server_metadata, external_base_url, hub_audience,
     protected_resource_metadata, protected_resource_metadata_url, workspace_audience,
 };
 pub use oauth_flow::{

@@ -14,21 +14,96 @@ use tokio::sync::oneshot;
 use tower_http::cors::CorsLayer;
 
 use crate::auth::{
-    authorization_server_metadata, authorize_get, authorize_post, external_base_url,
+    authorization_server_metadata, authorize_get, authorize_post, external_base_url, hub_audience,
     protected_resource_metadata, protected_resource_metadata_url, register_client, token_exchange,
     verify_bearer_header, verify_oauth_bearer_header, workspace_audience, AuthorizeForm,
     AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, TokenForm,
 };
+use crate::hub::{Hub, HubSecrets, HUB_SCOPE};
 use crate::local_network;
 use crate::logs::append_profile_log;
 use crate::mcp::server::{handle_request, SharedState};
 use crate::secret::SecretStore;
 use crate::settings::AppSettings;
-use crate::tools::build_tool_context;
+use crate::tools::{build_tool_context, SharedToolContext};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, RuntimeConfig};
 
 pub type ShutdownSender = oneshot::Sender<()>;
+
+/// 监听器背后是谁在答 JSON-RPC。
+///
+/// 认证、OAuth 路由、请求日志工作区和 hub 完全一样，只有这一处不同。
+/// 分成两份监听器的话，下次修一个 OAuth 的坑就得记得修两遍。
+#[derive(Clone)]
+enum Endpoint {
+    /// 一个工作区自己的 MCP 服务。
+    Workspace(SharedState),
+    /// 聚合入口：每次调用按 `workspace` 参数分到成员，见 [`crate::hub`]。
+    Hub(Arc<Hub>),
+}
+
+/// 一条请求处理完的结果。
+struct Handled {
+    response: Value,
+    /// 这次实际用到的工具上下文，取上下文审计用；hub 没路由到成员时为 None。
+    context: Option<SharedToolContext>,
+    /// hub 请求落到的成员 id。工作区自己的监听器永远是 None。
+    member: Option<String>,
+}
+
+impl Endpoint {
+    fn server_name(&self) -> String {
+        match self {
+            Self::Workspace(context) => context.server_name().to_string(),
+            Self::Hub(_) => crate::hub::SERVER_NAME.to_string(),
+        }
+    }
+
+    fn usage(&self) -> Arc<ServiceUsage> {
+        match self {
+            Self::Workspace(context) => context.usage(),
+            Self::Hub(hub) => hub.usage(),
+        }
+    }
+
+    /// 同步跑工具，必须在 `spawn_blocking` 里调。
+    fn handle(&self, body: &Value) -> Handled {
+        match self {
+            Self::Workspace(context) => Handled {
+                response: handle_request(context, body),
+                context: Some(context.clone()),
+                member: None,
+            },
+            Self::Hub(hub) => {
+                let (response, routed) = hub.handle_request(body);
+                Handled {
+                    response,
+                    member: routed.as_ref().map(|routed| routed.workspace_id.clone()),
+                    context: routed.map(|routed| routed.context),
+                }
+            }
+        }
+    }
+}
+
+/// 一条请求的日志往哪儿写。
+///
+/// hub 请求在 hub 自己的日志里记一份，再在落到的成员日志里记一份（带 `[hub]` 前缀）：
+/// `gld logs -w api` 看得到经 hub 对 api 做了什么，又看不到别的成员的请求。
+struct RequestLog<'a> {
+    scope: &'a str,
+    member: Option<&'a str>,
+}
+
+impl RequestLog<'_> {
+    fn line(&self, text: &str) {
+        append_profile_log(self.scope, "mcp-requests.log", text);
+        if let Some(member) = self.member {
+            append_profile_log(member, "mcp-requests.log", &format!("[hub] {text}"));
+        }
+    }
+}
 
 async fn oauth_register_post(
     State(state): State<ListenerState>,
@@ -42,10 +117,12 @@ async fn oauth_register_post(
 
 #[derive(Clone)]
 struct ListenerState {
-    mcp: SharedState,
+    endpoint: Endpoint,
     auth: AuthConfig,
-    workspace_id: String,
-    workspace_path: String,
+    /// 日志目录和 OAuth 客户端注册表的作用域：工作区 id，或 [`HUB_SCOPE`]。
+    scope: String,
+    /// 授权页上告诉用户"你在授权什么"的那一行。
+    authorize_label: String,
     bind_port: u16,
     configured_public_url: String,
     bearer_token: Option<String>,
@@ -105,36 +182,85 @@ pub fn spawn_listener(
         ));
     }
     let configured_public_url = public_base_url.trim().to_string();
-    let oauth = if auth.oauth_enabled() {
-        let password = oauth_password.unwrap_or_default();
-        let token_secret = oauth_token_secret.unwrap_or_default();
-        Some(Arc::new(OAuthRuntime::new(
+    let oauth = auth.oauth_enabled().then(|| {
+        Arc::new(OAuthRuntime::new(
             workspace_audience(&workspace_id),
             auth.oauth_client_id.clone(),
             oauth_client_secret.clone(),
-            password,
-            token_secret,
+            oauth_password.unwrap_or_default(),
+            oauth_token_secret.unwrap_or_default(),
             Arc::new(ClientRegistry::load(&workspace_id, &workspace_id)),
-        )))
-    } else {
-        None
-    };
-    let state = ListenerState {
-        mcp,
+        ))
+    });
+    listen(ListenerState {
+        endpoint: Endpoint::Workspace(mcp),
         auth,
-        workspace_id,
-        workspace_path: workspace_display,
+        scope: workspace_id,
+        authorize_label: workspace_display,
         bind_port: port,
         configured_public_url,
         bearer_token,
         oauth,
         oauth_client_secret,
+    })
+}
+
+/// 起聚合入口的监听器。路由、认证、日志和工作区监听器是同一套，只是答请求的换成 [`Hub`]。
+///
+/// 令牌受众是 [`hub_audience`]，客户端注册表是独立的 [`HUB_SCOPE`]：工作区发出去的令牌
+/// 进不了 hub，hub 的令牌也进不了任何工作区——拿到一个项目的授权不等于拿到全部。
+pub fn spawn_hub_listener(
+    port: u16,
+    hub: Arc<Hub>,
+    auth_type: &str,
+    public_base_url: String,
+    secrets: HubSecrets,
+) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
+    let auth = AuthConfig {
+        auth_type: auth_type.to_string(),
+        oauth_client_id: secrets.oauth_client_id.clone(),
+        use_shared_secrets: false,
     };
+    if auth.bearer_enabled() && secrets.bearer_token.is_empty() {
+        return Err(
+            "聚合入口的认证方式是 bearer，但没有 bearer_token，任何客户端都会拿 401。\
+             先执行 `gld hub regen bearer_token`。"
+                .into(),
+        );
+    }
+    let oauth = auth.oauth_enabled().then(|| {
+        Arc::new(OAuthRuntime::new(
+            hub_audience(),
+            secrets.oauth_client_id.clone(),
+            None,
+            secrets.oauth_password.clone(),
+            secrets.oauth_token_secret.clone(),
+            Arc::new(ClientRegistry::load(HUB_SCOPE, HUB_SCOPE)),
+        ))
+    });
+    let bearer_token = auth.bearer_enabled().then_some(secrets.bearer_token);
+    listen(ListenerState {
+        endpoint: Endpoint::Hub(hub),
+        auth,
+        scope: HUB_SCOPE.into(),
+        authorize_label: "gld 聚合入口（hub）：授权后可访问它的全部成员工作区".into(),
+        bind_port: port,
+        configured_public_url: public_base_url.trim().to_string(),
+        bearer_token,
+        oauth,
+        oauth_client_secret: None,
+    })
+}
+
+fn listen(
+    state: ListenerState,
+) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
+    let port = state.bind_port;
     // 在返回 Running 之前完成 bind，避免后台任务里的端口冲突被伪装成启动成功。
     let allow_lan_access = AppSettings::load_or_default().allow_lan_access;
     let listener = bind_listener(port, allow_lan_access)?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let profile_id = state.workspace_id.clone();
+    let profile_id = state.scope.clone();
     let handle = crate::async_rt::spawn(async move {
         let result = serve(listener, port, allow_lan_access, state, shutdown_rx).await;
         if let Err(err) = &result {
@@ -158,7 +284,7 @@ async fn serve(
     state: ListenerState,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let profile_id = state.workspace_id.clone();
+    let profile_id = state.scope.clone();
     let app = Router::new()
         .route("/mcp", get(mcp_discovery).post(mcp_post))
         .route(
@@ -230,7 +356,7 @@ async fn mcp_discovery(State(state): State<ListenerState>) -> Response {
 
 fn mcp_discovery_payload(state: &ListenerState) -> Value {
     json!({
-        "name": state.mcp.server_name(),
+        "name": state.endpoint.server_name(),
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": "2025-06-18"
     })
@@ -264,7 +390,7 @@ async fn mcp_post(
         .unwrap_or("")
         .to_string();
     append_profile_log(
-        &state.workspace_id,
+        &state.scope,
         "mcp-requests.log",
         &format!(
             "[rpc] request id={} method={} tool={}",
@@ -272,12 +398,15 @@ async fn mcp_post(
         ),
     );
 
-    let mcp = state.mcp.clone();
-    let audit_state = state.mcp.clone();
-    let profile_id = state.workspace_id.clone();
-    let result = tokio::task::spawn_blocking(move || handle_request(&mcp, &body)).await;
+    let endpoint = state.endpoint.clone();
+    let result = tokio::task::spawn_blocking(move || endpoint.handle(&body)).await;
     match result {
-        Ok(response) => {
+        Ok(handled) => {
+            let response = handled.response;
+            let log = RequestLog {
+                scope: &state.scope,
+                member: handled.member.as_deref(),
+            };
             let response_bytes = serde_json::to_vec(&response)
                 .map(|bytes| bytes.len())
                 .unwrap_or_default();
@@ -287,13 +416,17 @@ async fn mcp_post(
                     .and_then(|result| result.get("isError"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-            state.mcp.usage().record(
+            state.endpoint.usage().record(
                 request_bytes,
                 response_bytes,
                 method == "tools/call",
                 is_error,
             );
-            let audit = audit_state.context_audit_snapshot();
+            let audit = handled
+                .context
+                .as_ref()
+                .map(|context| context.context_audit_snapshot())
+                .unwrap_or(Value::Null);
             let repeated_bytes = audit
                 .get("repeated_bytes")
                 .and_then(Value::as_u64)
@@ -302,19 +435,12 @@ async fn mcp_post(
                 .get("blocks")
                 .and_then(Value::as_array)
                 .and_then(|blocks| blocks.last());
-            append_profile_log(
-                &profile_id,
-                "mcp-requests.log",
-                &format!(
-                    "[rpc] completed id={} method={} tool={} response_bytes={} repeated_bytes={}",
-                    request_id, method, tool_name, response_bytes, repeated_bytes
-                ),
-            );
+            log.line(&format!(
+                "[rpc] completed id={} method={} tool={} response_bytes={} repeated_bytes={}",
+                request_id, method, tool_name, response_bytes, repeated_bytes
+            ));
             if let Some(block) = latest_block {
-                append_profile_log(
-                    &profile_id,
-                    "mcp-requests.log",
-                    &format!(
+                log.line(&format!(
                         "[context-audit] kind={} bytes={} hash={} repeated={} total_bytes={} repeated_bytes={}",
                         block.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
                         block.get("bytes").and_then(Value::as_u64).unwrap_or_default(),
@@ -322,8 +448,7 @@ async fn mcp_post(
                         block.get("repeated").and_then(Value::as_bool).unwrap_or(false),
                         audit.get("total_bytes").and_then(Value::as_u64).unwrap_or_default(),
                         repeated_bytes
-                    ),
-                );
+                ));
             }
             if tool_name == "exec_command" || tool_name == "exec_health_check" {
                 let structured = response
@@ -346,14 +471,10 @@ async fn mcp_post(
                     .and_then(|result| result.get("isError"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                append_profile_log(
-                    &profile_id,
-                    "mcp-requests.log",
-                    &format!(
-                        "[exec] id={} tool={} is_error={} status={} termination_reason={} exit_code={}",
-                        request_id, tool_name, is_error, status, termination_reason, exit_code
-                    ),
-                );
+                log.line(&format!(
+                    "[exec] id={} tool={} is_error={} status={} termination_reason={} exit_code={}",
+                    request_id, tool_name, is_error, status, termination_reason, exit_code
+                ));
             }
             Json(response).into_response()
         }
@@ -375,12 +496,14 @@ async fn mcp_post(
             let response_bytes = serde_json::to_vec(&error_response)
                 .map(|bytes| bytes.len())
                 .unwrap_or_default();
-            state
-                .mcp
-                .usage()
-                .record(request_bytes, response_bytes, method == "tools/call", true);
+            state.endpoint.usage().record(
+                request_bytes,
+                response_bytes,
+                method == "tools/call",
+                true,
+            );
             append_profile_log(
-                &profile_id,
+                &state.scope,
                 "mcp-requests.log",
                 &format!(
                     "[rpc] worker_failed id={} method={} tool={} error={error}",
@@ -455,7 +578,7 @@ async fn oauth_authorize_get(
     authorize_get(
         oauth,
         params,
-        Some(state.workspace_path.as_str()),
+        Some(state.authorize_label.as_str()),
         &resolve_oauth_base(&state, &headers),
     )
 }
@@ -499,7 +622,7 @@ mod tests {
     use axum::http::header::CACHE_CONTROL;
     use axum::response::IntoResponse;
 
-    use super::{bind_listener, mcp_discovery, mcp_discovery_payload, ListenerState};
+    use super::{bind_listener, mcp_discovery, mcp_discovery_payload, Endpoint, ListenerState};
     use crate::tools::ToolContext;
     use crate::workspace::AuthConfig;
     use axum::extract::State;
@@ -512,10 +635,10 @@ mod tests {
             .expect("context")
             .with_workspace_name(workspace_name);
         ListenerState {
-            mcp: Arc::new(context),
+            endpoint: Endpoint::Workspace(Arc::new(context)),
             auth: AuthConfig::default(),
-            workspace_id: "w1".into(),
-            workspace_path: "/tmp/x".into(),
+            scope: "w1".into(),
+            authorize_label: "/tmp/x".into(),
             bind_port: 0,
             configured_public_url: String::new(),
             bearer_token: None,

@@ -33,6 +33,14 @@ pub fn actions_audience(workspace_id: &str) -> String {
     format!("gld:actions:{workspace_id}")
 }
 
+/// 聚合入口的受众。
+///
+/// 和任何工作区都不同：一个工作区的令牌打到 hub 上必须是 401。否则拿到一个项目的
+/// 授权，就等于拿到了 hub 里所有项目的授权。
+pub fn hub_audience() -> String {
+    "gld:hub".to_string()
+}
+
 /// Resolve the external OAuth/MCP base URL for a request.
 /// Matches the Python server's behavior: prefer configured URL,
 /// then `X-Forwarded-*` / `Host`, then localhost.

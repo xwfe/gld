@@ -58,6 +58,19 @@ macro_rules! field {
     };
 }
 
+/// MCP 认证方式的可选值。工作区和聚合入口共用，免得一边加了新方式另一边不认。
+pub(super) const MCP_AUTH_CHOICES: &[&str] = &["oauth", "bearer", "noauth"];
+
+/// 工具集的可选值。`normalize_tool_profile` 会把认不出的值悄悄当成 core，
+/// 所以写入配置前必须在这里拦下拼写错误。
+pub(super) const TOOL_PROFILE_CHOICES: &[&str] = &[
+    "compact",
+    "core",
+    "advanced",
+    "read-only",
+    "compat-readonly-all",
+];
+
 const FIELDS: &[Field] = &[
     field!("name", "文本", "显示名称", |p, v| {
         require_non_empty("name", v)?;
@@ -82,7 +95,7 @@ const FIELDS: &[Field] = &[
         "oauth | bearer | noauth",
         "MCP 认证方式",
         |p, v| {
-            p.auth.auth_type = parse_choice(v, &["oauth", "bearer", "noauth"])?;
+            p.auth.auth_type = parse_choice(v, MCP_AUTH_CHOICES)?;
             Ok(())
         }
     ),
@@ -110,16 +123,7 @@ const FIELDS: &[Field] = &[
         "compact | core | advanced | read-only | compat-readonly-all",
         "暴露给客户端的工具集（compact 为稳定聚合 API；core / advanced 保留兼容旧工具名）",
         |p, v| {
-            p.runtime.tool_profile = parse_choice(
-                v,
-                &[
-                    "compact",
-                    "core",
-                    "advanced",
-                    "read-only",
-                    "compat-readonly-all",
-                ],
-            )?;
+            p.runtime.tool_profile = parse_choice(v, TOOL_PROFILE_CHOICES)?;
             Ok(())
         }
     ),
@@ -479,7 +483,7 @@ fn parse_tunnel_type(value: &str) -> AppResult<String> {
     }
 }
 
-fn parse_choice(value: &str, choices: &[&str]) -> AppResult<String> {
+pub(super) fn parse_choice(value: &str, choices: &[&str]) -> AppResult<String> {
     let normalized = value.trim().to_ascii_lowercase();
     if choices.contains(&normalized.as_str()) {
         Ok(normalized)
