@@ -70,13 +70,28 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
     if truncated {
         warnings.push("content truncated".to_string());
     }
+    // 截断落在一行中间时这一行只给了半截，下一页得从它重新读，否则后半截就被跳过了
+    // （以前给的是下一行，AI 照着翻完一遍会以为读全了）。只有这一页连一整行都装不下时
+    // 才往下跳，不然翻页会停在原地；跳过的部分用 warning 说清楚。
+    let next_start_line = if !truncated {
+        None
+    } else if content.ends_with('\n') {
+        Some(actual_end + 1)
+    } else if content.contains('\n') {
+        Some(actual_end)
+    } else {
+        warnings.push(format!(
+            "line {start_line} is longer than max_bytes ({max_bytes}); the rest of it is skipped, raise max_bytes to read it whole"
+        ));
+        Some(start_line + 1)
+    };
     Ok(tool_ok(json!({
         "path": resolved.display,
         "content": content,
         "encoding": "utf-8",
         "start_line": start_line,
         "end_line": actual_end,
-        "next_start_line": truncated.then_some(actual_end.saturating_add(1)),
+        "next_start_line": next_start_line,
         "total_lines": total_lines,
         "total_bytes": total_bytes,
         "bytes_read": content.len(),

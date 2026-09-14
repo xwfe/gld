@@ -50,6 +50,80 @@ fn read_file_happy_path() {
     assert_eq!(payload["encoding"], "utf-8");
 }
 
+/// 照着 `next_start_line` 一页页往下翻，每一行都得完整地出现在某一页里。
+///
+/// 截断落在一行中间时，以前 `next_start_line` 给的是下一行，这一行的后半截就再也
+/// 读不到了——AI 以为自己读完了整个文件，其实中间缺了好几段。
+#[test]
+fn paging_with_next_start_line_never_skips_part_of_a_line() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let lines: Vec<String> = (1..=40)
+        .map(|n| format!("{n}:{}\n", "x".repeat(n % 7)))
+        .collect();
+    fs::write(dir.path().join("paged.txt"), lines.concat()).expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let mut seen = vec![false; lines.len()];
+    let mut start = 1u64;
+    for _ in 0..200 {
+        let out = invoke(
+            &ctx,
+            "read_file",
+            json!({"path": "paged.txt", "start_line": start, "max_bytes": 12}),
+        );
+        let page = assert_ok(&out);
+        let content = page["content"].as_str().expect("content");
+        for (offset, piece) in content.split_inclusive('\n').enumerate() {
+            let index = start as usize - 1 + offset;
+            if piece == lines[index] {
+                seen[index] = true;
+            }
+        }
+        match page["next_start_line"].as_u64() {
+            Some(next) => {
+                assert!(next > start, "翻页原地打转：{page:#}");
+                start = next;
+            }
+            None => break,
+        }
+    }
+    let missing: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter(|(_, seen)| !**seen)
+        .map(|(index, _)| index + 1)
+        .collect();
+    assert!(missing.is_empty(), "这些行从没完整读到过：{missing:?}");
+}
+
+/// 一行本身就比 max_bytes 长时只能跳过它的剩余部分，但得明说，不能让 AI 以为读全了。
+#[test]
+fn a_line_longer_than_max_bytes_is_skipped_out_loud() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let long_line = "y".repeat(50);
+    fs::write(
+        dir.path().join("long.txt"),
+        format!("short\n{long_line}\nend\n"),
+    )
+    .expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let out = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "long.txt", "start_line": 2, "max_bytes": 12}),
+    );
+    let page = assert_ok(&out);
+    assert_eq!(page["content"], "y".repeat(12));
+    assert_eq!(page["next_start_line"], 3);
+    assert!(
+        page["warnings"]
+            .to_string()
+            .contains("line 2 is longer than max_bytes"),
+        "{page:#}"
+    );
+}
+
 #[test]
 fn unknown_tool_is_validation_error() {
     let fx = tiny_js_fixture();
