@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::process::Command;
+
 use common::env::Env;
 
 /// 按 JSON Pointer 取字符串字段。
@@ -18,6 +20,60 @@ fn field(value: &serde_json::Value, pointer: &str) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// 切到 plan 模式要把工作区里还在跑的命令停掉——plan 是只读的，留着一个
+/// 正在写文件的进程等于没切。
+///
+/// 会话只在守护进程里活得下来，所以这条必须经守护进程走：守护进程的请求处理跑在
+/// 异步线程上，而停会话要同步等进程退出，两者撞在一起就是 tokio 那句
+/// "Cannot start a runtime from within a runtime"，请求直接断掉，会话也没停。
+/// 没有会话时这段代码根本不执行，所以得先真起一个。
+#[test]
+fn switching_to_plan_mode_stops_running_commands_through_the_daemon() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("跳过：本机没有 python3");
+        return;
+    }
+    let env = Env::new();
+    env.ok(&["ws", "add", ".", "--name", "plan"]);
+    env.ok(&["daemon", "start"]);
+
+    let started = env.json(&[
+        "--json",
+        "tool",
+        "call",
+        "exec_command",
+        r#"cmd=python3 -c "import time; time.sleep(60)""#,
+        "timeout_ms:=90000",
+        "yield_time_ms:=300",
+    ]);
+    let session = field(&started, "/session_id");
+    assert!(!session.is_empty(), "命令没留在后台：{started:#}");
+
+    let switched = env.gld(&["--json", "planning", "mode", "plan"]);
+    assert!(
+        switched.status.success(),
+        "切 plan 模式失败（exit {:?}）\nstdout:\n{}\nstderr:\n{}",
+        switched.status.code(),
+        String::from_utf8_lossy(&switched.stdout),
+        String::from_utf8_lossy(&switched.stderr)
+    );
+
+    let after = env.gld(&[
+        "--json",
+        "tool",
+        "call",
+        "read_output",
+        &format!("output_ref=session:{session}:stdout"),
+    ]);
+    let payload: serde_json::Value = serde_json::from_slice(&after.stdout).expect("json");
+    assert_eq!(
+        payload["error"]["code"], "SESSION_NOT_FOUND",
+        "切到 plan 之后会话还在：{payload:#}"
+    );
+    // 守护进程还得活着，别是处理请求时整个挂掉了。
+    env.ok(&["daemon", "status"]);
 }
 
 #[test]

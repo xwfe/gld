@@ -24,11 +24,27 @@ impl App {
     }
 
     /// 切换 Direct / Plan / Goal 模式；进入 Plan 模式时杀掉工作区里仍在运行的命令会话。
-    pub fn set_planning_mode(&self, id: &str, mode: PlanningMode) -> AppResult<PlanningState> {
+    ///
+    /// 杀会话要同步等进程退出（内部 `block_on`），而守护进程处理请求时在 tokio 异步线程上。
+    /// 直接调会 panic（"Cannot start a runtime from within a runtime"）：模式已经切过去了，
+    /// 命令却还在跑，用户只看到一句"守护进程内部出错"。所以杀会话放进 `spawn_blocking`。
+    pub async fn set_planning_mode(
+        &self,
+        id: &str,
+        mode: PlanningMode,
+    ) -> AppResult<PlanningState> {
         let path = self.workspace_root(id)?;
         let state = PlanningService::new(&path).set_mode(mode)?;
         if mode == PlanningMode::Plan {
-            crate::tools::session::kill_workspace_sessions(&path);
+            tokio::task::spawn_blocking(move || {
+                crate::tools::session::kill_workspace_sessions(&path)
+            })
+            .await
+            .map_err(|error| {
+                AppError::Message(format!(
+                    "已切到 plan 模式，但停止工作区里还在跑的命令时出错：{error}"
+                ))
+            })?;
         }
         Ok(state)
     }

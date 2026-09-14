@@ -194,7 +194,7 @@ pub async fn dispatch(
         }
         R::SetPlanningMode { target, mode } => {
             let profile = resolve(app, &target)?;
-            ok(&app.set_planning_mode(&profile.id, mode)?)
+            ok(&app.set_planning_mode(&profile.id, mode).await?)
         }
         R::CreateGoal {
             target,
