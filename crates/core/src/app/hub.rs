@@ -122,6 +122,7 @@ impl App {
             restore_on_launch: before.restore_on_launch,
             ..config
         };
+        reject_public_noauth(&after)?;
         if after != before {
             let saved = after.clone();
             self.update_settings(|settings| {
@@ -250,6 +251,8 @@ impl App {
         let settings = self.settings()?;
         let config = settings.hub.clone();
         self.validate_hub_port(config.local_port)?;
+        // 保存时已经拦过一道；这里再拦是防手工改过数据文件、或老配置恢复起来。
+        reject_public_noauth(&config)?;
         if config.use_global_gateway {
             if !settings.global_gateway.enabled {
                 return Err(AppError::Message(
@@ -310,6 +313,24 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// hub 挂了公网入口就不许 noauth。
+///
+/// 工作区那边 noauth + 公网只是 `gld doctor` 报 ✗，这里直接拒：hub 的暴露面是全部成员，
+/// 一个无认证的公网地址等于把这几个项目的"执行任意命令"一起开放给整个互联网，
+/// 而且谁连上来先调 list_workspaces 就知道有哪几个。
+fn reject_public_noauth(config: &HubConfig) -> AppResult<()> {
+    let public = config.use_global_gateway || !config.public_url.trim().is_empty();
+    if config.auth_type == "noauth" && public {
+        return Err(AppError::Message(
+            "hub 挂了公网入口（经全局入口或手动公网地址），不能用 noauth：\
+             那等于把全部成员的执行权限开放给整个互联网。\
+             改用认证：gld hub set --auth oauth；确实只在本机用就先撤掉公网入口再改 noauth。"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn member_dto(profile: &WorkspaceProfile) -> HubMemberDto {

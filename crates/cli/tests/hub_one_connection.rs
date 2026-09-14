@@ -475,4 +475,18 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
         resource.json()["resource"],
         "https://gw.example.com/hub/mcp"
     );
+
+    // 挂着公网入口改 noauth 要当场拒，配置不落盘。
+    let refused = hub.env.gld(&["hub", "set", "--auth", "noauth"]);
+    assert!(
+        !refused.status.success(),
+        "公网 hub 改成 noauth 居然保存成功了"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("noauth"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let shown = hub.env.json(&["--json", "hub", "show"]);
+    assert_eq!(shown["status"]["config"]["authType"], "oauth", "{shown}");
 }
