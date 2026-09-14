@@ -1,13 +1,39 @@
-use std::sync::Mutex;
+use std::cell::Cell;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
 use crate::workspace::WorkspaceProfile;
 
-use super::migrate::{data_file_path, load_or_migrate, maybe_backup_legacy_files, save};
+use super::migrate::{
+    data_file_path, load_existing, load_or_migrate, maybe_backup_legacy_files, save,
+};
 use super::model::AppData;
 
 static DATA_FILE_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// 当前线程是否已经拿着 [`DATA_FILE_LOCK`]。
+    ///
+    /// `App` 会在整段"重读 → 改 → 保存"期间拿着锁，而保存（以及闭包里可能调到的
+    /// `AppSettings::load_or_default`）自己也要拿锁。`std::sync::Mutex` 不可重入，
+    /// 没有这个标记就是同一线程自己等自己，整个守护进程卡死。
+    static HOLDING_DATA_FILE_LOCK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 数据文件锁。同一线程里嵌套拿锁时，里层拿到的是个空壳，由最外层负责解锁。
+///
+/// 里面是 `MutexGuard`，所以不能跨 `.await` 持有（编译器会拒绝把它送到别的线程），
+/// 这正好保证了线程标记不会错位。
+pub(crate) struct DataFileGuard(Option<MutexGuard<'static, ()>>);
+
+impl Drop for DataFileGuard {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            HOLDING_DATA_FILE_LOCK.with(|holding| holding.set(false));
+        }
+    }
+}
 
 const SHARED_KEYS: &[&str] = &[
     "oauth_client_id",
@@ -54,6 +80,22 @@ impl DataStore {
         let result = f(&mut data)?;
         save(&data)?;
         Ok(result)
+    }
+
+    /// 拿住数据文件锁，并把内存副本换成磁盘上的最新内容。
+    ///
+    /// 内存副本保存时是整份覆盖文件的。守护进程里还有别的代码直接改文件（全局入口
+    /// 回写公网地址、Actions 补 OAuth 密钥），用户也可能手工改。不先重读，这些值会在
+    /// 下一次任意保存时被悄悄冲掉：密钥变了、连接器突然 401，还查不到是谁改的。
+    ///
+    /// 文件不在了就沿用内存里的（下次保存会写回去）。当成空配置的话，误删一个文件
+    /// 就会让守护进程把所有工作区和密钥一起抹掉。文件坏了则报错，不覆盖它。
+    pub(crate) fn lock_latest(&mut self) -> AppResult<DataFileGuard> {
+        let guard = lock_data_file()?;
+        if let Some(data) = load_existing()? {
+            self.data = data;
+        }
+        Ok(guard)
     }
 
     pub fn data(&self) -> &AppData {
@@ -221,9 +263,8 @@ impl DataStore {
 
     /// 取应用级密钥，没有就当场生成一个存下。
     ///
-    /// 给聚合入口这种"第一次用到才需要凭据"的地方用。必须走这里（内存里的这份数据）
-    /// 而不是 `SecretStore` 直接改文件：`App` 下一次保存会拿内存副本整份覆盖文件，
-    /// 绕过它写进去的凭据会被悄悄冲掉，表现是客户端突然 401、凭据又变了一遍。
+    /// 给聚合入口这种"第一次用到才需要凭据"的地方用。查和写在同一次 `App::with_data`
+    /// 里完成，两条并发请求不会各生成一个、后写的把先写的盖掉。
     pub fn get_or_create_app_secret(&mut self, scope: &str, item_id: &str) -> AppResult<String> {
         match self.get_app_secret(scope, item_id) {
             Some(value) => Ok(value),
@@ -248,10 +289,15 @@ impl DataStore {
     }
 }
 
-fn lock_data_file() -> AppResult<std::sync::MutexGuard<'static, ()>> {
-    DATA_FILE_LOCK
+fn lock_data_file() -> AppResult<DataFileGuard> {
+    if HOLDING_DATA_FILE_LOCK.with(Cell::get) {
+        return Ok(DataFileGuard(None));
+    }
+    let guard = DATA_FILE_LOCK
         .lock()
-        .map_err(|_| AppError::Message("data file lock poisoned".into()))
+        .map_err(|_| AppError::Message("data file lock poisoned".into()))?;
+    HOLDING_DATA_FILE_LOCK.with(|holding| holding.set(true));
+    Ok(DataFileGuard(Some(guard)))
 }
 
 fn random_secret() -> String {

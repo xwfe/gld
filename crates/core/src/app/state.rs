@@ -11,7 +11,7 @@ use crate::workspace::WorkspaceProfile;
 
 /// 进程内的应用状态：持久化数据 + 正在运行的监听器 + 命令行工具调用的上下文。
 ///
-/// 三把锁都是 `std::sync::Mutex`，临界区只做内存读写和一次同步落盘，
+/// 三把锁都是 `std::sync::Mutex`，临界区只做内存读写和同步读写数据文件，
 /// 不在持锁期间 `await`。异步的重启串行化由 [`App::restart_gate`] 负责。
 pub struct App {
     data: Mutex<DataStore>,
@@ -68,6 +68,8 @@ impl App {
             .data
             .lock()
             .map_err(|_| AppError::Message("data store poisoned".into()))?;
+        // 整段读-改-写都拿着文件锁，并且先重读磁盘：内存里这份只是缓存，文件才是准的。
+        let _file = guard.lock_latest()?;
         f(&mut guard)
     }
 
@@ -110,5 +112,50 @@ impl App {
 
     pub(super) fn ensure_workspace_exists(&self, id: &str) -> AppResult<()> {
         self.profile_by_id(id).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secret::SecretStore;
+
+    /// 守护进程里不止 `App` 一个写数据文件的：全局入口拿到临时公网地址会回写，
+    /// Actions 起服务时发现缺 OAuth 密钥会当场补一个，用户也可能手工改文件。
+    /// 以前 `App` 拿启动时读的内存副本整份覆盖，这些值会在下一次任意保存时被悄悄冲掉。
+    #[test]
+    fn a_value_written_straight_to_the_file_survives_the_next_app_save() {
+        crate::home::isolate_for_tests();
+        let app = App::load().expect("load");
+        let workspace_id = uuid::Uuid::new_v4().simple().to_string();
+
+        SecretStore::set(
+            &workspace_id,
+            "actions_oauth_password",
+            "written-behind-app",
+        )
+        .expect("write straight to the file");
+        app.update_settings(|settings| {
+            settings.last_workspace_id = workspace_id.clone();
+            Ok(())
+        })
+        .expect("app save");
+
+        assert_eq!(
+            SecretStore::get(&workspace_id, "actions_oauth_password")
+                .expect("read")
+                .as_deref(),
+            Some("written-behind-app"),
+            "App 保存时把别人写进文件的密钥冲掉了"
+        );
+        // App 自己读到的也得是这个值，否则展示凭据的命令会报没有。
+        assert_eq!(
+            app.with_data(
+                |store| store.get_workspace_secret(&workspace_id, "actions_oauth_password")
+            )
+            .expect("read through app")
+            .as_deref(),
+            Some("written-behind-app")
+        );
     }
 }

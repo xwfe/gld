@@ -29,6 +29,15 @@ fn read_data_file(path: &Path) -> AppResult<AppData> {
     serde_json::from_str(&raw).map_err(|error| corrupt_data_file(path, &error))
 }
 
+/// 数据文件存在就读出来，不存在返回 `None`——不走旧布局迁移，也不当成空配置。
+pub fn load_existing() -> AppResult<Option<AppData>> {
+    let path = data_file_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_data_file(&path).map(Some)
+}
+
 pub fn load_or_migrate() -> AppResult<AppData> {
     let path = data_file_path()?;
     if path.exists() {
