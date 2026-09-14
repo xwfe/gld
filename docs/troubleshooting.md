@@ -109,6 +109,7 @@ gld tool call exec_command cmd='cargo test'
 | `GLD_DATA_HOME_DENIED` | 想用文件工具读 gld 自己的数据目录 | 有意挡的，**关掉 confine-reads 也不给读**：那里明文存着所有工作区的密钥。要看密钥用 `gld secret show <key> --reveal` |
 | `FILE_CHANGED_EXTERNALLY`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹，发现任务开始后有它没记账的文件变化 | 确实是你在编辑器里改了文件的话，这是它该做的事——让 AI 重新读一遍再动手。要是你什么都没改却一直报，看下一行 |
 | 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
+| 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 跳过名单多了 `.venv/`、`coverage/`、`Library/` 等目录（[concepts.md](concepts.md#durable-task-的工作区基线)），工作区里有这些目录就跟升级前记下的指纹对不上 | 结束旧任务再开一个：`task_manage action=finish task_id=<id> allow_unverified=true`，然后 `action=start`。`<id>` 在 `action=status` 的 `task_id` 里 |
 
 ## 聚合入口（hub）
 
