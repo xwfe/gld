@@ -316,7 +316,11 @@ async fn run_command(
         if session.has_exited() {
             session.wait_for_readers().await;
             let snapshot = session.snapshot(max_output);
-            ctx.sessions.remove(&session.session_id);
+            // The result hands out output_refs (and says when it cut the
+            // output), so they must stay readable for a while, like after a
+            // timeout; removing the session here made every one of them
+            // SESSION_NOT_FOUND.
+            schedule_session_eviction(ctx.sessions.clone(), session.session_id.clone());
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, false));
         }
         if !tty && Instant::now() >= deadline {
@@ -349,7 +353,7 @@ async fn run_command(
     }
 }
 
-/// How long a timed-out / background session stays readable before map eviction.
+/// How long a finished, timed-out or background session stays readable before map eviction.
 const SESSION_EVICT_AFTER_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn spawn_timeout_monitor(
@@ -766,6 +770,53 @@ mod tests {
             return Err(format!("grandchild {pid} outlived the command"));
         }
         Ok(())
+    }
+
+    /// A command that finishes before yield_time, with more output than
+    /// max_output_bytes: the result says "truncated" and hands out
+    /// output_refs, so those refs have to be readable.
+    #[cfg(unix)]
+    #[test]
+    fn output_refs_of_a_command_that_finished_inline_can_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let script = workspace.path().join("noisy");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nhead -c 5000 /dev/zero | tr '\\000' a\necho END\n",
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("meta").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        let output = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./noisy", "timeout_ms": 10_000, "yield_time_ms": 10_000, "max_output_bytes": 64 }),
+        );
+        assert_eq!(output["command_ok"], true, "{output}");
+        assert_eq!(output["stdout_truncated"], true, "{output}");
+        let stdout_ref = output["output_refs"]["stdout"]
+            .as_str()
+            .expect("stdout ref");
+        let read = call_tool(
+            &ctx,
+            "read_output",
+            &json!({ "output_ref": stdout_ref, "limit": 10_000 }),
+        );
+        assert_eq!(read["total_stream_bytes"], 5004, "{read}");
+        assert!(
+            read["content"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("aEND\n"),
+            "{read}"
+        );
     }
 
     #[cfg(unix)]
