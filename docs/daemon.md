@@ -193,8 +193,15 @@ systemctl --user enable --now gld
 守护进程加载的是旧二进制的代码。升级 `gld` 后：
 
 ```bash
+gld list                         # 先记下哪些工作区的服务在跑
 gld daemon restart
+gld start -w <工作区>             # 对原来在跑的每个工作区各执行一次
 ```
+
+**重启会停掉所有服务，而且不会自己恢复。** 输出里那句“所有服务已停止”是真的：重启完
+`gld daemon status` 显示运行中的服务 0，公网入口（隧道）也跟着停了，ChatGPT 连接器这时
+连不上，直到你 `gld start` 回来。0.3.0 升 0.4.0 时实测：`gld start -w xdo` 重新拉起 MCP 和
+cloudflare 隧道，工作区配置、OAuth 设置不用重配。
 
 没重启时执行任何命令都会提示“守护进程版本 x 与命令行版本 y 不一致”（退出码 4），
 `daemon status` / `daemon stop` 不受影响。

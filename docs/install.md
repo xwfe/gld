@@ -56,6 +56,8 @@ gld --version
 gld daemon restart
 ```
 
+重启会停掉所有正在跑的服务，要对原来在跑的工作区逐个 `gld start -w <工作区>`，见[守护进程 · 升级](daemon.md#升级)。
+
 > 注意别和 `gld upgrade` 搞混：那条命令改的是**工作区配置**（目录、公网入口、
 > 端口、认证），不升级 gld 自己。升级 gld 只有"换二进制 + `gld daemon restart`"这一条路。
 
