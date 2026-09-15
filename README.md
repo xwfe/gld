@@ -92,6 +92,7 @@ gld destroy                   # 连配置和密钥一起删掉；项目文件不
 | 装 / 升级 / 卸载 | [install.md](docs/install.md) |
 | 从桌面版迁移过来 | [migrate-from-desktop.md](docs/migrate-from-desktop.md) |
 | 改这个项目的代码 | [architecture.md](docs/architecture.md)、[development.md](docs/development.md) |
+| 看多产品共用项目执行服务的推荐方案与迁移门禁（尚未实施） | [RFC-0001](docs/rfc/0001-shared-workspace-runtime.md) |
 
 ## Credits
 
