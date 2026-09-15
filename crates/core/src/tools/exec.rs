@@ -54,19 +54,9 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
         }
         return Ok(tool_ok(result));
     }
-    let timeout_ms = args
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(30_000);
-    let max_output = args
-        .get("max_output_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(32_768) as usize;
-    let yield_ms = args
-        .get("yield_time_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(1000)
-        .min(30_000);
+    let timeout_ms = crate::tools::args::bounded(args, "exec_command", "timeout_ms");
+    let max_output = crate::tools::args::bounded(args, "exec_command", "max_output_bytes") as usize;
+    let yield_ms = crate::tools::args::bounded(args, "exec_command", "yield_time_ms");
     let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
     let stdin_text = args.get("stdin").and_then(Value::as_str).unwrap_or("");
 

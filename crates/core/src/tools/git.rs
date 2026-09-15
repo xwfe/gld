@@ -12,10 +12,7 @@ use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 pub fn git_status(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
     let resolved = ws.resolve_existing(path)?;
-    let max_entries = args
-        .get("max_entries")
-        .and_then(Value::as_u64)
-        .unwrap_or(500) as usize;
+    let max_entries = crate::tools::args::bounded(args, "git_status", "max_entries") as usize;
     let include_untracked = args
         .get("include_untracked")
         .and_then(Value::as_bool)
@@ -105,14 +102,8 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         .get("unstaged")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let context = args
-        .get("context_lines")
-        .and_then(Value::as_u64)
-        .unwrap_or(3);
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(65_536) as usize;
+    let context = crate::tools::args::bounded(args, "git_diff", "context_lines");
+    let max_bytes = crate::tools::args::bounded(args, "git_diff", "max_bytes") as usize;
 
     let mut path_filters: Vec<String> = Vec::new();
     if let Some(p) = args.get("path").and_then(Value::as_str) {
@@ -168,16 +159,8 @@ pub fn git_log(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
     let resolved = ws.resolve_existing(path)?;
     let ref_name = validate_git_ref(args.get("ref").and_then(Value::as_str).unwrap_or("HEAD"))?;
-    let max_count = args
-        .get("max_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(20)
-        .clamp(1, 100) as usize;
-    let skip = args
-        .get("skip")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .min(10_000) as usize;
+    let max_count = crate::tools::args::bounded(args, "git_log", "max_count") as usize;
+    let skip = crate::tools::args::bounded(args, "git_log", "skip") as usize;
 
     if !is_git_repo(ws.root()) {
         return Ok(tool_ok(json!({
@@ -257,14 +240,8 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     }
 
     let rev = validate_git_ref(args.get("rev").and_then(Value::as_str).unwrap_or("HEAD"))?;
-    let context = args
-        .get("context_lines")
-        .and_then(Value::as_u64)
-        .unwrap_or(3);
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(65_536) as usize;
+    let context = crate::tools::args::bounded(args, "git_show", "context_lines");
+    let max_bytes = crate::tools::args::bounded(args, "git_show", "max_bytes") as usize;
     let include_diff = args
         .get("include_diff")
         .and_then(Value::as_bool)
@@ -356,11 +333,7 @@ pub fn git_blame(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .get("end_line")
         .and_then(Value::as_u64)
         .map(|v| v as usize);
-    let max_lines = args
-        .get("max_lines")
-        .and_then(Value::as_u64)
-        .unwrap_or(200)
-        .clamp(1, 1000) as usize;
+    let max_lines = crate::tools::args::bounded(args, "git_blame", "max_lines") as usize;
 
     let final_line = match end_line_arg {
         None => start_line + max_lines - 1,

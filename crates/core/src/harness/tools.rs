@@ -45,11 +45,7 @@ fn harness_status(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
 
 fn operation_log(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let offset = args.get("cursor").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(50)
-        .clamp(1, 200) as usize;
+    let limit = crate::tools::args::bounded(args, "operation_log", "limit") as usize;
     let operations = ctx
         .harness
         .list_operations(offset, limit)
@@ -61,7 +57,7 @@ fn operation_log(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErro
 }
 
 fn project_state(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
-    let max_files = args.get("max_files").and_then(Value::as_u64).unwrap_or(200) as usize;
+    let max_files = crate::tools::args::bounded(args, "project_state", "max_files") as usize;
     serde_json::to_value(ctx.harness.project_state(max_files).map_err(map_error)?)
         .map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))
 }
@@ -133,11 +129,7 @@ fn task_context(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError
 fn list_task_events(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let task_id = task_id(args)?;
     let offset = args.get("cursor").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(50)
-        .clamp(1, 200) as usize;
+    let limit = crate::tools::args::bounded(args, "list_task_events", "limit") as usize;
     let events = ctx
         .harness
         .list_events(task_id, offset, limit)

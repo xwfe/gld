@@ -1104,7 +1104,7 @@ pub fn input_schema(name: &str) -> Value {
                 "path": { "type": "string", "default": "." },
                 "recursive": { "type": "boolean", "default": false },
                 "max_depth": { "type": "integer", "minimum": 1, "maximum": 20, "default": 1 },
-                "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 },
+                "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 100 },
                 "include_hidden": { "type": "boolean", "default": false },
                 "include_ignored": { "type": "boolean", "default": false }
             },

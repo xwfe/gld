@@ -10,8 +10,6 @@ use walkdir::WalkDir;
 
 use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceError};
 
-/// Default per-file cap for `search_text` to avoid loading multi-GB assets.
-const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const BINARY_PEEK_BYTES: usize = 8192;
 
 /// `read_file` 每次从磁盘取多少字节。内存峰值约等于这个缓冲加 `max_bytes`，跟文件多大无关。
@@ -37,10 +35,7 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
             retryable: false,
         });
     }
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(32_768) as usize;
+    let max_bytes = crate::tools::args::bounded(args, "read_file", "max_bytes") as usize;
     let start_line = args
         .get("start_line")
         .and_then(Value::as_u64)
@@ -111,15 +106,8 @@ pub fn list_dir(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         .get("recursive")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let max_depth = args
-        .get("max_depth")
-        .and_then(Value::as_u64)
-        .unwrap_or(1)
-        .max(1) as usize;
-    let max_entries = args
-        .get("max_entries")
-        .and_then(Value::as_u64)
-        .unwrap_or(100) as usize;
+    let max_depth = crate::tools::args::bounded(args, "list_dir", "max_depth") as usize;
+    let max_entries = crate::tools::args::bounded(args, "list_dir", "max_entries") as usize;
     let include_hidden = args
         .get("include_hidden")
         .and_then(Value::as_bool)
@@ -161,10 +149,7 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
     }
     let patterns = list_files_patterns(args);
     let exclude_patterns = string_list_arg(args, "exclude_patterns");
-    let max_results = args
-        .get("max_results")
-        .and_then(Value::as_u64)
-        .unwrap_or(5000) as usize;
+    let max_results = crate::tools::args::bounded(args, "list_files", "max_results") as usize;
     let include_hidden = args
         .get("include_hidden")
         .and_then(Value::as_bool)
@@ -237,25 +222,13 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         .get("case_sensitive")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let max_results = args
-        .get("max_results")
-        .and_then(Value::as_u64)
-        .unwrap_or(1000) as usize;
-    let max_preview = args
-        .get("max_preview_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(256) as usize;
-    let max_file_bytes = args
-        .get("max_file_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_SEARCH_MAX_FILE_BYTES)
-        .max(1);
+    let max_results = crate::tools::args::bounded(args, "search_text", "max_results") as usize;
+    let max_preview =
+        crate::tools::args::bounded(args, "search_text", "max_preview_bytes") as usize;
+    let max_file_bytes = crate::tools::args::bounded(args, "search_text", "max_file_bytes");
 
     let (include_globs, exclude_globs) = search_globs(args);
-    let context_lines = args
-        .get("context_lines")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let context_lines = crate::tools::args::bounded(args, "search_text", "context_lines") as usize;
     let matcher = build_matcher(query, use_regex, case_sensitive)?;
 
     let mut matches = Vec::new();
@@ -826,6 +799,38 @@ fn format_mtime(st: Option<SystemTime>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The schema tells the client "default 100"; the code used to return up
+    /// to 1000, ten times what the client planned its context for.
+    #[test]
+    fn search_text_default_max_results_is_what_the_schema_says() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("many.txt"), "needle\n".repeat(150)).expect("write");
+        let ws = Workspace::new(dir.path().to_path_buf()).expect("workspace");
+        let result = search_text(&ws, &json!({ "query": "needle" })).expect("search");
+        assert_eq!(
+            result["matches"].as_array().expect("matches").len(),
+            100,
+            "{result}"
+        );
+        assert_eq!(result["truncated"], true);
+    }
+
+    /// Out-of-range values are brought into the declared range rather than
+    /// obeyed: a max_results of a billion is a request for "all of it", not
+    /// a licence to fill memory.
+    #[test]
+    fn search_text_max_results_above_the_schema_maximum_is_clamped() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("many.txt"), "needle\n".repeat(10_050)).expect("write");
+        let ws = Workspace::new(dir.path().to_path_buf()).expect("workspace");
+        let result = search_text(
+            &ws,
+            &json!({ "query": "needle", "max_results": 1_000_000_000u64, "max_preview_bytes": 1 }),
+        )
+        .expect("search");
+        assert_eq!(result["matches"].as_array().expect("matches").len(), 10_000);
+    }
 
     /// 改成流式之前的算法，原样留着当标准答案。
     fn whole_file_reference(

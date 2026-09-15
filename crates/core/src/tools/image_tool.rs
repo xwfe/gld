@@ -7,26 +7,14 @@ use serde_json::{json, Value};
 
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
-const DEFAULT_MAX_BYTES: usize = 5_242_880;
-const DEFAULT_MAX_DIMENSION: u32 = 2000;
-
 pub fn view_image(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let path = args
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| WorkspaceError::invalid_argument("path is required"))?;
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_MAX_BYTES as u64) as usize;
-    let max_width = args
-        .get("max_width")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_MAX_DIMENSION as u64) as u32;
-    let max_height = args
-        .get("max_height")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_MAX_DIMENSION as u64) as u32;
+    let max_bytes = crate::tools::args::bounded(args, "view_image", "max_bytes") as usize;
+    let max_width = crate::tools::args::bounded(args, "view_image", "max_width") as u32;
+    let max_height = crate::tools::args::bounded(args, "view_image", "max_height") as u32;
     let auto_resize = args
         .get("auto_resize")
         .and_then(Value::as_bool)
