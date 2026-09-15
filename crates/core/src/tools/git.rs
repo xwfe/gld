@@ -1,5 +1,8 @@
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::io::Read;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde_json::{json, Value};
@@ -482,8 +485,16 @@ fn run_git(
     cmd.arg("-C")
         .arg(cwd)
         .args(args)
+        // 改用 spawn 后 stdin 默认会继承守护进程的；原来 output() 给的是空输入，保持不变。
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 自成进程组，超时时把 git 拉起的 sh、hook、helper 一起杀掉。
+        cmd.process_group(0);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -491,16 +502,79 @@ fn run_git(
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| git_error(&format!("git not available: {e}")))?;
-    let _ = limit;
+    let stdout = read_pipe_in_background(child.stdout.take());
+    let stderr = read_pipe_in_background(child.stderr.take());
+    let deadline = Instant::now() + limit;
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                kill_git(&mut child);
+                return Err(git_timeout(args, limit));
+            }
+            Err(e) => {
+                kill_git(&mut child);
+                return Err(git_error(&format!("waiting for git failed: {e}")));
+            }
+        }
+    };
+    // git 已退出，但它留下的后台进程可能还占着管道；读端也只等到期限为止。
+    // 这时 git 已被回收，进程组号可能被复用，所以不再发信号。
+    let collect = |pipe: mpsc::Receiver<Vec<u8>>| {
+        pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| git_timeout(args, limit))
+    };
+    let stdout = collect(stdout)?;
+    let stderr = collect(stderr)?;
     Ok(GitOutput {
-        success: output.status.success(),
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        success: status.success(),
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+fn read_pipe_in_background<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+fn kill_git(child: &mut Child) {
+    #[cfg(unix)]
+    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: 只发信号，负号表示整个进程组；组号是刚 spawn 且尚未回收的 git。
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    // Windows 上 kill 只结束 git 本身；子孙若占着管道，读线程会晚些退出，但调用已经按时返回。
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn git_timeout(args: &[&str], limit: Duration) -> WorkspaceError {
+    WorkspaceError::Tool {
+        code: "TIMEOUT",
+        message: format!(
+            "git {} did not finish within {} ms",
+            args.join(" "),
+            limit.as_millis()
+        ),
+        category: "runtime",
+        retryable: true,
+    }
 }
 
 fn run_git_diff(
@@ -621,6 +695,54 @@ fn git_error(message: &str) -> WorkspaceError {
 #[cfg(test)]
 mod tests {
     use super::parse_branch_line;
+
+    // `!` 别名让 git 经 sh 再拉起 sleep，sleep 继承 stdout/stderr 管道。
+    // 只杀 git 本身时 sleep 还活着占着管道——所以既要按时返回，也要确认 sleep 死了。
+    #[cfg(unix)]
+    #[test]
+    fn run_git_kills_a_hung_git_and_what_it_spawned_at_the_limit() {
+        use super::run_git;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("sleep.pid");
+        let alias = format!(
+            "alias.hang=!echo $$ > '{}'; exec sleep 20",
+            pid_file.display()
+        );
+
+        let started = Instant::now();
+        let result = run_git(
+            dir.path(),
+            &["-c", &alias, "hang"],
+            Duration::from_millis(300),
+        );
+        let elapsed = started.elapsed();
+
+        assert!(elapsed < Duration::from_secs(3), "等了 {elapsed:?} 才返回");
+        let error = result.err().expect("超时应当报错");
+        assert!(
+            error.to_error_value()["code"] == "TIMEOUT",
+            "{:?}",
+            error.to_error_value()
+        );
+
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .expect("别名没跑起来")
+            .trim()
+            .parse()
+            .unwrap();
+        // 被杀的 sleep 成了孤儿，要等 init/launchd 收尸，给 2 秒。
+        let gone_by = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < gone_by {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "git 拉起的 sleep {pid} 还活着"
+        );
+    }
 
     #[test]
     fn parses_every_form_of_the_status_branch_line() {
