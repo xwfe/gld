@@ -144,9 +144,16 @@ struct FilePatch {
     is_deleted: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Hunk {
     lines: Vec<HunkLine>,
+    /// 0-based index in the original file where the old lines start, from a
+    /// unified `@@ -a,b` header. For `-a,0` (pure insertion) it is the line
+    /// after line `a`.
+    old_start: Option<usize>,
+    /// Codex `@@ <line>` header: the old lines are looked for after the
+    /// first line equal to this one.
+    anchor: Option<String>,
 }
 
 #[derive(Debug)]
@@ -201,7 +208,10 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
                     f.hunks.push(h);
                 }
             }
-            current_hunk = Some(Hunk { lines: Vec::new() });
+            current_hunk = Some(Hunk {
+                old_start: unified_old_start(line),
+                ..Hunk::default()
+            });
         } else if let Some(ref mut hunk) = current_hunk {
             if let Some(rest) = line.strip_prefix('+') {
                 hunk.lines.push(HunkLine::Add(rest.to_string()));
@@ -260,18 +270,22 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
                 is_deleted,
             });
             if is_new_file {
-                current_hunk = Some(Hunk { lines: Vec::new() });
+                current_hunk = Some(Hunk::default());
             }
             continue;
         }
 
-        if line.starts_with("@@") {
+        if let Some(header) = line.strip_prefix("@@") {
             if let Some(hunk) = current_hunk.take() {
                 if let Some(ref mut file) = current {
                     file.hunks.push(hunk);
                 }
             }
-            current_hunk = Some(Hunk { lines: Vec::new() });
+            let anchor = header.trim();
+            current_hunk = Some(Hunk {
+                anchor: (!anchor.is_empty()).then(|| anchor.to_string()),
+                ..Hunk::default()
+            });
             continue;
         }
 
@@ -281,7 +295,7 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
         if file.is_deleted {
             continue;
         }
-        let hunk = current_hunk.get_or_insert_with(|| Hunk { lines: Vec::new() });
+        let hunk = current_hunk.get_or_insert_with(Hunk::default);
         if let Some(rest) = line.strip_prefix('+') {
             hunk.lines.push(HunkLine::Add(rest.to_string()));
         } else if let Some(rest) = line.strip_prefix('-') {
@@ -347,10 +361,23 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
             .map(|line| line.trim_end_matches('\r').to_string())
             .collect()
     };
-    let mut offset: i64 = 0;
+    // Hunks apply in order: each is looked for after the previous one ended,
+    // so a later hunk cannot land on a repeat of the text above it.
+    let mut search_from = 0usize;
+    // Lines added minus lines removed so far. Header line numbers refer to
+    // the original file, and earlier hunks have moved everything below them.
+    let mut shift: isize = 0;
 
     for hunk in hunks {
-        let search_at = 0usize;
+        if let Some(anchor) = &hunk.anchor {
+            let at = lines[search_from..]
+                .iter()
+                .position(|line| line.trim() == anchor)
+                .ok_or_else(|| {
+                    patch_failed(format!("Hunk header did not match any line: @@ {anchor}"))
+                })?;
+            search_from += at + 1;
+        }
         let hunk_old: Vec<String> = hunk
             .lines
             .iter()
@@ -360,7 +387,10 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
             })
             .collect();
 
-        let pos = find_hunk_position(&lines, &hunk_old, search_at)
+        let expected = hunk
+            .old_start
+            .map(|start| start.saturating_add_signed(shift));
+        let pos = find_hunk_position(&lines, &hunk_old, search_from, expected)
             .ok_or_else(|| patch_failed("Hunk context did not match file content."))?;
 
         let mut idx = pos;
@@ -378,8 +408,18 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
                 }
             }
         }
-        offset += 0; // reserved for future fuzzy offset
-        let _ = offset;
+        search_from = idx;
+        let added = hunk
+            .lines
+            .iter()
+            .filter(|l| matches!(l, HunkLine::Add(_)))
+            .count();
+        let removed = hunk
+            .lines
+            .iter()
+            .filter(|l| matches!(l, HunkLine::Remove(_)))
+            .count();
+        shift += added as isize - removed as isize;
     }
     let mut output = lines.join(line_ending);
     if !output.is_empty() && (had_trailing_newline || original.is_empty()) {
@@ -388,23 +428,46 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
     Ok(output)
 }
 
-fn find_hunk_position(lines: &[String], pattern: &[String], start: usize) -> Option<usize> {
+/// Where the old lines of a hunk are, at or after `start`. With a line
+/// number from the header, the match nearest to it wins (the file may have
+/// drifted a little since the diff was made); without one, the first.
+fn find_hunk_position(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    expected: Option<usize>,
+) -> Option<usize> {
     if pattern.is_empty() {
-        return Some(start);
+        return Some(
+            expected
+                .unwrap_or(start)
+                .clamp(start, lines.len().max(start)),
+        );
     }
     if start > lines.len() || pattern.len() > lines.len().saturating_sub(start) {
         return None;
     }
-    for i in start..=lines.len().saturating_sub(pattern.len()) {
-        if lines[i..i + pattern.len()]
-            .iter()
-            .zip(pattern.iter())
-            .all(|(a, b)| a == b)
-        {
-            return Some(i);
-        }
+    let mut matches =
+        (start..=lines.len() - pattern.len()).filter(|&i| lines[i..i + pattern.len()] == *pattern);
+    match expected {
+        Some(expected) => matches.min_by_key(|&i| i.abs_diff(expected)),
+        None => matches.next(),
     }
-    None
+}
+
+/// The 0-based start of a unified hunk's old lines, from `@@ -a,b +c,d @@`.
+/// `None` for a bare `@@`, which some tools and models write.
+fn unified_old_start(header: &str) -> Option<usize> {
+    let old = header.strip_prefix("@@ -")?.split_whitespace().next()?;
+    let (start, count) = match old.split_once(',') {
+        Some((start, count)) => (start.parse::<usize>().ok()?, count.parse::<usize>().ok()?),
+        None => (old.parse::<usize>().ok()?, 1),
+    };
+    Some(if count == 0 {
+        start
+    } else {
+        start.saturating_sub(1)
+    })
 }
 
 fn commit_staged(
@@ -623,6 +686,7 @@ mod tests {
                 HunkLine::Add("insert-b".into()),
                 HunkLine::Context("two".into()),
             ],
+            ..Hunk::default()
         };
         assert_eq!(
             apply_hunks(input, &[hunk]).expect("patch"),
@@ -662,5 +726,68 @@ mod tests {
             std::fs::read_to_string(context.workspace.root().join("main.rs")).unwrap(),
             "old\n"
         );
+    }
+
+    fn apply_to(original: &str, patch: &str) -> String {
+        let files = parse_unified_diff(patch).expect("parse");
+        apply_hunks(original, &files[0].hunks).expect("apply")
+    }
+
+    /// The same line twice; the header says which one.
+    #[test]
+    fn unified_hunk_goes_where_its_line_numbers_say() {
+        let original = "fn a() {\n    x = 1;\n}\nfn b() {\n    x = 1;\n}\n";
+        let patch = "--- a/m.rs\n+++ b/m.rs\n@@ -5,1 +5,1 @@\n-    x = 1;\n+    x = 2;\n";
+        assert_eq!(
+            apply_to(original, patch),
+            "fn a() {\n    x = 1;\n}\nfn b() {\n    x = 2;\n}\n"
+        );
+    }
+
+    /// The second hunk's context also matches text before the first hunk.
+    #[test]
+    fn a_later_hunk_is_never_applied_before_an_earlier_one() {
+        let original = "a\nb\na\nb\n";
+        let patch = "*** Begin Patch\n*** Update File: m.txt\n@@\n a\n b\n+tail1\n@@\n a\n b\n+tail2\n*** End Patch\n";
+        assert_eq!(apply_to(original, patch), "a\nb\ntail1\na\nb\ntail2\n");
+    }
+
+    #[test]
+    fn codex_context_header_picks_the_block_after_it() {
+        let original = "fn a() {\n  x\n}\nfn b() {\n  x\n}\n";
+        let patch =
+            "*** Begin Patch\n*** Update File: m.rs\n@@ fn b() {\n-  x\n+  y\n*** End Patch\n";
+        assert_eq!(
+            apply_to(original, patch),
+            "fn a() {\n  x\n}\nfn b() {\n  y\n}\n"
+        );
+    }
+
+    /// `-2,0` means "after line 2"; without context there is nothing else
+    /// to go by.
+    #[test]
+    fn a_pure_insertion_lands_after_the_line_its_header_names() {
+        let patch = "--- a/m.txt\n+++ b/m.txt\n@@ -2,0 +3,1 @@\n+inserted\n";
+        assert_eq!(apply_to("l1\nl2\nl3\n", patch), "l1\nl2\ninserted\nl3\n");
+    }
+
+    /// Line numbers in later hunks refer to the original file; earlier
+    /// hunks that added lines shift where that is now.
+    #[test]
+    fn later_line_numbers_account_for_lines_added_above() {
+        let original = "x\nk\nx\nk\nx\n";
+        let patch =
+            "--- a/m.txt\n+++ b/m.txt\n@@ -1,1 +1,3 @@\n x\n+p\n+q\n@@ -5,1 +7,1 @@\n-x\n+z\n";
+        assert_eq!(apply_to(original, patch), "x\np\nq\nk\nx\nk\nz\n");
+    }
+
+    #[test]
+    fn a_context_header_that_is_not_in_the_file_fails() {
+        let files = parse_unified_diff(
+            "*** Begin Patch\n*** Update File: m.rs\n@@ fn missing() {\n-x\n+y\n*** End Patch\n",
+        )
+        .expect("parse");
+        let error = apply_hunks("x\n", &files[0].hunks).expect_err("no such block");
+        assert_eq!(error.to_error_value()["code"], "PATCH_FAILED");
     }
 }
