@@ -223,6 +223,9 @@ impl ExecSession {
     pub async fn kill_and_wait(&self) {
         let status = {
             let mut child = self.child.lock().await;
+            if let Some(pid) = child.id() {
+                signal_process_tree(pid, "KILL");
+            }
             let _ = child.start_kill();
             child.wait().await.ok()
         };
@@ -506,7 +509,7 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
                 child.id()
             };
             if let Some(pid) = pid {
-                send_session_signal(pid, signal);
+                signal_process_tree(pid, signal);
             } else {
                 let mut child = session.child.lock().await;
                 let _ = child.start_kill();
@@ -547,23 +550,51 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
     Ok(tool_ok(payload))
 }
 
+/// Signal the command and everything it started.
+///
+/// exec_command puts each command in its own process group whose id is the
+/// command's pid, so the group is signalled first. A process that was not
+/// started that way has no such group (the kernel does not hand out a pid
+/// while a group with that id exists), and gets the signal alone. A child
+/// that moved itself to another group or session on purpose is out of reach.
 #[cfg(unix)]
-fn send_session_signal(pid: u32, signal: &str) {
+fn signal_process_tree(pid: u32, signal: &str) {
     let sig = match signal {
         "KILL" => libc::SIGKILL,
         "INT" => libc::SIGINT,
         _ => libc::SIGTERM,
     };
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
     unsafe {
-        libc::kill(pid as i32, sig);
+        if libc::kill(-pid, sig) != 0 {
+            libc::kill(pid, sig);
+        }
     }
 }
 
+/// `taskkill /T` walks the child list; TerminateProcess alone would leave
+/// the grandchildren. The signal name has no Windows equivalent: it is
+/// always a forced stop. Not run on Windows in this change, only compiled
+/// by CI.
 #[cfg(windows)]
-fn send_session_signal(pid: u32, _signal: &str) {
+fn signal_process_tree(pid: u32, _signal: &str) {
+    use std::os::windows::process::CommandExt;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let tree = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    if tree.is_ok_and(|status| status.success()) {
+        return;
+    }
     unsafe {
         if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
             let _ = TerminateProcess(handle, 1);

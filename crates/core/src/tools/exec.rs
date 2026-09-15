@@ -263,6 +263,11 @@ async fn run_command(
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONLEGACYWINDOWSSTDIO", "0");
 
+    // Its own process group, so a timeout or kill_session reaches whatever
+    // the command started in the background too, not only the command.
+    #[cfg(unix)]
+    command.process_group(0);
+
     let child = command.spawn().map_err(|e| WorkspaceError::ToolDetails {
         code: "COMMAND_SPAWN_FAILED",
         message: format!("Failed to start command: {e}"),
@@ -715,6 +720,87 @@ mod tests {
         assert_eq!(result["command_ok"], false);
         assert_eq!(result["status"], "spawn_failed");
         assert_eq!(result["error"]["code"], expected_code);
+    }
+
+    /// A workspace script that starts `sleep` in the background and waits:
+    /// `sleep` is a grandchild of gld, not its child.
+    #[cfg(unix)]
+    fn tree_workspace() -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let script = workspace.path().join("spawn-tree");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 30 &\necho $! > grandchild.pid\nwait\n",
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("meta").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        (workspace, harness, ctx)
+    }
+
+    #[cfg(unix)]
+    fn grandchild_gone(workspace: &Path) -> Result<(), String> {
+        let pid_file = workspace.join("grandchild.pid");
+        let started = Instant::now();
+        while !pid_file.exists() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .map_err(|e| format!("script never wrote its pid: {e}"))?
+            .trim()
+            .parse()
+            .map_err(|e| format!("bad pid: {e}"))?;
+        // The killed sleep is an orphan until init reaps it.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            return Err(format!("grandchild {pid} outlived the command"));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_command_takes_its_background_children_with_it() {
+        let (workspace, _harness, ctx) = tree_workspace();
+        let output = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./spawn-tree", "timeout_ms": 500, "yield_time_ms": 10_000 }),
+        );
+        assert_eq!(output["termination_reason"], "timeout", "{output}");
+        grandchild_gone(workspace.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_session_takes_the_background_children_with_it() {
+        let (workspace, _harness, ctx) = tree_workspace();
+        let started = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./spawn-tree", "timeout_ms": 60_000, "yield_time_ms": 300 }),
+        );
+        let session_id = started["session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no session: {started}"))
+            .to_string();
+        let killed = call_tool(
+            &ctx,
+            "kill_session",
+            &json!({ "session_id": session_id, "wait_ms": 2000 }),
+        );
+        assert_eq!(killed["killed"], true, "{killed}");
+        grandchild_gone(workspace.path()).unwrap();
     }
 
     #[cfg(unix)]
