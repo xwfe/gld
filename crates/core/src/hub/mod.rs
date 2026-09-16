@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::agent_context::render_skill_catalog;
+use crate::auth::AuthContext;
 use crate::bridge::member::{CcnmMember, Mode};
 use crate::bridge::peer::PeerError;
 use crate::bridge::session::Connections;
@@ -241,7 +242,10 @@ impl Hub {
     }
 
     /// 处理一条 JSON-RPC 请求。会同步跑工具，必须在 `spawn_blocking` 里调。
-    pub fn handle_request(&self, body: &Value) -> (Value, Option<Routed>) {
+    ///
+    /// `auth` 是监听器验完鉴权之后的主体。远端成员的 bridge 按它分：同一个
+    /// 工作区、两个不同的主体，拿到的是两条连接（RFC-0002 5.3）。
+    pub fn handle_request(&self, auth: &AuthContext, body: &Value) -> (Value, Option<Routed>) {
         let method = body.get("method").and_then(Value::as_str).unwrap_or("");
         let id = body.get("id").cloned().unwrap_or(Value::Null);
         let params = body.get("params").cloned().unwrap_or(Value::Null);
@@ -255,7 +259,7 @@ impl Hub {
             "initialize" => Ok(self.initialize_result()),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": self.list_tools() })),
-            "tools/call" => self.call(&params, &mut routed),
+            "tools/call" => self.call(auth, &params, &mut routed),
             _ => Err(json!({
                 "code": -32601,
                 "message": format!("Method not found: {method}")
@@ -343,7 +347,12 @@ impl Hub {
                 && exposed_tool_names(&self.tool_profile).contains(&name))
     }
 
-    fn call(&self, params: &Value, routed: &mut Option<Routed>) -> Result<Value, Value> {
+    fn call(
+        &self,
+        auth: &AuthContext,
+        params: &Value,
+        routed: &mut Option<Routed>,
+    ) -> Result<Value, Value> {
         let name = params
             .get("name")
             .and_then(Value::as_str)
@@ -400,7 +409,7 @@ impl Hub {
                     workspace_id: remote.id.clone(),
                     context: None,
                 });
-                Ok(self.call_remote(tool, remote, &args))
+                Ok(self.call_remote(auth, tool, remote, &args))
             }
             (Some(_), Member::Local(local)) => Ok(plain_result(tool_err(
                 WorkspaceError::ToolDetails {
@@ -477,7 +486,13 @@ impl Hub {
     /// 远端的 `content` / `structuredContent` / `isError` 一个字都不改
     /// （验收项 H04）——那是 ccnm 的契约，改了模型看到的就不是远端说的话。
     /// 是哪个成员答的放在 `_meta` 里，不往 ccnm 的结构化结果里塞字段。
-    fn call_remote(&self, tool: &'static RemoteTool, member: &CcnmMember, args: &Value) -> Value {
+    fn call_remote(
+        &self,
+        auth: &AuthContext,
+        tool: &'static RemoteTool,
+        member: &CcnmMember,
+        args: &Value,
+    ) -> Value {
         let missing = tool.missing_required(args);
         if !missing.is_empty() {
             return plain_result(tool_err(WorkspaceError::ToolDetails {
@@ -490,10 +505,13 @@ impl Hub {
         }
         // 只读工具走 read，而且 bridge_argv 那边还会再跟成员上限取一次低。
         let mode = Mode::Read;
-        match self
-            .connections
-            .call(member, mode, tool.remote_name, tool.forward_arguments(args))
-        {
+        match self.connections.call(
+            &auth.tag(),
+            member,
+            mode,
+            tool.remote_name,
+            tool.forward_arguments(args),
+        ) {
             Ok(mut result) => {
                 if let Some(object) = result.as_object_mut() {
                     object.insert(
@@ -944,24 +962,35 @@ mod tests {
         }
     }
 
+    /// 测试里统一用这个主体；专门验"按主体分连接"的那条会换。
+    fn caller() -> AuthContext {
+        AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE)
+    }
+
     fn call(hub: &Hub, tool: &str, arguments: Value) -> Value {
-        let (response, _) = hub.handle_request(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": { "name": tool, "arguments": arguments }
-        }));
+        let (response, _) = hub.handle_request(
+            &caller(),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments }
+            }),
+        );
         response["result"]["structuredContent"].clone()
     }
 
     /// 整个 MCP result，不只是 structuredContent——远端调用要看 content/isError。
     fn raw_call(hub: &Hub, tool: &str, arguments: Value) -> Value {
-        let (response, _) = hub.handle_request(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": { "name": tool, "arguments": arguments }
-        }));
+        let (response, _) = hub.handle_request(
+            &caller(),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments }
+            }),
+        );
         response["result"].clone()
     }
 
@@ -1222,9 +1251,10 @@ mod tests {
         assert!(instructions.contains("rule-for-api"), "{api}");
         assert!(!api.to_string().contains("rule-for-web"), "{api}");
 
-        let (initialized, _) = fixture
-            .hub
-            .handle_request(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }));
+        let (initialized, _) = fixture.hub.handle_request(
+            &caller(),
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+        );
         let text = initialized["result"]["instructions"]
             .as_str()
             .expect("instructions");
@@ -1612,15 +1642,18 @@ mod tests {
     #[test]
     fn a_remote_member_leaves_no_local_workspace_state() {
         let fixture = remote_fixture(RemoteSpy::new());
-        let (response, routed) = fixture.hub.handle_request(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "remote_workspace_info",
-                "arguments": { "workspace": "prod" }
-            }
-        }));
+        let (response, routed) = fixture.hub.handle_request(
+            &caller(),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "remote_workspace_info",
+                    "arguments": { "workspace": "prod" }
+                }
+            }),
+        );
         assert_eq!(response["result"]["isError"], json!(false), "{response}");
         let routed = routed.expect("该记下落到了哪个成员");
         assert_eq!(routed.workspace_id, "remote-prod");
@@ -1690,6 +1723,41 @@ mod tests {
         );
         // 对面机器上的节点名和 workspace 名不外报，模型路由只需要 id。
         assert!(!listed.to_string().contains("server"), "{listed}");
+    }
+
+    /// 一条 bridge 属于某个主体，不属于某个工作区名字（RFC-0002 5.3）。
+    /// 换个 OAuth 客户端来调同一个远端成员，拿到的是另一条连接。
+    #[test]
+    fn two_principals_do_not_share_one_bridge() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let as_client = |client: &str| {
+            let auth = AuthContext::new(
+                crate::auth::Principal::OAuthClient {
+                    client_id: client.into(),
+                },
+                HUB_SCOPE,
+            );
+            let (response, _) = fixture.hub.handle_request(
+                &auth,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "remote_workspace_info",
+                        "arguments": { "workspace": "prod" }
+                    }
+                }),
+            );
+            assert_eq!(response["result"]["isError"], json!(false), "{response}");
+        };
+
+        as_client("chatgpt");
+        assert_eq!(fixture.spy.opens(), 1);
+        as_client("chatgpt");
+        assert_eq!(fixture.spy.opens(), 1, "同一个客户端该复用");
+        as_client("claude");
+        assert_eq!(fixture.spy.opens(), 2, "另一个客户端复用了别人的 bridge");
     }
 
     /// 成员被移出 hub：下一次请求就断掉它的 bridge，不等空闲到期。

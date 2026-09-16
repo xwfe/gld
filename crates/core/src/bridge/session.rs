@@ -145,16 +145,22 @@ impl Connections {
 
     /// 在这个成员的连接上调一个远端工具，没连就先连。
     ///
+    /// `principal` 是调用方的主体标识（`AuthContext::tag()`）。它进代次，
+    /// 所以**两个不同的主体拿到的是两条连接**，不是共用一条按成员 id 缓存的
+    /// ——RFC-0002 5.3「不能只按 workspace ID 缓存长期 bridge」。它是已经脱敏
+    /// 的短标识，不含任何凭据。
+    ///
     /// 返回的是远端 MCP result 原样，包括 `isError: true`——那是工具自己说
     /// 这次没成，不是连接出问题（验收项 H04）。
     pub fn call(
         &self,
+        principal: &str,
         member: &CcnmMember,
         mode: Mode,
         tool: &str,
         arguments: Value,
     ) -> Result<Value, PeerError> {
-        let slot = self.slot(&member.id, &generation_of(member, mode));
+        let slot = self.slot(&member.id, &generation_of(principal, member, mode));
         let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if guard.is_none() {
             *guard = Some(Live {
@@ -265,12 +271,15 @@ impl Default for Connections {
     }
 }
 
-/// 一条连接的「代次」：开它时的成员配置加上模式。
+/// 一条连接的「代次」：开它时的主体、成员配置和模式。
+///
+/// 三样里任何一样变了，旧连接就不能再用——它是按旧主体、旧配置、旧权限
+/// 开出来的。
 ///
 /// 把整个成员序列化进去而不是只取几个字段：以后给 `CcnmMember` 加字段时，
 /// 忘了同步这里的后果是操作员改了配置、hub 却还用着按旧配置开的连接。
-fn generation_of(member: &CcnmMember, mode: Mode) -> String {
-    serde_json::to_string(&(member, mode.as_str())).unwrap_or_default()
+fn generation_of(principal: &str, member: &CcnmMember, mode: Mode) -> String {
+    serde_json::to_string(&(principal, member, mode.as_str())).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -368,6 +377,9 @@ mod tests {
         }
     }
 
+    /// 测试里统一用这一个主体；只有专门验"按主体分连接"的那条会换。
+    const ANYONE: &str = "bearer:hub";
+
     fn member(id: &str) -> CcnmMember {
         CcnmMember {
             id: id.into(),
@@ -393,7 +405,7 @@ mod tests {
 
         for _ in 0..3 {
             let result = pool
-                .call(&member("m1"), Mode::Read, "read_file", json!({}))
+                .call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
                 .expect("调用");
             assert_eq!(result["content"][0]["text"], json!("read_file"));
         }
@@ -406,9 +418,9 @@ mod tests {
     fn each_member_gets_its_own_connection() {
         let recorder = Recording::new();
         let pool = connections(&recorder);
-        pool.call(&member("m1"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
             .expect("m1");
-        pool.call(&member("m2"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("m2"), Mode::Read, "read_file", json!({}))
             .expect("m2");
         assert_eq!(recorder.opens(), 2);
         assert_eq!(pool.open_count(), 2);
@@ -420,11 +432,11 @@ mod tests {
         let recorder = Recording::new();
         let pool = connections(&recorder);
         let mut m = member("m1");
-        pool.call(&m, Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &m, Mode::Read, "read_file", json!({}))
             .expect("先");
 
         m.workspace = "another-project".into();
-        pool.call(&m, Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &m, Mode::Read, "read_file", json!({}))
             .expect("后");
 
         assert_eq!(recorder.opens(), 2, "换了 workspace 却在复用旧连接");
@@ -434,6 +446,26 @@ mod tests {
         assert_eq!(argv[1].1[2], "another-project");
     }
 
+    /// 换一个主体也是新一代：一条 bridge 属于某个主体，不是属于某个成员 id
+    /// （RFC-0002 5.3「不能只按 workspace ID 缓存长期 bridge」）。
+    #[test]
+    fn another_principal_does_not_inherit_the_connection() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let m = member("m1");
+        pool.call("oauth:hub:chatgpt", &m, Mode::Read, "read_file", json!({}))
+            .expect("第一个主体");
+        pool.call("oauth:hub:claude", &m, Mode::Read, "read_file", json!({}))
+            .expect("另一个主体");
+        assert_eq!(recorder.opens(), 2, "两个主体共用了一条 bridge");
+        assert_eq!(recorder.closes(), 1, "旧主体那条没被关掉");
+
+        // 同一个主体再来还是复用，不是每次都重开。
+        pool.call("oauth:hub:claude", &m, Mode::Read, "read_file", json!({}))
+            .expect("同一个主体");
+        assert_eq!(recorder.opens(), 2);
+    }
+
     /// 模式变了也是新一代。read 的连接不能被拿去当 coding 用。
     #[test]
     fn changing_the_mode_opens_a_new_generation() {
@@ -441,9 +473,9 @@ mod tests {
         let pool = connections(&recorder);
         let mut m = member("m1");
         m.max_mode = Mode::Coding;
-        pool.call(&m, Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &m, Mode::Read, "read_file", json!({}))
             .expect("read");
-        pool.call(&m, Mode::Coding, "read_file", json!({}))
+        pool.call(ANYONE, &m, Mode::Coding, "read_file", json!({}))
             .expect("coding");
         assert_eq!(recorder.opens(), 2);
     }
@@ -454,12 +486,12 @@ mod tests {
         let recorder = Recording::new();
         let pool = Connections::with_opener(Box::new(recorder.clone()))
             .with_budgets(Duration::from_millis(30), Duration::from_millis(200));
-        pool.call(&member("idle"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("idle"), Mode::Read, "read_file", json!({}))
             .expect("idle 成员");
         assert_eq!(pool.open_count(), 1);
 
         std::thread::sleep(Duration::from_millis(60));
-        pool.call(&member("busy"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("busy"), Mode::Read, "read_file", json!({}))
             .expect("另一个成员");
 
         assert_eq!(
@@ -479,12 +511,12 @@ mod tests {
         let pool = connections(&recorder);
 
         let err = pool
-            .call(&member("m1"), Mode::Read, "read_file", json!({}))
+            .call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
             .expect_err("应该超时");
         assert!(matches!(err, PeerError::Timeout { .. }), "{err}");
         assert_eq!(recorder.closes(), 1, "坏掉的连接没被关");
 
-        let _ = pool.call(&member("m1"), Mode::Read, "read_file", json!({}));
+        let _ = pool.call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}));
         assert_eq!(recorder.opens(), 2, "没重连，还在用那条坏的");
     }
 
@@ -493,10 +525,16 @@ mod tests {
     fn a_member_that_left_the_hub_loses_its_connection() {
         let recorder = Recording::new();
         let pool = connections(&recorder);
-        pool.call(&member("stays"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("stays"), Mode::Read, "read_file", json!({}))
             .expect("stays");
-        pool.call(&member("leaves"), Mode::Read, "read_file", json!({}))
-            .expect("leaves");
+        pool.call(
+            ANYONE,
+            &member("leaves"),
+            Mode::Read,
+            "read_file",
+            json!({}),
+        )
+        .expect("leaves");
 
         pool.retain(&["stays".to_string()]);
 
@@ -512,7 +550,7 @@ mod tests {
     fn the_bridge_is_started_with_the_configured_argv_only() {
         let recorder = Recording::new();
         let pool = connections(&recorder);
-        pool.call(&member("m1"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
             .expect("调用");
         let argv = recorder.argv.lock().expect("argv");
         assert_eq!(argv[0].0, "ccnm");

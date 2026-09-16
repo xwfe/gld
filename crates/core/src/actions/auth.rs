@@ -96,7 +96,8 @@ pub async fn require_actions_auth(
             )
                 .into_response();
         };
-        if let Some(response) = verify_oauth_bearer_header(
+        // Actions 没有远端成员，用不上令牌里的 client_id：这里只关心放行还是拒。
+        if let Err(response) = verify_oauth_bearer_header(
             request.headers(),
             oauth,
             &external_base_url(
@@ -105,7 +106,7 @@ pub async fn require_actions_auth(
                 &auth.configured_public_url,
             ),
         ) {
-            return response;
+            return *response;
         }
         return next.run(request).await;
     }

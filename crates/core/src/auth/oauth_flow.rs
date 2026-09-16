@@ -138,8 +138,16 @@ impl OAuthRuntime {
     }
 
     pub fn verify_access_token(&self, token: &str, server_url: &str) -> bool {
+        self.identify_access_token(token, server_url).is_some()
+    }
+
+    /// 验一条访问令牌，并把里面已签名的 `client_id` 取出来。
+    ///
+    /// 只认 `token_use = access`：刷新令牌换不来访问权限。
+    pub fn identify_access_token(&self, token: &str, server_url: &str) -> Option<String> {
         self.decode_any(token, server_url)
-            .is_some_and(|claims| claims.token_use == "access")
+            .filter(|claims| claims.token_use == "access")
+            .map(|claims| claims.client_id)
     }
 
     /// 先按稳定受众验，再按"当前公网地址"验一次。
@@ -245,25 +253,37 @@ pub fn register_client(oauth: &OAuthRuntime, request: ClientRegistrationRequest)
     (StatusCode::CREATED, axum::Json(body)).into_response()
 }
 
+/// 验一条 OAuth 访问令牌，验过了返回令牌里那个已签名的 `client_id`。
+///
+/// 返回 client_id 是给远端成员用的：一条通往远端的 bridge 属于某个主体，
+/// 不是属于某个工作区名字（RFC-0002 5.3）。**它标识的是注册过的 MCP 客户端，
+/// 不是自然人**——gld 的 OAuth 验的是同一个操作员口令，令牌里没有 `sub`。
 pub fn verify_oauth_bearer_header(
     headers: &HeaderMap,
     oauth: &OAuthRuntime,
     server_url: &str,
-) -> Option<Response> {
+) -> Result<String, Box<Response>> {
+    // Err 那支装箱：axum 的 Response 有 128 字节，成功路径不该为它变胖。
+    let refused = || -> Box<Response> {
+        Box::new((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response())
+    };
     let Some(header_value) = headers.get(AUTHORIZATION) else {
-        return Some((StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response());
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response(),
+        ));
     };
     let Ok(header_str) = header_value.to_str() else {
-        return Some((StatusCode::UNAUTHORIZED, "Invalid Authorization header").into_response());
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "Invalid Authorization header").into_response(),
+        ));
     };
     // 和静态 bearer 走同一个解析：scheme 大小写不敏感，空 token 直接算无效。
     let Some(token) = super::bearer::bearer_token(header_str) else {
-        return Some((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response());
+        return Err(refused());
     };
-    if oauth.verify_access_token(token, server_url) {
-        None
-    } else {
-        Some((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response())
+    match oauth.identify_access_token(token, server_url) {
+        Some(client_id) => Ok(client_id),
+        None => Err(refused()),
     }
 }
 

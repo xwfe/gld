@@ -16,8 +16,9 @@ use tower_http::cors::CorsLayer;
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, external_base_url, hub_audience,
     protected_resource_metadata, protected_resource_metadata_url, register_client, token_exchange,
-    verify_bearer_header, verify_oauth_bearer_header, workspace_audience, AuthorizeForm,
-    AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, TokenForm,
+    verify_bearer_header, verify_oauth_bearer_header, workspace_audience, AuthContext,
+    AuthorizeForm, AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime,
+    Principal, TokenForm,
 };
 use crate::hub::{Hub, HubSecrets, HUB_SCOPE};
 use crate::local_network;
@@ -68,7 +69,10 @@ impl Endpoint {
     }
 
     /// 同步跑工具，必须在 `spawn_blocking` 里调。
-    fn handle(&self, body: &Value) -> Handled {
+    ///
+    /// 单工作区的那支不用 `auth`：它没有远端成员，也就没有"这条连接属于谁"
+    /// 这个问题。
+    fn handle(&self, auth: &AuthContext, body: &Value) -> Handled {
         match self {
             Self::Workspace(context) => Handled {
                 response: handle_request(context, body),
@@ -76,7 +80,7 @@ impl Endpoint {
                 member: None,
             },
             Self::Hub(hub) => {
-                let (response, routed) = hub.handle_request(body);
+                let (response, routed) = hub.handle_request(auth, body);
                 Handled {
                     response,
                     member: routed.as_ref().map(|routed| routed.workspace_id.clone()),
@@ -372,10 +376,13 @@ async fn mcp_post(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Some(response) = require_mcp_auth(&state, &headers) {
-        log_rejected(&state.scope, &headers, response.status());
-        return response;
-    }
+    let auth = match require_mcp_auth(&state, &headers) {
+        Ok(auth) => auth,
+        Err(response) => {
+            log_rejected(&state.scope, &headers, response.status());
+            return *response;
+        }
+    };
     let method = body
         .get("method")
         .and_then(Value::as_str)
@@ -394,14 +401,18 @@ async fn mcp_post(
     append_profile_log(
         &state.scope,
         "mcp-requests.log",
+        // 记的是"怎么过的鉴权"，不是令牌——auth.tag() 里没有凭据。
         &format!(
-            "[rpc] request id={} method={} tool={}",
-            request_id, method, tool_name
+            "[rpc] request id={} method={} tool={} auth={}",
+            request_id,
+            method,
+            tool_name,
+            auth.tag()
         ),
     );
 
     let endpoint = state.endpoint.clone();
-    let result = tokio::task::spawn_blocking(move || endpoint.handle(&body)).await;
+    let result = tokio::task::spawn_blocking(move || endpoint.handle(&auth, &body)).await;
     match result {
         Ok(handled) => {
             let response = handled.response;
@@ -566,28 +577,45 @@ fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn require_mcp_auth(state: &ListenerState, headers: &HeaderMap) -> Option<Response> {
+/// 验这条请求的鉴权，验过了带出**是怎么过的**。
+///
+/// 以前这里只回答放行还是 401。远端成员要知道是谁在调：一条通往远端的 bridge
+/// 属于某个主体，不属于某个工作区名字（RFC-0002 5.3）。原始令牌到此为止，
+/// 不进 [`AuthContext`]，也就进不了日志和错误消息。
+fn require_mcp_auth(
+    state: &ListenerState,
+    headers: &HeaderMap,
+) -> Result<AuthContext, Box<Response>> {
     if state.auth.bearer_enabled() {
         let expected = state.bearer_token.as_deref().unwrap_or("");
-        return verify_bearer_header(headers, expected);
+        return match verify_bearer_header(headers, expected) {
+            Some(refused) => Err(Box::new(refused)),
+            None => Ok(AuthContext::new(Principal::SharedSecret, &state.scope)),
+        };
     }
     if state.auth.oauth_enabled() {
         if let Some(oauth) = state.oauth.as_ref() {
             let server_url = resolve_oauth_base(state, headers);
-            if let Some(mut response) = verify_oauth_bearer_header(headers, oauth, &server_url) {
-                if response.status() == StatusCode::UNAUTHORIZED {
-                    let metadata_url = protected_resource_metadata_url(&server_url);
-                    if let Ok(value) =
-                        format!("Bearer resource_metadata=\"{metadata_url}\"").parse()
-                    {
-                        response.headers_mut().insert(WWW_AUTHENTICATE, value);
+            return match verify_oauth_bearer_header(headers, oauth, &server_url) {
+                Ok(client_id) => Ok(AuthContext::new(
+                    Principal::OAuthClient { client_id },
+                    &state.scope,
+                )),
+                Err(mut response) => {
+                    if response.status() == StatusCode::UNAUTHORIZED {
+                        let metadata_url = protected_resource_metadata_url(&server_url);
+                        if let Ok(value) =
+                            format!("Bearer resource_metadata=\"{metadata_url}\"").parse()
+                        {
+                            response.headers_mut().insert(WWW_AUTHENTICATE, value);
+                        }
                     }
+                    Err(response)
                 }
-                return Some(response);
-            }
+            };
         }
     }
-    None
+    Ok(AuthContext::anonymous(&state.scope))
 }
 
 async fn oauth_authorization_server_metadata(
