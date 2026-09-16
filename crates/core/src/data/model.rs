@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bridge::member::CcnmMember;
 use crate::settings::{FrpProfile, GlobalGatewayConfig, HubConfig, ProxyConfig};
 use crate::workspace::WorkspaceProfile;
 
@@ -46,6 +47,11 @@ pub struct AppData {
     pub app_secrets: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     pub profiles: Vec<WorkspaceProfile>,
+    /// 远端 ccnm workspace 成员。跟 `profiles` 是两份名单：本地成员有 root
+    /// 路径、隧道和 Planning，远端成员一样都没有（RFC-0002 5.1）。
+    /// 旧数据文件里没有这个键，`default` 让它读出来是空的。
+    #[serde(default)]
+    pub ccnm_members: Vec<CcnmMember>,
 }
 
 /// Legacy `{ "profiles": [...] }` file at the app root.

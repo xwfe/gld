@@ -4,4 +4,5 @@
 //! 和连接生命周期在后续切片里加，**不在这一层**——这一层不认识 workspace、
 //! 不读配置、不碰鉴权。
 
+pub mod member;
 pub mod peer;
