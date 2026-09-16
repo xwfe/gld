@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use regex::Regex;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
-use wk_text::{next_line, LineLimits};
+use toexec_text::{next_line, LineLimits};
 
 use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceError};
 
@@ -380,7 +380,7 @@ fn search_file_streaming(
     let mut recent: VecDeque<String> = VecDeque::with_capacity(context_lines.max(1));
     let mut pending: Vec<PendingMatch> = Vec::new();
     let mut line_no = 0usize;
-    // 共用 ccnm 的有界读行（wk-text）。`scan_limit` 是 None：这里跟以前一样
+    // 共用 ccnm 的有界读行（toexec-text）。`scan_limit` 是 None：这里跟以前一样
     // 要读完整个文件，行长才有上限。
     let limits = LineLimits {
         keep: SEARCH_LINE_KEEP,
@@ -989,7 +989,7 @@ mod tests {
         assert_eq!(selection.total_bytes, data.len() as u64);
     }
 
-    /// 搜索换了读行的实现（`BufRead::lines()` → 共用的 `wk_text::next_line`）。
+    /// 搜索换了读行的实现（`BufRead::lines()` → 共用的 `toexec_text::next_line`）。
     /// `lines()` 会把 `\r\n` 两个字节都去掉，新实现必须一样，否则 CRLF 文件里
     /// 每条 preview 末尾都会多一个 `\r`，行尾锚定的正则也会失配。
     #[test]

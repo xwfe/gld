@@ -52,6 +52,13 @@ ccnm 的官方 Agent 管理入口保持原样，但不接入本次 hub。将来�
 
 暂名 `workspace-kernel`，拟放在独立源码仓库；本轮未创建。两个项目通过固定 revision 的依赖消费，Cargo.lock 各自保留；本地 path 仅供开发，不提交依赖个人目录的路径配置。发布包或外部仓库创建按实际实施范围另行安排。
 
+> **2026-09-16 补记（RFC 正文保持原样，这里只记事实）**：仓库已创建，正式名是
+> **`toexec`**（`github.com/xwfe/toexec`，公开），不叫 workspace-kernel。第一个
+> crate 是 `toexec-text`（有界行读取），按 tag 消费而不是 revision——`{ git = ...,
+> tag = "toexec-text-v0.1.0" }`；一个 crate 管一件事，所以 crate 不跟仓库同名。
+> "本地 path 仅供开发、不提交"这一条按原样执行过一次教训：提交了 path 依赖，
+> 两边 CI 当场构建不了。
+
 ### K1：第一步只共享文本扫描原语
 
 从现有 gld 的固定块扫描实现提取、整理，不重新写一套完整 `read_file`：

@@ -575,13 +575,13 @@ dependencies = [
  "shlex 1.3.0",
  "tempfile",
  "thiserror",
+ "toexec-text",
  "tokio",
  "tower-http",
  "uuid",
  "walkdir",
  "which",
  "windows",
- "wk-text",
 ]
 
 [[package]]
@@ -1683,6 +1683,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
+name = "toexec-text"
+version = "0.1.0"
+source = "git+https://github.com/xwfe/toexec.git?tag=toexec-text-v0.1.0#25ef24a8b670c37dc05ce66d1a91caddfefb2657"
+
+[[package]]
 name = "tokio"
 version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2244,11 +2249,6 @@ name = "winsafe"
 version = "0.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
-
-[[package]]
-name = "wk-text"
-version = "0.1.0"
-source = "git+https://github.com/xwfe/toexec.git?tag=wk-text-v0.1.0#e0ffc54cb0dd77278edb1c837f6ee2928854fcc0"
 
 [[package]]
 name = "writeable"
