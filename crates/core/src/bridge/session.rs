@@ -631,7 +631,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::mpsc::{self, RecvTimeoutError};
 
     /// 合成通道：握手照答，`tools/call` 回一句话，记下自己被关过没有。
     struct Fake {
@@ -640,9 +640,27 @@ mod tests {
         closed: Arc<AtomicUsize>,
         /// 调用一律超时，用来验「传输层坏了就丢连接」。
         black_hole: bool,
-        call_delay: Duration,
+        hold: Option<Hold>,
         tool_calls: Arc<AtomicUsize>,
     }
+
+    /// 通道这头：第一次工具调用进门先报一声，然后停住，等测试放行才回。
+    struct Hold {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    /// 测试那头：`entered` 收到信号时，第一个调用正拿着会话锁停在远端；
+    /// 丢掉 `release` 就放它回来。
+    struct Held {
+        entered: mpsc::Receiver<()>,
+        release: mpsc::Sender<()>,
+    }
+
+    /// 停住的调用最多等这么久。只有测试本身出问题时才会等满：比如实现退化成
+    /// 排队，第二个调用会一直等锁，到点放行后它拿到锁、断言失败，而不是让整个
+    /// `cargo test` 挂住。
+    const HOLD_AT_MOST: Duration = Duration::from_secs(10);
 
     impl Transport for Fake {
         fn send_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -654,8 +672,9 @@ mod tests {
             let method = request["method"].as_str().unwrap_or("");
             if method == "tools/call" {
                 self.tool_calls.fetch_add(1, Ordering::SeqCst);
-                if !self.call_delay.is_zero() {
-                    std::thread::sleep(self.call_delay);
+                if let Some(hold) = self.hold.take() {
+                    let _ = hold.entered.send(());
+                    let _ = hold.release.recv_timeout(HOLD_AT_MOST);
                 }
                 if self.black_hole {
                     return Ok(());
@@ -696,8 +715,8 @@ mod tests {
         argv: Mutex<Vec<(String, Vec<String>)>>,
         closed: Arc<AtomicUsize>,
         black_hole: bool,
-        /// 每次工具调用先睡这么久，用来制造"上一个还在跑"。
-        call_delay: Duration,
+        /// 交给下一条开出来的连接，用来制造"上一个还在跑"。
+        hold: Mutex<Option<Hold>>,
         /// 真正到达远端的工具调用次数。
         tool_calls: Arc<AtomicUsize>,
     }
@@ -708,9 +727,22 @@ mod tests {
                 argv: Mutex::new(Vec::new()),
                 closed: Arc::new(AtomicUsize::new(0)),
                 black_hole: false,
-                call_delay: Duration::ZERO,
+                hold: Mutex::new(None),
                 tool_calls: Arc::new(AtomicUsize::new(0)),
             })
+        }
+        /// 让下一条连接上的第一次工具调用停在远端，直到测试放行。
+        fn hold_first_call(&self) -> Held {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            *self.hold.lock().expect("hold") = Some(Hold {
+                entered: entered_tx,
+                release: release_rx,
+            });
+            Held {
+                entered: entered_rx,
+                release: release_tx,
+            }
         }
         fn opens(&self) -> usize {
             self.argv.lock().expect("argv").len()
@@ -734,7 +766,7 @@ mod tests {
                 pending: None,
                 closed: self.closed.clone(),
                 black_hole: self.black_hole,
-                call_delay: self.call_delay,
+                hold: self.hold.lock().expect("hold").take(),
                 tool_calls: self.tool_calls.clone(),
             }))
         }
@@ -1110,10 +1142,16 @@ mod tests {
     /// 同一个会话上的两个调用**串行**：第二个等一小会儿之后明确回"忙"，
     /// 而且**根本没发到远端**（RFC-0002 5.4：不能在同一 writer 内并发
     /// patch 与 exec）。
+    ///
+    /// 先后顺序靠 `entered` 信号定，不能靠睡。这里原来是第一个调用在远端睡
+    /// 300 毫秒、测试睡 60 毫秒再发第二个，赌的是"60 毫秒后第一个已经拿着锁、
+    /// 而且还没放"。CI 的 macOS runner 核少、调度抖动大，线程晚两三百毫秒被
+    /// 调度就会错开：第一个起晚了，第二个先跑完；或者第二个起晚了，第一个已经
+    /// 放锁。两个调用都成功，挂在"后到的该被挡住"上。
     #[test]
     fn a_second_call_on_one_session_waits_briefly_then_says_busy() {
-        let mut recorder = Recording::new();
-        Arc::get_mut(&mut recorder).expect("独占").call_delay = Duration::from_millis(300);
+        let recorder = Recording::new();
+        let held = recorder.hold_first_call();
         let pool = Connections::with_opener(Box::new(recorder.clone()))
             .with_coding_busy_grace(Duration::from_millis(40));
         let m = coding_member("m1");
@@ -1122,9 +1160,12 @@ mod tests {
         let (first, second) = std::thread::scope(|scope| {
             let a =
                 scope.spawn(|| pool.call_coding(ANYONE, &m, &handle, "exec_command", json!({})));
-            std::thread::sleep(Duration::from_millis(60));
-            let b = scope.spawn(|| pool.call_coding(ANYONE, &m, &handle, "apply_patch", json!({})));
-            (a.join().expect("第一个"), b.join().expect("第二个"))
+            held.entered
+                .recv_timeout(HOLD_AT_MOST)
+                .expect("第一个调用没到远端");
+            let b = pool.call_coding(ANYONE, &m, &handle, "apply_patch", json!({}));
+            drop(held.release);
+            (a.join().expect("第一个"), b)
         });
 
         assert!(first.is_ok(), "先到的该正常跑完：{first:?}");
@@ -1140,12 +1181,22 @@ mod tests {
 
     /// 等的是**一小会儿**，不是无限排队。远端 exec 最长 10 分钟，挂在锁上
     /// 那么久，Web 那头的 HTTP 早断了。
+    ///
+    /// 顺序同样靠信号定，原因见上一条。两头都不用墙钟上限：
+    /// - 不排队：第一个调用停在远端，直到第二个返回才放行。第二个能回来"忙"，
+    ///   就说明它是自己放弃的；排队的话它得等放行、拿到锁、成功返回。
+    /// - 真等了一小会儿：至少等满配置的宽限，盖住"前一个刚好要结束"。
+    ///   `lock_within` 过了期限才放弃，这个下限多慢的机器上都成立。
+    ///
+    /// 原来断言"等了不到 400 毫秒"，想借时间证明没排在睡 600 毫秒的第一个调用
+    /// 后面；机器一卡，40 毫秒的轮询就能被拖过 400 毫秒，照样误报。
     #[test]
     fn the_busy_wait_is_bounded() {
-        let mut recorder = Recording::new();
-        Arc::get_mut(&mut recorder).expect("独占").call_delay = Duration::from_millis(600);
-        let pool = Connections::with_opener(Box::new(recorder.clone()))
-            .with_coding_busy_grace(Duration::from_millis(40));
+        let grace = Duration::from_millis(40);
+        let recorder = Recording::new();
+        let held = recorder.hold_first_call();
+        let pool =
+            Connections::with_opener(Box::new(recorder.clone())).with_coding_busy_grace(grace);
         let m = coding_member("m1");
         let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
 
@@ -1153,17 +1204,16 @@ mod tests {
             scope.spawn(|| {
                 let _ = pool.call_coding(ANYONE, &m, &handle, "exec_command", json!({}));
             });
-            std::thread::sleep(Duration::from_millis(60));
+            held.entered
+                .recv_timeout(HOLD_AT_MOST)
+                .expect("第一个调用没到远端");
             let started = Instant::now();
-            let err = pool
-                .call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
-                .expect_err("该报忙");
+            let second = pool.call_coding(ANYONE, &m, &handle, "apply_patch", json!({}));
             let waited = started.elapsed();
+            drop(held.release);
+            let err = second.expect_err("第一个还停在远端，第二个该自己放弃而不是排队");
             assert!(matches!(err, CodingError::Busy), "{err}");
-            assert!(
-                waited < Duration::from_millis(400),
-                "等了 {waited:?}，说明是在排队而不是有界等待"
-            );
+            assert!(waited >= grace, "只等了 {waited:?} 就报忙，没等满宽限");
         });
     }
 
