@@ -512,12 +512,18 @@ pub(crate) fn commit_staged_bytes(
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
             }
+            // 原文件的权限，好让打完补丁的脚本还是可执行的。文件不存在（新增）
+            // 时是 None，临时文件就用新建文件的默认权限。
+            let mode = fs::metadata(&path).ok().map(|meta| meta.permissions());
             let temp = path.with_file_name(format!(
                 ".{}.harness-stage-{}",
                 path.file_name().and_then(|v| v.to_str()).unwrap_or("file"),
                 Uuid::new_v4().simple()
             ));
-            if let Err(err) = fs::write(&temp, bytes) {
+            // 共用 ccnm 的落盘写（toexec-fs）：内容 fsync 之后才返回。少了这一步，
+            // 后面那次 rename 可能先持久化、内容还没有，断电后留下的是一个名字对、
+            // 长度错的文件——看起来是成功的。
+            if let Err(err) = toexec_fs::write_durable(&temp, bytes, mode.as_ref()) {
                 cleanup_temporary_files(temporary_files.values());
                 restore_backups(&backups);
                 return Err(patch_failed(format!("Failed to stage file: {err}")));
@@ -539,7 +545,7 @@ pub(crate) fn commit_staged_bytes(
                 .cloned()
                 .ok_or_else(|| patch_failed("Staged file is missing"));
             match temp {
-                Ok(temp) => replace_file(&temp, &path),
+                Ok(temp) => toexec_fs::replace(&temp, &path),
                 Err(error) => Err(std::io::Error::other(error.to_string())),
             }
         } else if path.exists() && path.is_file() {
@@ -571,16 +577,6 @@ fn restore_backups(backups: &HashMap<PathBuf, Option<Vec<u8>>>) {
             }
         }
     }
-}
-
-fn replace_file(temp: &PathBuf, path: &PathBuf) -> Result<(), std::io::Error> {
-    #[cfg(windows)]
-    {
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-    }
-    fs::rename(temp, path)
 }
 
 fn cleanup_temporary_files<'a>(paths: impl Iterator<Item = &'a PathBuf>) {
@@ -663,6 +659,62 @@ mod tests {
         json!({
             "patch": "--- a/main.rs\n+++ b/main.rs\n@@\n-old\n+new\n"
         })
+    }
+
+    /// 打补丁不该让一个脚本丢掉可执行位。
+    ///
+    /// 以前会丢：暂存写的是一个全新的临时文件，用默认权限，rename 过去之后
+    /// 原来的 0755 就没了，下一次 ./run.sh 直接 Permission denied。现在暂存
+    /// 时把原文件的权限带过去（共用的 toexec-fs 负责设）。
+    #[cfg(unix)]
+    #[test]
+    fn patching_a_script_keeps_it_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let script = workspace.path().join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\nold\n").expect("写脚本");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("设权限");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        apply_patch(
+            &context,
+            &json!({ "patch": "--- a/run.sh\n+++ b/run.sh\n@@\n-old\n+new\n" }),
+        )
+        .expect("apply");
+
+        assert_eq!(
+            std::fs::read_to_string(&script).expect("读"),
+            "#!/bin/sh\nnew\n"
+        );
+        let mode = std::fs::metadata(&script)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755, "权限成了 {:o}", mode & 0o777);
+    }
+
+    /// 新增的文件没有"原来的权限"可继承，用默认的就行——尤其不能莫名其妙
+    /// 带上可执行位。
+    #[cfg(unix)]
+    #[test]
+    fn a_newly_added_file_gets_the_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let (workspace, _harness, context) = context_with_file();
+        apply_patch(
+            &context,
+            &json!({ "patch": "--- /dev/null\n+++ b/added.txt\n@@\n+hello\n" }),
+        )
+        .expect("apply");
+
+        let added = workspace.path().join("added.txt");
+        let mode = std::fs::metadata(&added)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0, "新文件不该可执行，实际 {:o}", mode & 0o777);
     }
 
     #[test]
