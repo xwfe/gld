@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::SystemTime;
 
 use regex::Regex;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
+use wk_text::{next_line, LineLimits};
 
 use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceError};
 
@@ -20,6 +21,18 @@ const BINARY_PEEK_BYTES: usize = 8192;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 /// 开头这么多字节里出现 0 字节，就当二进制文件拒绝。
 const BINARY_SNIFF_BYTES: u64 = 4096;
+
+/// `search_text` 一行最多保留多少字节。
+///
+/// 以前用 `BufRead::lines()`，一行有多长就往内存里放多长。`max_file_bytes`
+/// 兜着（默认 2 MiB，最多 64 MiB），所以不至于把机器吃光，但一个 64 MiB 的
+/// 单行文件（压缩过的 JS、一行导出的 JSON）确实会整行进内存，`context_lines`
+/// 还会把它克隆好几十份。
+///
+/// 代价说清楚：**超过这个长度的行，只搜前 1 MiB**，后面匹配不到。正常源码
+/// 没有这么长的行；真有的话它也是一行压缩产物，`max_preview_bytes` 最多给
+/// 4096 字节的预览，搜到了也看不出什么。
+const SEARCH_LINE_KEEP: usize = 1024 * 1024;
 
 pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let path = args
@@ -363,14 +376,32 @@ fn search_file_streaming(
         Ok(f) => f,
         Err(_) => return false,
     };
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut recent: VecDeque<String> = VecDeque::with_capacity(context_lines.max(1));
     let mut pending: Vec<PendingMatch> = Vec::new();
     let mut line_no = 0usize;
+    // 共用 ccnm 的有界读行（wk-text）。`scan_limit` 是 None：这里跟以前一样
+    // 要读完整个文件，行长才有上限。
+    let limits = LineLimits {
+        keep: SEARCH_LINE_KEEP,
+        scan_limit: None,
+    };
+    let mut raw = Vec::new();
+    let mut scanned = 0u64;
 
-    for line_res in reader.lines() {
-        let line = match line_res {
-            Ok(l) => l,
+    loop {
+        raw.clear();
+        match next_line(&mut reader, &mut raw, limits, &mut scanned) {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                // 读不动了：跟以前一样丢掉没写完的 context，这个文件到此为止。
+                flush_pending(&mut pending, matches, max_results);
+                return matches.len() >= max_results;
+            }
+        }
+        let line = match std::str::from_utf8(&raw) {
+            Ok(text) => text.to_string(),
             Err(_) => {
                 // Invalid UTF-8 mid-file: drop unfinished context and stop this file.
                 flush_pending(&mut pending, matches, max_results);
@@ -946,5 +977,64 @@ mod tests {
         assert!(selection.truncated);
         assert_eq!(selection.total_lines, 1);
         assert_eq!(selection.total_bytes, data.len() as u64);
+    }
+
+    /// 搜索换了读行的实现（`BufRead::lines()` → 共用的 `wk_text::next_line`）。
+    /// `lines()` 会把 `\r\n` 两个字节都去掉，新实现必须一样，否则 CRLF 文件里
+    /// 每条 preview 末尾都会多一个 `\r`，行尾锚定的正则也会失配。
+    #[test]
+    fn a_crlf_file_is_searched_without_the_carriage_return() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("crlf.txt"), "alpha\r\nneedle\r\nomega\r\n").expect("write");
+        let ws = Workspace::new(dir.path().to_path_buf()).expect("workspace");
+
+        let result = search_text(&ws, &json!({ "query": "needle" })).expect("search");
+        let matches = result["matches"].as_array().expect("matches");
+        assert_eq!(matches.len(), 1, "{result}");
+        assert_eq!(matches[0]["preview"], "needle");
+        assert_eq!(matches[0]["line"], 2);
+
+        // 行尾锚定：`\r` 要是还留着，这条就搜不到。
+        let anchored = search_text(
+            &ws,
+            &json!({ "query": "needle$", "regex": true, "context_lines": 1 }),
+        )
+        .expect("search");
+        assert_eq!(anchored["matches"].as_array().expect("matches").len(), 1);
+        assert_eq!(anchored["matches"][0]["before"][0], "alpha");
+        assert_eq!(anchored["matches"][0]["after"][0], "omega");
+    }
+
+    /// 新语义，跟以前不一样：一行超过 `SEARCH_LINE_KEEP` 的部分不再参与匹配。
+    /// 换来的是一行占的内存有上限——以前有多长就吃多长，`context_lines` 还会
+    /// 把它克隆几十份。
+    #[test]
+    fn a_line_past_the_keep_limit_is_only_searched_up_to_it() {
+        let dir = tempfile::tempdir().expect("dir");
+        let padding = "x".repeat(SEARCH_LINE_KEEP);
+        std::fs::write(
+            dir.path().join("huge.txt"),
+            format!("needle-early{padding}needle-late\n"),
+        )
+        .expect("write");
+        let ws = Workspace::new(dir.path().to_path_buf()).expect("workspace");
+        let big = json!({ "max_file_bytes": 67_108_864u64 });
+
+        let early = search_text(
+            &ws,
+            &json!({ "query": "needle-early", "max_file_bytes": big["max_file_bytes"] }),
+        )
+        .expect("search");
+        assert_eq!(early["matches"].as_array().expect("matches").len(), 1);
+
+        let late = search_text(
+            &ws,
+            &json!({ "query": "needle-late", "max_file_bytes": big["max_file_bytes"] }),
+        )
+        .expect("search");
+        assert!(
+            late["matches"].as_array().expect("matches").is_empty(),
+            "保留上限之后的内容不该被搜到：{late}"
+        );
     }
 }
