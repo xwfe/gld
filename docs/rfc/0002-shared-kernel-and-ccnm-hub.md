@@ -276,13 +276,17 @@ S0 必须在实验前冻结每个平台/能力的适用矩阵、输出预算、d
 | 鉴权主体 | `crates/core/src/auth/context.rs` | 5.3 的连接按主体分；H02 的凭据不进日志 |
 | 操作员配置面 | `gld hub remote add/rm` | 远端成员从此可配，不只存在于测试里 |
 
-现场证据在 [`evidence/v2-h1-read-chain.md`](evidence/v2-h1-read-chain.md)。
+现场证据在 [`evidence/v2-h-read-chain.md`](evidence/v2-h-read-chain.md)。
 
-**H2 卡住的地方**：`ccnm mcp bridge` 要从 Host 机器 SSH 到 Runtime。开发这台机器
-在 ccnm 配置里本身就是 Runtime，唯一带 ssh 别名的节点是 Agent Node；自连需要往
-`~/.ssh/authorized_keys` 加公钥，并给对面 workspace 开 `external_mcp`。两件都是改
-用户的个人配置，未做。协议、路由、连接生命周期、错误分类都已用真 ccnm 二进制或
-合成 peer 验过，缺的只是最后那一跳网络。
+**H2 完成**：跨两台真实机器走通了。这台 Mac 当 MCP Host，fodelf 当 Runtime，
+四个只读工具（`workspace_info` / `read_file` / `list_files` / `search_text`）加分页
+和越界路径拒绝全部在真机上验过；ccnm 自报的 `[server pid …, call N]` 证明一条连接
+服务了全部调用（首次 465 ms，之后 34–60 ms）；`gld hub stop` 之后两台机器上的进程
+都归零，走的是 EOF 正常收尾而不是 kill。
+
+两台机器原有的 Agent/Runtime 角色一个字没改——fodelf 作为 Agent Node 把 workspace
+列表委托给了 Runtime，ccnm 正确地拒绝了「既委托又自带列表」，所以探针走另一份
+`CCNM_CONFIG` 配置文件。细节和清理清单见证据文档。
 
 **H3（远端 coding）没开始**。`AuthContext::is_authenticated()` 已经就位，
 RFC 5.3 的「noauth 不开放 remote coding」那道闸门在 H3 里接。`session.rs` 的
