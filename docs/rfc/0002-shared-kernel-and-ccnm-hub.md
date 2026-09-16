@@ -251,9 +251,42 @@ S0 必须在实验前冻结每个平台/能力的适用矩阵、输出预算、d
 
 ## 9. 当前完成与后续入口
 
-本轮完成：用户边界确认、WebCodex 浅克隆与只读组件核查、旧服务方案明确废止、新方案入库。共享库、remote hub 类型/工具/认证上下文和真实远端试点均未实施。
+本轮（09-15）完成：用户边界确认、WebCodex 浅克隆与只读组件核查、旧服务方案明确废止、新方案入库。共享库、remote hub 类型/工具/认证上下文和真实远端试点均未实施。
 
 下一实施入口是 S0/K1 与 H1 的小范围设计和测试，不再安排 WebCodex 服务 PoC。新库创建、两产品代码迁移按明确实施任务推进；真实系统账号、ACL、防火墙、已安装二进制替换、公网发布继续遵守既有授权要求。
+
+### 2026-09-16 补记：K1/K2 与 H1 已落地，H2 卡在一跳 SSH
+
+**共享内核**（K1、K2）：仓库 `xwfe/toexec`，两个 crate 各自发版，按 tag 引用。
+`toexec-text` 是有界行读取，`toexec-fs` 是原子落盘与替换。gld 和 ccnm 都真的在
+消费，各自保留原有的对外契约——尤其 `toexec-fs` 返回的是 `WriteError { step, source }`
+而不是一个合成的 `io::Error`，否则 ccnm 会把刷盘失败从 `internal` 静默变成
+`invalid_args`。盘点结论在 toexec 仓库的 `evidence/v2-k/duplication-audit.md`：
+两个产品真正重复的只有这些纯机制，read 契约和回滚编排是各自的外部契约，不共享。
+
+**H1 完成**，四块：
+
+| 块 | 源码 | 钉住的验收项 |
+| --- | --- | --- |
+| MCP stdio 客户端 | `crates/core/src/bridge/peer.rs` | H05 的超时、stderr 有界收集、握手版本错配 |
+| 远端成员模型 | `crates/core/src/bridge/member.rs` | 5.1 的 argv 只由配置决定、模式只降不升 |
+| 静态远端工具 | `crates/core/src/bridge/tools.rs` | H03 的工具名与参数名双白名单 |
+| 连接生命周期 | `crates/core/src/bridge/session.rs` | 5.4 的按需打开、串行、空闲回收；H05 的不在全局锁里等远端 I/O |
+| hub 分型与路由 | `crates/core/src/hub/mod.rs` | H01 本地路径不变、H04 结果原样透传 |
+| 鉴权主体 | `crates/core/src/auth/context.rs` | 5.3 的连接按主体分；H02 的凭据不进日志 |
+| 操作员配置面 | `gld hub remote add/rm` | 远端成员从此可配，不只存在于测试里 |
+
+现场证据在 [`evidence/v2-h1-read-chain.md`](evidence/v2-h1-read-chain.md)。
+
+**H2 卡住的地方**：`ccnm mcp bridge` 要从 Host 机器 SSH 到 Runtime。开发这台机器
+在 ccnm 配置里本身就是 Runtime，唯一带 ssh 别名的节点是 Agent Node；自连需要往
+`~/.ssh/authorized_keys` 加公钥，并给对面 workspace 开 `external_mcp`。两件都是改
+用户的个人配置，未做。协议、路由、连接生命周期、错误分类都已用真 ccnm 二进制或
+合成 peer 验过，缺的只是最后那一跳网络。
+
+**H3（远端 coding）没开始**。`AuthContext::is_authenticated()` 已经就位，
+RFC 5.3 的「noauth 不开放 remote coding」那道闸门在 H3 里接。`session.rs` 的
+四个预算是 read 模式的，coding 是写租约，规则按 5.4 另定，不要顺手复用。
 
 ### 本轮源码定位
 

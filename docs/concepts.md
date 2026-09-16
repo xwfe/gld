@@ -5,7 +5,7 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 
 各节都能单独看，按需跳：
 
-- [工作区](#工作区workspace) · [一个工作区能不能装多个项目](#一个工作区能不能装多个项目) · [聚合入口 hub](#聚合入口hub)
+- [工作区](#工作区workspace) · [一个工作区能不能装多个项目](#一个工作区能不能装多个项目) · [聚合入口 hub](#聚合入口hub)（含[别的机器上的成员](#成员还可以在别的机器上只读)）
 - [MCP 和 Actions 是两条线路](#mcp-和-actions-是两条线路) · [共享密钥池](#共享密钥池shared-secrets)
 - [拿公网地址的三种方式](#拿公网地址的三种方式) · [工具集 tool-profile](#工具集tool-profile)
 - [权限模式 permission-mode](#权限模式permission-mode) · [Planning 三种模式](#planning-三种模式)
@@ -120,6 +120,53 @@ gld hub show --reveal        # 客户端要填的地址和凭据
   hub 会提示 AI 第一次进一个工作区前先调它。
 
 名称重复时填名称会报 `WORKSPACE_AMBIGUOUS`，要求改填 id——不会挑一个猜。
+
+### 成员还可以在别的机器上（只读）
+
+如果项目在另一台机器上、并且那台机器用 [ccnm](https://github.com/xwfe/ccnm) 管着，
+可以把它也加进 hub：
+
+```bash
+gld hub remote add prod --node work --remote-workspace server
+```
+
+`--node` 和 `--remote-workspace` 填的都是 **ccnm 配置里的名字**，不是 host 也不是
+路径——在那台机器上跑 `ccnm workspace list` 能看到有哪些。（叫 `--remote-workspace`
+是因为 `-w/--workspace` 是全局参数，那个说的是"本机哪个工作区"，两回事。）
+
+前提：本机装了 `ccnm`，并且它能连到那台机器。gld 起的是公开命令
+`ccnm mcp bridge`，SSH 连接、凭据和对面的目录全由 ccnm 自己管，gld 不碰。
+
+**远端成员的工具是另一套，名字带 `remote_` 前缀**，目前是只读的四个：
+
+```text
+remote_workspace_info  workspace=prod                     对面项目的名字、git 状态、平台
+remote_read_file       workspace=prod  path=src/main.rs   读对面的文件
+remote_list_files      workspace=prod  path=src           列对面的目录
+remote_search_text     workspace=prod  query=TODO         在对面搜，只有命中结果过网络
+```
+
+为什么不直接复用本地那几个同名工具：因为**不是同一个契约**。gld 本机也有
+`search_text` 和 `list_files`，但两边的分页、参数和错误码都不一样。混用的话，
+AI 以为自己在读 A，实际读的是 B。所以用错了直接报错：
+
+```text
+read_file         workspace=prod  → TOOL_IS_LOCAL_ONLY（并告诉你该用哪个 remote_*）
+remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
+```
+
+两种情况都**不会退而求其次在另一边执行**。
+
+`list_workspaces` 里远端成员带 `kind: "remote"`，没有 `path`——那是对面机器上的
+目录，gld 不知道，编一个比不报更糟。`gld hub show` 里那一列显示的是
+`node:workspace`。
+
+删掉用 `gld hub remote rm prod`。和本地成员不同，本地的"移出 hub"只是不再暴露、
+工作区本身还在；远端成员除了这份配置没有别的东西，所以是真删。
+
+连接是**用到才建**：第一次调用才起 `ccnm mcp bridge`，之后复用，闲 5 分钟收掉，
+`gld hub stop` 时正常关闭（让对面读到 EOF 而不是直接杀，否则远端的写锁会留下
+标记要人工恢复）。
 
 ### 为什么不会串
 

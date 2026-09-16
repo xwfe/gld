@@ -59,6 +59,9 @@
 - [gld hub start](#gld-hub-start)
 - [gld hub stop](#gld-hub-stop)
 - [gld hub regenerate](#gld-hub-regenerate)
+- [gld hub remote](#gld-hub-remote)
+- [gld hub remote add](#gld-hub-remote-add)
+- [gld hub remote remove](#gld-hub-remote-remove)
 - [gld secret](#gld-secret)
 - [gld secret show](#gld-secret-show)
 - [gld secret set](#gld-secret-set)
@@ -1424,6 +1427,7 @@ Commands:
   start       启动（已在运行则按当前配置重启）；之后守护进程重启会自动恢复
   stop        停止；配置、成员和凭据都保留，守护进程重启后不再自动拉起
   regenerate  重新生成凭据并返回新值；hub 在跑会自动重启 [alias: regen]
+  remote      远端成员：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 只读访问
 
 Options:
   -w, --workspace <WS>
@@ -1620,6 +1624,110 @@ Options:
 
   -V, --version
           Print version
+```
+
+## gld hub remote
+
+```text
+远端成员：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 只读访问
+
+Usage: gld hub remote [OPTIONS] <COMMAND>
+
+Commands:
+  add     登记一个远端 workspace 并加进 hub（立即生效，不用重启）
+  remove  删掉一个远端成员（按名字、id 或 id 前缀） [alias: rm]
+
+Options:
+  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld hub remote add
+
+```text
+登记一个远端 workspace 并加进 hub（立即生效，不用重启）
+
+  gld hub remote add prod --node work --remote-workspace server
+
+两个值填的都是 **ccnm 配置里的名字**，不是 host 也不是路径。在那台机器上
+跑 ccnm workspace list 能看到有哪些。
+
+叫 --remote-workspace 是因为 --workspace / -w 已经被全局参数占了，
+那个说的是"本机哪个工作区"，两回事。
+
+Usage: gld hub remote add [OPTIONS] --node <NODE> --remote-workspace <WS> <NAME>
+
+Arguments:
+  <NAME>
+          给人看的名字，调用时 workspace 参数也能用它
+
+Options:
+      --node <NODE>
+          ccnm 配置里的 node 别名（一台机器的名字）
+
+  -w, --workspace <WS>
+          目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --remote-workspace <WS>
+          ccnm 配置里的 workspace 名
+
+      --ccnm <PATH>
+          本机 ccnm 可执行程序（默认用 PATH 里的 ccnm）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --mode <MODE>
+          访问上限：read（默认）| coding。coding 还没实现，现在填了也只能只读
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld hub remote remove
+
+```text
+删掉一个远端成员（按名字、id 或 id 前缀）
+
+Usage: gld hub remote remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -w, --workspace <WS>  目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
 ```
 
 ## gld secret

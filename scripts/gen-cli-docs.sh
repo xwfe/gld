@@ -29,6 +29,7 @@ COMMANDS=(
   "tunnel" "tunnel start" "tunnel stop" "tunnel restart" "tunnel test" "tunnel status" "tunnel snippet"
   "gateway" "gateway show" "gateway set" "gateway start" "gateway stop" "gateway health"
   "hub" "hub show" "hub add" "hub remove" "hub set" "hub start" "hub stop" "hub regenerate"
+  "hub remote" "hub remote add" "hub remote remove"
   "secret" "secret show" "secret set" "secret regenerate" "secret shared" "secret keys"
   "frp" "frp list" "frp add" "frp update" "frp remove"
   "settings" "settings show" "settings proxy" "settings runtime"
