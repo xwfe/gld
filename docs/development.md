@@ -7,7 +7,16 @@ cargo build                    # target/debug/gld
 cargo build --release          # target/release/gld，已开 LTO + strip
 ```
 
-Rust 1.85+。没有 Node、没有 Tauri 依赖。
+Rust 1.89+（根 `Cargo.toml` 的 `rust-version`，和 ccnm、toexec 保持一致）。没有 Node、没有 Tauri 依赖。
+
+平时用 stable 开发，CI 的 `MSRV 编译检查` 另用 1.89 在 Linux、macOS、Windows 上各编一遍。推之前想先验本机这个平台：
+
+```bash
+rustup toolchain install 1.89 --profile minimal
+cargo +1.89 check --workspace --all-targets --locked
+```
+
+报 `error[E0658]: use of unstable library feature ...` 看着像用了 nightly 特性，实际是那个 std API 在 1.89 之后才稳定，stable 上当然编得过，换个老 API 写。报 `rustc 1.89.0 is not supported by the following package` 是某个依赖要更高版本——**别只在 gld 里调高 `rust-version`**，gld、ccnm、toexec 三个仓库一起升，提交说明写明是哪个依赖要求的（toexec 的 `docs/plan/implementation-plan-v2.md` 第 11 节）。
 
 ## 测试
 

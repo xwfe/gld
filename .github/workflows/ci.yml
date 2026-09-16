@@ -65,3 +65,40 @@ jobs:
       # Windows 上守护进程走命名管道，与 Unix domain socket 是两套实现，
       # 至少要保证它能编过；运行时行为由使用者反馈补充。
       - run: cargo check --workspace --all-targets --locked
+
+  msrv:
+    name: MSRV 编译检查 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 三个平台都要：core/src/platform 下 linux、macos、windows 各一套实现，
+        # 只在自己的 OS 上编译；Windows 还多一个 windows crate，Unix 多一个
+        # libc。只查一个平台的话，另外两套用了新 API 也发现不了。
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # 警告归上面 stable 的 Clippy 和 Windows 编译检查管。这里只回答"声明的
+      # 版本编不编得过"，老编译器才有的警告（比如不认识后来新加的 lint 名）
+      # 不该拦住合并。
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      # 版本只写在 Cargo.toml 一处：三仓以后一起升 rust-version 时这里不用
+      # 跟着改，也就不会还在测旧版本。
+      - name: 读 Cargo.toml 里的 rust-version
+        id: msrv
+        shell: bash
+        run: |
+          v=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' Cargo.toml)
+          case "$v" in
+            ''|*[!0-9.]*)
+              echo "::error::根 Cargo.toml 要有且只有一行 rust-version = \"x.y\"，实际读到：$v"
+              exit 1 ;;
+          esac
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      # toexec 是 https 的 git 依赖，公开仓库，匿名就能拉。
+      - run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets --locked
