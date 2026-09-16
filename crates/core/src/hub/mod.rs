@@ -969,27 +969,46 @@ fn remote_failure(tool: &str, member: &CcnmMember, error: PeerError) -> Value {
 ///
 /// ccnm 的写锁有两种拿不到（协议第 7 节），**给调用方的指示完全相反**：
 ///
-/// - **busy**：别人正开着一个 coding 会话。等一会儿，或者改用只读。可重试。
+/// - **busy**：别人正开着一个会话。等一会儿，或者改用只读。可重试。
 /// - **unknown**：锁的状态说不清（锁文件坏了、上次的持有者被打断留下了
 ///   `held`）。协议原话是「人去看现场，不要重试到它"好了"」——因为"好了"
 ///   的另一种可能是两个 Agent 同时在改一棵树。**绝不标可重试。**
 ///
-/// 认的是 ccnm 自己那几句话里的关键词。认不出来就按「连接断了、可以重试」
-/// 走——那是原来的行为，宁可少标一个 unknown，也不把 busy 说成要人工介入。
-/// 但 unknown 的关键词必须优先匹配：把 unknown 说成可重试才是危险的那一边。
+/// **只看消息的第一行。**ccnm 的 fixture 自己写着「第一行之后是给人的排查
+/// 指引，措辞会变」：busy 那条后面跟着三行"去哪儿找持有者"，里面也带着
+/// `held`、`guard` 这些词。在整段 stderr 上做包含匹配，ccnm 哪天改一句指引，
+/// 一个 busy 就会被读成 unknown。
+///
+/// 认不出来按「连接断了、可以重试」走——那是原来的行为。但 unknown 的关键词
+/// 优先匹配：把 unknown 说成可重试才是危险的那一边。
 fn classify_startup_failure(stderr: &str) -> (&'static str, &'static str, bool) {
-    let text = stderr.to_ascii_lowercase();
-    if text.contains("state is unknown")
-        || text.contains("state is incomplete or unknown")
-        || text.contains("left held")
-        || text.contains("refusing to transfer write authority")
+    let line = guard_message_line(stderr);
+    if line.contains("state is unknown")
+        || line.contains("state is incomplete or unknown")
+        || line.contains("left held")
+        || line.contains("refusing to transfer write authority")
     {
         return ("REMOTE_WRITE_LOCK_UNKNOWN", "runtime", false);
     }
-    if text.contains("write guard is busy") || text.contains("still owns this working tree") {
+    if line.contains("write guard is busy") {
         return ("REMOTE_WRITE_LOCK_BUSY", "runtime", true);
     }
     ("REMOTE_BRIDGE_CLOSED", "runtime", true)
+}
+
+/// ccnm 启动失败的 stderr 里，真正表示"哪一种失败"的那一行。
+///
+/// 形状是固定的（协议 11.2）：第一行是 `CCNM_E_*:` 这个名字，第二行是消息，
+/// 再往后是给人看的排查步骤。所以取的是**跳过错误码名之后的第一行非空内容**。
+fn guard_message_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // `CCNM_E_POLICY:` 这类名字本身不带信息量，跳过去看下一行。
+        .find(|line| !(line.starts_with("CCNM_E_") && line.ends_with(':')))
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 /// coding 会话调用失败。
@@ -1000,6 +1019,15 @@ fn coding_failure(tool: &str, member: &CcnmMember, error: CodingError) -> Value 
             message: format!("{tool} on {}: {error}", member.name),
             category: "validation",
             retryable: false,
+            details: json!({ "workspace": remote_ref(member) }),
+        }),
+        // 同一个会话上还有调用在跑。这个可以重试——等前一个完事就行，
+        // 跟"远端做没做不知道"完全是两回事。
+        CodingError::Busy => tool_err(WorkspaceError::ToolDetails {
+            code: "REMOTE_CODING_BUSY",
+            message: format!("{tool} on {}: {error}", member.name),
+            category: "runtime",
+            retryable: true,
             details: json!({ "workspace": remote_ref(member) }),
         }),
         CodingError::SessionEnded => tool_err(WorkspaceError::ToolDetails {
@@ -1559,6 +1587,7 @@ mod tests {
         /// 每次 `tools/call` 收到的 params，用来验参数白名单真的生效了。
         calls: Arc<Mutex<Vec<Value>>>,
         opens: Arc<Mutex<usize>>,
+        coding_opens: Arc<Mutex<usize>>,
         closes: Arc<Mutex<usize>>,
         /// 让远端工具自己说「这次没成」，验 `isError` 不被外层吞掉。
         tool_fails: bool,
@@ -1566,6 +1595,11 @@ mod tests {
         cannot_start: bool,
         /// 工具调用一律不回，验"断在半路"。
         black_hole: bool,
+        /// 最多允许开几条 coding 连接，之后一律报远端写锁被占着。
+        /// `usize::MAX` = 不限制。
+        coding_opens_allowed: usize,
+        /// 每次工具调用先睡这么久，用来制造"上一个还在跑"。
+        call_delay_ms: u64,
     }
 
     impl RemoteSpy {
@@ -1573,10 +1607,13 @@ mod tests {
             RemoteSpy {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 opens: Arc::new(Mutex::new(0)),
+                coding_opens: Arc::new(Mutex::new(0)),
                 closes: Arc::new(Mutex::new(0)),
                 tool_fails: false,
                 cannot_start: false,
                 black_hole: false,
+                coding_opens_allowed: usize::MAX,
+                call_delay_ms: 0,
             }
         }
         fn calls(&self) -> Vec<Value> {
@@ -1587,6 +1624,29 @@ mod tests {
         }
         fn closes(&self) -> usize {
             *self.closes.lock().expect("closes")
+        }
+    }
+
+    /// 冒充一条起不来的 bridge：进程退了，stderr 上留下 ccnm 的诊断。
+    ///
+    /// 这正是真 ccnm 抢不到写锁时的样子——失败发生在 MCP 握手之前，所以它
+    /// 是启动失败，不是工具结果（协议第 7 节）。
+    struct RefusedTransport {
+        stderr: &'static str,
+    }
+
+    impl crate::bridge::peer::Transport for RefusedTransport {
+        fn send_line(&mut self, _line: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn recv_line(
+            &mut self,
+            _timeout: std::time::Duration,
+        ) -> Result<Option<String>, std::sync::mpsc::RecvTimeoutError> {
+            Ok(None) // 管道关了
+        }
+        fn stderr_tail(&self) -> String {
+            self.stderr.to_string()
         }
     }
 
@@ -1615,6 +1675,11 @@ mod tests {
                         .lock()
                         .expect("calls")
                         .push(request["params"].clone());
+                    if self.spy.call_delay_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            self.spy.call_delay_ms,
+                        ));
+                    }
                     if self.spy.black_hole {
                         return Ok(()); // 什么都不回，让调用方超时
                     }
@@ -1669,6 +1734,16 @@ mod tests {
                         "no such file or directory",
                     ),
                 });
+            }
+            if _mode == Mode::Coding {
+                let mut opened = self.coding_opens.lock().expect("coding opens");
+                if *opened >= self.coding_opens_allowed {
+                    // 写锁被别人占着：进程起得来，但握手之前就退了。
+                    return Ok(Box::new(RefusedTransport {
+                        stderr: FIXTURE_GUARD_BUSY,
+                    }));
+                }
+                *opened += 1;
             }
             *self.opens.lock().expect("opens") += 1;
             Ok(Box::new(SpyTransport {
@@ -2246,20 +2321,41 @@ mod tests {
         );
     }
 
+    // ---- 写入互斥（验收项 H06）----
+
+    /// ccnm 冻结协议的 `docs/protocol/fixtures-mcp/start-refused-busy.json`，
+    /// 2026-09-16 逐字抄来。工作树被另一个会话占着时，bridge 在 MCP 握手之前
+    /// 就退出，这段是它 stderr 上留下的全部内容。
+    ///
+    /// **后面那几行是给人的排查指引**，fixture 的 `$note` 写明措辞会变。
+    /// 抄全了才测得出「只看消息第一行」这件事。
+    const FIXTURE_GUARD_BUSY: &str = "CCNM_E_POLICY:\n\
+         workspace write guard is busy; another session still owns this working tree\n\
+         who holds it, on the Runtime Node: the `held <session> <workspace>` file in\n\
+         ${XDG_STATE_HOME:-~/.local/state}/ccnm/write-guards/\n\
+         `ccnm status` alone does not prove nobody is using it: a --print run holds\n\
+         this guard and never appears there";
+
+    /// 同上，`start-refused-guard-unknown.json`。
+    const FIXTURE_GUARD_UNKNOWN: &str =
+        "CCNM_E_POLICY:\nworkspace write guard state is unknown; refusing to transfer write authority";
+
+    /// ccnm `write_guard.rs` 里第三种：上一个持有者被打断，留下了 `held` 标记。
+    /// 它那句话的措辞被 ccnm 自己的 p12 dogfood 测试锁住，恢复步骤是追加在后面的。
+    const FIXTURE_GUARD_LEFT_HELD: &str = "CCNM_E_POLICY:\n\
+         workspace write guard was left held by an interrupted process; old children may still exist, so authority is not transferred automatically\n\
+         recover on the Runtime Node, in this order:\n\
+         1. prove the old ones are gone: `ccnm status <workspace>` AND a process list\n\
+         never clear it just because time passed";
+
     /// 远端写锁被别人占着 vs 状态说不清，是两个错，给的指示相反。
     #[test]
     fn a_busy_lock_and_an_unknown_lock_are_not_the_same_error() {
-        let busy = classify_startup_failure(
-            "CCNM_E_POLICY:\nworkspace write guard is busy; another session still owns this working tree",
-        );
+        let busy = classify_startup_failure(FIXTURE_GUARD_BUSY);
         assert_eq!(busy.0, "REMOTE_WRITE_LOCK_BUSY");
         assert!(busy.2, "别人占着，等一会儿可以再试");
 
-        for text in [
-            "CCNM_E_POLICY:\nworkspace write guard state is unknown; refusing to transfer write authority",
-            "CCNM_E_POLICY:\nworkspace write guard was left held by an interrupted process",
-            "CCNM_E_POLICY:\nworkspace write guard state is incomplete or unknown",
-        ] {
+        for text in [FIXTURE_GUARD_UNKNOWN, FIXTURE_GUARD_LEFT_HELD] {
             let unknown = classify_startup_failure(text);
             assert_eq!(unknown.0, "REMOTE_WRITE_LOCK_UNKNOWN", "{text}");
             assert!(
@@ -2273,6 +2369,162 @@ mod tests {
             classify_startup_failure("connection reset by peer").0,
             "REMOTE_BRIDGE_CLOSED"
         );
+    }
+
+    /// **只看消息的第一行**，不在整段 stderr 上做包含匹配。
+    ///
+    /// busy 那条的排查指引里带着 `held <session>`、`this guard` 这些词。
+    /// 在整段上匹配的话，ccnm 哪天把指引改成带 "state is unknown" 的一句，
+    /// 一个本来可以重试的 busy 就会被读成"要人工介入"。
+    #[test]
+    fn only_the_first_message_line_decides_which_failure_it_is() {
+        assert!(
+            FIXTURE_GUARD_BUSY.contains("held <session>"),
+            "fixture 抄得不全，这条测试就没意义了"
+        );
+        assert_eq!(
+            classify_startup_failure(FIXTURE_GUARD_BUSY).0,
+            "REMOTE_WRITE_LOCK_BUSY"
+        );
+
+        // 指引里出现 unknown 的字样也不该改变判断。
+        let noisy =
+            format!("{FIXTURE_GUARD_BUSY}\nif the guard state is unknown, see docs/operations.md");
+        assert_eq!(
+            classify_startup_failure(&noisy).0,
+            "REMOTE_WRITE_LOCK_BUSY",
+            "被排查指引带偏了"
+        );
+    }
+
+    /// 两个会话争同一把远端写锁：第二个拿到的是 busy，**不会**降级成只读，
+    /// 也不会静默重试到它"好了"。
+    #[test]
+    fn a_second_session_competing_for_the_same_writer_is_refused() {
+        let mut spy = RemoteSpy::new();
+        spy.coding_opens_allowed = 1; // 第一条 coding 连接成功，之后都报 busy
+        let fixture = coding_fixture(spy);
+
+        let first = call(
+            &fixture.hub,
+            "remote_coding_begin",
+            json!({ "workspace": "prod" }),
+        );
+        assert_eq!(first["ok"], true, "{first}");
+
+        // 换一个主体来开：它拿的是另一条连接，于是撞上远端那把锁。
+        let other = AuthContext::new(
+            crate::auth::Principal::OAuthClient {
+                client_id: "another-client".into(),
+            },
+            HUB_SCOPE,
+        );
+        let (response, _) = fixture.hub.handle_request(
+            &other,
+            &json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                     "params": { "name": "remote_coding_begin",
+                                 "arguments": { "workspace": "prod" } } }),
+        );
+        let refused = response["result"]["structuredContent"].clone();
+        assert_eq!(
+            refused["error"]["code"], "REMOTE_WRITE_LOCK_BUSY",
+            "{refused}"
+        );
+        assert_eq!(refused["error"]["retryable"], json!(true), "{refused}");
+
+        // gld 不替远端认定占锁的是谁：ccnm 的 guard 是 Managed session 和
+        // 外部 coding 共用的（协议 4.4），说成"另一个远端会话"是在瞎猜。
+        let text = refused.to_string();
+        assert!(
+            !text.contains("another remote") && !text.contains("another managed"),
+            "不该替远端认定占锁的是哪一种会话：{text}"
+        );
+        assert!(
+            text.contains("still owns this working tree"),
+            "远端原话该带出来：{text}"
+        );
+    }
+
+    /// 写锁被占着的时候，**只读照常**——ccnm 的 read 模式不碰这把锁（协议 4.4）。
+    #[test]
+    fn a_busy_writer_does_not_block_reading() {
+        let mut spy = RemoteSpy::new();
+        spy.coding_opens_allowed = 0; // coding 一律 busy
+        let fixture = coding_fixture(spy);
+
+        let refused = call(
+            &fixture.hub,
+            "remote_coding_begin",
+            json!({ "workspace": "prod" }),
+        );
+        assert_eq!(
+            refused["error"]["code"], "REMOTE_WRITE_LOCK_BUSY",
+            "{refused}"
+        );
+
+        let read = raw_call(
+            &fixture.hub,
+            "remote_read_file",
+            json!({ "workspace": "prod", "path": "src/main.rs" }),
+        );
+        assert_eq!(read["isError"], json!(false), "只读不该被写锁挡住：{read}");
+    }
+
+    /// 同一个会话上的两个调用串行，第二个拿到的是"忙"。
+    ///
+    /// **并发本身在 session 层测**（那儿能把等待宽限调短，不用真等两秒）：
+    /// `bridge::session::a_second_call_on_one_session_waits_briefly_then_says_busy`。
+    /// 这里只钉住它到了 hub 这一层长什么样——尤其是**可重试**：等前一个完事
+    /// 就行，跟"远端做没做不知道"是两回事，后者绝不能标可重试。
+    #[test]
+    fn a_busy_session_is_retryable_unlike_an_unknown_outcome() {
+        let member = CcnmMember {
+            id: "m1".into(),
+            name: "prod".into(),
+            ccnm_bin: "ccnm".into(),
+            node: "work".into(),
+            workspace: "server".into(),
+            max_mode: Mode::Coding,
+        };
+        let busy = coding_failure("remote_apply_patch", &member, CodingError::Busy);
+        assert_eq!(busy["error"]["code"], "REMOTE_CODING_BUSY");
+        assert_eq!(busy["error"]["retryable"], json!(true), "{busy}");
+        assert!(
+            busy["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("one call at a time"),
+            "{busy}"
+        );
+
+        // 对照：断在半路的那个绝不可重试。
+        let unknown = coding_failure(
+            "remote_apply_patch",
+            &member,
+            CodingError::Peer(PeerError::Closed {
+                method: "tools/call".into(),
+                stderr: String::new(),
+            }),
+        );
+        assert_eq!(unknown["error"]["code"], "REMOTE_OUTCOME_UNKNOWN");
+        assert_eq!(unknown["error"]["retryable"], json!(false), "{unknown}");
+    }
+
+    /// 前一个跑完之后，同一个句柄接着能用——"忙"是暂时的，不是会话作废了。
+    #[test]
+    fn the_session_still_works_after_the_busy_call_finishes() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let handle = begin(&fixture);
+
+        for path in ["a.txt", "b.txt"] {
+            let out = raw_call(
+                &fixture.hub,
+                "remote_apply_patch",
+                json!({ "workspace": "prod", "coding_handle": handle,
+                        "files": [{ "op": "add", "path": path, "content": "1" }] }),
+            );
+            assert_eq!(out["isError"], json!(false), "串行跑完照样能用：{out}");
+        }
     }
 
     #[test]

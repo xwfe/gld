@@ -65,6 +65,15 @@ pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// [`Slot::is_idle`] 一律判为"不闲"。
 pub const CODING_IDLE_AFTER: Duration = Duration::from_secs(2 * 60);
 
+/// 同一个 coding 会话上已经有调用在跑时，第二个调用等多久才报"忙"。
+///
+/// 会话内的调用必须串行（RFC-0002 5.4：不能在同一 writer 内并发 patch 与
+/// exec），但**串行不等于无限排队**。远端的 `exec_command` 最长能跑 10 分钟，
+/// 让第二个请求在锁上干等 10 分钟，Web 那头的 HTTP 早就断了——RFC 5.2 专门
+/// 警告过这件事。等一小会儿盖住"前一个刚好要结束"，之后明确回一句"还在跑"，
+/// 比挂着强。
+const CODING_BUSY_GRACE: Duration = Duration::from_secs(2);
+
 /// 握手时报给远端的客户端名，会进 ccnm 那边的日志。
 const CLIENT_NAME: &str = "gld-hub";
 
@@ -149,6 +158,7 @@ pub struct Connections {
     opener: Box<dyn Open>,
     idle_after: Duration,
     coding_idle_after: Duration,
+    coding_busy_grace: Duration,
     handshake_timeout: Duration,
     call_timeout: Duration,
     live: Mutex<HashMap<Key, Slot>>,
@@ -179,6 +189,8 @@ pub enum CodingError {
     /// 句柄本来是对的，但它那条连接已经没了（空闲回收、断线、成员被摘掉）。
     /// 没有 resume：要接着写就重新 begin，旧的 `output_ref` 全部作废。
     SessionEnded,
+    /// 这个会话上还有一个调用没跑完。会话内串行，不并发。
+    Busy,
     Peer(PeerError),
 }
 
@@ -193,6 +205,10 @@ impl std::fmt::Display for CodingError {
                 f,
                 "that coding session has ended, so its output_ref values are gone too; \
                  call remote_coding_begin for a new one"
+            ),
+            CodingError::Busy => write!(
+                f,
+                "another call is still running on this coding session; remote sessions run one call at a time, so wait for it to finish"
             ),
             CodingError::Peer(error) => write!(f, "{error}"),
         }
@@ -212,6 +228,7 @@ impl Connections {
             opener,
             idle_after: IDLE_AFTER,
             coding_idle_after: CODING_IDLE_AFTER,
+            coding_busy_grace: CODING_BUSY_GRACE,
             handshake_timeout: HANDSHAKE_TIMEOUT,
             call_timeout: CALL_TIMEOUT,
             live: Mutex::new(HashMap::new()),
@@ -225,6 +242,13 @@ impl Connections {
         self.coding_idle_after = idle_after;
         self.handshake_timeout = call_timeout;
         self.call_timeout = call_timeout;
+        self
+    }
+
+    /// 会话内第二个调用等多久才报"忙"。默认 [`CODING_BUSY_GRACE`]；
+    /// 测试把它调到几十毫秒，免得为了验这条真的等两秒。
+    pub fn with_coding_busy_grace(mut self, grace: Duration) -> Self {
+        self.coding_busy_grace = grace;
         self
     }
 
@@ -266,7 +290,19 @@ impl Connections {
             &(member.id.clone(), mode),
             &generation_of(principal, member, mode),
         );
-        let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.run_locked(guard, member, mode, tool, arguments)
+    }
+
+    /// 已经拿到槽位锁之后的那一半。
+    fn run_locked(
+        &self,
+        mut guard: std::sync::MutexGuard<'_, Option<Live>>,
+        member: &CcnmMember,
+        mode: Mode,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<(Value, bool), PeerError> {
         if guard.is_none() {
             *guard = Some(Live {
                 peer: self.handshake(member, mode)?,
@@ -355,7 +391,13 @@ impl Connections {
     ) -> Result<Value, CodingError> {
         let generation = generation_of(principal, member, Mode::Coding);
         self.check_lease(principal, member, handle, &generation)?;
-        match self.run(principal, member, Mode::Coding, tool, arguments) {
+        let slot = self.slot(&(member.id.clone(), Mode::Coding), &generation);
+        // 会话内串行：拿不到锁说明上一个调用还在跑。等一小会儿，之后明确
+        // 回"忙"，不无限排队——见 [`CODING_BUSY_GRACE`]。
+        let Some(guard) = lock_within(&slot, self.coding_busy_grace) else {
+            return Err(CodingError::Busy);
+        };
+        match self.run_locked(guard, member, Mode::Coding, tool, arguments) {
             Ok((value, _)) => Ok(value),
             Err(error) => {
                 // 传输层断了：这个会话没了，不能让句柄继续看着有效。
@@ -548,6 +590,31 @@ impl Default for Connections {
     }
 }
 
+/// 在 `grace` 之内拿到锁，拿不到就返回 `None`。
+///
+/// `std::sync::Mutex` 没有带超时的 lock，所以是轮询。间隔 20 毫秒：一次远端
+/// 调用最快也要几十毫秒，比这更密只是白转 CPU。
+fn lock_within(
+    slot: &Arc<Mutex<Option<Live>>>,
+    grace: Duration,
+) -> Option<std::sync::MutexGuard<'_, Option<Live>>> {
+    let deadline = Instant::now() + grace;
+    loop {
+        match slot.try_lock() {
+            Ok(guard) => return Some(guard),
+            // 上一个持有者 panic 了。锁里的东西可能是半截状态，但这里唯一
+            // 的"半截"是那条连接，而它坏了会在下一次调用时被丢掉。
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
 /// 一条连接的「代次」：开它时的主体、成员配置和模式。
 ///
 /// 三样里任何一样变了，旧连接就不能再用——它是按旧主体、旧配置、旧权限
@@ -573,6 +640,8 @@ mod tests {
         closed: Arc<AtomicUsize>,
         /// 调用一律超时，用来验「传输层坏了就丢连接」。
         black_hole: bool,
+        call_delay: Duration,
+        tool_calls: Arc<AtomicUsize>,
     }
 
     impl Transport for Fake {
@@ -583,8 +652,14 @@ mod tests {
                 return Ok(()); // 通知，没有回复
             };
             let method = request["method"].as_str().unwrap_or("");
-            if self.black_hole && method == "tools/call" {
-                return Ok(());
+            if method == "tools/call" {
+                self.tool_calls.fetch_add(1, Ordering::SeqCst);
+                if !self.call_delay.is_zero() {
+                    std::thread::sleep(self.call_delay);
+                }
+                if self.black_hole {
+                    return Ok(());
+                }
             }
             let result = match method {
                 "initialize" => json!({
@@ -621,6 +696,10 @@ mod tests {
         argv: Mutex<Vec<(String, Vec<String>)>>,
         closed: Arc<AtomicUsize>,
         black_hole: bool,
+        /// 每次工具调用先睡这么久，用来制造"上一个还在跑"。
+        call_delay: Duration,
+        /// 真正到达远端的工具调用次数。
+        tool_calls: Arc<AtomicUsize>,
     }
 
     impl Recording {
@@ -629,6 +708,8 @@ mod tests {
                 argv: Mutex::new(Vec::new()),
                 closed: Arc::new(AtomicUsize::new(0)),
                 black_hole: false,
+                call_delay: Duration::ZERO,
+                tool_calls: Arc::new(AtomicUsize::new(0)),
             })
         }
         fn opens(&self) -> usize {
@@ -636,6 +717,9 @@ mod tests {
         }
         fn closes(&self) -> usize {
             self.closed.load(Ordering::SeqCst)
+        }
+        fn tool_calls(&self) -> usize {
+            self.tool_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -650,6 +734,8 @@ mod tests {
                 pending: None,
                 closed: self.closed.clone(),
                 black_hole: self.black_hole,
+                call_delay: self.call_delay,
+                tool_calls: self.tool_calls.clone(),
             }))
         }
     }
@@ -1019,6 +1105,66 @@ mod tests {
             "只读成员绝不能被开成 coding：{:?}",
             argv[0].1
         );
+    }
+
+    /// 同一个会话上的两个调用**串行**：第二个等一小会儿之后明确回"忙"，
+    /// 而且**根本没发到远端**（RFC-0002 5.4：不能在同一 writer 内并发
+    /// patch 与 exec）。
+    #[test]
+    fn a_second_call_on_one_session_waits_briefly_then_says_busy() {
+        let mut recorder = Recording::new();
+        Arc::get_mut(&mut recorder).expect("独占").call_delay = Duration::from_millis(300);
+        let pool = Connections::with_opener(Box::new(recorder.clone()))
+            .with_coding_busy_grace(Duration::from_millis(40));
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+
+        let (first, second) = std::thread::scope(|scope| {
+            let a =
+                scope.spawn(|| pool.call_coding(ANYONE, &m, &handle, "exec_command", json!({})));
+            std::thread::sleep(Duration::from_millis(60));
+            let b = scope.spawn(|| pool.call_coding(ANYONE, &m, &handle, "apply_patch", json!({})));
+            (a.join().expect("第一个"), b.join().expect("第二个"))
+        });
+
+        assert!(first.is_ok(), "先到的该正常跑完：{first:?}");
+        let err = second.expect_err("后到的该被挡住");
+        assert!(matches!(err, CodingError::Busy), "{err}");
+        assert_eq!(recorder.tool_calls(), 1, "被挡住的那个不该也发到远端");
+
+        // "忙"是暂时的，不是会话作废了：前一个完事之后照样能用。
+        pool.call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+            .expect("前一个跑完就该通了");
+        assert_eq!(recorder.tool_calls(), 2);
+    }
+
+    /// 等的是**一小会儿**，不是无限排队。远端 exec 最长 10 分钟，挂在锁上
+    /// 那么久，Web 那头的 HTTP 早断了。
+    #[test]
+    fn the_busy_wait_is_bounded() {
+        let mut recorder = Recording::new();
+        Arc::get_mut(&mut recorder).expect("独占").call_delay = Duration::from_millis(600);
+        let pool = Connections::with_opener(Box::new(recorder.clone()))
+            .with_coding_busy_grace(Duration::from_millis(40));
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = pool.call_coding(ANYONE, &m, &handle, "exec_command", json!({}));
+            });
+            std::thread::sleep(Duration::from_millis(60));
+            let started = Instant::now();
+            let err = pool
+                .call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+                .expect_err("该报忙");
+            let waited = started.elapsed();
+            assert!(matches!(err, CodingError::Busy), "{err}");
+            assert!(
+                waited < Duration::from_millis(400),
+                "等了 {waited:?}，说明是在排队而不是有界等待"
+            );
+        });
     }
 
     /// 开的是公开的 bridge 子命令，argv 全来自配置。
