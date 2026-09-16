@@ -39,6 +39,7 @@ const BOUNDED: &[(&str, &str, u64, u64, u64)] = &[
     ("view_image", "max_height", 2_000, 1, 10_000),
     ("operation_log", "limit", 50, 1, 200),
     ("list_task_events", "limit", 50, 1, 200),
+    ("task_context", "max_bytes", 32_768, 8_192, 131_072),
     ("project_state", "max_files", 200, 1, 10_000),
 ];
 
@@ -75,9 +76,6 @@ mod tests {
         ("history_session_read", "max_bytes"),
         ("history_manage", "limit"),
         ("history_manage", "max_bytes"),
-        // Declared but not read by task_context yet; tracked as its own defect.
-        ("task_context", "max_bytes"),
-        ("task_manage", "max_bytes"),
         // Hidden from clients and not read by any code.
         ("request_permissions", "ttl_seconds"),
     ];
@@ -88,6 +86,7 @@ mod tests {
             ("grep_text", _) => "search_text",
             ("task_manage", "limit") => "operation_log",
             ("task_manage", "max_files") => "project_state",
+            ("task_manage", "max_bytes") => "task_context",
             _ => tool,
         }
     }

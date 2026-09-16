@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 use crate::tools::ToolContext;
 
-use super::model::TaskStatus;
+use super::model::{TaskSession, TaskStatus};
 use super::store::HarnessError;
 
 pub const TOOL_NAMES: &[&str] = &[
@@ -119,11 +119,60 @@ fn task_context(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError
     let Some(task) = task else {
         return Ok(json!({"task": null, "message": "当前没有活动任务"}));
     };
-    let events = ctx
-        .harness
-        .list_events(&task.id, 0, 100)
-        .map_err(map_error)?;
-    Ok(json!({"task": task, "events": events, "truncated": false}))
+    let max_bytes = crate::tools::args::bounded(args, "task_context", "max_bytes") as usize;
+    let view = task_view(&task)?;
+    // 预算按客户端最终收到的整个对象算，含 tool_ok 补上的 "ok"。truncated 和
+    // next_cursor 先占最长的写法，装完填真值只会变短。任务本身不截：目标和步骤
+    // 是调用方自己写的，正常离 8 KB 的下限很远。
+    let skeleton = json!({
+        "ok": true, "task": view, "events": [], "truncated": false, "next_cursor": usize::MAX
+    });
+    let mut used = json_len(&skeleton)?;
+    let mut events = Vec::new();
+    let mut truncated = false;
+    'fill: loop {
+        let page = ctx
+            .harness
+            .list_events(&task.id, events.len(), EVENT_PAGE)
+            .map_err(map_error)?;
+        let last_page = page.len() < EVENT_PAGE;
+        for event in page {
+            let cost = json_len(&event)? + usize::from(!events.is_empty());
+            if used + cost > max_bytes {
+                truncated = true;
+                break 'fill;
+            }
+            used += cost;
+            events.push(event);
+        }
+        if last_page {
+            break;
+        }
+    }
+    let next_cursor = events.len();
+    Ok(json!({"task": view, "events": events, "truncated": truncated, "next_cursor": next_cursor}))
+}
+
+/// 装事件时一次向存储要几条。只决定读几次文件，装多少由 max_bytes 决定。
+const EVENT_PAGE: usize = 100;
+
+/// 回给客户端的任务。基线的逐文件清单（每个文件一条路径加 sha256）只供服务端
+/// check_baseline 比对，客户端拿到也用不上；它随项目文件数线性涨，2108 个文件的
+/// 项目约 450 KB。这里只留条数，指纹、分支、HEAD 照旧。
+fn task_view(task: &TaskSession) -> Result<Value, WorkspaceError> {
+    let mut value =
+        serde_json::to_value(task).map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))?;
+    if let Some(baseline) = value.get_mut("baseline").and_then(Value::as_object_mut) {
+        baseline.remove("entries");
+        baseline.insert("entry_count".into(), json!(task.baseline.entries.len()));
+    }
+    Ok(value)
+}
+
+fn json_len(value: &impl serde::Serialize) -> Result<usize, WorkspaceError> {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))
 }
 
 fn list_task_events(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {

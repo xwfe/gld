@@ -315,3 +315,111 @@ fn 开了任务之后工具自己的写入不会把自己锁死() {
         "{blocked}"
     );
 }
+
+fn reply_bytes(value: &serde_json::Value) -> usize {
+    serde_json::to_vec(value).expect("序列化").len()
+}
+
+/// task_context 的 schema 声明了 max_bytes，以前代码不读：`task` 里带着
+/// 基线的逐文件清单（每个文件一条 sha256），2108 个文件的项目光这一项就约
+/// 450 KB，远超 schema 的上限 131072。
+#[test]
+fn task_context_在文件很多的工作区也不超过_max_bytes() {
+    let temp = tempfile::tempdir().expect("创建临时目录");
+    let workspace = temp.path().join("workspace");
+    for i in 0..1500 {
+        let dir = workspace.join(format!("src/module_{i:04}"));
+        fs::create_dir_all(&dir).expect("创建目录");
+        fs::write(
+            dir.join("a_reasonably_descriptive_file_name.rs"),
+            "fn f() {}\n",
+        )
+        .expect("写入文件");
+    }
+    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let started = call_tool(&ctx, "start_task", &json!({"objective": "大仓库"}));
+    assert_eq!(started["ok"], true, "{started}");
+
+    let context = call_tool(&ctx, "task_context", &json!({}));
+    assert_eq!(context["ok"], true, "{context}");
+    assert!(
+        reply_bytes(&context) <= 32_768,
+        "默认 max_bytes 是 32768，实际 {} 字节",
+        reply_bytes(&context)
+    );
+    let baseline = &context["task"]["baseline"];
+    assert!(
+        baseline.get("entries").is_none(),
+        "逐文件清单不该出现在上下文里"
+    );
+    assert_eq!(baseline["entry_count"], 1500);
+    assert!(!baseline["worktree_fingerprint"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+}
+
+/// 以前固定取前 100 条事件、`truncated` 恒为 false：超过 100 条时后面的
+/// 静默丢掉，单条事件再大也照单全收。现在按字节装，装不下就明说，并给出
+/// 从哪里接着用 list_task_events 读。
+#[test]
+fn task_context_按字节装事件并说清从哪接着读() {
+    let temp = tempfile::tempdir().expect("创建临时目录");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("创建工作区");
+    fs::write(workspace.join("README.md"), "初始内容\n").expect("写入文件");
+    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let started = call_tool(&ctx, "start_task", &json!({"objective": "很多步"}));
+    let task_id = started["task"]["id"].as_str().expect("任务 ID").to_string();
+    for i in 0..150 {
+        let updated = call_tool(
+            &ctx,
+            "update_task",
+            &json!({"task_id": task_id, "pending_steps": [format!("第 {i} 步：{}", "细节".repeat(60))]}),
+        );
+        assert_eq!(updated["ok"], true, "{updated}");
+    }
+    let mut all = Vec::new();
+    loop {
+        let page = call_tool(
+            &ctx,
+            "list_task_events",
+            &json!({"task_id": task_id, "cursor": all.len(), "limit": 200}),
+        );
+        let events = page["events"].as_array().expect("事件").clone();
+        if events.is_empty() {
+            break;
+        }
+        all.extend(events);
+    }
+    assert!(
+        all.len() > 100,
+        "要超过旧的 100 条上限才测得到，实际 {}",
+        all.len()
+    );
+
+    // 小预算：装不下，要说 truncated，并且 next_cursor 正好接上。
+    let small = call_tool(&ctx, "task_context", &json!({"max_bytes": 8192}));
+    assert_eq!(small["ok"], true, "{small}");
+    assert!(
+        reply_bytes(&small) <= 8192,
+        "实际 {} 字节",
+        reply_bytes(&small)
+    );
+    let shown = small["events"].as_array().expect("事件");
+    assert!(!shown.is_empty());
+    assert_eq!(small["truncated"], true);
+    assert_eq!(small["next_cursor"], shown.len());
+    assert_eq!(shown.as_slice(), &all[..shown.len()], "从头按顺序装");
+
+    // 大预算：全部装得下（超过 100 条），不截断。
+    let large = call_tool(&ctx, "task_context", &json!({"max_bytes": 131072}));
+    assert!(
+        reply_bytes(&large) <= 131_072,
+        "实际 {} 字节",
+        reply_bytes(&large)
+    );
+    assert_eq!(large["events"].as_array().unwrap().len(), all.len());
+    assert_eq!(large["truncated"], false);
+    assert_eq!(large["next_cursor"], all.len());
+}
