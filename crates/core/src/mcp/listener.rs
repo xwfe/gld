@@ -80,7 +80,8 @@ impl Endpoint {
                 Handled {
                     response,
                     member: routed.as_ref().map(|routed| routed.workspace_id.clone()),
-                    context: routed.map(|routed| routed.context),
+                    // 远端成员没有本机工具上下文，取上下文审计这一段跳过。
+                    context: routed.and_then(|routed| routed.context),
                 }
             }
         }

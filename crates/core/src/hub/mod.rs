@@ -19,6 +19,18 @@
 //! 另外两条是"别漏出去"：不在 hub 里的工作区和不存在的工作区报同一个错，
 //! 不给枚举机会；成员的说明文件 / Skill / 历史摘要不在 initialize 里混着注入，
 //! 由 `workspace_context` 按工作区单独取，免得 A 的 AGENTS.md 被拿去指导 B。
+//!
+//! ## 成员有两种
+//!
+//! [`Member::Local`] 是本机的一个工作区目录，[`Member::Remote`] 是另一台机器上
+//! 由 ccnm 管着的 workspace。两者**不共用类型、不互相伪装**（RFC-0002 5.1）：
+//! 远端成员没有本机根目录、没有 [`ToolContext`]、不建 Planning 文件，gld 这边
+//! 连它在对面是哪个目录都不知道。
+//!
+//! 工具也是两套，名字不重叠：远端的一律带 `remote_` 前缀，见
+//! [`crate::bridge::tools`]。用错了直接报错，**绝不落到另一边执行**——
+//! gld 本机也有 `search_text` 和 `list_files`，跟 ccnm 的同名工具根本不是
+//! 一个契约（分页、参数、错误码都不同）。
 
 pub mod runtime;
 
@@ -29,6 +41,12 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::agent_context::render_skill_catalog;
+use crate::bridge::member::{CcnmMember, Mode};
+use crate::bridge::peer::PeerError;
+use crate::bridge::session::Connections;
+#[cfg(test)]
+use crate::bridge::session::Open;
+use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
 use crate::planning::PlanningService;
 use crate::settings::{AppSettings, HubConfig};
@@ -87,7 +105,7 @@ pub const WORKSPACE_CONTEXT: &str = "workspace_context";
 /// 经 hub 不暴露的工具：它们改的是所有对话共享的服务端状态，见模块说明第 1 条。
 const HIDDEN_TOOLS: &[&str] = &["set_default_cwd", "get_default_cwd"];
 
-const INSTRUCTIONS: &str = "This server is a gld hub: one connection to several local workspaces. Every tool call except list_workspaces must include `workspace` (an id or name returned by list_workspaces). The server keeps no current workspace, so pass it again on every call and never rely on the workspace of an earlier call. Workspaces are isolated from each other: paths are relative to the selected workspace root, command sessions and output_ref values only exist in the workspace that created them, and planning mode, permissions and tool sets are enforced per workspace. Before working in a workspace for the first time in a conversation, call workspace_context for it and follow only that workspace's instructions; never apply one workspace's instructions or skills to another. Planning mode is controlled exclusively by the gld CLI, and only the human operator can accept Goal or Plan reviews. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, retry the same tool with confirm=true only when the user's request already clearly authorizes it; otherwise ask the user.";
+const INSTRUCTIONS: &str = "This server is a gld hub: one connection to several workspaces. Every tool call except list_workspaces must include `workspace` (an id or name returned by list_workspaces). The server keeps no current workspace, so pass it again on every call and never rely on the workspace of an earlier call. Workspaces are isolated from each other: paths are relative to the selected workspace root, command sessions and output_ref values only exist in the workspace that created them, and planning mode, permissions and tool sets are enforced per workspace. Before working in a workspace for the first time in a conversation, call workspace_context for it and follow only that workspace's instructions; never apply one workspace's instructions or skills to another. Planning mode is controlled exclusively by the gld CLI, and only the human operator can accept Goal or Plan reviews. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, retry the same tool with confirm=true only when the user's request already clearly authorizes it; otherwise ask the user. A workspace listed with kind=remote lives on another machine and is reached only through the tools named remote_*, which it lists; the hub's own tools do not work on it and the remote_* tools do not work on a local workspace. The two sets are different contracts even where the names look alike, so never substitute one for the other, and read a remote workspace only through its own tools rather than assuming anything about it from a local one.";
 
 /// 成员名单从哪儿来。
 enum Members {
@@ -95,7 +113,46 @@ enum Members {
     DataFile,
     /// 固定的一份，给单元测试用；套 Mutex 是为了测"改完配置下一次调用就生效"。
     #[cfg(test)]
-    Fixed(Box<Mutex<(Vec<WorkspaceProfile>, AppSettings)>>),
+    Fixed(Box<Mutex<Fixed>>),
+}
+
+/// 测试里那份固定的成员名单。
+#[cfg(test)]
+#[derive(Clone)]
+struct Fixed {
+    profiles: Vec<WorkspaceProfile>,
+    remotes: Vec<CcnmMember>,
+    settings: AppSettings,
+}
+
+/// hub 里的一个成员。
+///
+/// **不拿假路径把远端塞进本地那套**（RFC-0002 5.1）：`Local` 有本机根目录、
+/// 工具上下文、Planning 和 Harness，`Remote` 一样都没有，它只有「哪台机器上的
+/// 哪个 workspace」和一个访问上限。
+/// 两个变体差了 776 字节（本地的 900+，远端的 128）。不 Box：成员名单每次
+/// 请求都要重建，一个 hub 也就十来个成员，多这点内存远比多十来次堆分配和
+/// 一层解引用划算——何况本地那份 `WorkspaceProfile` 本来就是整份克隆出来的。
+#[allow(clippy::large_enum_variant)]
+enum Member {
+    Local(WorkspaceProfile),
+    Remote(CcnmMember),
+}
+
+impl Member {
+    fn id(&self) -> &str {
+        match self {
+            Member::Local(profile) => &profile.id,
+            Member::Remote(remote) => &remote.id,
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Member::Local(profile) => &profile.name,
+            Member::Remote(remote) => &remote.name,
+        }
+    }
 }
 
 struct CachedContext {
@@ -106,7 +163,8 @@ struct CachedContext {
 /// 一次请求实际落到了哪个成员，监听器拿它往那个工作区的日志里记一笔。
 pub struct Routed {
     pub workspace_id: String,
-    pub context: SharedToolContext,
+    /// 落到远端成员时是 `None`——远端没有本机工具上下文，这正是分型的意义。
+    pub context: Option<SharedToolContext>,
 }
 
 pub struct Hub {
@@ -116,22 +174,35 @@ pub struct Hub {
     auth: AuthConfig,
     usage: Arc<ServiceUsage>,
     contexts: Mutex<HashMap<String, CachedContext>>,
+    /// 远端成员的 bridge 连接。本地成员一条都用不到。
+    connections: Connections,
 }
 
 impl Hub {
     pub fn new(config: &HubConfig) -> Self {
-        Self::with_members(config, Members::DataFile)
+        Self::with_members(config, Members::DataFile, Connections::new())
     }
 
     #[cfg(test)]
-    fn fixed(config: &HubConfig, profiles: Vec<WorkspaceProfile>, settings: AppSettings) -> Self {
+    fn fixed(config: &HubConfig, fixed: Fixed) -> Self {
         Self::with_members(
             config,
-            Members::Fixed(Box::new(Mutex::new((profiles, settings)))),
+            Members::Fixed(Box::new(Mutex::new(fixed))),
+            Connections::new(),
         )
     }
 
-    fn with_members(config: &HubConfig, members: Members) -> Self {
+    /// 测试用：成员名单固定，远端连接也用合成通道，不起任何子进程。
+    #[cfg(test)]
+    fn fixed_with_opener(config: &HubConfig, fixed: Fixed, opener: Box<dyn Open>) -> Self {
+        Self::with_members(
+            config,
+            Members::Fixed(Box::new(Mutex::new(fixed))),
+            Connections::with_opener(opener),
+        )
+    }
+
+    fn with_members(config: &HubConfig, members: Members, connections: Connections) -> Self {
         Self {
             members,
             tool_profile: normalize_tool_profile(&config.tool_profile).into(),
@@ -141,6 +212,7 @@ impl Hub {
             },
             usage: Arc::new(ServiceUsage::default()),
             contexts: Mutex::new(HashMap::new()),
+            connections,
         }
     }
 
@@ -148,7 +220,8 @@ impl Hub {
         self.usage.clone()
     }
 
-    /// 结束所有成员上下文里还在跑的命令。hub 停掉之后没人能再读它们的输出。
+    /// 结束所有成员上下文里还在跑的命令，并关掉所有远端 bridge。
+    /// hub 停掉之后没人能再读它们的输出。
     ///
     /// 会阻塞等进程退出，必须在 `spawn_blocking` 里调。
     pub fn shutdown(&self) {
@@ -162,6 +235,9 @@ impl Hub {
         for cached in contexts {
             cached.context.sessions.terminate_all();
         }
+        // 远端 bridge 必须走正常关闭：直接留着进程不管，远端 Runtime 的写锁
+        // 会留下 held 标记要人工恢复。
+        self.connections.close_all();
     }
 
     /// 处理一条 JSON-RPC 请求。会同步跑工具，必须在 `spawn_blocking` 里调。
@@ -201,7 +277,14 @@ impl Hub {
             Ok((members, _)) => {
                 let lines = members
                     .iter()
-                    .map(|member| format!("- {} (id {})", member.name, member.id))
+                    .map(|member| match member {
+                        Member::Local(_) => format!("- {} (id {})", member.name(), member.id()),
+                        Member::Remote(_) => format!(
+                            "- {} (id {}, remote: use the remote_* tools)",
+                            member.name(),
+                            member.id()
+                        ),
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
@@ -240,12 +323,22 @@ impl Hub {
                     tool
                 }),
         );
+        // 有远端成员才报远端工具。一个只有本地成员的 hub 列出四个永远调不通
+        // 的 `remote_*`，只会引着模型去试；`listChanged` 是 false，但这里本来
+        // 就以 list_workspaces 为准，跟成员名单一个口径。
+        if self
+            .snapshot()
+            .is_ok_and(|(members, _)| members.iter().any(|m| matches!(m, Member::Remote(_))))
+        {
+            tools.extend(remote_tools::definitions());
+        }
         tools
     }
 
     fn exposes(&self, name: &str) -> bool {
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
+            || remote_tools::find(name).is_some()
             || (!HIDDEN_TOOLS.contains(&name)
                 && exposed_tool_names(&self.tool_profile).contains(&name))
     }
@@ -298,7 +391,59 @@ impl Hub {
             Ok(member) => member,
             Err(error) => return Ok(plain_result(error)),
         };
-        let context = match self.context_for(member, &settings) {
+
+        // 两套工具、两种成员，只有对角线上的两格能往下走。用错的那两格都
+        // 只报错，**绝不落到另一边执行**（RFC-0002 5.2）。
+        match (remote_tools::find(canonical), member) {
+            (Some(tool), Member::Remote(remote)) => {
+                *routed = Some(Routed {
+                    workspace_id: remote.id.clone(),
+                    context: None,
+                });
+                Ok(self.call_remote(tool, remote, &args))
+            }
+            (Some(_), Member::Local(local)) => Ok(plain_result(tool_err(
+                WorkspaceError::ToolDetails {
+                    code: "TOOL_IS_FOR_REMOTE_WORKSPACES",
+                    message: format!(
+                        "{canonical} only works on a remote ccnm workspace, and {} is a local one. Use this hub's own tools for it.",
+                        local.name
+                    ),
+                    category: "validation",
+                    retryable: false,
+                    details: json!({ "workspace": member_ref(member) }),
+                },
+            ))),
+            (None, Member::Remote(remote)) => Ok(plain_result(tool_err(
+                WorkspaceError::ToolDetails {
+                    code: "TOOL_IS_LOCAL_ONLY",
+                    message: format!(
+                        "{canonical} runs on this machine, and {} is a remote ccnm workspace. Remote workspaces have their own tools: {}. They are a different contract, not the same tool over a network.",
+                        remote.name,
+                        remote_tool_names().join(", ")
+                    ),
+                    category: "validation",
+                    retryable: false,
+                    details: json!({
+                        "workspace": member_ref(member),
+                        "remote_tools": remote_tool_names(),
+                    }),
+                },
+            ))),
+            (None, Member::Local(local)) => self.call_local(canonical, local, &args, &settings, routed),
+        }
+    }
+
+    /// 本地成员：和分型之前一模一样。
+    fn call_local(
+        &self,
+        canonical: &str,
+        member: &WorkspaceProfile,
+        args: &Value,
+        settings: &AppSettings,
+        routed: &mut Option<Routed>,
+    ) -> Result<Value, Value> {
+        let context = match self.context_for(member, settings) {
             Ok(context) => context,
             Err(message) => {
                 return Ok(plain_result(tool_err(WorkspaceError::ToolDetails {
@@ -306,13 +451,13 @@ impl Hub {
                     message: format!("Workspace {} cannot be opened: {message}", member.name),
                     category: "runtime",
                     retryable: false,
-                    details: json!({ "workspace": member_ref(member) }),
+                    details: json!({ "workspace": local_ref(member) }),
                 })))
             }
         };
         *routed = Some(Routed {
             workspace_id: member.id.clone(),
-            context: context.clone(),
+            context: Some(context.clone()),
         });
 
         let structured = if canonical == WORKSPACE_CONTEXT {
@@ -320,28 +465,87 @@ impl Hub {
         } else if !exposed_tool_names(&context.tool_profile).contains(&canonical) {
             tool_not_in_workspace(canonical, member, &context.tool_profile)
         } else {
-            call_tool(&context, canonical, &args)
+            call_tool(&context, canonical, args)
         };
-        let result = wrap_mcp_tool_result(canonical, &args, tag_workspace(structured, member));
+        let result = wrap_mcp_tool_result(canonical, args, tag_workspace(structured, member));
         context.record_context_block("tool_return", &result);
         Ok(result)
     }
 
+    /// 远端成员：参数过白名单，经 bridge 转一次，结果原样带回来。
+    ///
+    /// 远端的 `content` / `structuredContent` / `isError` 一个字都不改
+    /// （验收项 H04）——那是 ccnm 的契约，改了模型看到的就不是远端说的话。
+    /// 是哪个成员答的放在 `_meta` 里，不往 ccnm 的结构化结果里塞字段。
+    fn call_remote(&self, tool: &'static RemoteTool, member: &CcnmMember, args: &Value) -> Value {
+        let missing = tool.missing_required(args);
+        if !missing.is_empty() {
+            return plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "MISSING_ARGUMENT",
+                message: format!("{} needs {}", tool.name, missing.join(", ")),
+                category: "validation",
+                retryable: false,
+                details: json!({ "missing": missing }),
+            }));
+        }
+        // 只读工具走 read，而且 bridge_argv 那边还会再跟成员上限取一次低。
+        let mode = Mode::Read;
+        match self
+            .connections
+            .call(member, mode, tool.remote_name, tool.forward_arguments(args))
+        {
+            Ok(mut result) => {
+                if let Some(object) = result.as_object_mut() {
+                    object.insert(
+                        "_meta".into(),
+                        json!({ "gld/workspace": remote_ref(member), "gld/mode": mode.as_str() }),
+                    );
+                }
+                result
+            }
+            Err(error) => plain_result(remote_failure(tool, member, error)),
+        }
+    }
+
     /// 当前成员（按加入顺序，跳过已经不存在的 id）和这一刻的全局设置。
-    fn snapshot(&self) -> Result<(Vec<WorkspaceProfile>, AppSettings), String> {
-        let (profiles, settings) = match &self.members {
+    ///
+    /// 一个 id 先在本地工作区里找，找不到再去远端成员里找。两边的 id 撞上
+    /// 是配置错误，不是这里该兜的事——本地 id 是 32 位十六进制，远端 id 由
+    /// 操作员起，撞上得手动改。
+    fn snapshot(&self) -> Result<(Vec<Member>, AppSettings), String> {
+        let (profiles, remotes, settings) = match &self.members {
             Members::DataFile => DataStore::read_file(|data| {
-                Ok((data.profiles.clone(), AppSettings::from_data(data)))
+                Ok((
+                    data.profiles.clone(),
+                    data.ccnm_members.clone(),
+                    AppSettings::from_data(data),
+                ))
             })
             .map_err(|error| error.to_string())?,
             #[cfg(test)]
-            Members::Fixed(fixed) => fixed.lock().expect("fixed members").clone(),
+            Members::Fixed(fixed) => {
+                let fixed = fixed.lock().expect("fixed members").clone();
+                (fixed.profiles, fixed.remotes, fixed.settings)
+            }
         };
         let members = settings
             .hub
             .members
             .iter()
-            .filter_map(|id| profiles.iter().find(|profile| &profile.id == id).cloned())
+            .filter_map(|id| {
+                profiles
+                    .iter()
+                    .find(|profile| &profile.id == id)
+                    .cloned()
+                    .map(Member::Local)
+                    .or_else(|| {
+                        remotes
+                            .iter()
+                            .find(|remote| &remote.id == id)
+                            .cloned()
+                            .map(Member::Remote)
+                    })
+            })
             .collect();
         Ok((members, settings))
     }
@@ -389,8 +593,11 @@ impl Hub {
         Ok(context)
     }
 
-    /// 被移出 hub 或已经 destroy 的成员：丢掉上下文，收掉它的命令。
-    fn forget_departed(&self, members: &[WorkspaceProfile]) {
+    /// 被移出 hub 或已经 destroy 的成员：丢掉上下文，收掉它的命令和远端连接。
+    ///
+    /// 远端那半是 RFC-0002 5.1「成员删除/权限收紧/配置变化须使对应旧会话
+    /// 失效」——操作员把成员摘出去了，正在开着的 bridge 不能还留着。
+    fn forget_departed(&self, members: &[Member]) {
         let departed: Vec<CachedContext> = {
             let mut contexts = self
                 .contexts
@@ -398,7 +605,7 @@ impl Hub {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let gone: Vec<String> = contexts
                 .keys()
-                .filter(|id| !members.iter().any(|member| &member.id == *id))
+                .filter(|id| !members.iter().any(|member| member.id() == id.as_str()))
                 .cloned()
                 .collect();
             gone.iter().filter_map(|id| contexts.remove(id)).collect()
@@ -406,6 +613,12 @@ impl Hub {
         for cached in departed {
             cached.context.sessions.terminate_all();
         }
+        let still_here: Vec<String> = members
+            .iter()
+            .filter(|member| matches!(member, Member::Remote(_)))
+            .map(|member| member.id().to_string())
+            .collect();
+        self.connections.retain(&still_here);
     }
 
     fn workspace_context(&self, member: &WorkspaceProfile, context: &SharedToolContext) -> Value {
@@ -461,21 +674,17 @@ fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> Str
 ///
 /// 不复用命令行的 `-w` 解析：那边还认路径、报错教人跑 `gld workspace list`，
 /// 而这里的读者是模型，候选列表只能来自 hub 成员——漏出其他工作区的名字就是泄露。
-fn resolve_member<'a>(
-    members: &'a [WorkspaceProfile],
-    selector: &str,
-) -> Result<&'a WorkspaceProfile, Value> {
-    if let Some(found) = members.iter().find(|member| member.id == selector) {
+fn resolve_member<'a>(members: &'a [Member], selector: &str) -> Result<&'a Member, Value> {
+    if let Some(found) = members.iter().find(|member| member.id() == selector) {
         return Ok(found);
     }
-    let rules: [&dyn Fn(&WorkspaceProfile) -> bool; 3] = [
-        &|member| member.name == selector,
-        &|member| member.name.eq_ignore_ascii_case(selector),
-        &|member| selector.len() >= 4 && member.id.starts_with(selector),
+    let rules: [&dyn Fn(&Member) -> bool; 3] = [
+        &|member| member.name() == selector,
+        &|member| member.name().eq_ignore_ascii_case(selector),
+        &|member| selector.len() >= 4 && member.id().starts_with(selector),
     ];
     for rule in rules {
-        let matched: Vec<&WorkspaceProfile> =
-            members.iter().filter(|member| rule(member)).collect();
+        let matched: Vec<&Member> = members.iter().filter(|member| rule(member)).collect();
         match matched.as_slice() {
             [] => continue,
             [only] => return Ok(only),
@@ -505,7 +714,7 @@ fn resolve_member<'a>(
     }))
 }
 
-fn workspace_required(tool: &str, members: &[WorkspaceProfile]) -> Value {
+fn workspace_required(tool: &str, members: &[Member]) -> Value {
     tool_err(WorkspaceError::ToolDetails {
         code: "WORKSPACE_REQUIRED",
         message: format!(
@@ -527,33 +736,58 @@ fn tool_not_in_workspace(tool: &str, member: &WorkspaceProfile, profile: &str) -
         ),
         category: "permission",
         retryable: false,
-        details: json!({ "workspace": member_ref(member), "tool_profile": profile }),
+        details: json!({ "workspace": local_ref(member), "tool_profile": profile }),
     })
 }
 
-fn list_workspaces(members: &[WorkspaceProfile]) -> Value {
+fn list_workspaces(members: &[Member]) -> Value {
     tool_ok(json!({
         "workspaces": members
             .iter()
-            .map(|member| json!({
-                "id": member.id,
-                "name": member.name,
-                "path": member.path,
-                "tool_profile": normalize_tool_profile(&member.runtime.tool_profile),
-            }))
+            .map(|member| match member {
+                Member::Local(local) => json!({
+                    "id": local.id,
+                    "name": local.name,
+                    "kind": "local",
+                    "path": local.path,
+                    "tool_profile": normalize_tool_profile(&local.runtime.tool_profile),
+                }),
+                // 远端不报 path：那是对面机器上的目录，gld 这边根本不知道，
+                // 报一个假的比不报更糟。也不报 node —— 模型路由只需要 id。
+                Member::Remote(remote) => json!({
+                    "id": remote.id,
+                    "name": remote.name,
+                    "kind": "remote",
+                    "mode": remote.max_mode.as_str(),
+                    "tools": remote_tool_names(),
+                }),
+            })
             .collect::<Vec<_>>(),
         "count": members.len(),
-        "usage": "Pass one of these ids or names as `workspace` on every other tool call."
+        "usage": "Pass one of these ids or names as `workspace` on every other tool call. A workspace with kind=remote lives on another machine: use only the tools it lists, not this hub's own ones."
     }))
 }
 
-fn member_ref(member: &WorkspaceProfile) -> Value {
+/// hub 暴露的远端工具名，用在报错和 `list_workspaces` 里。
+fn remote_tool_names() -> Vec<&'static str> {
+    remote_tools::READ_TOOLS.iter().map(|t| t.name).collect()
+}
+
+fn member_ref(member: &Member) -> Value {
+    json!({ "id": member.id(), "name": member.name() })
+}
+
+fn local_ref(member: &WorkspaceProfile) -> Value {
     json!({ "id": member.id, "name": member.name })
 }
 
-fn describe<'a>(members: impl Iterator<Item = &'a WorkspaceProfile>) -> String {
+fn remote_ref(member: &CcnmMember) -> Value {
+    json!({ "id": member.id, "name": member.name })
+}
+
+fn describe<'a>(members: impl Iterator<Item = &'a Member>) -> String {
     let listed = members
-        .map(|member| format!("{} (id {})", member.name, member.id))
+        .map(|member| format!("{} (id {})", member.name(), member.id()))
         .collect::<Vec<_>>();
     if listed.is_empty() {
         "none".into()
@@ -562,13 +796,41 @@ fn describe<'a>(members: impl Iterator<Item = &'a WorkspaceProfile>) -> String {
     }
 }
 
+/// 一次远端调用没走通，翻译成模型和操作员都能照着做事的错。
+///
+/// 每种失败一个码：告诉模型「重试有没有用」，告诉操作员「该去看哪儿」。
+/// 合成一个 REMOTE_ERROR 的话，「ccnm 没装」和「网络抖了一下」看起来一样。
+///
+/// `Closed` 会把远端 stderr 的最后一段带出来——ccnm 的 `CCNM_E_*` 诊断只在
+/// 那里，丢掉就只剩「连接断了」，没人查得下去。gld 从不往 bridge 传凭据，
+/// 这段文本里也就不会有。
+fn remote_failure(tool: &RemoteTool, member: &CcnmMember, error: PeerError) -> Value {
+    let (code, category, retryable) = match &error {
+        // 本机根本没起来这个程序：装没装、路径对不对，是操作员的事。
+        PeerError::Spawn { .. } => ("REMOTE_BRIDGE_NOT_STARTED", "runtime", false),
+        PeerError::Write(_) | PeerError::Closed { .. } => ("REMOTE_BRIDGE_CLOSED", "runtime", true),
+        // 只读工具没有副作用，重试是安全的。coding 模式不能照抄这一条。
+        PeerError::Timeout { .. } => ("REMOTE_TIMEOUT", "runtime", true),
+        PeerError::Malformed { .. } => ("REMOTE_PROTOCOL_ERROR", "runtime", false),
+        PeerError::Remote { .. } => ("REMOTE_REFUSED", "runtime", false),
+        PeerError::Handshake(_) => ("REMOTE_PROTOCOL_MISMATCH", "runtime", false),
+    };
+    tool_err(WorkspaceError::ToolDetails {
+        code,
+        message: format!("{} on remote workspace {}: {error}", tool.name, member.name),
+        category,
+        retryable,
+        details: json!({ "workspace": remote_ref(member), "remote_tool": tool.remote_name }),
+    })
+}
+
 /// 在结果里注明是哪个工作区答的。
 ///
 /// 单独用 `hub_workspace` 这个键：`server_info`、`check_exec_environment` 的结果里
 /// 已经有一个表示根目录路径的 `workspace`，覆盖掉就丢了信息。
 fn tag_workspace(mut structured: Value, member: &WorkspaceProfile) -> Value {
     if let Some(object) = structured.as_object_mut() {
-        object.insert("hub_workspace".into(), member_ref(member));
+        object.insert("hub_workspace".into(), local_ref(member));
     }
     structured
 }
@@ -667,8 +929,11 @@ mod tests {
         let config = settings.hub.clone();
         let hub = Hub::fixed(
             &config,
-            vec![api.clone(), web.clone(), outsider.clone()],
-            settings,
+            Fixed {
+                profiles: vec![api.clone(), web.clone(), outsider.clone()],
+                remotes: Vec::new(),
+                settings,
+            },
         );
         Fixture {
             _dirs: vec![api_dir, web_dir, outsider_dir],
@@ -689,13 +954,24 @@ mod tests {
         response["result"]["structuredContent"].clone()
     }
 
+    /// 整个 MCP result，不只是 structuredContent——远端调用要看 content/isError。
+    fn raw_call(hub: &Hub, tool: &str, arguments: Value) -> Value {
+        let (response, _) = hub.handle_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments }
+        }));
+        response["result"].clone()
+    }
+
     fn update_fixed(hub: &Hub, change: impl FnOnce(&mut Vec<WorkspaceProfile>, &mut AppSettings)) {
         let Members::Fixed(fixed) = &hub.members else {
             unreachable!("tests use fixed members")
         };
         let mut guard = fixed.lock().expect("fixed members");
-        let (profiles, settings) = &mut *guard;
-        change(profiles, settings);
+        let fixed = &mut *guard;
+        change(&mut fixed.profiles, &mut fixed.settings);
     }
 
     #[test]
@@ -964,8 +1240,12 @@ mod tests {
     fn member_config_changes_rebuild_its_context_and_nothing_else() {
         let fixture = fixture();
         let (members, settings) = fixture.hub.snapshot().expect("snapshot");
-        let api = &members[0];
-        let web = &members[1];
+        let local = |index: usize| match &members[index] {
+            Member::Local(profile) => profile,
+            Member::Remote(_) => unreachable!("这个 fixture 里都是本地成员"),
+        };
+        let api = local(0);
+        let web = local(1);
         let api_before = fixture.hub.context_for(api, &settings).expect("api");
         let web_before = fixture.hub.context_for(web, &settings).expect("web");
         assert!(Arc::ptr_eq(
@@ -1021,6 +1301,421 @@ mod tests {
             .lock()
             .expect("contexts")
             .contains_key(&fixture.web.id));
+    }
+
+    // ---- 远端成员 ----
+
+    /// 合成的远端 ccnm：握手照答，工具调用把收到的东西原样记下来。
+    ///
+    /// 整套远端测试都不起子进程、不碰 SSH——验收项 H1 要的就是「用合成 stdio
+    /// peer 验证」。
+    #[derive(Clone)]
+    struct RemoteSpy {
+        /// 每次 `tools/call` 收到的 params，用来验参数白名单真的生效了。
+        calls: Arc<Mutex<Vec<Value>>>,
+        opens: Arc<Mutex<usize>>,
+        closes: Arc<Mutex<usize>>,
+        /// 让远端工具自己说「这次没成」，验 `isError` 不被外层吞掉。
+        tool_fails: bool,
+        /// 连 bridge 都起不来，验错误分类。
+        cannot_start: bool,
+    }
+
+    impl RemoteSpy {
+        fn new() -> Self {
+            RemoteSpy {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                opens: Arc::new(Mutex::new(0)),
+                closes: Arc::new(Mutex::new(0)),
+                tool_fails: false,
+                cannot_start: false,
+            }
+        }
+        fn calls(&self) -> Vec<Value> {
+            self.calls.lock().expect("calls").clone()
+        }
+        fn opens(&self) -> usize {
+            *self.opens.lock().expect("opens")
+        }
+        fn closes(&self) -> usize {
+            *self.closes.lock().expect("closes")
+        }
+    }
+
+    struct SpyTransport {
+        spy: RemoteSpy,
+        pending: Option<String>,
+    }
+
+    impl crate::bridge::peer::Transport for SpyTransport {
+        fn send_line(&mut self, line: &str) -> std::io::Result<()> {
+            let request: Value = serde_json::from_str(line).expect("请求是 JSON");
+            let Some(id) = request.get("id").cloned() else {
+                return Ok(());
+            };
+            let result = match request["method"].as_str().unwrap_or("") {
+                "initialize" => json!({
+                    "protocolVersion": crate::bridge::peer::PROTOCOL_VERSION,
+                    "serverInfo": { "name": "ccnm", "version": "0.7.0" }
+                }),
+                _ => {
+                    self.spy
+                        .calls
+                        .lock()
+                        .expect("calls")
+                        .push(request["params"].clone());
+                    if self.spy.tool_fails {
+                        json!({
+                            "content": [{ "type": "text", "text": "CCNM_E_PATH_OUTSIDE_ROOT" }],
+                            "isError": true
+                        })
+                    } else {
+                        json!({
+                            "content": [{ "type": "text", "text": "line 1 of the remote file" }],
+                            "structuredContent": { "ok": true, "lines": 1 },
+                            "isError": false
+                        })
+                    }
+                }
+            };
+            self.pending =
+                Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string());
+            Ok(())
+        }
+
+        fn recv_line(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> Result<Option<String>, std::sync::mpsc::RecvTimeoutError> {
+            match self.pending.take() {
+                Some(line) => Ok(Some(line)),
+                None => {
+                    std::thread::sleep(timeout.min(std::time::Duration::from_millis(20)));
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                }
+            }
+        }
+
+        fn shutdown(&mut self, _grace: std::time::Duration) {
+            *self.spy.closes.lock().expect("closes") += 1;
+        }
+    }
+
+    impl Open for RemoteSpy {
+        fn open(
+            &self,
+            _member: &CcnmMember,
+            _mode: Mode,
+        ) -> Result<Box<dyn crate::bridge::peer::Transport>, PeerError> {
+            if self.cannot_start {
+                return Err(PeerError::Spawn {
+                    program: "ccnm".into(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no such file or directory",
+                    ),
+                });
+            }
+            *self.opens.lock().expect("opens") += 1;
+            Ok(Box::new(SpyTransport {
+                spy: self.clone(),
+                pending: None,
+            }))
+        }
+    }
+
+    struct RemoteFixture {
+        _dirs: Vec<tempfile::TempDir>,
+        hub: Hub,
+        api: WorkspaceProfile,
+        remote: CcnmMember,
+        spy: RemoteSpy,
+    }
+
+    /// 一个本地成员 api，一个远端成员 prod。
+    fn remote_fixture(spy: RemoteSpy) -> RemoteFixture {
+        crate::home::isolate_for_tests();
+        let (api_dir, api) = workspace("api", &[("only-api.txt", "api secret\n")]);
+        let remote = CcnmMember {
+            id: "remote-prod".into(),
+            name: "prod".into(),
+            ccnm_bin: "ccnm".into(),
+            node: "work".into(),
+            workspace: "server".into(),
+            max_mode: Mode::Read,
+        };
+        let mut settings = AppSettings::default();
+        settings.hub.members = vec![api.id.clone(), remote.id.clone()];
+        let config = settings.hub.clone();
+        let hub = Hub::fixed_with_opener(
+            &config,
+            Fixed {
+                profiles: vec![api.clone()],
+                remotes: vec![remote.clone()],
+                settings,
+            },
+            Box::new(spy.clone()),
+        );
+        RemoteFixture {
+            _dirs: vec![api_dir],
+            hub,
+            api,
+            remote,
+            spy,
+        }
+    }
+
+    /// 远端工具只在 hub 真有远端成员时才列出来。
+    #[test]
+    fn the_remote_tools_show_up_only_when_a_remote_member_is_configured() {
+        let names = |hub: &Hub| -> Vec<String> {
+            hub.list_tools()
+                .iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                .collect()
+        };
+
+        let only_local = fixture();
+        assert!(
+            !names(&only_local.hub)
+                .iter()
+                .any(|name| name.starts_with("remote_")),
+            "没有远端成员却列了远端工具：{:?}",
+            names(&only_local.hub)
+        );
+
+        let with_remote = remote_fixture(RemoteSpy::new());
+        let listed = names(&with_remote.hub);
+        for expected in remote_tool_names() {
+            assert!(listed.contains(&expected.to_string()), "{listed:?}");
+        }
+        // 本地工具一个没少。
+        assert!(listed.contains(&"read_file".to_string()), "{listed:?}");
+    }
+
+    /// 远端成员的调用经 bridge 转发，结果**原样**回来。
+    #[test]
+    fn a_remote_call_goes_through_the_bridge_and_comes_back_unchanged() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let result = raw_call(
+            &fixture.hub,
+            "remote_read_file",
+            json!({ "workspace": "prod", "path": "src/main.rs", "max_lines": 20 }),
+        );
+
+        assert_eq!(fixture.spy.opens(), 1, "该开一条 bridge");
+        let calls = fixture.spy.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        // 转发的是 ccnm 的工具名，不是 hub 对外那个带前缀的。
+        assert_eq!(calls[0]["name"], json!("read_file"));
+        assert_eq!(
+            calls[0]["arguments"],
+            json!({ "path": "src/main.rs", "max_lines": 20 }),
+            "路由字段 workspace 不该跟着出去"
+        );
+
+        // 远端说什么就是什么：content 和 structuredContent 一个字不改。
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("line 1 of the remote file")
+        );
+        assert_eq!(
+            result["structuredContent"],
+            json!({ "ok": true, "lines": 1 })
+        );
+        assert_eq!(result["isError"], json!(false));
+        // 是谁答的放在 _meta，不塞进 ccnm 的结构化结果里。
+        assert_eq!(result["_meta"]["gld/workspace"]["id"], json!("remote-prod"));
+        assert_eq!(result["_meta"]["gld/mode"], json!("read"));
+    }
+
+    /// 远端工具自己报的错是工具的话，不是连接出问题，外层不能改写成成功，
+    /// 也不能翻译成 hub 自己的错误码。
+    #[test]
+    fn an_error_from_the_remote_tool_itself_is_passed_through() {
+        let mut spy = RemoteSpy::new();
+        spy.tool_fails = true;
+        let fixture = remote_fixture(spy);
+
+        let result = raw_call(
+            &fixture.hub,
+            "remote_read_file",
+            json!({ "workspace": "prod", "path": "../../etc/passwd" }),
+        );
+        assert_eq!(result["isError"], json!(true), "{result}");
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("CCNM_E_PATH_OUTSIDE_ROOT"),
+            "远端的诊断被改写了：{result}"
+        );
+    }
+
+    /// 本地工具用在远端成员上：明确拒绝，**不在本机执行**。
+    ///
+    /// gld 本机也有 `search_text`、`list_files`，跟 ccnm 的同名工具不是一个
+    /// 契约——悄悄在本机跑一遍，模型拿到的是另一台机器的答案。
+    #[test]
+    fn a_local_tool_aimed_at_a_remote_member_is_refused_and_runs_nowhere() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        for tool in ["read_file", "search_text", "list_files", "exec_command"] {
+            let refused = call(
+                &fixture.hub,
+                tool,
+                json!({ "workspace": "prod", "path": "only-api.txt", "query": "x", "cmd": "id" }),
+            );
+            assert_eq!(
+                refused["error"]["code"], "TOOL_IS_LOCAL_ONLY",
+                "{tool}: {refused}"
+            );
+            // 报错要告诉模型该用哪个。
+            assert!(
+                refused["error"]["details"]["remote_tools"]
+                    .to_string()
+                    .contains("remote_read_file"),
+                "{refused}"
+            );
+        }
+        assert_eq!(fixture.spy.opens(), 0, "既没本地跑，也不该往远端转");
+        assert!(
+            !fixture
+                .hub
+                .contexts
+                .lock()
+                .expect("contexts")
+                .contains_key(&fixture.remote.id),
+            "远端成员不该有本机工具上下文"
+        );
+    }
+
+    /// 远端工具用在本地成员上：一样拒绝，不往任何 bridge 转。
+    #[test]
+    fn a_remote_tool_aimed_at_a_local_member_is_refused_and_not_forwarded() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let refused = call(
+            &fixture.hub,
+            "remote_read_file",
+            json!({ "workspace": "api", "path": "only-api.txt" }),
+        );
+        assert_eq!(
+            refused["error"]["code"], "TOOL_IS_FOR_REMOTE_WORKSPACES",
+            "{refused}"
+        );
+        assert_eq!(fixture.spy.opens(), 0, "本地成员不该开 bridge");
+        assert!(
+            !refused.to_string().contains("api secret"),
+            "不该读到文件内容：{refused}"
+        );
+    }
+
+    /// 远端成员不产生任何本机工作区状态：没有 ToolContext，也没有 exec 会话表。
+    /// 这是验收项 H01 的后半句。
+    #[test]
+    fn a_remote_member_leaves_no_local_workspace_state() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let (response, routed) = fixture.hub.handle_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "remote_workspace_info",
+                "arguments": { "workspace": "prod" }
+            }
+        }));
+        assert_eq!(response["result"]["isError"], json!(false), "{response}");
+        let routed = routed.expect("该记下落到了哪个成员");
+        assert_eq!(routed.workspace_id, "remote-prod");
+        assert!(routed.context.is_none(), "远端不该带本机工具上下文");
+        assert!(fixture.hub.contexts.lock().expect("contexts").is_empty());
+    }
+
+    /// 少了必填参数在 hub 这边就拦下，不白开一条 bridge。
+    #[test]
+    fn a_remote_call_missing_a_required_argument_never_reaches_the_bridge() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let refused = call(
+            &fixture.hub,
+            "remote_read_file",
+            json!({ "workspace": "prod" }),
+        );
+        assert_eq!(refused["error"]["code"], "MISSING_ARGUMENT", "{refused}");
+        assert!(refused["error"]["details"]["missing"]
+            .to_string()
+            .contains("path"));
+        assert_eq!(fixture.spy.opens(), 0);
+    }
+
+    /// bridge 起不来要说清是哪一种失败：ccnm 没装和网络抖了一下，
+    /// 操作员要去看的地方完全不同。
+    #[test]
+    fn a_bridge_that_cannot_start_is_reported_as_such() {
+        let mut spy = RemoteSpy::new();
+        spy.cannot_start = true;
+        let fixture = remote_fixture(spy);
+
+        let failed = call(
+            &fixture.hub,
+            "remote_read_file",
+            json!({ "workspace": "prod", "path": "a.rs" }),
+        );
+        assert_eq!(
+            failed["error"]["code"], "REMOTE_BRIDGE_NOT_STARTED",
+            "{failed}"
+        );
+        assert_eq!(failed["error"]["retryable"], json!(false), "{failed}");
+        assert!(
+            failed["summary"].as_str().unwrap_or("").contains("ccnm"),
+            "得说出是哪个程序没起来：{failed}"
+        );
+    }
+
+    /// list_workspaces 要分清哪些在别的机器上，**不给远端编一个本机路径**。
+    #[test]
+    fn list_workspaces_marks_the_remote_ones_and_invents_no_path() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let listed = call(&fixture.hub, LIST_WORKSPACES, json!({}));
+        let workspaces = listed["workspaces"].as_array().expect("workspaces");
+        assert_eq!(workspaces.len(), 2, "{listed}");
+
+        let local = &workspaces[0];
+        assert_eq!(local["kind"], json!("local"));
+        assert_eq!(local["path"], json!(fixture.api.path));
+
+        let remote = &workspaces[1];
+        assert_eq!(remote["kind"], json!("remote"));
+        assert_eq!(remote["mode"], json!("read"));
+        assert!(remote.get("path").is_none(), "远端不该有 path：{remote}");
+        assert!(
+            remote["tools"].to_string().contains("remote_read_file"),
+            "{remote}"
+        );
+        // 对面机器上的节点名和 workspace 名不外报，模型路由只需要 id。
+        assert!(!listed.to_string().contains("server"), "{listed}");
+    }
+
+    /// 成员被移出 hub：下一次请求就断掉它的 bridge，不等空闲到期。
+    #[test]
+    fn removing_a_remote_member_closes_its_bridge() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let ok = raw_call(
+            &fixture.hub,
+            "remote_workspace_info",
+            json!({ "workspace": "prod" }),
+        );
+        assert_eq!(ok["isError"], json!(false), "{ok}");
+        assert_eq!(fixture.spy.opens(), 1);
+
+        let remote_id = fixture.remote.id.clone();
+        update_fixed(&fixture.hub, |_, settings| {
+            settings.hub.members.retain(|id| id != &remote_id);
+        });
+
+        let after = call(
+            &fixture.hub,
+            "remote_workspace_info",
+            json!({ "workspace": "prod" }),
+        );
+        assert_eq!(after["error"]["code"], "WORKSPACE_NOT_IN_HUB", "{after}");
+        assert_eq!(fixture.spy.closes(), 1, "摘掉了成员却没断连接");
     }
 
     #[test]
