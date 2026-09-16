@@ -1,6 +1,6 @@
 # RFC-0002：共享 Rust 内核，gld hub 接入 ccnm Runtime
 
-日期：2026-09-15。方向已由用户确认；本文为实施方案，代码与公开字段尚未实施。
+日期：2026-09-15。方向已由用户确认；本文为实施方案。**2026-09-16 已实施**：共享内核 K1/K2 与 hub 接入 H1–H8 都落地了，逐项对照在第 9 节的补记；正文其余部分保留为当时的方案。Codex 原生 exec-server 那条线不在 gld 里，进度在 ccnm（P21–P24）和 toexec 的 v2 计划。
 
 本 RFC 替代 [RFC-0001 的 WebCodex 服务采用路线](0001-shared-workspace-runtime.md)。不增加第三个 Server，不部署 WebCodex，不重写模型循环。原[证据附录](0001-shared-workspace-runtime-evidence.md)中的源码事实继续适用，不继续执行其中的服务准入计划。
 

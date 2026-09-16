@@ -92,7 +92,7 @@ gld destroy                   # 连配置和密钥一起删掉；项目文件不
 | 装 / 升级 / 卸载 | [install.md](docs/install.md) |
 | 从桌面版迁移过来 | [migrate-from-desktop.md](docs/migrate-from-desktop.md) |
 | 改这个项目的代码 | [architecture.md](docs/architecture.md)、[development.md](docs/development.md) |
-| 看共享 Rust 内核、hub 接 ccnm 远端工具的方案（尚未实施） | [RFC-0002](docs/rfc/0002-shared-kernel-and-ccnm-hub.md) |
+| 看共享 Rust 内核、hub 接 ccnm 远端工具的方案和落地记录（已实施，第 9 节） | [RFC-0002](docs/rfc/0002-shared-kernel-and-ccnm-hub.md) |
 
 ## Credits
 
