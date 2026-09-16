@@ -3,7 +3,8 @@
 //! gld 本来只有 MCP **服务端**（`mcp::listener`），这是第一个客户端方向的
 //! 实现。它只做 RFC-0002 第 5 节要的那几件事：initialize、tools/list、
 //! tools/call、ping、关闭，**不做**通用 MCP 客户端——没有 sampling、没有
-//! roots、不实现服务端反向请求。
+//! roots。服务端反过来问我们的，只答 `ping`（见 [`Peer::answer`]），别的
+//! 一律回 `-32601`。
 //!
 //! 传输抽成 [`Transport`]，所以协议逻辑能用内存管道测，不必每个用例都起
 //! 一个进程。只有 [`spawn`] 这一步碰真实子进程。
@@ -236,6 +237,32 @@ impl<T: Transport> Peer<T> {
         self.transport.shutdown(grace);
     }
 
+    /// 回答服务端反过来发的请求。
+    ///
+    /// **只认 `ping`，别的一律回"没有这个方法"。**ccnm 的远端 server 空闲时
+    /// 每 30 秒发一次 ping（协议第 6.2 节），它是用来探对面死没死的：Host
+    /// 在就回一句，Host 没了这一写会被内核 RST，server 于是读到 EOF 正常收尾、
+    /// 释放写锁。**不答的后果不是断线，是远端迟迟发现不了我们已经走了**，
+    /// coding 模式下那把写锁就一直占着。
+    ///
+    /// 答不出去（管道已经坏了）当成写失败往上报：这条连接确实不能用了。
+    fn answer(&mut self, id: Value, method: Option<&str>) -> Result<(), PeerError> {
+        let reply = match method {
+            Some("ping") => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+            other => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("gld-hub does not implement {}", other.unwrap_or("that"))
+                }
+            }),
+        };
+        self.transport
+            .send_line(&reply.to_string())
+            .map_err(PeerError::Write)
+    }
+
     /// 发一条请求并等回复。
     fn request(
         &mut self,
@@ -289,9 +316,15 @@ impl<T: Transport> Peer<T> {
                     });
                 }
             };
-            // 服务端自己发的通知没有 id，跳过继续等自己的回复。
             match message.get("id") {
+                // 自己那条的回复。
                 Some(Value::Number(got)) if got.as_u64() == Some(id) => {}
+                // 有 id 又有 method，是**服务端反过来问我们**。答完接着等。
+                Some(other) if message.get("method").is_some() => {
+                    self.answer(other.clone(), message.get("method").and_then(Value::as_str))?;
+                    continue;
+                }
+                // 通知（没有 id），或者别人那条请求的回复。跳过。
                 _ => continue,
             }
             if let Some(error) = message.get("error") {
@@ -594,6 +627,64 @@ mod tests {
         let tools = peer.list_tools(QUICK).expect("列工具");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], json!("read_file"));
+    }
+
+    /// 服务端反过来发的 ping 要答，不能只是跳过。
+    ///
+    /// ccnm 的远端 server 空闲时每 30 秒发一次，用它探 Host 死没死；不答的话
+    /// 远端迟迟发现不了我们已经走了，coding 模式下写锁就一直占着。
+    #[test]
+    fn a_ping_from_the_server_is_answered_and_then_we_keep_waiting() {
+        let mut peer = Peer::new(Scripted::new(vec![
+            Reply::Line(json!({ "jsonrpc": "2.0", "id": 77, "method": "ping" }).to_string()),
+            ok(1, json!({ "tools": [{ "name": "read_file" }] })),
+        ]));
+        let tools = peer.list_tools(QUICK).expect("列工具");
+        assert_eq!(tools.len(), 1, "ping 之后自己那条回复还是要拿到");
+
+        let answered: Vec<&String> = peer
+            .transport
+            .sent
+            .iter()
+            .filter(|line| line.contains("\"id\":77"))
+            .collect();
+        assert_eq!(
+            answered.len(),
+            1,
+            "该答且只答一次：{:?}",
+            peer.transport.sent
+        );
+        let reply: Value = serde_json::from_str(answered[0]).expect("回复是 JSON");
+        assert_eq!(reply["result"], json!({}), "ping 的回复是空结果");
+        assert!(reply.get("error").is_none(), "{reply}");
+    }
+
+    /// 服务端问一个我们不做的方法：回标准的 -32601，不能装死也不能断连接。
+    #[test]
+    fn an_unknown_request_from_the_server_gets_method_not_found() {
+        let mut peer = Peer::new(Scripted::new(vec![
+            Reply::Line(
+                json!({ "jsonrpc": "2.0", "id": 5, "method": "sampling/createMessage" })
+                    .to_string(),
+            ),
+            ok(1, json!({ "tools": [] })),
+        ]));
+        peer.list_tools(QUICK).expect("自己那条照样成功");
+        let reply: Value = peer
+            .transport
+            .sent
+            .iter()
+            .find(|line| line.contains("\"id\":5"))
+            .map(|line| serde_json::from_str(line).expect("回复是 JSON"))
+            .expect("应该答了一条");
+        assert_eq!(reply["error"]["code"], json!(-32601), "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("sampling/createMessage"),
+            "{reply}"
+        );
     }
 
     /// 别人那条请求的回复也不能当成自己的。
