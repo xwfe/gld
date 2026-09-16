@@ -58,8 +58,12 @@ fn operation_log(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErro
 
 fn project_state(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let max_files = crate::tools::args::bounded(args, "project_state", "max_files") as usize;
-    serde_json::to_value(ctx.harness.project_state(max_files).map_err(map_error)?)
-        .map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))
+    let mut state = serde_json::to_value(ctx.harness.project_state(max_files).map_err(map_error)?)
+        .map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))?;
+    if let Some(task) = state.get_mut("task").filter(|task| task.is_object()) {
+        *task = without_baseline_entries(task.take());
+    }
+    Ok(state)
 }
 
 fn start_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -68,7 +72,7 @@ fn start_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> 
         .and_then(Value::as_str)
         .ok_or_else(|| tool_error("INVALID_ARGUMENT", "objective 是必填项"))?;
     let task = ctx.harness.start_task(objective).map_err(map_error)?;
-    Ok(json!({"task": task, "next": ["project_state", "task_context"]}))
+    Ok(json!({"task": task_view(&task)?, "next": ["project_state", "task_context"]}))
 }
 
 fn update_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -79,7 +83,7 @@ fn update_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
         .harness
         .update_steps(task_id, completed_steps, pending_steps)
         .map_err(map_error)?;
-    Ok(json!({"task": task}))
+    Ok(json!({"task": task_view(&task)?}))
 }
 
 fn transition(
@@ -91,7 +95,7 @@ fn transition(
         .harness
         .transition(task_id(args)?, status)
         .map_err(map_error)?;
-    Ok(json!({"task": task}))
+    Ok(json!({"task": task_view(&task)?}))
 }
 
 fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -107,7 +111,7 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
     };
     let task = ctx.harness.transition(task_id, status).map_err(map_error)?;
     let summary = change_summary(ctx, &json!({"task_id": task_id}))?;
-    Ok(json!({"task": task, "change_summary": summary}))
+    Ok(json!({"task": task_view(&task)?, "change_summary": summary}))
 }
 
 fn task_context(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -156,17 +160,25 @@ fn task_context(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError
 /// 装事件时一次向存储要几条。只决定读几次文件，装多少由 max_bytes 决定。
 const EVENT_PAGE: usize = 100;
 
-/// 回给客户端的任务。基线的逐文件清单（每个文件一条路径加 sha256）只供服务端
-/// check_baseline 比对，客户端拿到也用不上；它随项目文件数线性涨，2108 个文件的
-/// 项目约 450 KB。这里只留条数，指纹、分支、HEAD 照旧。
+/// 回给客户端的任务。凡是把任务交给客户端的工具都走这里。
 fn task_view(task: &TaskSession) -> Result<Value, WorkspaceError> {
-    let mut value =
-        serde_json::to_value(task).map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))?;
-    if let Some(baseline) = value.get_mut("baseline").and_then(Value::as_object_mut) {
-        baseline.remove("entries");
-        baseline.insert("entry_count".into(), json!(task.baseline.entries.len()));
+    serde_json::to_value(task)
+        .map(without_baseline_entries)
+        .map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))
+}
+
+/// 基线的逐文件清单（每个文件一条路径加 sha256）只供服务端 check_baseline 比对，
+/// 客户端拿到也用不上；它随项目文件数线性涨，2108 个文件的项目约 450 KB，以前
+/// 开任务、改步骤、暂停、结束每次都原样回一遍。只留条数，指纹、分支、HEAD 照旧。
+fn without_baseline_entries(mut task: Value) -> Value {
+    if let Some(baseline) = task.get_mut("baseline").and_then(Value::as_object_mut) {
+        let count = baseline
+            .remove("entries")
+            .and_then(|entries| entries.as_array().map(Vec::len))
+            .unwrap_or(0);
+        baseline.insert("entry_count".into(), json!(count));
     }
-    Ok(value)
+    task
 }
 
 fn json_len(value: &impl serde::Serialize) -> Result<usize, WorkspaceError> {

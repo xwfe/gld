@@ -320,12 +320,8 @@ fn reply_bytes(value: &serde_json::Value) -> usize {
     serde_json::to_vec(value).expect("序列化").len()
 }
 
-/// task_context 的 schema 声明了 max_bytes，以前代码不读：`task` 里带着
-/// 基线的逐文件清单（每个文件一条 sha256），2108 个文件的项目光这一项就约
-/// 450 KB，远超 schema 的上限 131072。
-#[test]
-fn task_context_在文件很多的工作区也不超过_max_bytes() {
-    let temp = tempfile::tempdir().expect("创建临时目录");
+/// 1500 个文件的工作区。基线每个文件记一条，这个数量下整份清单约 27 万字节。
+fn many_files_context(temp: &tempfile::TempDir) -> ToolContext {
     let workspace = temp.path().join("workspace");
     for i in 0..1500 {
         let dir = workspace.join(format!("src/module_{i:04}"));
@@ -336,7 +332,16 @@ fn task_context_在文件很多的工作区也不超过_max_bytes() {
         )
         .expect("写入文件");
     }
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文")
+}
+
+/// task_context 的 schema 声明了 max_bytes，以前代码不读：`task` 里带着
+/// 基线的逐文件清单（每个文件一条 sha256），2108 个文件的项目光这一项就约
+/// 450 KB，远超 schema 的上限 131072。
+#[test]
+fn task_context_在文件很多的工作区也不超过_max_bytes() {
+    let temp = tempfile::tempdir().expect("创建临时目录");
+    let ctx = many_files_context(&temp);
     let started = call_tool(&ctx, "start_task", &json!({"objective": "大仓库"}));
     assert_eq!(started["ok"], true, "{started}");
 
@@ -422,4 +427,58 @@ fn task_context_按字节装事件并说清从哪接着读() {
     assert_eq!(large["events"].as_array().unwrap().len(), all.len());
     assert_eq!(large["truncated"], false);
     assert_eq!(large["next_cursor"], all.len());
+}
+
+/// 基线的逐文件清单只供服务端比对。task_context 之外，凡是把任务回给客户端
+/// 的工具以前都原样带着它：在这个工作区里开任务、改步骤、暂停、恢复、看项目
+/// 状态、结束，每一次都是二十多万字节。
+#[test]
+fn 回给客户端的任务都不带逐文件清单() {
+    let temp = tempfile::tempdir().expect("创建临时目录");
+    let ctx = many_files_context(&temp);
+    let started = call_tool(&ctx, "start_task", &json!({"objective": "大仓库"}));
+    let task_id = started["task"]["id"].as_str().expect("任务 ID").to_string();
+    let replies = [
+        ("start_task", started),
+        (
+            "update_task",
+            call_tool(
+                &ctx,
+                "update_task",
+                &json!({"task_id": task_id, "pending_steps": ["下一步"]}),
+            ),
+        ),
+        (
+            "pause_task",
+            call_tool(&ctx, "pause_task", &json!({"task_id": task_id})),
+        ),
+        (
+            "resume_task",
+            call_tool(&ctx, "resume_task", &json!({"task_id": task_id})),
+        ),
+        (
+            "project_state",
+            call_tool(&ctx, "project_state", &json!({"max_files": 1})),
+        ),
+        (
+            "finish_task",
+            call_tool(
+                &ctx,
+                "finish_task",
+                &json!({"task_id": task_id, "allow_unverified": true}),
+            ),
+        ),
+    ];
+    for (tool, reply) in replies {
+        assert_eq!(reply["ok"], true, "{tool}: {reply}");
+        let baseline = &reply["task"]["baseline"];
+        assert!(baseline.get("entries").is_none(), "{tool} 还带着逐文件清单");
+        assert_eq!(baseline["entry_count"], 1500, "{tool}");
+        // 只量 task 本身：finish_task 附带的 change_summary 另有 200 条文件的上限。
+        assert!(
+            reply_bytes(&reply["task"]) <= 4096,
+            "{tool} 的 task 有 {} 字节",
+            reply_bytes(&reply["task"])
+        );
+    }
 }
