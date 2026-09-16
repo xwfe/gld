@@ -410,11 +410,19 @@ fn search_file_streaming(
         };
         line_no += 1;
 
+        // 要留下来当 context 的那一份先截到 `max_preview_bytes`，跟 preview 同一把尺子。
+        // 不截断的话一行会被克隆很多份：`recent` 存最近 context_lines 行，同时最多有
+        // context_lines + 1 个待定匹配，每个又各存一份 before 和一份 after。实测 41 行
+        // 每行 1 MiB（`SEARCH_LINE_KEEP` 的上限）配 context_lines=20，结果里的字符串
+        // 就有 1.19 GiB，进程峰值 RSS 2.5 GB。
+        // 匹配用的还是整行，截断只影响留存，搜得到什么没变。
+        let context = (context_lines > 0).then(|| preview_line(&line, max_preview));
+
         // Feed "after" context for earlier hits.
-        if context_lines > 0 {
+        if let Some(context) = &context {
             for pend in &mut pending {
                 if pend.after.len() < context_lines {
-                    pend.after.push(line.clone());
+                    pend.after.push(context.clone());
                 }
             }
             while pending
@@ -430,30 +438,30 @@ fn search_file_streaming(
         }
 
         if matcher.is_match(&line) {
-            let preview = preview_line(&line, max_preview);
-            if context_lines == 0 {
+            if let Some(context) = &context {
+                pending.push(PendingMatch {
+                    path: rel.to_string(),
+                    line: line_no,
+                    // preview 跟 context 是同一把尺子截出来的，复用这一份。
+                    preview: context.clone(),
+                    before: recent.iter().cloned().collect(),
+                    after: Vec::new(),
+                });
+            } else {
                 matches.push(json!({
                     "path": rel,
                     "line": line_no,
                     "column": 1,
-                    "preview": preview
+                    "preview": preview_line(&line, max_preview)
                 }));
                 if matches.len() >= max_results {
                     return true;
                 }
-            } else {
-                pending.push(PendingMatch {
-                    path: rel.to_string(),
-                    line: line_no,
-                    preview,
-                    before: recent.iter().cloned().collect(),
-                    after: Vec::new(),
-                });
             }
         }
 
-        if context_lines > 0 {
-            recent.push_back(line);
+        if let Some(context) = context {
+            recent.push_back(context);
             while recent.len() > context_lines {
                 recent.pop_front();
             }
@@ -491,6 +499,8 @@ impl PendingMatch {
     }
 }
 
+/// 一行截到 `max_preview` 字节，切在字符边界上，截过的以 `...` 收尾。
+/// preview 和 before/after 的 context 行都走这里。
 fn preview_line(line: &str, max_preview: usize) -> String {
     if line.len() <= max_preview {
         return line.to_string();
@@ -1035,6 +1045,62 @@ mod tests {
         assert!(
             late["matches"].as_array().expect("matches").is_empty(),
             "保留上限之后的内容不该被搜到：{late}"
+        );
+    }
+
+    /// 结果里所有字符串加起来多少字节。context 的克隆全都落在这里，所以这个
+    /// 数就是放大程度，不用去量进程 RSS。
+    fn held_string_bytes(value: &Value) -> usize {
+        match value {
+            Value::String(text) => text.len(),
+            Value::Array(items) => items.iter().map(held_string_bytes).sum(),
+            Value::Object(fields) => fields.values().map(held_string_bytes).sum(),
+            _ => 0,
+        }
+    }
+
+    /// context 行不截断的话，`context_lines: 20` 会把整行克隆几十份（为什么克隆
+    /// 这么多份，见 `search_file_streaming` 里的注释）。
+    ///
+    /// 下面这份 41 行、每行 64 KiB 的文件，修之前结果里的字符串有 79,972,193 字节、
+    /// 进程峰值 RSS 212 MB，修之后是 326,933 字节、RSS 11 MB；1 MiB 的阈值卡在中间。
+    #[test]
+    fn long_context_lines_are_clipped_instead_of_cloned_whole() {
+        let dir = tempfile::tempdir().expect("dir");
+        let wide = "x".repeat(64 * 1024);
+        std::fs::write(
+            dir.path().join("wide.txt"),
+            format!("needle{wide}\n").repeat(41),
+        )
+        .expect("write");
+        let ws = Workspace::new(dir.path().to_path_buf()).expect("workspace");
+
+        let result = search_text(
+            &ws,
+            &json!({
+                "query": "needle",
+                "context_lines": 20,
+                "max_file_bytes": 67_108_864u64,
+            }),
+        )
+        .expect("search");
+
+        let matches = result["matches"].as_array().expect("matches");
+        assert_eq!(matches.len(), 41);
+        let held = held_string_bytes(&result);
+        assert!(
+            held < 1024 * 1024,
+            "context 行还在整行克隆：结果里有 {held} 字节"
+        );
+
+        // 行为变了，钉死：超长的 context 行按 max_preview_bytes（默认 256）截断，
+        // 跟 preview 一样以 ... 收尾。
+        let before = matches[1]["before"][0].as_str().expect("before");
+        assert_eq!(before, matches[1]["preview"].as_str().expect("preview"));
+        assert_eq!(before.len(), 256 + "...".len());
+        assert_eq!(
+            matches[1]["after"][0].as_str().expect("after").len(),
+            256 + "...".len()
         );
     }
 }
