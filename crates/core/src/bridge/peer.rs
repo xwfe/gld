@@ -112,6 +112,29 @@ pub trait Transport: Send {
     fn stderr_tail(&self) -> String {
         String::new()
     }
+    /// 收工：告诉对面没有更多请求了，最多等它 `grace` 自己退出。
+    ///
+    /// 默认什么都不做——内存传输没有进程要收。调用之后这条通道就废了。
+    fn shutdown(&mut self, grace: Duration) {
+        let _ = grace;
+    }
+}
+
+/// 连接池里放的是 `Box<dyn Transport>`（同一个池里既有子进程也有测试用的
+/// 合成通道），所以盒子本身也得是一条通道。
+impl Transport for Box<dyn Transport> {
+    fn send_line(&mut self, line: &str) -> std::io::Result<()> {
+        (**self).send_line(line)
+    }
+    fn recv_line(&mut self, timeout: Duration) -> Result<Option<String>, RecvTimeoutError> {
+        (**self).recv_line(timeout)
+    }
+    fn stderr_tail(&self) -> String {
+        (**self).stderr_tail()
+    }
+    fn shutdown(&mut self, grace: Duration) {
+        (**self).shutdown(grace)
+    }
 }
 
 /// 跟一个 MCP 服务端的一次连接。
@@ -206,6 +229,11 @@ impl<T: Transport> Peer<T> {
     /// 探活。**不能拿它当租期续期的凭据**——传输层还通不代表 Web 那头还有人。
     pub fn ping(&mut self, timeout: Duration) -> Result<(), PeerError> {
         self.request("ping", json!({}), timeout).map(|_| ())
+    }
+
+    /// 收工。之后这个 `Peer` 就废了，调用方负责丢掉它。
+    pub fn shutdown(&mut self, grace: Duration) {
+        self.transport.shutdown(grace);
     }
 
     /// 发一条请求并等回复。
@@ -314,7 +342,9 @@ fn truncate(text: &str, max: usize) -> String {
 /// 一个黑洞掉的 SSH 会把 hub 的工作线程永远挂住。
 pub struct ChildTransport {
     child: Child,
-    stdin: ChildStdin,
+    /// 关掉之后是 `None`：[`Transport::shutdown`] 只能拿走一次，而它拿走的
+    /// 正是「对面会读到 EOF」这件事。
+    stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     stderr: Arc<Mutex<VecDeque<u8>>>,
 }
@@ -344,19 +374,24 @@ impl ChildTransport {
 
         Ok(ChildTransport {
             child,
-            stdin,
+            stdin: Some(stdin),
             lines,
             stderr: kept,
         })
     }
 
-    /// 结束这个连接：关掉 stdin 让对面读到 EOF，再等它退出。
+    /// 结束这个连接并报告它是怎么走的。`None` = 宽限期内没退出，被杀掉了。
+    pub fn close(mut self, grace: Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.wait_out(grace)
+    }
+
+    /// 关掉 stdin 让对面读到 EOF，再等它退出。
     ///
     /// **不是先 kill**。ccnm 的 `mcp-serve` 读到 EOF 会正常收尾并释放
     /// Runtime 那边的写锁；直接杀掉会留下 `held` 标记，要人工恢复（ccnm
     /// 的运维文档写过这个坑）。
-    pub fn close(mut self, grace: Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
-        drop(self.stdin);
+    fn wait_out(&mut self, grace: Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.stdin.take();
         let deadline = Instant::now() + grace;
         loop {
             match self.child.try_wait()? {
@@ -376,9 +411,15 @@ impl ChildTransport {
 
 impl Transport for ChildTransport {
     fn send_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.stdin.write_all(line.as_bytes())?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "this bridge connection was already closed",
+            ));
+        };
+        stdin.write_all(line.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()
     }
 
     fn recv_line(&mut self, timeout: Duration) -> Result<Option<String>, RecvTimeoutError> {
@@ -397,6 +438,10 @@ impl Transport for ChildTransport {
         String::from_utf8_lossy(&kept.iter().copied().collect::<Vec<_>>())
             .trim()
             .to_string()
+    }
+
+    fn shutdown(&mut self, grace: Duration) {
+        let _ = self.wait_out(grace);
     }
 }
 
