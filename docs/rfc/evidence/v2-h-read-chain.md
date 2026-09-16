@@ -1,6 +1,6 @@
 # V2-H 远端链的现场证据
 
-H1 用合成 peer 和本机真 ccnm；H2 只读链和 H3 写链都跨两台真实机器。
+H1 用合成 peer 和本机真 ccnm；H2 只读链、H3 写链、H08 完整闭环都跨两台真实机器。
 
 2026-09-16。走的是真的 HTTP MCP 客户端 → 真的 bearer 鉴权 → 真的
 `ccnm mcp bridge` 子进程，不是单元测试里的合成通道。
@@ -253,7 +253,12 @@ fix: remove the runtime account from those groups / use a Runtime identity
 
 结果是：想开一个只读远端 workspace 的人，收到的是一屏 exec 和凭据的告警，
 并被告知去设 `allow_unconfined_exec`——那个名字听起来比他实际在做的事危险得多。
-这是 ccnm 那边的事，不在本次范围内，记在这里免得丢。
+
+> **后续（同日）**：这条已经报给 ccnm 并有人在改。做 H08 时发现探针配置里的
+> `allow_unconfined_exec` 已经被去掉，而四个只读工具照常工作——也就是只读链
+> 不再需要那个开关了。两个 opt-in 现在分工清楚：
+> `allow_unisolated_credentials` 管建会话那道闸（只读和 coding 都要），
+> `allow_unconfined_exec` 只管 `exec_command`。详见 H08 最后一节。
 
 ---
 
@@ -339,6 +344,128 @@ message   : … CCNM_E_POLICY:
 
 gld 一个字没改。这句话是给模型和看日志的人看的，吞掉它等于替远端隐瞒风险。
 
+---
+
+# H08：真实 Web 客户端走完 read → search → patch → test → 结果 → 关闭
+
+同日。一个纯 HTTP 的 MCP 客户端（100 行 Python，只发 JSON-RPC，不碰 gld 的
+任何内部 API），经 hub → `ccnm mcp bridge` → SSH → fodelf。**没有启动任何模型
+进程**，只动试点目录 `~/gld-remote-probe/`。
+
+下面的输出是脱敏后的原样：bearer token 从不打印，coding 句柄只留前 8 位。
+
+## 试点项目
+
+探针目录里放了一个真会红的小项目：`calc.py` 的 `tally()` 少算最后一个元素，
+`test_calc.py` 有三个 unittest。
+
+## 1. 先弄清这个远端项目是什么
+
+```
+workspace_info   (509 ms)  workspace gldprobe (not a git repository, macos/aarch64)
+                           [server pid 4429, call 1]
+list_files        (67 ms)  glob=**/*.py → calc.py, test_calc.py
+                           [2 matches for **/*.py under .]
+search_text      (116 ms)  query=BUG context_lines=2
+                           calc.py
+                           6-    total = 0
+                           7:    # BUG: 少算了最后一个…
+                           8-    for value in values[:-1]:
+read_file         (37 ms)  1..14 行，末尾 version 393-18d5ba62ec2b51a4
+```
+
+`search_text` 的 `context_lines` 和 `list_files` 的 `glob` 都是这次才补进白名单
+的参数——冻结 fixture 里没有它们，是照 ccnm 源码加的。这一步顺带证明了它们
+真的能用。
+
+## 2. 开写会话，先看红
+
+```
+coding_begin     (476 ms)  rc-c55ab…
+exec_command     (143 ms)  $ python3 -m unittest -v
+                           exit 1 in 80 ms, 0 B stdout, 1147 B stderr
+                           test_mean ... FAIL
+                           test_empty ... ok
+                           test_sums_everything ... FAIL
+                           AssertionError: 2.0 != 4
+```
+
+## 3. 打补丁
+
+```
+apply_patch  dry_run  (42 ms)  update calc.py (1 edit, 393 -> 314 bytes)
+                               [dry run: 1 file would change, nothing was written]
+apply_patch  真写     (65 ms)  update calc.py (1 edit, 393 -> 314 bytes)
+                               version 314-18d5ba633817b295
+                               [1 file changed]
+```
+
+**然后故意拿刚才那个已经过期的 version 再打一次：**
+
+```
+CCNM_E_STALE_EPOCH: calc.py has changed since you read it
+(version 393-18d5ba62ec2b51a4 is now 314-18d5ba633817b295);
+read it again before patching, or your edit would overwrite whatever changed
+```
+
+这是整条链里最值钱的一条证据：**远端的版本守卫是活的**，gld 一个字没改地把它
+交回来了。模型基于旧内容算出来的编辑不会悄悄覆盖别人的改动。
+
+## 4. 再看绿
+
+```
+exec_command     (111 ms)  $ python3 -m unittest -v
+                           ok in 65 ms, 0 B stdout, 268 B stderr
+                           test_mean ... ok
+                           test_empty ... ok
+                           test_sums_everything ... ok
+                           Ran 3 tests in 0.000s
+                           OK
+                           [output_ref r-27ca97b321d14e5f]
+                           [this runtime is NOT confined (running as fodelf) and this
+                            workspace has allow_unconfined_exec set; …]
+read_output       (36 ms)  stream=stderr offset=0 limit=400
+                           （同样三行 ok，[end of stderr at 268 bytes]）
+```
+
+那段安全提示 gld 一个字没改地透传了。吞掉它等于替远端隐瞒风险。
+
+## 5. 关掉
+
+```
+coding_end        (62 ms)  {"closed": true, …}
+再用同一个句柄     (17 ms)  REMOTE_CODING_HANDLE_UNKNOWN
+read_file        (175 ms)  7→    for value in values:      ← 改动确实落盘了
+                           version 314-18d5ba633817b295
+```
+
+最后这一读走的是**只读那条连接**（175 ms，新开的 SSH），证明改动是真的写进了
+那台机器的磁盘，不是会话里的幻觉。
+
+## 一条顺带确认的事：两个 opt-in 现在分工清楚了
+
+第一次跑这个闭环时 `exec_command` 被拒了，因为探针配置里 `allow_unconfined_exec`
+已经被另一个会话去掉——那个会话在修[只读会话被 exec 闸误拦]的问题，并在配置里
+留了注释：「只读链只要 `allow_unisolated_credentials` 这一个开关，删掉
+`allow_unconfined_exec`，四个只读工具照常」。
+
+这正好把两个开关分清楚了：
+
+| 开关 | 管什么 |
+| --- | --- |
+| `allow_unisolated_credentials` | 建会话那道闸，只读和 coding 都要 |
+| `allow_unconfined_exec` | **只管 `exec_command`**，只读链不需要 |
+
+H08 要真的跑一次测试，所以临时把 `allow_unconfined_exec` 加回来，验完撤掉了。
+探针配置现在是 `external_mcp = "read"` + 只有 `allow_unisolated_credentials`。
+
+## 验收对照
+
+| 编号 | 这次覆盖到的 |
+| --- | --- |
+| H06 | 两会话争同一 writer（真机手工占锁 + 合成 opener 两条路都验过）；同会话并发被有界等待挡住且不发到远端；Managed 与外部 coding 共用一把锁，gld 不替远端认定占锁的是哪一种 |
+| H08 | 上面这条闭环。**未做**：脱敏证据只到这份文档，没有单独归档的 transcript；不涉及公网入口链路 |
+
 ## 清理
 
 探针留下的东西，都可以整个删掉：
@@ -349,3 +476,6 @@ gld 一个字没改。这句话是给模型和看日志的人看的，吞掉它�
   探针配置已经改回 `external_mcp = "read"`。用户自己那份 `config.toml`
   全程没动，md5 前后一致。
 - 这台 Mac：只有 `GLD_HOME` 指向的那个临时目录和两个包装脚本，都在 scratchpad 里
+
+这次在试点目录里还多留了 `calc.py` 和 `test_calc.py`（`calc.py` 是被 patch
+修过的那一版）。跟别的探针文件一样，整个 `~/gld-remote-probe/` 可以直接删掉。

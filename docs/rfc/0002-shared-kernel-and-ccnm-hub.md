@@ -301,6 +301,21 @@ exec 的 `output_ref` 分页偏移稳定且只在本会话里有效，写锁被�
 noauth 不开放 coding（5.3）。coding 空闲 2 分钟回收，比只读的 5 分钟短，
 因为它占着远端写锁。
 
+**H06 / H08 也做完了。**H06：同会话并发被有界等待挡住（等 2 秒后报
+`REMOTE_CODING_BUSY`，可重试，被挡的调用根本不发到远端）——串行不等于无限排队，
+远端 exec 最长 10 分钟，挂在锁上那么久 Web 那头早断了；两会话争同一 writer 真机
+和合成 opener 两条路都验过；Managed 与外部 coding 共用一把锁，gld **不替远端
+认定占锁的是哪一种会话**。判断写锁失败时**只看消息第一行**，因为 ccnm 的 fixture
+写明「第一行之后是给人的排查指引，措辞会变」，在整段 stderr 上匹配迟早被指引
+带偏；测试用的 stderr 逐字抄自 `start-refused-busy.json` /
+`start-refused-guard-unknown.json`。
+
+H08：一个纯 HTTP 的 MCP 客户端走完 read → search → patch → **test** → 结果 →
+关闭。远端一个真会红的小项目，改之前三个 unittest 挂两个，patch 之后全绿；
+中间故意拿过期 version 再打一次，拿到 `CCNM_E_STALE_EPOCH` 原样透传——**远端的
+版本守卫是活的**。没有启动任何模型进程，只动试点目录。**未做**的是单独归档
+脱敏 transcript，以及公网入口链路。
+
 **参数名的出处改了**：冻结协议的 `tools-list-*.json` fixture 是删节版，而且
 `tools-list-coding.json` 把 `apply_patch` 的参数写成 `changes`，实现收的是
 `files`。现在以 ccnm 的 `*Args` 结构体为准，read 白名单也照真二进制补齐了
