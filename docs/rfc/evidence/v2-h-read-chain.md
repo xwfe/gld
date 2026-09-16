@@ -1,6 +1,6 @@
-# V2-H 只读链的现场证据
+# V2-H 远端链的现场证据
 
-上半截（H1）用合成 peer 和本机真 ccnm；下半截（H2）跨两台真实机器。
+H1 用合成 peer 和本机真 ccnm；H2 只读链和 H3 写链都跨两台真实机器。
 
 2026-09-16。走的是真的 HTTP MCP 客户端 → 真的 bearer 鉴权 → 真的
 `ccnm mcp bridge` 子进程，不是单元测试里的合成通道。
@@ -255,10 +255,97 @@ fix: remove the runtime account from those groups / use a Runtime identity
 并被告知去设 `allow_unconfined_exec`——那个名字听起来比他实际在做的事危险得多。
 这是 ccnm 那边的事，不在本次范围内，记在这里免得丢。
 
+---
+
+# H3：跨真实网络的写链
+
+同日。拓扑和 H2 一样，只把探针配置里那一行 `external_mcp` 从 `read` 改成
+`coding`（验完改回去了），成员改成 `gld hub remote add … --mode coding`。
+
+## 一轮完整的写
+
+```
+begin           (455 ms)  rc-5ea24a6655864fce9d46eff13cfdf4bb
+apply_patch      (42 ms)  add from-gld.txt (28 bytes) version 28-18d5b7a05d771933
+                          [1 file changed]
+exec_command     (44 ms)  $ echo hello from a remote coding session
+                          ok in 6 ms, 35 B stdout, 0 B stderr
+                          hello from a remote coding session
+                          [output_ref r-9ed62f4fe0ee4a48]
+read_file       (456 ms)  1→written through the gld hub
+end              (77 ms)  closed
+再用同一个句柄    (17 ms)  REMOTE_CODING_HANDLE_UNKNOWN
+```
+
+`from-gld.txt` 是真的落在 fodelf 上的：`ls ~/gld-remote-probe` 能看到它。
+
+**那个 456 ms 是证据不是噪声。**同一轮里 apply_patch 和 exec 都是 40 ms 上下，
+偏偏读文件花了 456——因为只读工具走的是**另一条**连接，那一下是新开了一条
+SSH。这正是"read 和 coding 是两条独立连接"的现场证明；合成一条的话，这次
+只读调用就会把写会话连同 `output_ref` 一起挤掉。
+
+## output_ref 的分页和归属
+
+用一条产量大点的命令（`/bin/sh -c "seq 1 200"`，692 字节）验分页：
+
+```
+read_output offset=0  limit=40  →  1..16 和半个 17，[40 of 692 bytes; continue with offset=40]
+read_output offset=40 limit=40  →  接着那半个 17，[80 of 692 bytes; continue with offset=80]
+```
+
+偏移是字节偏移而且稳定：第二页从上一页断开的那半个数字接着来。
+
+归属也对：
+
+```
+拿另一个句柄读同一个 ref   →  REMOTE_CODING_HANDLE_UNKNOWN
+会话关掉之后再读那个 ref   →  REMOTE_CODING_HANDLE_UNKNOWN
+```
+
+> 顺带说明一件事：那条命令写成 `["/bin/sh", "-c", "seq 1 200"]` 才跑得起来。
+> ccnm 的 `cmd` 是 argv，想要 shell 必须自己显式写出来——**gld 绝不替你加**。
+> 这就是验收项 H04「绝不将 gld 字符串 cmd 当 ccnm argv」在现场的样子。
+
+## 写锁被别人占着
+
+手工另起一条 `ccnm mcp bridge … --mode coding` 占住远端写锁，再让 gld 去
+`remote_coding_begin`：
+
+```
+code      : REMOTE_WRITE_LOCK_BUSY
+retryable : True
+message   : … CCNM_E_POLICY:
+            workspace write guard is busy; another session still owns this working tree
+            who holds it, on the Runtime Node: the `held <session> <work…
+```
+
+分类对上了，ccnm 自己那句"谁占着、去哪儿看"也原样带到了调用方。同一时刻
+**只读照常通**——ccnm 的 read 模式不碰这把锁（协议 4.4）。
+
+状态说不清的那一种（`REMOTE_WRITE_LOCK_UNKNOWN`，不可重试）没有在真机上
+造过：那要人为弄坏锁文件或者杀掉一个持有者留下 `held` 标记，是在别人机器上
+制造故障，没做。它的分类由单元测试按 ccnm 源码里的原话钉住。
+
+## exec 的安全提示原样透传
+
+远端每次 exec 都在结果里附一段：
+
+```
+[this runtime is NOT confined (running as fodelf) and this workspace has
+ allow_unconfined_exec set; a command here has the access that account has;
+ it also has allow_unisolated_credentials set, so that account can read a
+ known Agent login and so can anything the model runs]
+```
+
+gld 一个字没改。这句话是给模型和看日志的人看的，吞掉它等于替远端隐瞒风险。
+
 ## 清理
 
 探针留下的东西，都可以整个删掉：
 
-- fodelf：`~/gld-remote-probe/`、`~/.config/ccnm/gldprobe.toml`、
-  `~/.local/bin/ccnm-gldprobe`、`~/.config/ccnm/config.toml.bak-gld-*`
+- fodelf：`~/gld-remote-probe/`（含这次写进去的 `from-gld.txt`）、
+  `~/.config/ccnm/gldprobe.toml`（和它的 `.read-only-bak`）、
+  `~/.local/bin/ccnm-gldprobe`、`~/.config/ccnm/config.toml.bak-gld-*`。
+  探针配置已经改回 `external_mcp = "read"`。用户自己那份 `config.toml`
+  全程没动，md5 前后一致。
 - 这台 Mac：只有 `GLD_HOME` 指向的那个临时目录和两个包装脚本，都在 scratchpad 里

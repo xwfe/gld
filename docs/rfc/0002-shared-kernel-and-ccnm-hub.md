@@ -288,9 +288,24 @@ S0 必须在实验前冻结每个平台/能力的适用矩阵、输出预算、d
 列表委托给了 Runtime，ccnm 正确地拒绝了「既委托又自带列表」，所以探针走另一份
 `CCNM_CONFIG` 配置文件。细节和清理清单见证据文档。
 
-**H3（远端 coding）没开始**。`AuthContext::is_authenticated()` 已经就位，
-RFC 5.3 的「noauth 不开放 remote coding」那道闸门在 H3 里接。`session.rs` 的
-四个预算是 read 模式的，coding 是写租约，规则按 5.4 另定，不要顺手复用。
+**H3（远端 coding）完成**：`remote_coding_begin` 开一段写租约发一个随机句柄，
+`remote_apply_patch` / `remote_exec_command` / `remote_read_output` 挂在它上面，
+`remote_coding_end` 关掉。同样跨两台真机验过——patch 真的在 fodelf 上建了文件，
+exec 的 `output_ref` 分页偏移稳定且只在本会话里有效，写锁被别人占着时报
+`REMOTE_WRITE_LOCK_BUSY` 而只读照常通。
+
+几条钉死的规矩：句柄不是授权（每次调用重对主体/成员/代次）；传输层一断会话
+就结束、**绝不偷偷重开**（协议 6.3 没有 resume）；read 和 coding 是两条独立
+连接；写调用断在半路报 `REMOTE_OUTCOME_UNKNOWN` 且**不标可重试**；
+写锁 busy 与状态 unknown 分成两个错，后者按协议第 7 节绝不标可重试；
+noauth 不开放 coding（5.3）。coding 空闲 2 分钟回收，比只读的 5 分钟短，
+因为它占着远端写锁。
+
+**参数名的出处改了**：冻结协议的 `tools-list-*.json` fixture 是删节版，而且
+`tools-list-coding.json` 把 `apply_patch` 的参数写成 `changes`，实现收的是
+`files`。现在以 ccnm 的 `*Args` 结构体为准，read 白名单也照真二进制补齐了
+`end_line` / `max_bytes` / `include_hidden` / `glob` / `case_sensitive` /
+`context_lines`。
 
 ### 本轮源码定位
 
