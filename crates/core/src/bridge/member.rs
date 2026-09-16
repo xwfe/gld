@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// 对远端 workspace 的访问级别。跟 ccnm `mcp bridge --mode` 的取值一一对应。
 ///
 /// 顺序有意义：`Read < Coding`，取交集时直接比大小。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// 四个只读工具。

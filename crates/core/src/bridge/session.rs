@@ -22,8 +22,24 @@
 //! | [`IDLE_AFTER`] | 5 分钟 | 一轮对话里模型连着读文件的间隔远小于它；超过就说明这轮结束了，不该白占一条 SSH |
 //! | [`CLOSE_GRACE`] | 5 秒 | 等对面自己收尾释放写锁的时间，到点才动手杀 |
 //!
-//! 这四个数是 **read 模式**的。coding 模式是写租约，规则另定（RFC 5.4），
-//! 不要顺手复用这里的数字。
+//! coding 另有一个 [`CODING_IDLE_AFTER`]（2 分钟），比只读的短，因为它占着
+//! 远端工作树的写锁。握手、单次调用和关闭宽限两种模式共用。
+//!
+//! ## coding 会话
+//!
+//! coding 不是"换个模式再调一次"，是一段**写租约**：
+//!
+//! - [`Connections::begin_coding`] 开一条 `--mode coding` 的连接并发一个随机
+//!   句柄。开连接这一步就把远端的写锁拿了（ccnm 协议 4.4），所以别人占着时
+//!   这里直接失败，不排队也不降级。
+//! - 句柄**不是授权**：每次调用都要把主体、成员、连接代次重新对一遍
+//!   （RFC 5.3）。对不上一律报同一个错，不帮人区分"存在但不属于你"。
+//! - 传输层一断，会话就结束，**绝不偷偷重开**。重开是新会话，新的
+//!   `output_ref` 空间（ccnm 协议 6.3「没有 resume」）；悄悄重开会让调用方
+//!   手里的 ref 指向不存在的东西，而它看起来一切正常。
+//! - read 和 coding 是**两条独立连接**（键里带模式）。让只读调用去挤 coding
+//!   那条的话，一次 `remote_read_file` 就能把别人的写会话连同 `output_ref`
+//!   一起弄没。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -38,6 +54,16 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
 pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
+
+/// coding 会话闲多久就收掉。
+///
+/// 比只读的 5 分钟短，因为它**占着远端工作树的写锁**：闲着不放等于挡住那台
+/// 机器上所有想写这个项目的人（包括 ccnm 自己的 Managed session）。一轮
+/// patch → test → 看结果 从不会停两分钟；真停了就说明这轮结束了。
+///
+/// 跑着的 `exec_command` 不受它影响：调用在途时槽位的锁拿不到，
+/// [`Slot::is_idle`] 一律判为"不闲"。
+pub const CODING_IDLE_AFTER: Duration = Duration::from_secs(2 * 60);
 
 /// 握手时报给远端的客户端名，会进 ccnm 那边的日志。
 const CLIENT_NAME: &str = "gld-hub";
@@ -78,12 +104,20 @@ impl Drop for Live {
     }
 }
 
-/// 一个成员的槽位。
+/// 连接表的键：哪个成员、哪种模式。
+///
+/// **模式进键**，所以 read 和 coding 是两条独立的连接，互相不挤掉。只读工具
+/// 走 read 那条，coding 工具走 coding 那条。ccnm 的 read 模式不碰写锁，所以
+/// 多一条读连接不会挡住谁；反过来如果让只读调用去挤 coding 那条，一次
+/// `remote_read_file` 就能把别人的写会话连同 `output_ref` 一起弄没。
+type Key = (String, Mode);
+
+/// 一个成员在某个模式下的槽位。
 ///
 /// 里面是 `Option`：槽位先占上、连接后开。这样两个请求同时打到一个还没连上的
 /// 成员时，第二个会在槽位的锁上等第一个连完，而不是各起一个 bridge。
 struct Slot {
-    /// 开这条连接时的成员配置 + 模式。变了就是新一代，旧连接作废。
+    /// 开这条连接时的主体 + 成员配置 + 模式。变了就是新一代，旧连接作废。
     generation: String,
     connection: Arc<Mutex<Option<Live>>>,
 }
@@ -114,10 +148,58 @@ impl Slot {
 pub struct Connections {
     opener: Box<dyn Open>,
     idle_after: Duration,
+    coding_idle_after: Duration,
     handshake_timeout: Duration,
     call_timeout: Duration,
-    live: Mutex<HashMap<String, Slot>>,
+    live: Mutex<HashMap<Key, Slot>>,
+    /// 还开着的 coding 会话：句柄 → 它属于谁。
+    leases: Mutex<HashMap<String, Lease>>,
 }
+
+/// 一个 coding 会话。句柄之外的每一项，每次调用都要重新对一遍
+/// （RFC-0002 5.3「每次调用重新检查授权与归属」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Lease {
+    /// 开它的那个主体。**换一个主体拿着同一个句柄也不认。**
+    principal: String,
+    member_id: String,
+    /// 开它时的连接代次。成员配置一变，旧句柄作废。
+    generation: String,
+}
+
+/// coding 会话出的岔子。
+///
+/// 跟 [`PeerError`] 分开，因为「句柄不认」和「远端断了」对调用方是两件事：
+/// 前者重新 begin 一次就行，后者要先搞清楚远端到底做了没有。
+#[derive(Debug)]
+pub enum CodingError {
+    /// 这个句柄在这里没用：不存在、不是你的、不是这个成员的，或者配置已经变了。
+    /// **四种情况报同一个错**，不帮人区分「存在但不属于你」。
+    NoSuchSession,
+    /// 句柄本来是对的，但它那条连接已经没了（空闲回收、断线、成员被摘掉）。
+    /// 没有 resume：要接着写就重新 begin，旧的 `output_ref` 全部作废。
+    SessionEnded,
+    Peer(PeerError),
+}
+
+impl std::fmt::Display for CodingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CodingError::NoSuchSession => write!(
+                f,
+                "that coding handle is not open on this workspace; call remote_coding_begin first"
+            ),
+            CodingError::SessionEnded => write!(
+                f,
+                "that coding session has ended, so its output_ref values are gone too; \
+                 call remote_coding_begin for a new one"
+            ),
+            CodingError::Peer(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for CodingError {}
 
 impl Connections {
     /// 真连远端用这个。
@@ -129,15 +211,18 @@ impl Connections {
         Connections {
             opener,
             idle_after: IDLE_AFTER,
+            coding_idle_after: CODING_IDLE_AFTER,
             handshake_timeout: HANDSHAKE_TIMEOUT,
             call_timeout: CALL_TIMEOUT,
             live: Mutex::new(HashMap::new()),
+            leases: Mutex::new(HashMap::new()),
         }
     }
 
     /// 改预算。给测试用，也给以后做成配置留个口子。
     pub fn with_budgets(mut self, idle_after: Duration, call_timeout: Duration) -> Self {
         self.idle_after = idle_after;
+        self.coding_idle_after = idle_after;
         self.handshake_timeout = call_timeout;
         self.call_timeout = call_timeout;
         self
@@ -156,11 +241,31 @@ impl Connections {
         &self,
         principal: &str,
         member: &CcnmMember,
-        mode: Mode,
         tool: &str,
         arguments: Value,
     ) -> Result<Value, PeerError> {
-        let slot = self.slot(&member.id, &generation_of(principal, member, mode));
+        // 只读调用永远走 read 那条连接，哪怕这个成员同时开着 coding 会话。
+        // 挤掉 coding 那条的代价是别人的写会话和 output_ref 一起没。
+        self.run(principal, member, Mode::Read, tool, arguments)
+            .map(|(value, _)| value)
+    }
+
+    /// 在指定模式的连接上跑一次调用。
+    ///
+    /// 第二个返回值是「这条连接还在不在」：传输层出岔子时是 `false`，调用方
+    /// 据此决定要不要把依赖这条连接的东西（coding 句柄）一起作废。
+    fn run(
+        &self,
+        principal: &str,
+        member: &CcnmMember,
+        mode: Mode,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<(Value, bool), PeerError> {
+        let slot = self.slot(
+            &(member.id.clone(), mode),
+            &generation_of(principal, member, mode),
+        );
         let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if guard.is_none() {
             *guard = Some(Live {
@@ -170,16 +275,162 @@ impl Connections {
         }
         let live = guard.as_mut().expect("刚刚连上");
         let result = live.peer.call_tool(tool, arguments, self.call_timeout);
-        match &result {
+        match result {
             // 远端明确回了 JSON-RPC error 也算这条连接好着，下次还能用。
-            Ok(_) | Err(PeerError::Remote { .. }) => live.last_used = Instant::now(),
+            Ok(value) => {
+                live.last_used = Instant::now();
+                Ok((value, true))
+            }
+            Err(PeerError::Remote {
+                method,
+                code,
+                message,
+            }) => {
+                live.last_used = Instant::now();
+                Err(PeerError::Remote {
+                    method,
+                    code,
+                    message,
+                })
+            }
             // 超时、写不进去、对面关了、回了看不懂的东西——传输层已经不可信，
             // 留着它下一次调用会读到上一次的残留回复。丢掉，下次重连。
-            Err(_) => {
+            Err(other) => {
                 guard.take();
+                Err(other)
             }
         }
-        result
+    }
+
+    /// 开一个 coding 会话，返回句柄。
+    ///
+    /// **这一步就把远端工作树的写锁拿了**——ccnm 的 coding server 在 MCP 握手
+    /// 之前就去抢那把锁（协议 4.4）。所以别人占着的时候这里直接失败，不排队、
+    /// 不静默降级成只读。
+    ///
+    /// 句柄是随机的 UUID：模型猜不出别人的句柄，但**它不是授权**——每次调用
+    /// 还要把主体、成员和代次重新对一遍（RFC 5.3）。
+    pub fn begin_coding(&self, principal: &str, member: &CcnmMember) -> Result<String, PeerError> {
+        let generation = generation_of(principal, member, Mode::Coding);
+        let key = (member.id.clone(), Mode::Coding);
+        // 先把连接建起来：拿不到远端写锁就在这里失败，不会留下一个空句柄。
+        let slot = self.slot(&key, &generation);
+        {
+            let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+            if guard.is_none() {
+                *guard = Some(Live {
+                    peer: self.handshake(member, Mode::Coding)?,
+                    last_used: Instant::now(),
+                });
+            }
+        }
+        let handle = format!("rc-{}", uuid::Uuid::new_v4().simple());
+        self.leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                handle.clone(),
+                Lease {
+                    principal: principal.to_string(),
+                    member_id: member.id.clone(),
+                    generation,
+                },
+            );
+        Ok(handle)
+    }
+
+    /// 在一个 coding 会话上跑一次调用。
+    ///
+    /// 句柄对不上就是 [`CodingError::NoSuchSession`]——**不去猜、不去新开一个**。
+    /// 新开是新会话：新的保留输出目录、新的 `output_ref` 空间（ccnm 协议 6.3
+    /// 「没有 resume」）。悄悄重开会让调用方手里的 `output_ref` 指向不存在的
+    /// 东西，而它看起来一切正常。
+    pub fn call_coding(
+        &self,
+        principal: &str,
+        member: &CcnmMember,
+        handle: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, CodingError> {
+        let generation = generation_of(principal, member, Mode::Coding);
+        self.check_lease(principal, member, handle, &generation)?;
+        match self.run(principal, member, Mode::Coding, tool, arguments) {
+            Ok((value, _)) => Ok(value),
+            Err(error) => {
+                // 传输层断了：这个会话没了，不能让句柄继续看着有效。
+                if !matches!(error, PeerError::Remote { .. }) {
+                    self.forget_lease(handle);
+                }
+                Err(CodingError::Peer(error))
+            }
+        }
+    }
+
+    /// 关掉一个 coding 会话，释放远端写锁。
+    ///
+    /// 幂等：已经没了的句柄不算错——调用方重试一次关闭不该拿到失败。
+    pub fn end_coding(&self, principal: &str, member: &CcnmMember, handle: &str) {
+        let generation = generation_of(principal, member, Mode::Coding);
+        if self
+            .check_lease(principal, member, handle, &generation)
+            .is_err()
+        {
+            return;
+        }
+        self.forget_lease(handle);
+        let dropped = self
+            .live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&(member.id.clone(), Mode::Coding));
+        // 关闭（等子进程退出）在放开全局锁之后。
+        drop(dropped);
+    }
+
+    /// 这个句柄现在还认不认。
+    fn check_lease(
+        &self,
+        principal: &str,
+        member: &CcnmMember,
+        handle: &str,
+        generation: &str,
+    ) -> Result<(), CodingError> {
+        let leases = self.leases.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(lease) = leases.get(handle) else {
+            return Err(CodingError::NoSuchSession);
+        };
+        // 三项逐一对。任何一项不符都报同一个错：告诉调用方"这个句柄在这里
+        // 没用"，不告诉它"存在但不属于你"——那是在帮人枚举别人的会话。
+        if lease.principal != principal
+            || lease.member_id != member.id
+            || lease.generation != generation
+        {
+            return Err(CodingError::NoSuchSession);
+        }
+        drop(leases);
+        // 连接被空闲回收或者代次变过：句柄还在表里，但它指的那条连接没了。
+        let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
+        match live.get(&(member.id.clone(), Mode::Coding)) {
+            Some(slot) if slot.generation == generation => Ok(()),
+            _ => {
+                drop(live);
+                self.forget_lease(handle);
+                Err(CodingError::SessionEnded)
+            }
+        }
+    }
+
+    fn forget_lease(&self, handle: &str) {
+        self.leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(handle);
+    }
+
+    /// 现在开着几个 coding 会话。给测试和诊断用。
+    pub fn coding_count(&self) -> usize {
+        self.leases.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// 只留这些成员的连接，其余全收掉。
@@ -189,13 +440,19 @@ impl Connections {
     pub fn retain(&self, keep: &[String]) {
         let dropped: Vec<Slot> = {
             let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-            let gone: Vec<String> = live
+            let gone: Vec<Key> = live
                 .keys()
-                .filter(|id| !keep.iter().any(|kept| kept == *id))
+                .filter(|(id, _)| !keep.iter().any(|kept| kept == id))
                 .cloned()
                 .collect();
-            gone.iter().filter_map(|id| live.remove(id)).collect()
+            gone.iter().filter_map(|key| live.remove(key)).collect()
         };
+        // 被摘掉的成员，它的 coding 句柄也不能再认——RFC 5.1「成员删除/权限
+        // 收紧须使对应旧会话失效」。
+        self.leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, lease| keep.iter().any(|kept| kept == &lease.member_id));
         // 关闭动作（等子进程退出）在放开全局锁之后才发生。
         drop(dropped);
     }
@@ -214,26 +471,30 @@ impl Connections {
     ///
     /// 不另起后台线程扫：hub 本来就是有请求才醒，没请求的时候留着一条 SSH
     /// 也没人会被它挡住；有请求了就是回收的时机。
-    fn slot(&self, member_id: &str, generation: &str) -> Arc<Mutex<Option<Live>>> {
+    fn slot(&self, want: &Key, generation: &str) -> Arc<Mutex<Option<Live>>> {
         let mut detached: Vec<Slot> = Vec::new();
+        let mut reclaimed: Vec<String> = Vec::new();
         let slot = {
             let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-            let idle: Vec<String> = live
+            let idle: Vec<Key> = live
                 .iter()
-                .filter(|(id, slot)| id.as_str() != member_id && slot.is_idle(self.idle_after))
-                .map(|(id, _)| id.clone())
+                .filter(|(key, slot)| *key != want && slot.is_idle(self.idle_for(key.1)))
+                .map(|(key, _)| key.clone())
                 .collect();
-            for id in idle {
-                detached.extend(live.remove(&id));
+            for key in idle {
+                if key.1 == Mode::Coding {
+                    reclaimed.push(key.0.clone());
+                }
+                detached.extend(live.remove(&key));
             }
-            match live.get(member_id) {
+            match live.get(want) {
                 Some(slot) if slot.generation == generation => slot.connection.clone(),
                 _ => {
-                    // 配置或模式变了：旧连接是按旧权限开的，不能接着用。
-                    detached.extend(live.remove(member_id));
+                    // 配置或主体变了：旧连接是按旧权限开的，不能接着用。
+                    detached.extend(live.remove(want));
                     let connection = Arc::new(Mutex::new(None));
                     live.insert(
-                        member_id.to_string(),
+                        want.clone(),
                         Slot {
                             generation: generation.to_string(),
                             connection: connection.clone(),
@@ -243,8 +504,24 @@ impl Connections {
                 }
             }
         };
+        // 回收掉的 coding 连接，它的句柄也跟着作废：没有 resume，句柄留着
+        // 只会让调用方以为自己的 output_ref 还在。
+        if !reclaimed.is_empty() {
+            self.leases
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|_, lease| !reclaimed.contains(&lease.member_id));
+        }
         drop(detached);
         slot
+    }
+
+    /// 这种模式的连接闲多久算闲。coding 短一些，它占着远端写锁。
+    fn idle_for(&self, mode: Mode) -> Duration {
+        match mode {
+            Mode::Read => self.idle_after,
+            Mode::Coding => self.coding_idle_after,
+        }
     }
 
     /// 开一条连接并握手。握手不成就把刚起的进程收掉，不留孤儿。
@@ -405,7 +682,7 @@ mod tests {
 
         for _ in 0..3 {
             let result = pool
-                .call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
+                .call(ANYONE, &member("m1"), "read_file", json!({}))
                 .expect("调用");
             assert_eq!(result["content"][0]["text"], json!("read_file"));
         }
@@ -418,9 +695,9 @@ mod tests {
     fn each_member_gets_its_own_connection() {
         let recorder = Recording::new();
         let pool = connections(&recorder);
-        pool.call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("m1"), "read_file", json!({}))
             .expect("m1");
-        pool.call(ANYONE, &member("m2"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("m2"), "read_file", json!({}))
             .expect("m2");
         assert_eq!(recorder.opens(), 2);
         assert_eq!(pool.open_count(), 2);
@@ -432,12 +709,10 @@ mod tests {
         let recorder = Recording::new();
         let pool = connections(&recorder);
         let mut m = member("m1");
-        pool.call(ANYONE, &m, Mode::Read, "read_file", json!({}))
-            .expect("先");
+        pool.call(ANYONE, &m, "read_file", json!({})).expect("先");
 
         m.workspace = "another-project".into();
-        pool.call(ANYONE, &m, Mode::Read, "read_file", json!({}))
-            .expect("后");
+        pool.call(ANYONE, &m, "read_file", json!({})).expect("后");
 
         assert_eq!(recorder.opens(), 2, "换了 workspace 却在复用旧连接");
         assert_eq!(recorder.closes(), 1, "旧连接没被关掉");
@@ -453,31 +728,40 @@ mod tests {
         let recorder = Recording::new();
         let pool = connections(&recorder);
         let m = member("m1");
-        pool.call("oauth:hub:chatgpt", &m, Mode::Read, "read_file", json!({}))
+        pool.call("oauth:hub:chatgpt", &m, "read_file", json!({}))
             .expect("第一个主体");
-        pool.call("oauth:hub:claude", &m, Mode::Read, "read_file", json!({}))
+        pool.call("oauth:hub:claude", &m, "read_file", json!({}))
             .expect("另一个主体");
         assert_eq!(recorder.opens(), 2, "两个主体共用了一条 bridge");
         assert_eq!(recorder.closes(), 1, "旧主体那条没被关掉");
 
         // 同一个主体再来还是复用，不是每次都重开。
-        pool.call("oauth:hub:claude", &m, Mode::Read, "read_file", json!({}))
+        pool.call("oauth:hub:claude", &m, "read_file", json!({}))
             .expect("同一个主体");
         assert_eq!(recorder.opens(), 2);
     }
 
-    /// 模式变了也是新一代。read 的连接不能被拿去当 coding 用。
+    /// read 和 coding 是**两条**连接，不是一条换模式。
+    ///
+    /// 合成一条的代价：一次只读调用就会把别人的写会话连同 output_ref 一起
+    /// 挤掉，而调用方看起来一切正常。
     #[test]
-    fn changing_the_mode_opens_a_new_generation() {
+    fn reading_and_coding_are_two_separate_connections() {
         let recorder = Recording::new();
         let pool = connections(&recorder);
         let mut m = member("m1");
         m.max_mode = Mode::Coding;
-        pool.call(ANYONE, &m, Mode::Read, "read_file", json!({}))
-            .expect("read");
-        pool.call(ANYONE, &m, Mode::Coding, "read_file", json!({}))
-            .expect("coding");
-        assert_eq!(recorder.opens(), 2);
+
+        pool.call(ANYONE, &m, "read_file", json!({})).expect("读");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开写会话");
+        assert_eq!(recorder.opens(), 2, "该是两条连接");
+
+        // 再读一次：走的还是那条 read 连接，不重开，也不碰写会话。
+        pool.call(ANYONE, &m, "read_file", json!({})).expect("再读");
+        assert_eq!(recorder.opens(), 2, "只读调用不该动 coding 那条");
+        pool.call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+            .expect("写会话还在");
+        assert_eq!(recorder.closes(), 0, "谁也不该被挤掉");
     }
 
     /// 闲过期限的连接在下一次请求时被收掉，不是等到进程退出。
@@ -486,12 +770,12 @@ mod tests {
         let recorder = Recording::new();
         let pool = Connections::with_opener(Box::new(recorder.clone()))
             .with_budgets(Duration::from_millis(30), Duration::from_millis(200));
-        pool.call(ANYONE, &member("idle"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("idle"), "read_file", json!({}))
             .expect("idle 成员");
         assert_eq!(pool.open_count(), 1);
 
         std::thread::sleep(Duration::from_millis(60));
-        pool.call(ANYONE, &member("busy"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("busy"), "read_file", json!({}))
             .expect("另一个成员");
 
         assert_eq!(
@@ -511,12 +795,12 @@ mod tests {
         let pool = connections(&recorder);
 
         let err = pool
-            .call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
+            .call(ANYONE, &member("m1"), "read_file", json!({}))
             .expect_err("应该超时");
         assert!(matches!(err, PeerError::Timeout { .. }), "{err}");
         assert_eq!(recorder.closes(), 1, "坏掉的连接没被关");
 
-        let _ = pool.call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}));
+        let _ = pool.call(ANYONE, &member("m1"), "read_file", json!({}));
         assert_eq!(recorder.opens(), 2, "没重连，还在用那条坏的");
     }
 
@@ -525,16 +809,10 @@ mod tests {
     fn a_member_that_left_the_hub_loses_its_connection() {
         let recorder = Recording::new();
         let pool = connections(&recorder);
-        pool.call(ANYONE, &member("stays"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("stays"), "read_file", json!({}))
             .expect("stays");
-        pool.call(
-            ANYONE,
-            &member("leaves"),
-            Mode::Read,
-            "read_file",
-            json!({}),
-        )
-        .expect("leaves");
+        pool.call(ANYONE, &member("leaves"), "read_file", json!({}))
+            .expect("leaves");
 
         pool.retain(&["stays".to_string()]);
 
@@ -545,12 +823,210 @@ mod tests {
         assert_eq!(recorder.closes(), 2);
     }
 
+    // ---- coding 会话 ----
+
+    fn coding_member(id: &str) -> CcnmMember {
+        let mut m = member(id);
+        m.max_mode = Mode::Coding;
+        m
+    }
+
+    /// 句柄是随机的，两次开出来不一样——模型猜不到别人的。
+    #[test]
+    fn every_session_gets_its_own_unguessable_handle() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let m = coding_member("m1");
+        let first = pool.begin_coding(ANYONE, &m).expect("第一次");
+        pool.end_coding(ANYONE, &m, &first);
+        let second = pool.begin_coding(ANYONE, &m).expect("第二次");
+        assert_ne!(first, second);
+        assert!(first.starts_with("rc-") && first.len() > 20, "{first}");
+    }
+
+    /// 句柄不是授权：主体、成员、代次每次都重对一遍（RFC-0002 5.3）。
+    /// 三种不符报**同一个**错，不帮人区分"存在但不属于你"。
+    #[test]
+    fn a_handle_is_not_authority_on_its_own() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let m = coding_member("m1");
+        let other = coding_member("m2");
+        let handle = pool.begin_coding("bearer:hub", &m).expect("开会话");
+
+        for (label, principal, member) in [
+            ("换个主体", "oauth:hub:someone-else", &m),
+            ("换个成员", "bearer:hub", &other),
+        ] {
+            let err = pool
+                .call_coding(principal, member, &handle, "apply_patch", json!({}))
+                .expect_err(label);
+            assert!(matches!(err, CodingError::NoSuchSession), "{label}: {err}");
+        }
+        // 编一个句柄同样不认。
+        let err = pool
+            .call_coding("bearer:hub", &m, "rc-made-up", "apply_patch", json!({}))
+            .expect_err("编的句柄");
+        assert!(matches!(err, CodingError::NoSuchSession), "{err}");
+
+        // 原主原成员照常能用。
+        pool.call_coding("bearer:hub", &m, &handle, "apply_patch", json!({}))
+            .expect("自己的句柄还好着");
+    }
+
+    /// 成员配置改了，旧句柄作废——它是按旧配置、旧权限开的。
+    #[test]
+    fn changing_the_member_config_invalidates_the_handle() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let mut m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+
+        m.workspace = "another-project".into();
+        let err = pool
+            .call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+            .expect_err("该不认了");
+        assert!(matches!(err, CodingError::NoSuchSession), "{err}");
+    }
+
+    /// 传输层断了：会话就此结束，**不偷偷重开**。
+    ///
+    /// 重开是新会话（ccnm 协议 6.3「没有 resume」）：新的保留输出目录、新的
+    /// output_ref 空间。悄悄重开会让调用方手里的 output_ref 指向不存在的东西，
+    /// 而它看起来一切正常。
+    #[test]
+    fn a_broken_connection_ends_the_session_instead_of_silently_reopening() {
+        let mut recorder = Recording::new();
+        Arc::get_mut(&mut recorder).expect("独占").black_hole = true;
+        let pool = connections(&recorder);
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+        assert_eq!(pool.coding_count(), 1);
+
+        let err = pool
+            .call_coding(ANYONE, &m, &handle, "exec_command", json!({}))
+            .expect_err("该超时");
+        assert!(
+            matches!(err, CodingError::Peer(PeerError::Timeout { .. })),
+            "{err}"
+        );
+
+        // 同一个句柄再用：不认了，而且没有偷偷开第二条连接。
+        let opens_before = recorder.opens();
+        let again = pool
+            .call_coding(ANYONE, &m, &handle, "exec_command", json!({}))
+            .expect_err("句柄该没了");
+        assert!(matches!(again, CodingError::NoSuchSession), "{again}");
+        assert_eq!(recorder.opens(), opens_before, "不该偷偷重开");
+        assert_eq!(pool.coding_count(), 0);
+    }
+
+    /// 关掉会话要真的把连接关掉，写锁得还回去。幂等：重复关不报错。
+    #[test]
+    fn ending_a_session_closes_the_connection_and_is_idempotent() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+        assert_eq!(recorder.closes(), 0);
+
+        pool.end_coding(ANYONE, &m, &handle);
+        assert_eq!(recorder.closes(), 1, "连接没关，远端写锁还占着");
+        assert_eq!(pool.coding_count(), 0);
+
+        pool.end_coding(ANYONE, &m, &handle);
+        assert_eq!(recorder.closes(), 1, "重复关不该再动一次");
+
+        let err = pool
+            .call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+            .expect_err("关了就不能再用");
+        assert!(matches!(err, CodingError::NoSuchSession), "{err}");
+    }
+
+    /// 会话闲过期限被回收之后，句柄报的是"会话结束了"，不是"句柄不对"——
+    /// 这两句话对调用方的意思不一样：后者是它拿错了，前者是它得重新开一个。
+    #[test]
+    fn an_idle_session_is_reclaimed_and_says_so() {
+        let recorder = Recording::new();
+        let pool = Connections::with_opener(Box::new(recorder.clone()))
+            .with_budgets(Duration::from_millis(30), Duration::from_millis(200));
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+
+        std::thread::sleep(Duration::from_millis(60));
+        // 另一个成员的请求触发回收扫描。
+        pool.call(ANYONE, &member("someone-else"), "read_file", json!({}))
+            .expect("别人的调用");
+
+        let err = pool
+            .call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+            .expect_err("该被回收了");
+        assert!(
+            matches!(err, CodingError::NoSuchSession | CodingError::SessionEnded),
+            "{err}"
+        );
+        assert_eq!(pool.coding_count(), 0, "句柄不能留着");
+        assert!(recorder.closes() >= 1, "连接该关掉，写锁该还回去");
+    }
+
+    /// 成员被移出 hub：连接和句柄一起作废。
+    #[test]
+    fn removing_the_member_also_kills_its_coding_handle() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+
+        pool.retain(&[]);
+
+        assert_eq!(pool.coding_count(), 0);
+        let err = pool
+            .call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+            .expect_err("成员都没了");
+        assert!(matches!(err, CodingError::NoSuchSession), "{err}");
+    }
+
+    /// 开会话用的是 `--mode coding` 的 argv，跟只读那条分得清清楚楚。
+    #[test]
+    fn a_coding_session_asks_the_bridge_for_coding_mode() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let m = coding_member("m1");
+        pool.begin_coding(ANYONE, &m).expect("开会话");
+        let argv = recorder.argv.lock().expect("argv");
+        assert!(
+            argv[0]
+                .1
+                .ends_with(&["--mode".to_string(), "coding".to_string()]),
+            "{:?}",
+            argv[0].1
+        );
+    }
+
+    /// 成员上限是只读时，连接层照样只会开 read——`bridge_argv` 那道取低还在。
+    /// hub 会更早一步拦掉，这里钉的是"就算漏过来了也升不了权"。
+    #[test]
+    fn a_read_only_member_cannot_be_opened_for_coding() {
+        let recorder = Recording::new();
+        let pool = connections(&recorder);
+        let m = member("m1"); // max_mode = Read
+        pool.begin_coding(ANYONE, &m).expect("连接本身能建");
+        let argv = recorder.argv.lock().expect("argv");
+        assert!(
+            argv[0]
+                .1
+                .ends_with(&["--mode".to_string(), "read".to_string()]),
+            "只读成员绝不能被开成 coding：{:?}",
+            argv[0].1
+        );
+    }
+
     /// 开的是公开的 bridge 子命令，argv 全来自配置。
     #[test]
     fn the_bridge_is_started_with_the_configured_argv_only() {
         let recorder = Recording::new();
         let pool = connections(&recorder);
-        pool.call(ANYONE, &member("m1"), Mode::Read, "read_file", json!({}))
+        pool.call(ANYONE, &member("m1"), "read_file", json!({}))
             .expect("调用");
         let argv = recorder.argv.lock().expect("argv");
         assert_eq!(argv[0].0, "ccnm");

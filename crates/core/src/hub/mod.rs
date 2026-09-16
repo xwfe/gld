@@ -44,9 +44,9 @@ use crate::agent_context::render_skill_catalog;
 use crate::auth::AuthContext;
 use crate::bridge::member::{CcnmMember, Mode};
 use crate::bridge::peer::PeerError;
-use crate::bridge::session::Connections;
 #[cfg(test)]
 use crate::bridge::session::Open;
+use crate::bridge::session::{CodingError, Connections};
 use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
 use crate::planning::PlanningService;
@@ -330,11 +330,22 @@ impl Hub {
         // 有远端成员才报远端工具。一个只有本地成员的 hub 列出四个永远调不通
         // 的 `remote_*`，只会引着模型去试；`listChanged` 是 false，但这里本来
         // 就以 list_workspaces 为准，跟成员名单一个口径。
-        if self
-            .snapshot()
-            .is_ok_and(|(members, _)| members.iter().any(|m| matches!(m, Member::Remote(_))))
-        {
-            tools.extend(remote_tools::definitions());
+        //
+        // coding 那几个同理，再窄一层：要有成员的上限真的到 coding 才列。
+        // 全是只读成员时列出 `remote_coding_begin`，模型只会得到一个必然
+        // 失败的调用。
+        if let Ok((members, _)) = self.snapshot() {
+            let remotes: Vec<&CcnmMember> = members
+                .iter()
+                .filter_map(|m| match m {
+                    Member::Remote(remote) => Some(remote),
+                    Member::Local(_) => None,
+                })
+                .collect();
+            if !remotes.is_empty() {
+                let any_coding = remotes.iter().any(|r| r.max_mode == Mode::Coding);
+                tools.extend(remote_tools::definitions(any_coding));
+            }
         }
         tools
     }
@@ -343,6 +354,7 @@ impl Hub {
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
             || remote_tools::find(name).is_some()
+            || remote_tools::is_session_tool(name)
             || (!HIDDEN_TOOLS.contains(&name)
                 && exposed_tool_names(&self.tool_profile).contains(&name))
     }
@@ -400,6 +412,29 @@ impl Hub {
             Ok(member) => member,
             Err(error) => return Ok(plain_result(error)),
         };
+
+        // 会话工具（begin/end）也是远端的，先分出去。
+        if remote_tools::is_session_tool(canonical) {
+            return Ok(match member {
+                Member::Remote(remote) => {
+                    *routed = Some(Routed {
+                        workspace_id: remote.id.clone(),
+                        context: None,
+                    });
+                    self.coding_session(auth, canonical, remote, &args)
+                }
+                Member::Local(local) => plain_result(tool_err(WorkspaceError::ToolDetails {
+                    code: "TOOL_IS_FOR_REMOTE_WORKSPACES",
+                    message: format!(
+                        "{canonical} only works on a remote ccnm workspace, and {} is a local one.",
+                        local.name
+                    ),
+                    category: "validation",
+                    retryable: false,
+                    details: json!({ "workspace": member_ref(member) }),
+                })),
+            });
+        }
 
         // 两套工具、两种成员，只有对角线上的两格能往下走。用错的那两格都
         // 只报错，**绝不落到另一边执行**（RFC-0002 5.2）。
@@ -503,25 +538,112 @@ impl Hub {
                 details: json!({ "missing": missing }),
             }));
         }
-        // 只读工具走 read，而且 bridge_argv 那边还会再跟成员上限取一次低。
-        let mode = Mode::Read;
-        match self.connections.call(
-            &auth.tag(),
-            member,
-            mode,
-            tool.remote_name,
-            tool.forward_arguments(args),
-        ) {
-            Ok(mut result) => {
-                if let Some(object) = result.as_object_mut() {
-                    object.insert(
-                        "_meta".into(),
-                        json!({ "gld/workspace": remote_ref(member), "gld/mode": mode.as_str() }),
-                    );
-                }
-                result
-            }
-            Err(error) => plain_result(remote_failure(tool, member, error)),
+        let forwarded = tool.forward_arguments(args);
+        if remote_tools::needs_coding(tool) {
+            return self.call_coding(auth, tool, member, args, forwarded);
+        }
+        match self
+            .connections
+            .call(&auth.tag(), member, tool.remote_name, forwarded)
+        {
+            Ok(result) => tag_remote(result, member, Mode::Read),
+            Err(error) => plain_result(remote_failure(tool.name, member, error)),
+        }
+    }
+
+    /// 要写的那三个工具：必须带一个还认的 coding 句柄。
+    fn call_coding(
+        &self,
+        auth: &AuthContext,
+        tool: &'static RemoteTool,
+        member: &CcnmMember,
+        args: &Value,
+        forwarded: Value,
+    ) -> Value {
+        let Some(handle) = args
+            .get(remote_tools::HANDLE_ARG)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "MISSING_ARGUMENT",
+                message: format!(
+                    "{} needs {}: call remote_coding_begin on {} first.",
+                    tool.name,
+                    remote_tools::HANDLE_ARG,
+                    member.name
+                ),
+                category: "validation",
+                retryable: false,
+                details: json!({ "missing": [remote_tools::HANDLE_ARG] }),
+            }));
+        };
+        match self
+            .connections
+            .call_coding(&auth.tag(), member, handle, tool.remote_name, forwarded)
+        {
+            Ok(result) => tag_remote(result, member, Mode::Coding),
+            Err(error) => plain_result(coding_failure(tool.name, member, error)),
+        }
+    }
+
+    /// `remote_coding_begin` / `remote_coding_end`。
+    fn coding_session(
+        &self,
+        auth: &AuthContext,
+        tool: &str,
+        member: &CcnmMember,
+        args: &Value,
+    ) -> Value {
+        // RFC-0002 5.3：第一版 remote coding 要求可验证的认证身份，
+        // noauth 不开放该能力。只读不受这条限制。
+        if !auth.is_authenticated() {
+            return plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "CODING_REQUIRES_AUTH",
+                message: format!(
+                    "Writing to a remote workspace needs an authenticated connection, and this hub is running with auth_type=noauth. Reading {} still works.",
+                    member.name
+                ),
+                category: "permission",
+                retryable: false,
+                details: json!({ "workspace": remote_ref(member) }),
+            }));
+        }
+        if member.max_mode < Mode::Coding {
+            return plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "REMOTE_IS_READ_ONLY",
+                message: format!(
+                    "Remote workspace {} is configured read-only, so it has no writing session. The operator raises that with `gld hub remote add ... --mode coding`.",
+                    member.name
+                ),
+                category: "permission",
+                retryable: false,
+                details: json!({ "workspace": remote_ref(member) }),
+            }));
+        }
+        if tool == remote_tools::CODING_END {
+            let handle = args
+                .get(remote_tools::HANDLE_ARG)
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            self.connections.end_coding(&auth.tag(), member, handle);
+            // 幂等：句柄本来就没了也报成功。调用方重试一次关闭不该拿到失败，
+            // 而"已经关了"和"刚刚关掉"对它是同一件事。
+            return plain_result(tool_ok(json!({
+                "closed": true,
+                "workspace": remote_ref(member),
+                "note": "The write lock on that machine is released. Any output_ref from this session is gone."
+            })));
+        }
+        match self.connections.begin_coding(&auth.tag(), member) {
+            Ok(handle) => plain_result(tool_ok(json!({
+                "coding_handle": handle,
+                "workspace": remote_ref(member),
+                "tools": remote_tools::CODING_TOOLS.iter().map(|t| t.name).collect::<Vec<_>>(),
+                "note": "This holds the write lock on that machine. Call remote_coding_end as soon as you are done; it also ends by itself after a few idle minutes, and its output_ref values do not survive that."
+            }))),
+            Err(error) => plain_result(remote_failure(remote_tools::CODING_BEGIN, member, error)),
         }
     }
 
@@ -822,12 +944,13 @@ fn describe<'a>(members: impl Iterator<Item = &'a Member>) -> String {
 /// `Closed` 会把远端 stderr 的最后一段带出来——ccnm 的 `CCNM_E_*` 诊断只在
 /// 那里，丢掉就只剩「连接断了」，没人查得下去。gld 从不往 bridge 传凭据，
 /// 这段文本里也就不会有。
-fn remote_failure(tool: &RemoteTool, member: &CcnmMember, error: PeerError) -> Value {
+fn remote_failure(tool: &str, member: &CcnmMember, error: PeerError) -> Value {
     let (code, category, retryable) = match &error {
         // 本机根本没起来这个程序：装没装、路径对不对，是操作员的事。
         PeerError::Spawn { .. } => ("REMOTE_BRIDGE_NOT_STARTED", "runtime", false),
-        PeerError::Write(_) | PeerError::Closed { .. } => ("REMOTE_BRIDGE_CLOSED", "runtime", true),
-        // 只读工具没有副作用，重试是安全的。coding 模式不能照抄这一条。
+        PeerError::Write(_) => ("REMOTE_BRIDGE_CLOSED", "runtime", true),
+        PeerError::Closed { stderr, .. } => classify_startup_failure(stderr),
+        // 只读工具没有副作用，重试是安全的。写操作另走 coding_failure。
         PeerError::Timeout { .. } => ("REMOTE_TIMEOUT", "runtime", true),
         PeerError::Malformed { .. } => ("REMOTE_PROTOCOL_ERROR", "runtime", false),
         PeerError::Remote { .. } => ("REMOTE_REFUSED", "runtime", false),
@@ -835,11 +958,103 @@ fn remote_failure(tool: &RemoteTool, member: &CcnmMember, error: PeerError) -> V
     };
     tool_err(WorkspaceError::ToolDetails {
         code,
-        message: format!("{} on remote workspace {}: {error}", tool.name, member.name),
+        message: format!("{tool} on remote workspace {}: {error}", member.name),
         category,
         retryable,
-        details: json!({ "workspace": remote_ref(member), "remote_tool": tool.remote_name }),
+        details: json!({ "workspace": remote_ref(member) }),
     })
+}
+
+/// 远端在 MCP 握手之前就失败了，从它 stderr 上那句话认出是哪一种。
+///
+/// ccnm 的写锁有两种拿不到（协议第 7 节），**给调用方的指示完全相反**：
+///
+/// - **busy**：别人正开着一个 coding 会话。等一会儿，或者改用只读。可重试。
+/// - **unknown**：锁的状态说不清（锁文件坏了、上次的持有者被打断留下了
+///   `held`）。协议原话是「人去看现场，不要重试到它"好了"」——因为"好了"
+///   的另一种可能是两个 Agent 同时在改一棵树。**绝不标可重试。**
+///
+/// 认的是 ccnm 自己那几句话里的关键词。认不出来就按「连接断了、可以重试」
+/// 走——那是原来的行为，宁可少标一个 unknown，也不把 busy 说成要人工介入。
+/// 但 unknown 的关键词必须优先匹配：把 unknown 说成可重试才是危险的那一边。
+fn classify_startup_failure(stderr: &str) -> (&'static str, &'static str, bool) {
+    let text = stderr.to_ascii_lowercase();
+    if text.contains("state is unknown")
+        || text.contains("state is incomplete or unknown")
+        || text.contains("left held")
+        || text.contains("refusing to transfer write authority")
+    {
+        return ("REMOTE_WRITE_LOCK_UNKNOWN", "runtime", false);
+    }
+    if text.contains("write guard is busy") || text.contains("still owns this working tree") {
+        return ("REMOTE_WRITE_LOCK_BUSY", "runtime", true);
+    }
+    ("REMOTE_BRIDGE_CLOSED", "runtime", true)
+}
+
+/// coding 会话调用失败。
+fn coding_failure(tool: &str, member: &CcnmMember, error: CodingError) -> Value {
+    match error {
+        CodingError::NoSuchSession => tool_err(WorkspaceError::ToolDetails {
+            code: "REMOTE_CODING_HANDLE_UNKNOWN",
+            message: format!("{tool} on {}: {error}", member.name),
+            category: "validation",
+            retryable: false,
+            details: json!({ "workspace": remote_ref(member) }),
+        }),
+        CodingError::SessionEnded => tool_err(WorkspaceError::ToolDetails {
+            code: "REMOTE_CODING_SESSION_ENDED",
+            message: format!("{tool} on {}: {error}", member.name),
+            category: "runtime",
+            // 可重试，但重试的是「重新 begin」，不是「再发一次这条」。
+            retryable: false,
+            details: json!({
+                "workspace": remote_ref(member),
+                "next": "remote_coding_begin"
+            }),
+        }),
+        // 写操作断在半路：**远端做没做，这边不知道**。不标可重试——
+        // 重发一次 apply_patch 或 exec_command 可能是第二次执行
+        // （RFC-0002 5.4 / 验收项 H07）。
+        CodingError::Peer(peer) => {
+            let unknown = matches!(
+                peer,
+                PeerError::Timeout { .. } | PeerError::Closed { .. } | PeerError::Write(_)
+            );
+            if unknown {
+                tool_err(WorkspaceError::ToolDetails {
+                    code: "REMOTE_OUTCOME_UNKNOWN",
+                    message: format!(
+                        "{tool} on {} lost the connection mid-call, so whether the remote machine did it is unknown: {peer}. Check the remote workspace before trying again; do not just resend.",
+                        member.name
+                    ),
+                    category: "runtime",
+                    retryable: false,
+                    details: json!({
+                        "workspace": remote_ref(member),
+                        "outcome": "unknown",
+                        "next": "remote_coding_begin, then look at the workspace"
+                    }),
+                })
+            } else {
+                remote_failure(tool, member, peer)
+            }
+        }
+    }
+}
+
+/// 在远端结果上标一句「谁答的、什么模式」。
+///
+/// 放 `_meta` 不放 `structuredContent`：那是 ccnm 的契约，往里塞字段会跟
+/// 它自己的键撞（验收项 H04 要求原样保留）。
+fn tag_remote(mut result: Value, member: &CcnmMember, mode: Mode) -> Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert(
+            "_meta".into(),
+            json!({ "gld/workspace": remote_ref(member), "gld/mode": mode.as_str() }),
+        );
+    }
+    result
 }
 
 /// 在结果里注明是哪个工作区答的。
@@ -1349,6 +1564,8 @@ mod tests {
         tool_fails: bool,
         /// 连 bridge 都起不来，验错误分类。
         cannot_start: bool,
+        /// 工具调用一律不回，验"断在半路"。
+        black_hole: bool,
     }
 
     impl RemoteSpy {
@@ -1359,6 +1576,7 @@ mod tests {
                 closes: Arc::new(Mutex::new(0)),
                 tool_fails: false,
                 cannot_start: false,
+                black_hole: false,
             }
         }
         fn calls(&self) -> Vec<Value> {
@@ -1377,6 +1595,9 @@ mod tests {
         pending: Option<String>,
     }
 
+    /// 合成通道等回复的最长睡眠。比调用预算短，测试不会真的等 60 秒。
+    const SPY_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+
     impl crate::bridge::peer::Transport for SpyTransport {
         fn send_line(&mut self, line: &str) -> std::io::Result<()> {
             let request: Value = serde_json::from_str(line).expect("请求是 JSON");
@@ -1394,6 +1615,9 @@ mod tests {
                         .lock()
                         .expect("calls")
                         .push(request["params"].clone());
+                    if self.spy.black_hole {
+                        return Ok(()); // 什么都不回，让调用方超时
+                    }
                     if self.spy.tool_fails {
                         json!({
                             "content": [{ "type": "text", "text": "CCNM_E_PATH_OUTSIDE_ROOT" }],
@@ -1420,7 +1644,7 @@ mod tests {
             match self.pending.take() {
                 Some(line) => Ok(Some(line)),
                 None => {
-                    std::thread::sleep(timeout.min(std::time::Duration::from_millis(20)));
+                    std::thread::sleep(timeout.min(SPY_WAIT));
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout)
                 }
             }
@@ -1462,8 +1686,17 @@ mod tests {
         spy: RemoteSpy,
     }
 
-    /// 一个本地成员 api，一个远端成员 prod。
+    /// 一个本地成员 api，一个远端成员 prod（只读）。
     fn remote_fixture(spy: RemoteSpy) -> RemoteFixture {
+        remote_fixture_with_mode(spy, Mode::Read)
+    }
+
+    /// 远端成员上限设成 coding。
+    fn coding_fixture(spy: RemoteSpy) -> RemoteFixture {
+        remote_fixture_with_mode(spy, Mode::Coding)
+    }
+
+    fn remote_fixture_with_mode(spy: RemoteSpy, max_mode: Mode) -> RemoteFixture {
         crate::home::isolate_for_tests();
         let (api_dir, api) = workspace("api", &[("only-api.txt", "api secret\n")]);
         let remote = CcnmMember {
@@ -1472,7 +1705,7 @@ mod tests {
             ccnm_bin: "ccnm".into(),
             node: "work".into(),
             workspace: "server".into(),
-            max_mode: Mode::Read,
+            max_mode,
         };
         let mut settings = AppSettings::default();
         settings.hub.members = vec![api.id.clone(), remote.id.clone()];
@@ -1784,6 +2017,262 @@ mod tests {
         );
         assert_eq!(after["error"]["code"], "WORKSPACE_NOT_IN_HUB", "{after}");
         assert_eq!(fixture.spy.closes(), 1, "摘掉了成员却没断连接");
+    }
+
+    // ---- 远端 coding ----
+
+    /// 开一个 coding 会话，返回句柄。
+    fn begin(fixture: &RemoteFixture) -> String {
+        let out = call(
+            &fixture.hub,
+            "remote_coding_begin",
+            json!({ "workspace": "prod" }),
+        );
+        assert_eq!(out["ok"], true, "{out}");
+        out["coding_handle"].as_str().expect("句柄").to_string()
+    }
+
+    /// 只读成员不该看到任何 coding 工具——列出来只会引着模型去试。
+    #[test]
+    fn a_read_only_remote_member_is_shown_no_coding_tool() {
+        let names = |f: &RemoteFixture| -> Vec<String> {
+            f.hub
+                .list_tools()
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect()
+        };
+
+        let read_only = names(&remote_fixture(RemoteSpy::new()));
+        assert!(
+            read_only.contains(&"remote_read_file".into()),
+            "{read_only:?}"
+        );
+        for forbidden in [
+            "remote_coding_begin",
+            "remote_apply_patch",
+            "remote_exec_command",
+        ] {
+            assert!(
+                !read_only.contains(&forbidden.into()),
+                "{forbidden} 不该列出来"
+            );
+        }
+
+        let coding = names(&coding_fixture(RemoteSpy::new()));
+        for expected in [
+            "remote_coding_begin",
+            "remote_coding_end",
+            "remote_apply_patch",
+            "remote_exec_command",
+            "remote_read_output",
+        ] {
+            assert!(coding.contains(&expected.into()), "少了 {expected}");
+        }
+    }
+
+    /// 只读成员上硬调 begin：拒绝，并告诉操作员怎么放开。
+    #[test]
+    fn a_read_only_member_refuses_to_open_a_writing_session() {
+        let fixture = remote_fixture(RemoteSpy::new());
+        let out = call(
+            &fixture.hub,
+            "remote_coding_begin",
+            json!({ "workspace": "prod" }),
+        );
+        assert_eq!(out["error"]["code"], "REMOTE_IS_READ_ONLY", "{out}");
+        assert!(
+            out["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("--mode coding"),
+            "得说清楚操作员怎么放开：{out}"
+        );
+        assert_eq!(fixture.spy.opens(), 0, "连都不该连");
+
+        // 拿不到句柄，写工具也就无从调起——句柄只能由 begin 发，而 begin
+        // 在只读成员上过不去。这是"只收紧不放宽"在远端这一侧的样子。
+        let forged = call(
+            &fixture.hub,
+            "remote_apply_patch",
+            json!({ "workspace": "prod", "coding_handle": "rc-whatever",
+                    "files": [{ "op": "delete", "path": "a.rs", "version": "1" }] }),
+        );
+        assert_eq!(
+            forged["error"]["code"], "REMOTE_CODING_HANDLE_UNKNOWN",
+            "{forged}"
+        );
+        assert_eq!(fixture.spy.opens(), 0, "还是一条都不该开");
+    }
+
+    /// noauth 不开放 remote coding（RFC-0002 5.3），但只读照常。
+    #[test]
+    fn writing_needs_an_authenticated_connection() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let anonymous = AuthContext::anonymous(HUB_SCOPE);
+        let ask = |tool: &str, args: Value| -> Value {
+            let (response, _) = fixture.hub.handle_request(
+                &anonymous,
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": tool, "arguments": args } }),
+            );
+            response["result"]["structuredContent"].clone()
+        };
+
+        let refused = ask("remote_coding_begin", json!({ "workspace": "prod" }));
+        assert_eq!(
+            refused["error"]["code"], "CODING_REQUIRES_AUTH",
+            "{refused}"
+        );
+        assert_eq!(fixture.spy.opens(), 0);
+
+        // 只读不受这条限制：操作员选了 noauth 就是自己决定把端口敞开。
+        let (response, _) = fixture.hub.handle_request(
+            &anonymous,
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": { "name": "remote_read_file",
+                                 "arguments": { "workspace": "prod", "path": "a.rs" } } }),
+        );
+        assert_eq!(response["result"]["isError"], json!(false), "{response}");
+    }
+
+    /// 一轮完整的写：begin → patch → exec → 读输出 → end。
+    #[test]
+    fn a_writing_session_carries_the_handle_through_every_call() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let handle = begin(&fixture);
+        assert!(handle.starts_with("rc-"), "{handle}");
+
+        for (tool, args) in [
+            (
+                "remote_apply_patch",
+                json!({ "files": [{ "op": "add", "path": "new.rs", "content": "x" }] }),
+            ),
+            ("remote_exec_command", json!({ "cmd": ["cargo", "test"] })),
+            ("remote_read_output", json!({ "output_ref": "out-1" })),
+        ] {
+            let mut full = args.clone();
+            full["workspace"] = json!("prod");
+            full["coding_handle"] = json!(handle);
+            let out = raw_call(&fixture.hub, tool, full);
+            assert_eq!(out["isError"], json!(false), "{tool}: {out}");
+            assert_eq!(out["_meta"]["gld/mode"], json!("coding"), "{tool}");
+        }
+
+        // 转发的是 ccnm 的名字，句柄和 workspace 都没跟着出去。
+        let calls = fixture.spy.calls();
+        let names: Vec<&str> = calls.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["apply_patch", "exec_command", "read_output"],
+            "{names:?}"
+        );
+        for c in &calls {
+            let args = &c["arguments"];
+            assert!(args.get("coding_handle").is_none(), "句柄不该转发：{args}");
+            assert!(args.get("workspace").is_none(), "路由字段不该转发：{args}");
+        }
+        // cmd 原样是数组，不会被拍成 shell 字符串。
+        assert_eq!(calls[1]["arguments"]["cmd"], json!(["cargo", "test"]));
+
+        let closed = call(
+            &fixture.hub,
+            "remote_coding_end",
+            json!({ "workspace": "prod", "coding_handle": handle }),
+        );
+        assert_eq!(closed["ok"], true, "{closed}");
+        assert_eq!(fixture.spy.closes(), 1, "关了会话就该断连接，把写锁还回去");
+    }
+
+    /// 不带句柄、或者带一个编的句柄：都拒，而且不往远端发。
+    #[test]
+    fn a_write_without_a_valid_handle_never_reaches_the_remote() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let patch = json!({ "files": [{ "op": "delete", "path": "a.rs", "version": "1" }] });
+
+        let mut no_handle = patch.clone();
+        no_handle["workspace"] = json!("prod");
+        let out = call(&fixture.hub, "remote_apply_patch", no_handle);
+        assert_eq!(out["error"]["code"], "MISSING_ARGUMENT", "{out}");
+        assert!(
+            out["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("remote_coding_begin"),
+            "得告诉它先去哪儿拿句柄：{out}"
+        );
+
+        let mut made_up = patch;
+        made_up["workspace"] = json!("prod");
+        made_up["coding_handle"] = json!("rc-0000000000000000");
+        let out = call(&fixture.hub, "remote_apply_patch", made_up);
+        assert_eq!(
+            out["error"]["code"], "REMOTE_CODING_HANDLE_UNKNOWN",
+            "{out}"
+        );
+
+        assert_eq!(fixture.spy.opens(), 0, "一条 bridge 都不该开");
+        assert!(fixture.spy.calls().is_empty(), "什么都不该发出去");
+    }
+
+    /// 写到一半断了：报 outcome unknown，**不标可重试**。
+    ///
+    /// 重发一次 apply_patch 或 exec_command 可能是第二次执行（验收项 H07）。
+    #[test]
+    fn a_write_that_loses_the_connection_reports_an_unknown_outcome() {
+        let mut spy = RemoteSpy::new();
+        spy.black_hole = true;
+        let fixture = coding_fixture(spy);
+        let handle = begin(&fixture);
+
+        let out = call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle, "cmd": ["rm", "-rf", "build"] }),
+        );
+        assert_eq!(out["error"]["code"], "REMOTE_OUTCOME_UNKNOWN", "{out}");
+        assert_eq!(
+            out["error"]["retryable"],
+            json!(false),
+            "绝不能标可重试：{out}"
+        );
+        assert_eq!(out["error"]["details"]["outcome"], json!("unknown"));
+        assert!(
+            out["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("do not just resend"),
+            "{out}"
+        );
+    }
+
+    /// 远端写锁被别人占着 vs 状态说不清，是两个错，给的指示相反。
+    #[test]
+    fn a_busy_lock_and_an_unknown_lock_are_not_the_same_error() {
+        let busy = classify_startup_failure(
+            "CCNM_E_POLICY:\nworkspace write guard is busy; another session still owns this working tree",
+        );
+        assert_eq!(busy.0, "REMOTE_WRITE_LOCK_BUSY");
+        assert!(busy.2, "别人占着，等一会儿可以再试");
+
+        for text in [
+            "CCNM_E_POLICY:\nworkspace write guard state is unknown; refusing to transfer write authority",
+            "CCNM_E_POLICY:\nworkspace write guard was left held by an interrupted process",
+            "CCNM_E_POLICY:\nworkspace write guard state is incomplete or unknown",
+        ] {
+            let unknown = classify_startup_failure(text);
+            assert_eq!(unknown.0, "REMOTE_WRITE_LOCK_UNKNOWN", "{text}");
+            assert!(
+                !unknown.2,
+                "状态说不清绝不能标可重试：重试到它「好了」的另一种可能，是两个 Agent 同时改一棵树。{text}"
+            );
+        }
+
+        // 认不出来就按老样子走，宁可少标一个 unknown。
+        assert_eq!(
+            classify_startup_failure("connection reset by peer").0,
+            "REMOTE_BRIDGE_CLOSED"
+        );
     }
 
     #[test]
