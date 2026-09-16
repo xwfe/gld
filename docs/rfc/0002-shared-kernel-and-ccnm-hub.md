@@ -58,6 +58,17 @@ ccnm 的官方 Agent 管理入口保持原样，但不接入本次 hub。将来�
 > tag = "toexec-text-v0.1.0" }`；一个 crate 管一件事，所以 crate 不跟仓库同名。
 > "本地 path 仅供开发、不提交"这一条按原样执行过一次教训：提交了 path 依赖，
 > 两边 CI 当场构建不了。
+>
+> **K1 里两处关于工具链的说法已经不成立**：基础库不是 MSRV 1.85 / edition 2021，
+> 两个 crate 都是 **edition 2024、rust-version 1.89**；gld 的工具链也**确实跟着
+> 升了**（1.85 → 1.89），那是用户 2026-09-15 定的「三仓统一 rust-version、时点为
+> 第一个共享 crate 被产品链接时」。所以 K05 里"基础库用既有 Rust 1.85 验证"这一条
+> 不再适用，其余（两产品各自门禁、gld Windows 编译分开记录）照旧。
+>
+> K1/K2 的实际结果：`toexec-text` 只抽了有界行读取——两边的 `read_file` 是两套
+> 对外契约，**不统一**；`toexec-fs` 抽了原子写入的两步纯机制，`PreparedBatch`
+> 那种统一的写入底座**没有做**，journal 和两种回滚编排仍各自留在产品里。逐项
+> 对照见 toexec 仓库 `evidence/v2-k/duplication-audit.md`。
 
 ### K1：第一步只共享文本扫描原语
 
@@ -125,6 +136,28 @@ ccnm 与 gld 的同名工具不是同一契约：`cmd` 数组/字符串、JSON e
 工具允许集取 hub 权限、远端成员最大模式、服务端批准的 ccnm 工具语义与 Runtime 实际能力的交集。不能因外层工具叫 `runtime_call` 就绕过 read-only；exec 保守视作可写，不从命令名字推断只读，也不只信任 MCP annotations。
 
 远端只报告自身能力。没有原生 Git 工具就使用受授权的远端 exec，不在本机 Git 上求结果；没有 stdin/PTY/运行中取消能力就明确不支持，不制造虚假 session 接口。长命令预算必须与真实 Web 客户端链路验证，不能在请求已经启动后才发现 HTTP 等不及，随后盲目重试。
+
+> **2026-09-16 补记：入口形状按跨仓计划改为静态工具（RFC 正文保持原样）。**
+>
+> 本节的 `runtime_open` / `runtime_call` / `runtime_close` 是 09-15 16:22 的草案。
+> 同日 22:49 起草、23:15 定稿的跨仓计划（toexec 仓库 `docs/plan/implementation-plan-v2.md`
+> 第 7 节）给了另一个形状：**固定前缀的静态工具** `remote_workspace_info` /
+> `remote_read_file` / `remote_list_files` / `remote_search_text`，schema 基于冻结协议，
+> 「只开放已评审工具，不自动跟随上游增加权限」。
+>
+> 以后者为准，理由不只是它更新：
+>
+> 1. **`runtime_call` 转发任意工具名，等于自动跟随上游。**远端 ccnm 哪天加一个工具，
+>    Web AI 立刻就能调用，而 gld 这边没有评审过。静态工具要求逐个显式声明。
+> 2. **schema 的可见性。**静态工具的 schema 在 `tools/list` 里就能看到，Web AI 和
+>    审计一眼知道能干什么；`runtime_call` 的能力藏在 `runtime_open` 的返回值里，
+>    每个会话还可能不一样。
+> 3. **权限交集更好落实。**静态工具集天然是「已评审」的子集，不必在调用时再去
+>    推断某个远端工具名是不是只读。
+>
+> 本节其余的约束**全部继续适用**，尤其是 5.3 的认证主体、5.4 的写租约和 5.5 的
+> Planning 边界。会话句柄也没有被否定——它在 coding 模式下仍然必要，只是名字按
+> 跨仓计划叫 `remote_coding_begin` / `remote_coding_end`，read 模式不需要句柄。
 
 ### 5.3 认证主体必须进入 hub 调用链
 
