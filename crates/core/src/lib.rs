@@ -18,6 +18,7 @@ pub mod agent_context;
 pub mod app;
 pub mod async_rt;
 pub mod auth;
+pub mod bridge;
 pub mod data;
 pub mod error;
 pub mod global_gateway;
