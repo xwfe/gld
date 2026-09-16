@@ -6,8 +6,8 @@ use std::time::SystemTime;
 
 use regex::Regex;
 use serde_json::{json, Value};
-use walkdir::WalkDir;
 use toexec_text::{next_line, LineLimits};
+use walkdir::WalkDir;
 
 use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceError};
 
