@@ -40,7 +40,7 @@ pub use doctor::{
     config_checks, port_check, software_check, Diagnosis, DoctorCheck, DoctorLevel, PortOccupant,
     SecretLookup,
 };
-pub use hub::{HubMemberDto, HubMembershipChange, HubStatusDto};
+pub use hub::{CcnmMemberSpec, HubMemberDto, HubMembershipChange, HubStatusDto};
 pub use logs::LogChunk;
 pub use planning::PlanStepUpdate;
 pub use runtime::{RunningService, ServiceOverview};

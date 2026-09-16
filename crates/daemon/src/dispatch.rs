@@ -129,6 +129,8 @@ pub async fn dispatch(
         R::SetHubConfig { config } => ok(&app.set_hub_config(config).await?),
         R::HubAddMembers { targets } => ok(&app.add_hub_members(&targets).await?),
         R::HubRemoveMembers { targets } => ok(&app.remove_hub_members(&targets).await?),
+        R::HubAddRemote { spec } => ok(&app.add_ccnm_member(spec).await?),
+        R::HubRemoveRemote { selector } => ok(&app.remove_ccnm_member(&selector).await?),
         R::HubStart => ok(&app.start_hub().await?),
         R::HubStop => ok(&app.stop_hub().await?),
         R::HubSecret { key } => ok(&app.hub_secret(&key)?),

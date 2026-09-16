@@ -10,7 +10,8 @@
 use std::path::PathBuf;
 
 use gld_core::app::{
-    GlobalRuntimeSettingsDto, PlanStepUpdate, WorkspaceCreateOptions, WorkspaceTarget,
+    CcnmMemberSpec, GlobalRuntimeSettingsDto, PlanStepUpdate, WorkspaceCreateOptions,
+    WorkspaceTarget,
 };
 use gld_core::planning::{GoalStatus, PlanStatus, PlanningMode};
 use gld_core::runtime::ServiceKind;
@@ -140,6 +141,14 @@ pub enum Request {
     },
     HubRemoveMembers {
         targets: Vec<WorkspaceTarget>,
+    },
+    /// 登记一个远端 ccnm workspace 并加进 hub。
+    HubAddRemote {
+        spec: CcnmMemberSpec,
+    },
+    /// 删掉一个远端成员（按 id、名字或 id 前缀）。
+    HubRemoveRemote {
+        selector: String,
     },
     HubStart,
     HubStop,

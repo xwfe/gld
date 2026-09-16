@@ -771,6 +771,50 @@ pub enum HubCmd {
     ///   oauth_client_id      静态 Client ID，只影响手填了它的客户端
     #[command(visible_alias = "regen", verbatim_doc_comment)]
     Regenerate { key: String },
+    /// 远端成员：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 只读访问
+    #[command(subcommand)]
+    Remote(HubRemoteCmd),
+}
+
+/// 远端 ccnm workspace 成员。
+///
+/// 前提：那台机器上已经装好并配好 ccnm，本机也装了 ccnm（gld 起的是
+/// `ccnm mcp bridge`，SSH 连接由 ccnm 自己管，gld 不碰凭据）。
+#[derive(Debug, Subcommand)]
+pub enum HubRemoteCmd {
+    /// 登记一个远端 workspace 并加进 hub（立即生效，不用重启）
+    ///
+    ///   gld hub remote add prod --node work --remote-workspace server
+    ///
+    /// 两个值填的都是 **ccnm 配置里的名字**，不是 host 也不是路径。在那台机器上
+    /// 跑 ccnm workspace list 能看到有哪些。
+    ///
+    /// 叫 --remote-workspace 是因为 --workspace / -w 已经被全局参数占了，
+    /// 那个说的是"本机哪个工作区"，两回事。
+    #[command(verbatim_doc_comment)]
+    Add {
+        /// 给人看的名字，调用时 workspace 参数也能用它
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// ccnm 配置里的 node 别名（一台机器的名字）
+        #[arg(long, value_name = "NODE")]
+        node: String,
+        /// ccnm 配置里的 workspace 名
+        #[arg(long = "remote-workspace", value_name = "WS")]
+        remote_workspace: String,
+        /// 本机 ccnm 可执行程序（默认用 PATH 里的 ccnm）
+        #[arg(long, value_name = "PATH")]
+        ccnm: Option<String>,
+        /// 访问上限：read（默认）| coding。coding 还没实现，现在填了也只能只读
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+    },
+    /// 删掉一个远端成员（按名字、id 或 id 前缀）
+    #[command(visible_alias = "rm")]
+    Remove {
+        #[arg(value_name = "NAME")]
+        selector: String,
+    },
 }
 
 #[derive(Debug, Args)]

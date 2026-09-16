@@ -1,10 +1,12 @@
-use gld_core::app::{HubMemberDto, HubMembershipChange, HubStatusDto, WorkspaceTarget};
+use gld_core::app::{
+    CcnmMemberSpec, HubMemberDto, HubMembershipChange, HubStatusDto, WorkspaceTarget,
+};
 use gld_core::settings::HubConfig;
 use gld_daemon::Request;
 use serde_json::json;
 
 use super::Ctx;
-use crate::cli::{HubCmd, HubSetArgs};
+use crate::cli::{HubCmd, HubRemoteCmd, HubSetArgs};
 use crate::error::{CliError, CliResult};
 use crate::output::{mask, or_dash, yes_no};
 
@@ -94,6 +96,46 @@ pub async fn run(ctx: &mut Ctx, command: HubCmd) -> CliResult {
             });
             Ok(())
         }
+        HubCmd::Remote(command) => remote(ctx, command).await,
+    }
+}
+
+async fn remote(ctx: &mut Ctx, command: HubRemoteCmd) -> CliResult {
+    match command {
+        HubRemoteCmd::Add {
+            name,
+            node,
+            remote_workspace,
+            ccnm,
+            mode,
+        } => {
+            let spec = CcnmMemberSpec {
+                name,
+                node,
+                workspace: remote_workspace,
+                ccnm_bin: ccnm.unwrap_or_default(),
+                mode: mode.unwrap_or_default(),
+            };
+            let change: HubMembershipChange = ctx
+                .backend
+                .call_typed(Request::HubAddRemote { spec })
+                .await?;
+            print_change(ctx, &change, "已加入", "本来就在 hub 里")?;
+            // 这条命令只写配置，不去连。真连要等第一次调用，那时才知道对面
+            // 通不通——先说清楚，免得以为"加成功了"就等于"连得上"。
+            ctx.out.note(
+                "只写了配置，还没连过。验一下：gld hub start 之后让客户端调 remote_workspace_info，\
+                 或者先在本机跑 ccnm mcp bridge <workspace> --node <node> --mode read 看看通不通。",
+            );
+            Ok(())
+        }
+        HubRemoteCmd::Remove { selector } => {
+            let change: HubMembershipChange = ctx
+                .backend
+                .call_typed(Request::HubRemoveRemote { selector })
+                .await?;
+            print_change(ctx, &change, "已删除", "本来就不在")
+        }
     }
 }
 
@@ -148,15 +190,25 @@ async fn show(ctx: &mut Ctx, reveal: bool) -> CliResult {
             .members
             .iter()
             .map(|member| {
+                // 远端成员没有本机路径和工具集，那两列给的是它在对面的位置
+                // 和访问上限——远端的 root 由 ccnm 自己解析，gld 不知道。
+                let (profile, location) = if member.kind == "remote" {
+                    (
+                        format!("{}（远端）", member.mode),
+                        format!("{}:{}", member.node, member.workspace),
+                    )
+                } else {
+                    (member.tool_profile.clone(), member.path.clone())
+                };
                 vec![
                     member.name.clone(),
                     gld_core::short_id(&member.id).to_string(),
-                    member.tool_profile.clone(),
-                    member.path.clone(),
+                    profile,
+                    location,
                 ]
             })
             .collect();
-        out.table(&["名称", "ID", "工具集", "路径"], &rows);
+        out.table(&["名称", "ID", "工具集 / 模式", "路径 / 位置"], &rows);
     }
     out.line("");
     out.line(out.dim(

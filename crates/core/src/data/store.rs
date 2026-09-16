@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::bridge::member::CcnmMember;
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
 use crate::workspace::WorkspaceProfile;
@@ -155,6 +156,35 @@ impl DataStore {
         };
         let removed = self.data.profiles.remove(index);
         self.data.workspace_secrets.remove(id);
+        self.save()?;
+        Ok(Some(removed))
+    }
+
+    /// 远端 ccnm 成员。和 [`list`](Self::list) 是两份名单，不混在一起——
+    /// 远端成员没有本机根目录、隧道和 Planning（RFC-0002 5.1）。
+    pub fn ccnm_members(&self) -> &[CcnmMember] {
+        &self.data.ccnm_members
+    }
+
+    /// 按 id 加一个远端成员，已有同 id 就整条换掉。
+    pub fn upsert_ccnm_member(&mut self, member: CcnmMember) -> AppResult<()> {
+        match self
+            .data
+            .ccnm_members
+            .iter()
+            .position(|item| item.id == member.id)
+        {
+            Some(index) => self.data.ccnm_members[index] = member,
+            None => self.data.ccnm_members.push(member),
+        }
+        self.save()
+    }
+
+    pub fn remove_ccnm_member(&mut self, id: &str) -> AppResult<Option<CcnmMember>> {
+        let Some(index) = self.data.ccnm_members.iter().position(|item| item.id == id) else {
+            return Ok(None);
+        };
+        let removed = self.data.ccnm_members.remove(index);
         self.save()?;
         Ok(Some(removed))
     }
