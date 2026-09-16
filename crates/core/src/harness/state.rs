@@ -257,49 +257,10 @@ impl Harness {
     pub fn project_state(&self, max_files: usize) -> HarnessResult<ProjectState> {
         let current = capture_baseline(&self.workspace_root);
         let task = self.current_task()?;
-        let baseline_map = task
-            .as_ref()
-            .map(|t| {
-                t.baseline
-                    .entries
-                    .iter()
-                    .map(|e| (e.path.clone(), e))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let current_map: HashMap<_, _> = current
-            .entries
-            .iter()
-            .map(|e| (e.path.clone(), e))
-            .collect();
-        let mut paths: Vec<String> = baseline_map
-            .keys()
-            .chain(current_map.keys())
-            .cloned()
-            .collect();
-        paths.sort();
-        paths.dedup();
-        let total_files = paths.len();
-        let files = paths
-            .into_iter()
-            .map(|path| {
-                let before = baseline_map.get(&path).map(|e| e.sha256.clone());
-                let entry = current_map.get(&path);
-                let status = match (before, entry) {
-                    (Some(before), Some(entry)) if before == entry.sha256 => "unchanged",
-                    (Some(_), Some(_)) => "modified",
-                    (Some(_), None) => "deleted",
-                    (None, Some(_)) => "added",
-                    (None, None) => "unknown",
-                };
-                ProjectFileState {
-                    path,
-                    status: status.to_string(),
-                    sha256: entry.map(|e| e.sha256.clone()).unwrap_or_default(),
-                    bytes: entry.map(|e| e.bytes).unwrap_or(0),
-                }
-            })
-            .collect::<Vec<_>>();
+        let files = file_states(task.as_ref().map(|t| &t.baseline), &current);
+        let total_files = files.len();
+        // clean 要在截断之前判：改动排在 max_files 之后也得算不干净。
+        let clean = files.iter().all(|f| f.status == "unchanged");
         let truncated = files.len() > max_files.max(1);
         let files = files.into_iter().take(max_files.max(1)).collect::<Vec<_>>();
         let active_task_id = task.as_ref().map(|t| t.id.clone());
@@ -313,7 +274,7 @@ impl Harness {
             workspace_id: self.workspace_id.clone(),
             branch: current.branch,
             head: current.head,
-            clean: files.iter().all(|f| f.status == "unchanged"),
+            clean,
             files,
             total_files,
             truncated,
@@ -321,6 +282,17 @@ impl Harness {
             task,
             recent_events,
         })
+    }
+
+    /// 这个任务开始以来改过的文件，全量、按路径排序。只拿它自己的基线比，不管
+    /// 它现在是不是活动任务——finish_task 算摘要时任务已经关了，拿活动任务的
+    /// 基线就是拿空基线，每个文件都成了 added。
+    pub fn task_changes(&self, task: &TaskSession) -> Vec<ProjectFileState> {
+        let current = capture_baseline(&self.workspace_root);
+        file_states(Some(&task.baseline), &current)
+            .into_iter()
+            .filter(|file| file.status != "unchanged")
+            .collect()
     }
 
     pub fn status(&self) -> HarnessResult<HarnessStatus> {
@@ -481,6 +453,49 @@ impl Harness {
             },
         )
     }
+}
+
+/// 每个文件相对某份基线的状态，基线和当前两边的路径取并集、按路径排序。
+/// 没有基线（没有任务）时一律是 added。
+fn file_states(
+    baseline: Option<&ProjectBaseline>,
+    current: &ProjectBaseline,
+) -> Vec<ProjectFileState> {
+    let baseline_map: HashMap<_, _> = baseline
+        .map(|b| b.entries.iter().map(|e| (e.path.as_str(), e)).collect())
+        .unwrap_or_default();
+    let current_map: HashMap<_, _> = current
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e))
+        .collect();
+    let mut paths: Vec<&str> = baseline_map
+        .keys()
+        .chain(current_map.keys())
+        .copied()
+        .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let before = baseline_map.get(path);
+            let entry = current_map.get(path);
+            let status = match (before, entry) {
+                (Some(before), Some(entry)) if before.sha256 == entry.sha256 => "unchanged",
+                (Some(_), Some(_)) => "modified",
+                (Some(_), None) => "deleted",
+                (None, Some(_)) => "added",
+                (None, None) => "unknown",
+            };
+            ProjectFileState {
+                path: path.to_string(),
+                status: status.to_string(),
+                sha256: entry.map(|e| e.sha256.clone()).unwrap_or_default(),
+                bytes: entry.map(|e| e.bytes).unwrap_or(0),
+            }
+        })
+        .collect()
 }
 
 pub fn capture_baseline(root: &Path) -> ProjectBaseline {

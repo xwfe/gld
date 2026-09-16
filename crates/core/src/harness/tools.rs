@@ -198,6 +198,9 @@ fn list_task_events(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
     Ok(json!({"events": events, "next_cursor": offset + events.len()}))
 }
 
+/// 摘要最多列几个改动文件，和改之前一样是 200；超过时看 total_changed_files。
+const SUMMARY_FILES: usize = 200;
+
 fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let task = if let Some(task_id) = args.get("task_id").and_then(Value::as_str) {
         ctx.harness.task(task_id).map_err(map_error)?
@@ -207,13 +210,11 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
             .map_err(map_error)?
             .ok_or_else(|| tool_error("TASK_STATE_REQUIRED", "没有可总结的活动任务"))?
     };
-    let state = ctx.harness.project_state(200).map_err(map_error)?;
-    let files = state
-        .files
-        .iter()
-        .filter(|file| file.status != "unchanged")
-        .cloned()
-        .collect::<Vec<_>>();
+    // 先对这个任务自己的基线算出全部改动再截，不是先截全部文件再挑改动——
+    // 后者在大仓库里会把排在后面的改动整个漏掉。
+    let changed = ctx.harness.task_changes(&task);
+    let total_changed_files = changed.len();
+    let files = changed.into_iter().take(SUMMARY_FILES).collect::<Vec<_>>();
     let events = ctx
         .harness
         .list_events(&task.id, 0, 100)
@@ -223,6 +224,7 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         "objective": task.objective,
         "why": {"text": task.objective, "source": "task_objective"},
         "files": files,
+        "total_changed_files": total_changed_files,
         "evidence": events,
         "verification": [],
         "risks": [],

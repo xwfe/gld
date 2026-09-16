@@ -482,3 +482,82 @@ fn 回给客户端的任务都不带逐文件清单() {
         );
     }
 }
+
+fn changed_paths(summary: &serde_json::Value) -> Vec<(String, String)> {
+    summary["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|file| {
+            (
+                file["path"].as_str().unwrap().to_string(),
+                file["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// finish_task 以前先把任务关掉再算摘要，算摘要时找不到活动任务，拿空基线
+/// 去比：什么都没改，工作区每个文件都报 added（1500 个文件时报满 200 条）。
+#[test]
+fn finish_task_的摘要只列这个任务期间真正改过的文件() {
+    let temp = tempfile::tempdir().expect("创建临时目录");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("创建工作区");
+    for name in ["README.md", "a.txt", "b.txt"] {
+        fs::write(workspace.join(name), "初始内容\n").expect("写入文件");
+    }
+    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let started = call_tool(&ctx, "start_task", &json!({"objective": "只改一个"}));
+    let task_id = started["task"]["id"].as_str().expect("任务 ID").to_string();
+    let patched = call_tool(
+        &ctx,
+        "apply_patch",
+        &json!({"patch": "--- a/a.txt\n+++ b/a.txt\n@@\n-初始内容\n+改过了\n"}),
+    );
+    assert_eq!(patched["ok"], true, "{patched}");
+
+    let finished = call_tool(
+        &ctx,
+        "finish_task",
+        &json!({"task_id": task_id, "allow_unverified": true}),
+    );
+    assert_eq!(finished["ok"], true, "{finished}");
+    let summary = &finished["change_summary"];
+    assert_eq!(
+        changed_paths(summary),
+        vec![("a.txt".to_string(), "modified".to_string())],
+        "{summary}"
+    );
+    assert_eq!(summary["total_changed_files"], 1);
+}
+
+/// change_summary 以前先取按路径排序的前 200 个文件（含没改的）再过滤，
+/// 大仓库里排在后面的改动根本进不了摘要。
+#[test]
+fn change_summary_不漏掉排在前_200_个文件之后的改动() {
+    let temp = tempfile::tempdir().expect("创建临时目录");
+    let ctx = many_files_context(&temp);
+    let started = call_tool(&ctx, "start_task", &json!({"objective": "改后面的"}));
+    let task_id = started["task"]["id"].as_str().expect("任务 ID").to_string();
+    let path = "src/module_1400/a_reasonably_descriptive_file_name.rs";
+    let patched = call_tool(
+        &ctx,
+        "apply_patch",
+        &json!({"patch": format!("--- a/{path}\n+++ b/{path}\n@@\n-fn f() {{}}\n+fn g() {{}}\n")}),
+    );
+    assert_eq!(patched["ok"], true, "{patched}");
+
+    let summary = call_tool(&ctx, "change_summary", &json!({"task_id": task_id}));
+    assert_eq!(summary["ok"], true, "{summary}");
+    assert_eq!(
+        changed_paths(&summary),
+        vec![(path.to_string(), "modified".to_string())]
+    );
+    assert_eq!(summary["total_changed_files"], 1);
+
+    // project_state 只列前 200 个文件，但 clean 得按全部文件判。
+    let state = call_tool(&ctx, "project_state", &json!({}));
+    assert_eq!(state["truncated"], true, "{state}");
+    assert_eq!(state["clean"], false);
+}
