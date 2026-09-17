@@ -38,7 +38,7 @@ sha256sum -c SHA256SUMS      # macOS 上是 shasum -a 256 -c SHA256SUMS
 
 ## 从源码装
 
-需要 Rust 1.85+，没有 Node、没有 Tauri 依赖。
+需要 Rust 1.89+，没有 Node、没有 Tauri 依赖。
 
 ```bash
 git clone <本仓库> && cd gld
