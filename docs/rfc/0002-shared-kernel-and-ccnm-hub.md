@@ -1,6 +1,6 @@
 # RFC-0002：共享 Rust 内核，gld hub 接入 ccnm Runtime
 
-日期：2026-09-15。方向已由用户确认；本文为实施方案。**2026-09-16 已实施**：共享内核 K1/K2 与 hub 接入 H1–H8 都落地了，逐项对照在第 9 节的补记；正文其余部分保留为当时的方案。Codex 原生 exec-server 那条线不在 gld 里，进度在 ccnm（P21–P24）和 toexec 的 v2 计划。
+日期：2026-09-15。方向已由用户确认；本文为实施方案。**2026-09-16 已实施**：共享内核 K1/K2 与 hub 接入 H1–H8 都落地了，逐项对照在第 9 节的补记；正文其余部分保留为当时的方案。Codex 原生 exec-server 那条线不在 gld 里，ccnm 做完 P21–P30 后于 2026-09-17 封存（ccnm P31）；三种客户端（Claude Code、Codex、Web AI 经 gld hub）都走同一条 MCP + 共享库路径，最终目标是三种客户端 × macOS / Linux / Windows，现状汇总在 toexec v2 计划第 0.1 节，gld 这一侧的含义见第 9 节最后的补记。
 
 本 RFC 替代 [RFC-0001 的 WebCodex 服务采用路线](0001-shared-workspace-runtime.md)。不增加第三个 Server，不部署 WebCodex，不重写模型循环。原[证据附录](0001-shared-workspace-runtime-evidence.md)中的源码事实继续适用，不继续执行其中的服务准入计划。
 
@@ -321,6 +321,12 @@ H08：一个纯 HTTP 的 MCP 客户端走完 read → search → patch → **tes
 `files`。现在以 ccnm 的 `*Args` 结构体为准，read 白名单也照真二进制补齐了
 `end_line` / `max_bytes` / `include_hidden` / `glob` / `case_sensitive` /
 `context_lines`。
+
+### 2026-09-17 补记：目标定为三种客户端 × 三种操作系统
+
+用户明确了最终目标：Claude Code、Codex CLI、Web AI（经 gld hub）三种客户端，在 macOS、Linux、Windows 上都走同一条执行路径。ccnm 的 Codex 原生 exec-server 链同日封存（收益没量过，OS 沙箱那一项 `codex sandbox` 不经 RPC 就能拿到，只开交互模式，每次 Codex 升级都要重测规则表），所以剩下的只有 MCP 七工具 + 共享库这一条路，gld hub 接的正是它，本 RFC 的方向不变。
+
+gld 这一侧的现状：Web AI 端在 macOS 上跨两台真机验过（上面的 H2、H3、H08，对端 fodelf 也是 macOS/aarch64）；Linux 上 gld 本地二进制实机验过，但 hub → ccnm → Linux Runtime 这条链**没有用 gld 验过**（ccnm 自己在 Debian 13 Runtime 上验过外部 MCP，Host 是 Claude Code 不是 gld）；Windows 上 gld 本地每次发版都构建、CI 做编译检查，**没有真机跑过**（[安装说明](../install.md)）；hub 连远端成员要本机有 `ccnm`（起的是 `ccnm mcp bridge`），而 ccnm 不跑 Windows，所以 Windows 上的 gld hub 目前只能管本地成员。Windows 那一列要另立 RFC，先定 ccnm 在 Windows 上当 Agent、当 Runtime 还是两者都要；gld 不为此提前改东西。
 
 ### 本轮源码定位
 
