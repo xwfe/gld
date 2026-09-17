@@ -93,6 +93,28 @@ gld share --tunnel cf:mcp.example.com --token <隧道 token>
 域名配过一次之后，`--tunnel cf:named` 就是"沿用已经配好的那个"；
 `gld upgrade --tunnel cf:<新域名>` 换一个。写不写 `https://` 都行。
 
+#### 云端的回源端口要和本地端口一致
+
+固定隧道把请求转到本机哪个端口（回源地址），是 **Cloudflare 云端那份配置**说了算。
+Tunnel Token 只用来连上隧道，gld 不会、也没法替你把云端的端口改成自己的端口。
+假设云端回源填的是 `http://127.0.0.1:28767`，启动时把本地端口明确对齐：
+
+```bash
+gld start ~/code/my-project --port 28767 --tunnel cf:mcp.example.com
+```
+
+`--port` 只改本地监听端口，不动云端；已经连着的本机客户端也要跟着换端口。
+两边对不上时，隧道进程照样显示 `running`，公网却是 502——看着像 gld 坏了，
+其实是云端把请求转到了一个没人监听的端口。
+
+所以固定隧道起来之后 gld 会自己访问一次公网地址：不通就返回非零退出码，并在报错里
+写出它预期的回源地址。已经起来的本地服务和隧道会留着，方便你改完云端配置直接复查。
+两点别误会：公网有响应不等于 OAuth 全流程能走通；`gld ls` 里隧道那列的 `running`
+只是进程还活着，不是实时的公网健康状态，要确认就跑 `gld health`。
+
+`start`、`share`、`upgrade` 三个命令给 token 都用 `--token`；旧写法 `--tunnel-token`
+仍然认。
+
 ### 办法三：FRP 固定域名（自己有公网机器）
 
 需要一台有公网 IP 的机器跑 frps，本机装 frpc（**要求 frp ≥ 0.52**，
