@@ -972,3 +972,156 @@ fn searching_by_type_and_inside_dot_directories() {
         "{hidden_on}"
     );
 }
+
+/// 版本前置条件的完整来回：read_file 给版本 → 中间有人改了文件 →
+/// apply_patch 带着旧版本来，被拒，文件不动（审查 C3、A09）。
+#[test]
+fn a_patch_built_on_a_stale_read_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let file = dir.path().join("notes.md");
+    fs::write(&file, "one\n").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let read = invoke(&ctx, "read_file", json!({"path": "notes.md"}));
+    assert_ok(&read);
+    let version = read["version"].as_str().expect("version").to_string();
+
+    // 别人改了它（编辑器、另一个 gld、git checkout……）。
+    // 版本号是大小加修改时间，所以内容长度也换一下。
+    fs::write(&file, "someone else edited this\n").expect("rewrite");
+
+    let patch = "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+two\n";
+    let refused = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": patch, "expected_versions": {"notes.md": version}}),
+    );
+    let error = assert_err(&refused);
+    assert_eq!(error["error"]["code"], "FILE_VERSION_CONFLICT", "{error}");
+    let diagnostic = &error["error"]["details"]["diagnostics"][0];
+    assert_eq!(diagnostic["reason_code"], "file_changed_since_read");
+    assert!(diagnostic["actual_version"].is_string(), "{diagnostic}");
+    assert_eq!(error["error"]["details"]["files_changed"], json!(false));
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "someone else edited this\n",
+        "别人的改动被盖掉了"
+    );
+
+    // 恢复提示不能是"检查 stderr"，得说清楚下一步是重读。
+    let hint = refused["recovery_hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("read_file") && !hint.contains("stderr"),
+        "{hint}"
+    );
+}
+
+/// patch_check 回的 `observed_versions` 原样交给 apply_patch 就能过；
+/// apply_patch 回的 `file_versions` 又能接着用于下一次改动。
+#[test]
+fn versions_round_trip_from_patch_check_through_apply_patch() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("notes.md"), "one\n").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let checked = invoke(
+        &ctx,
+        "patch_check",
+        json!({"patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+two\n"}),
+    );
+    assert_ok(&checked);
+    let observed = checked["observed_versions"].clone();
+    assert!(observed["notes.md"].is_string(), "{checked}");
+
+    let applied = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+two\n",
+            "expected_versions": observed
+        }),
+    );
+    assert_ok(&applied);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("notes.md")).unwrap(),
+        "two\n"
+    );
+
+    // 写完给的是新版本：接着改同一个文件不用再 read_file 一遍。
+    let after = applied["file_versions"]["notes.md"]
+        .as_str()
+        .expect("new version")
+        .to_string();
+    assert_ne!(Some(after.as_str()), observed["notes.md"].as_str());
+
+    let again = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-two\n+three\n",
+            "expected_versions": {"notes.md": after}
+        }),
+    );
+    assert_ok(&again);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("notes.md")).unwrap(),
+        "three\n"
+    );
+}
+
+/// 新建文件的前置条件是"这个路径应当什么都没有"，写成 null。
+#[test]
+fn a_new_file_precondition_is_null_and_it_is_enforced() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let ctx = ctx_for(dir.path());
+    let patch = "*** Begin Patch\n*** Add File: fresh.txt\n+mine\n*** End Patch\n";
+
+    let created = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": patch, "expected_versions": {"fresh.txt": null}}),
+    );
+    assert_ok(&created);
+
+    // 同一条补丁再来一次：这回路径上已经有东西了，前置条件不成立。
+    let refused = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": patch, "expected_versions": {"fresh.txt": null}}),
+    );
+    let error = assert_err(&refused);
+    assert_eq!(error["error"]["code"], "FILE_VERSION_CONFLICT", "{error}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("fresh.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
+/// 前置条件里写了补丁根本不碰的文件：报错。忽略的话，模型会以为自己保护住了
+/// 那个文件，而这次调用压根没检查它。
+#[test]
+fn a_precondition_for_an_untouched_file_is_an_error() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("notes.md"), "one\n").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+two\n",
+            "expected_versions": {"other.md": "1-2"}
+        }),
+    );
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "INVALID_ARGUMENT", "{error}");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("other.md"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("notes.md")).unwrap(),
+        "one\n",
+        "参数错了却把文件改了"
+    );
+}

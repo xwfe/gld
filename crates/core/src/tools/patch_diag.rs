@@ -63,6 +63,12 @@ pub(crate) struct Diagnostic {
     pub(crate) candidate_ranges: Vec<(usize, usize)>,
     pub(crate) excerpt: Option<Excerpt>,
     pub(crate) suggested_read_range: Option<(usize, usize)>,
+    /// 版本冲突时：补丁说文件当时是哪个版本，现在又是哪个版本。
+    ///
+    /// 两个都是 `Option<String>`，因为"当时不存在"和"现在不存在"都要能表达：
+    /// 新建一个文件时带的前置条件就是"这个路径应当没有东西"。
+    pub(crate) expected_version: Option<Option<String>>,
+    pub(crate) actual_version: Option<Option<String>>,
 }
 
 /// 文件现在那一段的真实内容。
@@ -97,6 +103,32 @@ impl Diagnostic {
             candidate_ranges: Vec::new(),
             excerpt: None,
             suggested_read_range: None,
+            expected_version: None,
+            actual_version: None,
+        }
+    }
+
+    /// 文件在读它之后被人写过（或者要新建的路径上已经有东西了）。
+    ///
+    /// 和"上下文对不上"分开报：那个是补丁本身写错了，这个是补丁没错、**世界
+    /// 变了**——模型下一步该做的是重读文件，而不是去琢磨自己的 hunk。
+    pub(crate) fn version_conflict(
+        message: String,
+        file: String,
+        operation: &'static str,
+        expected: Option<String>,
+        actual: Option<String>,
+    ) -> Self {
+        Self {
+            expected_version: Some(expected),
+            actual_version: Some(actual),
+            ..Self::file_level(
+                "FILE_VERSION_CONFLICT",
+                "file_changed_since_read",
+                message,
+                file,
+                operation,
+            )
         }
     }
 
@@ -123,6 +155,8 @@ impl Diagnostic {
             candidate_ranges: miss.candidate_ranges,
             excerpt,
             suggested_read_range: suggested,
+            expected_version: None,
+            actual_version: None,
         }
     }
 
@@ -142,7 +176,10 @@ impl Diagnostic {
                 .map(|range| range_value(Some(*range)))
                 .collect::<Vec<_>>(),
             "actual_excerpt": self.excerpt.as_ref().map(Excerpt::to_value),
-            "suggested_read_range": range_value(self.suggested_read_range)
+            "suggested_read_range": range_value(self.suggested_read_range),
+            // 没有版本冲突时这两格不出现，别让每条诊断都挂两个 null。
+            "expected_version": self.expected_version.clone().map(version_value),
+            "actual_version": self.actual_version.clone().map(version_value)
         })
     }
 }
@@ -156,6 +193,11 @@ impl Excerpt {
             "truncated_lines": self.truncated_lines
         })
     }
+}
+
+/// `None` 是"这个路径上什么都没有"，不是"不知道"。
+fn version_value(version: Option<String>) -> Value {
+    version.map(Value::String).unwrap_or(Value::Null)
 }
 
 fn range_value(range: Option<(usize, usize)>) -> Value {

@@ -528,6 +528,38 @@ fn data_home_prefixes() -> Vec<PathBuf> {
     }
 }
 
+/// 一个文件的版本标记：写一次就变一次。
+///
+/// `read_file` 给出来，`apply_patch` 的 `expected_versions` 拿回去——**基于
+/// 你读到的那份内容做的补丁，在文件已经被改过之后不该落盘**（审查 C3）。
+///
+/// 是 `大小-修改时间`，**不是内容 hash**，这是有意的：`read_file` 是流式的，
+/// 读 2 GB 文件的前 200 行不需要碰后面；要算 hash 就得每次都把整个文件读一遍，
+/// 流式那点好处全没了。大小和修改时间来自本来就要做的那次 stat，白拿。
+///
+/// 代价说清楚：文件从备份恢复、或者连时间戳一起复制过来，内容没变也会报成
+/// 变了——虚惊一场，是安全的那一侧。同一纳秒内两次写入且大小一模一样会漏掉，
+/// 在纳秒精度的文件系统上不会发生。
+///
+/// 格式和 ccnm 的 `version_of` 一字不差：同一个 hub 下，本机成员和远端成员
+/// 给模型的版本号必须长一样，否则模型会以为换了一台机器就换了一套规矩。
+/// 改这里要同时改那边。
+pub fn file_version(meta: &std::fs::Metadata) -> String {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{mtime:x}", meta.len())
+}
+
+/// 磁盘上这个路径现在的版本；不存在（或读不到属性）就是 `None`。
+pub fn current_file_version(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    meta.is_file().then(|| file_version(&meta))
+}
+
 pub fn relative_display(root: &Path, path: &Path) -> String {
     let display = path
         .strip_prefix(root)

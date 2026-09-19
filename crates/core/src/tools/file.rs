@@ -61,6 +61,12 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
 
     let file =
         File::open(&resolved.path).map_err(|_| WorkspaceError::not_found("File not found"))?;
+    // 版本标记：改这个文件时原样交给 apply_patch 的 expected_versions，
+    // 文件在这之后被别人写过就会被拒，而不是把人家的改动覆盖掉（审查 C3）。
+    let version = file
+        .metadata()
+        .ok()
+        .map(|meta| crate::tools::workspace::file_version(&meta));
     let TextSelection {
         content,
         truncated,
@@ -95,6 +101,7 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
     };
     Ok(tool_ok(json!({
         "path": resolved.display,
+        "version": version,
         "content": content,
         "encoding": "utf-8",
         "start_line": start_line,

@@ -855,6 +855,16 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
         .collect()
 }
 
+/// `apply_patch` / `patch_check` 的版本前置条件。两处一字不差，写两遍迟早
+/// 会只改一处。
+static EXPECTED_VERSIONS_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "additionalProperties": { "type": ["string", "null"] },
+        "description": "Optional preconditions: path -> the version read_file or patch_check returned, or null if the path must not exist yet. A file written since then is refused with FILE_VERSION_CONFLICT instead of being overwritten. Paths must be ones this patch touches."
+    })
+});
+
 pub fn input_schema(name: &str) -> Value {
     match name {
         "history_manage" => history_manage_schema(),
@@ -1191,6 +1201,7 @@ pub fn input_schema(name: &str) -> Value {
                 "patch": { "type": "string", "minLength": 1 },
                 "dry_run": { "type": "boolean", "default": false },
                 "confirm": { "type": "boolean", "default": false },
+                "expected_versions": EXPECTED_VERSIONS_SCHEMA.clone(),
                 "reason": { "type": "string", "default": "" }
             },
             "required": ["patch"],
@@ -1199,7 +1210,8 @@ pub fn input_schema(name: &str) -> Value {
         "patch_check" => json!({
             "type": "object",
             "properties": {
-                "patch": { "type": "string", "minLength": 1 }
+                "patch": { "type": "string", "minLength": 1 },
+                "expected_versions": EXPECTED_VERSIONS_SCHEMA.clone()
             },
             "required": ["patch"],
             "additionalProperties": false

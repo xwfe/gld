@@ -23,6 +23,18 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         .get("confirm")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let expected_versions = expected_versions(args)?;
+
+    // 真要落盘的那一路，从这里开始独占，直到函数结束。
+    //
+    // 挡的是 gld 自己的并发写者：两个 MCP 会话同时打补丁，一个读原文、另一个
+    // 正在落盘，第一个算出来的新内容就是基于已经过期的原文。dry_run 不写盘，
+    // 不占这把锁——预检不该让真正的写操作排队。
+    //
+    // 这把锁**管不到别的进程**（编辑器、另一个 gld 实例、git checkout）。那一侧
+    // 靠的是下面的版本前置条件和落盘前复核，两者都不是强 CAS，见
+    // `commit_staged_bytes` 的说明。
+    let _commit_guard = (!dry_run).then(lock_commits);
 
     let file_patches = parse_unified_diff(patch)?;
     if file_patches.is_empty() {
@@ -61,6 +73,11 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut failed_files: HashSet<String> = HashSet::new();
     let mut not_checked: Vec<Value> = Vec::new();
+    // 算这批补丁时，每个文件在磁盘上**是什么样**。落盘前再核一遍：不一样就
+    // 说明算完之后有人动过它，这时候写下去就是把人家的改动盖掉（审查 C3）。
+    let mut baselines: HashMap<String, Baseline> = HashMap::new();
+    // 每个被碰到的文件当时的版本号，patch_check 会把它交回给模型。
+    let mut observed: serde_json::Map<String, Value> = serde_json::Map::new();
 
     for fp in &file_patches {
         ws.reject_unsafe_text(&fp.path)?;
@@ -104,6 +121,42 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
             }
         };
         ws.reject_write_symlink(&fp.path)?;
+
+        // 这个文件现在是什么版本。第一次碰到它的时候记下来：给 patch_check
+        // 交回给模型，也当作落盘前复核的基线。
+        let current_version = crate::tools::workspace::current_file_version(&resolved.path);
+        if !observed.contains_key(&resolved.display) {
+            observed.insert(
+                resolved.display.clone(),
+                version_value(current_version.clone()),
+            );
+            baselines.insert(
+                resolved.display.clone(),
+                match &current_version {
+                    Some(version) => Baseline::Version(version.clone()),
+                    None => Baseline::Absent,
+                },
+            );
+            // 调用方给了前置条件就核对。给的是 `read_file` / `patch_check`
+            // 当时看到的版本；对不上说明这份补丁是照着一份已经过时的内容做的，
+            // 写下去就是把中间那次改动盖掉（审查 C3、A09）。
+            if let Some(expected) = expected_versions
+                .as_ref()
+                .and_then(|map| map.get(&resolved.display))
+            {
+                if expected != &current_version {
+                    diagnostics.push(Diagnostic::version_conflict(
+                        version_conflict_message(&resolved.display, expected, &current_version),
+                        resolved.display.clone(),
+                        operation_label(fp),
+                        expected.clone(),
+                        current_version.clone(),
+                    ));
+                    failed_files.insert(resolved.display.clone());
+                    continue;
+                }
+            }
+        }
 
         // Add 是"新建"，不是"覆盖"。同一批里先 Delete 过它则另说：那是
         // 明写出来的整文件替换，有测试钉着。
@@ -175,6 +228,15 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
                 continue;
             }
         };
+        // 原文是刚从磁盘读上来的：拿它当基线比版本号更结实——版本号只是
+        // 大小加修改时间，内容能一个字节一个字节地比。同一批里第二次碰这个
+        // 文件时 `original` 是上一段的结果，不是磁盘内容，那时不能换。
+        if staged_before.is_none() && !fp.is_new_file && resolved.existed {
+            baselines.insert(
+                resolved.display.clone(),
+                Baseline::Content(original.as_bytes().to_vec()),
+            );
+        }
 
         if fp.is_deleted {
             staged.insert(resolved.display.clone(), None);
@@ -221,6 +283,22 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         return Err(patch_diagnostics(diagnostics, not_checked));
     }
 
+    // 给了前置条件、补丁里却没有这个文件：报错，不是忽略。忽略的话模型以为
+    // 自己保护住了 `a.rs`，而这次调用根本没碰它——它会把这当成"检查过了"。
+    if let Some(expected) = expected_versions.as_ref() {
+        let unknown = expected
+            .keys()
+            .filter(|path| !observed.contains_key(path.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            return Err(WorkspaceError::invalid_argument(format!(
+                "expected_versions names files this patch does not touch: {}. Pass back what patch_check returned in observed_versions, with the same paths",
+                unknown.join(", ")
+            )));
+        }
+    }
+
     let affected: Vec<Value> = order
         .iter()
         .map(|path| json!({ "path": path, "operation": operations[path] }))
@@ -242,8 +320,19 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     let files_deleted = affected_paths(&affected, "delete");
 
     if !dry_run {
-        let _transaction_backups = commit_staged(ws, &staged)?;
+        let _transaction_backups = commit_staged(ws, &staged, &baselines)?;
         let change_id = Uuid::new_v4().simple().to_string();
+        // 落盘之后的新版本：接着改同一个文件时原样传回 expected_versions，
+        // 不用再 read_file 一遍。
+        let new_versions = order
+            .iter()
+            .map(|path| {
+                let version = ws.resolve_for_write(path).ok().and_then(|resolved| {
+                    crate::tools::workspace::current_file_version(&resolved.path)
+                });
+                (path.clone(), version_value(version))
+            })
+            .collect::<serde_json::Map<_, _>>();
         return Ok(tool_ok(json!({
             "dry_run": false,
             "clean": true,
@@ -253,6 +342,7 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
             "files_created": files_created,
             "files_modified": files_modified,
             "files_deleted": files_deleted,
+            "file_versions": new_versions,
             "recovery": "git",
             "warnings": []
         })));
@@ -267,6 +357,10 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         "would_create": files_created,
         "would_modify": files_modified,
         "would_delete": files_deleted,
+        // 预检看到的版本。原样交给 apply_patch 的 expected_versions，中间
+        // 有人动过这些文件就会被拒——**预检通过不是通行证**，它只说明"刚才
+        // 这一刻能过"（审查 C3）。
+        "observed_versions": observed,
         "warnings": []
     })))
 }
@@ -855,6 +949,36 @@ pub(crate) mod faults {
     pub(crate) fn restore_fails(path: &Path) -> bool {
         hits(&Fault::Restore(path.to_path_buf()))
     }
+
+    thread_local! {
+        static BEFORE_COMMIT: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    /// 在"算完补丁"和"开始落盘"之间插一手。
+    ///
+    /// 专门用来复现那个最难测也最要紧的窗口：补丁算完之后、写下去之前，
+    /// 别的进程（编辑器、另一个 gld、git checkout）改了同一个文件。靠真实
+    /// 并发碰运气是测不稳的。
+    pub(crate) struct CommitHook;
+
+    pub(crate) fn before_commit_do(action: impl Fn() + 'static) -> CommitHook {
+        BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
+        CommitHook
+    }
+
+    impl Drop for CommitHook {
+        fn drop(&mut self) {
+            BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    pub(crate) fn run_before_commit() {
+        let action = BEFORE_COMMIT.with(|slot| slot.borrow_mut().take());
+        if let Some(action) = action {
+            action();
+            BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(action));
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -869,11 +993,67 @@ mod faults {
     pub(crate) fn restore_fails(_path: &Path) -> bool {
         false
     }
+    pub(crate) fn run_before_commit() {}
+}
+
+/// 算这批补丁的时候，一个文件在磁盘上是什么样。落盘前拿它再核一遍。
+#[derive(Debug, Clone)]
+pub(crate) enum Baseline {
+    /// 内容就是这些字节（改文件时原文是现成的，比版本号结实）。
+    Content(Vec<u8>),
+    /// 只记了版本（删除：没必要为了校验把整个文件读进来）。
+    Version(String),
+    /// 那时这个路径上什么都没有（新建）。
+    Absent,
+}
+
+impl Baseline {
+    /// 磁盘上现在这一份，还是算补丁时的那一份吗。
+    ///
+    /// `on_disk` 是刚读出来的内容；路径上没有文件时是 `None`。
+    fn check(
+        &self,
+        display: &str,
+        path: &std::path::Path,
+        on_disk: Option<&[u8]>,
+    ) -> Result<(), WorkspaceError> {
+        match self {
+            Self::Content(expected) => match on_disk {
+                Some(actual) if actual == expected.as_slice() => Ok(()),
+                Some(_) => Err(version_conflict(format!(
+                    "{display} changed while this patch was being prepared; nothing was written. Read it again and rebuild the patch"
+                ))),
+                None => Err(version_conflict(format!(
+                    "{display} was removed while this patch was being prepared; nothing was written"
+                ))),
+            },
+            Self::Version(expected) => {
+                let actual = crate::tools::workspace::current_file_version(path);
+                match actual {
+                    // 删掉的东西已经不在了：结果一样，不算冲突。
+                    None => Ok(()),
+                    Some(actual) if &actual == expected => Ok(()),
+                    Some(actual) => Err(version_conflict(format!(
+                        "{display} changed while this patch was being prepared (version {expected} is now {actual}); nothing was written"
+                    ))),
+                }
+            }
+            Self::Absent => match on_disk {
+                None if !path.exists() => Ok(()),
+                // 新建的目标在这中间冒出来了：**不覆盖**。模型以为自己在建
+                // 一个新文件，实际会盖掉别人刚放进来的东西（审查 A09）。
+                _ => Err(version_conflict(format!(
+                    "{display} appeared while this patch was being prepared; it would have been overwritten, so nothing was written. Read it and decide whether to update it instead"
+                ))),
+            },
+        }
+    }
 }
 
 fn commit_staged(
     ws: &Workspace,
     staged: &HashMap<String, Option<String>>,
+    baselines: &HashMap<String, Baseline>,
 ) -> Result<HashMap<PathBuf, Option<Vec<u8>>>, WorkspaceError> {
     let staged_bytes = staged
         .iter()
@@ -884,13 +1064,15 @@ fn commit_staged(
             )
         })
         .collect::<HashMap<_, _>>();
-    commit_staged_bytes(ws, &staged_bytes)
+    commit_staged_bytes(ws, &staged_bytes, baselines)
 }
 
 pub(crate) fn commit_staged_bytes(
     ws: &Workspace,
     staged: &HashMap<String, Option<Vec<u8>>>,
+    baselines: &HashMap<String, Baseline>,
 ) -> Result<HashMap<PathBuf, Option<Vec<u8>>>, WorkspaceError> {
+    faults::run_before_commit();
     let mut backups: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
     let mut temporary_files = HashMap::new();
     // **按路径排序后再落盘**，不按 HashMap 的随机顺序。一批补丁中途失败时，
@@ -930,6 +1112,18 @@ pub(crate) fn commit_staged_bytes(
         } else {
             None
         };
+        // 落盘前最后一次核对：这个文件还是算补丁时的那一份吗。
+        //
+        // 备份刚刚把它读上来，比一比几乎不要钱，而它挡住的是最坏的一种失败——
+        // 补丁算完之后有人动了文件，照写下去就是把那次改动无声盖掉。这里发现
+        // 冲突时**还没有任何文件被换上去**（换上去是下面第二轮的事），所以
+        // 一个字节都没改，也没有要回滚的东西（审查 C3、A09）。
+        if let Some(baseline) = baselines.get(*rel) {
+            if let Err(error) = baseline.check(&resolved.display, &path, backup.as_deref()) {
+                cleanup_temporary_files(temporary_files.values());
+                return Err(error);
+            }
+        }
         backups.insert(path.clone(), backup);
         if let Some(bytes) = content {
             if let Some(parent) = path.parent() {
@@ -1141,10 +1335,10 @@ fn patch_diagnostics(diagnostics: Vec<Diagnostic>, not_checked: Vec<Value>) -> W
         message,
         // 分类跟着错误码走：NOT_FOUND 一直是 not_found 类，别因为它现在从
         // 补丁诊断里出来就换一个类别。
-        category: if code == "NOT_FOUND" {
-            "not_found"
-        } else {
-            "validation"
+        category: match code {
+            "NOT_FOUND" => "not_found",
+            "FILE_VERSION_CONFLICT" => "conflict",
+            _ => "validation",
         },
         retryable: false,
         details: json!({
@@ -1158,6 +1352,93 @@ fn patch_diagnostics(diagnostics: Vec<Diagnostic>, not_checked: Vec<Value>) -> W
             "suggestion": "按 diagnostics[].suggested_read_range 重读这些文件，照它们现在的样子重建对不上的那几段，再把整个补丁重新提交"
         }),
     }
+}
+
+/// 文件在这之间被写过。和 `PATCH_FAILED` 分开：那个是补丁自己写错了，
+/// 这个是补丁没错而世界变了——下一步是重读文件，不是琢磨 hunk。
+fn version_conflict(message: impl Into<String>) -> WorkspaceError {
+    WorkspaceError::Tool {
+        code: "FILE_VERSION_CONFLICT",
+        message: message.into(),
+        category: "conflict",
+        retryable: false,
+    }
+}
+
+fn version_value(version: Option<String>) -> Value {
+    version.map(Value::String).unwrap_or(Value::Null)
+}
+
+fn version_conflict_message(
+    display: &str,
+    expected: &Option<String>,
+    actual: &Option<String>,
+) -> String {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) => format!(
+            "{display} has changed since you read it (version {expected} is now {actual}); read it again before patching, or your edit would overwrite whatever changed"
+        ),
+        (Some(expected), None) => format!(
+            "{display} is gone (you had version {expected}); it was deleted after you read it"
+        ),
+        (None, Some(actual)) => format!(
+            "{display} already exists (version {actual}), but the precondition you sent says this path should be empty; read it and decide whether to update it instead"
+        ),
+        (None, None) => format!("{display}: version precondition failed"),
+    }
+}
+
+fn operation_label(file: &FilePatch) -> &'static str {
+    if file.is_deleted {
+        "delete"
+    } else if file.is_new_file {
+        "add"
+    } else {
+        "update"
+    }
+}
+
+/// `expected_versions`：路径 → 那时的版本号，`null` 表示"那时这里应当什么
+/// 都没有"。形状和 `patch_check` 回的 `observed_versions` 一模一样，原样粘
+/// 回来就行。
+fn expected_versions(
+    args: &Value,
+) -> Result<Option<HashMap<String, Option<String>>>, WorkspaceError> {
+    let Some(raw) = args.get("expected_versions") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let object = raw.as_object().ok_or_else(|| {
+        WorkspaceError::invalid_argument(
+            "expected_versions must be an object mapping paths to the version read_file or patch_check returned (null means the file should not exist)",
+        )
+    })?;
+    let mut map = HashMap::with_capacity(object.len());
+    for (path, value) in object {
+        let version = match value {
+            Value::Null => None,
+            Value::String(version) => Some(version.clone()),
+            _ => {
+                return Err(WorkspaceError::invalid_argument(format!(
+                    "expected_versions[{path}] must be a version string or null"
+                )))
+            }
+        };
+        map.insert(path.clone(), version);
+    }
+    Ok(Some(map))
+}
+
+/// 同一个进程里，落盘这一路串起来。见 `apply_patch` 里取锁处的说明。
+fn lock_commits() -> std::sync::MutexGuard<'static, ()> {
+    static COMMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // 上一个持锁的线程 panic 过：锁里存的是 `()`，没有被弄坏的状态可言，
+    // 接着用就是了——这里 panic 掉反而会把一次正常的补丁变成失败。
+    COMMIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn patch_failed(message: impl Into<String>) -> WorkspaceError {
@@ -1491,6 +1772,87 @@ mod tests {
             details["not_checked"][0]["reason_code"],
             "earlier_failure_in_same_file"
         );
+    }
+
+    /// 算完补丁、还没写下去，这中间别人改了同一个文件。
+    ///
+    /// 这是最难测、也最要紧的那个窗口：照原样写下去，别人的改动就无声没了。
+    /// 靠真实并发碰运气测不稳，所以用钩子把这一手插进确定的位置。
+    #[test]
+    fn a_file_changed_between_planning_and_writing_is_not_overwritten() {
+        let (_workspace, _harness, context) = context_with_file();
+        let main = context.workspace.root().join("main.rs");
+        let target = main.clone();
+        let _hook = faults::before_commit_do(move || {
+            std::fs::write(&target, "someone else wrote this\n").expect("外部写入");
+        });
+
+        let error = apply_patch(&context, &patch()).expect_err("文件变了，应当拒绝");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "FILE_VERSION_CONFLICT", "{value}");
+        assert_eq!(
+            std::fs::read_to_string(&main).unwrap(),
+            "someone else wrote this\n",
+            "别人的改动被盖掉了"
+        );
+    }
+
+    /// 新建的目标在这中间冒出来：也不覆盖。模型以为自己在建一个新文件，
+    /// 实际会盖掉别人刚放进来的东西（审查 A09）。
+    #[test]
+    fn a_new_file_that_appeared_in_the_meantime_is_not_clobbered() {
+        let (_workspace, _harness, context) = context_with_file();
+        let fresh = context.workspace.root().join("fresh.txt");
+        let target = fresh.clone();
+        let _hook = faults::before_commit_do(move || {
+            std::fs::write(&target, "someone else got here first\n").expect("外部写入");
+        });
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "*** Begin Patch\n*** Add File: fresh.txt\n+mine\n*** End Patch\n"
+            }),
+        )
+        .expect_err("目标已经有人了，应当拒绝");
+        assert_eq!(
+            error.to_error_value()["code"],
+            "FILE_VERSION_CONFLICT",
+            "{}",
+            error.to_error_value()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fresh).unwrap(),
+            "someone else got here first\n"
+        );
+    }
+
+    /// 删除也核对：模型是看着旧内容决定删它的，内容在这之后变了就不能照删。
+    #[test]
+    fn a_delete_of_a_file_that_changed_in_the_meantime_is_refused() {
+        let (_workspace, _harness, context) = context_with_file();
+        let main = context.workspace.root().join("main.rs");
+        let target = main.clone();
+        let _hook = faults::before_commit_do(move || {
+            // 版本号是大小加修改时间，所以内容和长度都换一下。
+            std::fs::write(&target, "changed and longer\n").expect("外部写入");
+        });
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "*** Begin Patch\n*** Delete File: main.rs\n*** End Patch\n",
+                "confirm": true
+            }),
+        )
+        .expect_err("文件变了，不能照删");
+        assert_eq!(
+            error.to_error_value()["code"],
+            "FILE_VERSION_CONFLICT",
+            "{}",
+            error.to_error_value()
+        );
+        assert!(main.exists(), "文件被删了");
     }
 
     /// 前一段加了几行之后，后一段报的行号必须还是**原文件**的行号——模型拿

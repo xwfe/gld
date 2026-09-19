@@ -817,6 +817,9 @@ fn standalone_recovery_hint(output: &Value) -> &'static str {
         "PATCH_FAILED" | "PATCH_AMBIGUOUS" | "NOT_FOUND" => {
             "补丁没有落盘，工作区没有变化；按 error.details.diagnostics 里的 suggested_read_range 重读这些文件，照它们现在的样子重建对不上的那几段再提交。"
         }
+        "FILE_VERSION_CONFLICT" => {
+            "文件在你读它之后被写过，补丁没有落盘，工作区没有变化；重新 read_file 看现在是什么样，照新内容重建补丁，再把它回的 version 放进 expected_versions。不要原样重发——那正是会盖掉别人改动的那一次。"
+        }
         "PATCH_ROLLBACK_INCOMPLETE" => {
             "补丁写到一半失败，而且回滚没做完；先看 error.message 点名的那几个文件现在是什么内容，确认现场之后再决定怎么办，不要直接重发。"
         }
