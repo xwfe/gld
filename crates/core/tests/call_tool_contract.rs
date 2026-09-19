@@ -824,3 +824,151 @@ fn a_failed_patch_is_not_told_to_check_stderr() {
         "{error}"
     );
 }
+
+/// 三种输出模式在同一份内容上必须自洽：只列文件的那份就是有匹配的那些文件，
+/// 计数加起来就是匹配行数。对不上的话，模型用哪一种得到的结论会不一样。
+#[test]
+fn the_three_output_modes_describe_the_same_matches() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("a.rs"), "needle\nother\nneedle\n").expect("a");
+    fs::write(dir.path().join("b.rs"), "needle\n").expect("b");
+    fs::write(dir.path().join("c.rs"), "nothing here\n").expect("c");
+    let ctx = ctx_for(dir.path());
+
+    let content = invoke(&ctx, "search_text", json!({"query": "needle"}));
+    assert_ok(&content);
+    assert_eq!(content["output_mode"], "content");
+    assert_eq!(content["total_matches"], json!(3));
+
+    let files = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "needle", "output_mode": "files_with_matches"}),
+    );
+    assert_ok(&files);
+    let mut listed = files["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|item| item.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    listed.sort();
+    assert_eq!(listed, vec!["a.rs", "b.rs"], "{files}");
+    assert!(files["matches"].as_array().expect("matches").is_empty());
+
+    let counts = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "needle", "output_mode": "count"}),
+    );
+    assert_ok(&counts);
+    let total: u64 = counts["counts"]
+        .as_array()
+        .expect("counts")
+        .iter()
+        .map(|item| item["count"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(total, 3, "{counts}");
+
+    // 认不出来的模式是错误，不是悄悄按默认来——那会让模型以为它要的过滤生效了。
+    let bad = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "needle", "output_mode": "lines"}),
+    );
+    assert_eq!(bad["error"]["code"], "INVALID_ARGUMENT", "{bad}");
+}
+
+/// 跨行匹配：一处匹配跨了几行也只报一条，行号是**起点**那一行。
+#[test]
+fn a_multiline_match_is_reported_once_at_its_first_line() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(
+        dir.path().join("a.rs"),
+        "fn one() {}\n\nfn two() {\n    body();\n}\n",
+    )
+    .expect("a");
+    let ctx = ctx_for(dir.path());
+
+    // 不开 multiline 时，`.` 不跨行，这条正则什么都匹配不到。
+    let single = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": r"fn two\(\) \{.*body", "regex": true}),
+    );
+    assert_ok(&single);
+    assert_eq!(single["total_matches"], json!(0), "{single}");
+
+    let multi = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": r"fn two\(\) \{.*body", "regex": true, "multiline": true}),
+    );
+    assert_ok(&multi);
+    assert_eq!(multi["total_matches"], json!(1), "{multi}");
+    assert_eq!(multi["matches"][0]["line"], json!(3), "{multi}");
+    assert_eq!(multi["matches"][0]["preview"], "fn two() {");
+}
+
+/// 类型过滤和 `.github` 的显式搜索：这两件事以前一个没有、一个做不到
+/// ——`.github/workflows` 要改的时候连"现在写的是什么"都搜不出来（审查 F03）。
+#[test]
+fn searching_by_type_and_inside_dot_directories() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("keep.rs"), "target-token\n").expect("rs");
+    fs::write(dir.path().join("keep.md"), "target-token\n").expect("md");
+    fs::create_dir_all(dir.path().join(".github/workflows")).expect("workflows");
+    fs::write(
+        dir.path().join(".github/workflows/ci.yml"),
+        "name: target-token\n",
+    )
+    .expect("workflow");
+    let ctx = ctx_for(dir.path());
+
+    let rust_only = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "target-token", "type": "rust"}),
+    );
+    assert_ok(&rust_only);
+    let paths = rust_only["matches"]
+        .as_array()
+        .expect("matches")
+        .iter()
+        .map(|item| item["path"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, vec!["keep.rs"], "{rust_only}");
+
+    // 类型名不认识要报错并列出支持的，不能当成"这个类型里没有匹配"。
+    let unknown = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "target-token", "type": "brainfuck"}),
+    );
+    assert_eq!(unknown["error"]["code"], "INVALID_ARGUMENT", "{unknown}");
+    assert!(unknown["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("rust"));
+
+    // 默认不搜点开头的目录。
+    let hidden_off = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "target-token", "glob": "**/*.yml"}),
+    );
+    assert_ok(&hidden_off);
+    assert_eq!(hidden_off["total_matches"], json!(0), "{hidden_off}");
+
+    let hidden_on = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "target-token", "glob": "**/*.yml", "include_hidden": true}),
+    );
+    assert_ok(&hidden_on);
+    assert_eq!(hidden_on["total_matches"], json!(1), "{hidden_on}");
+    assert_eq!(
+        hidden_on["matches"][0]["path"], ".github/workflows/ci.yml",
+        "{hidden_on}"
+    );
+}

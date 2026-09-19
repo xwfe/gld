@@ -1160,6 +1160,26 @@ pub fn input_schema(name: &str) -> Value {
                     "maximum": 67108864,
                     "default": 2097152,
                     "description": "Skip files larger than this many bytes (default 2MiB) to avoid memory spikes"
+                },
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["content", "files_with_matches", "count"],
+                    "default": "content",
+                    "description": "content: matching lines with context (results in matches[]). files_with_matches: only paths (files[]). count: matching lines per file (counts[]). max_results limits matching lines in content mode and files in the other two."
+                },
+                "multiline": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Let one match span lines; . then matches newlines too. The reported line is where the match starts, as in ripgrep -U."
+                },
+                "type": {
+                    "type": "string",
+                    "description": "Only search files of this type, e.g. rust, py, ts, md. A subset of ripgrep's --type names; an unknown name is an error that lists the supported ones."
+                },
+                "include_hidden": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Also search dotfiles and dot-directories such as .github. gld's own data directory is never searched."
                 }
             },
             "required": ["query"],

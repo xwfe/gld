@@ -242,27 +242,63 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
 
     let (include_globs, exclude_globs) = search_globs(args);
     let context_lines = crate::tools::args::bounded(args, "search_text", "context_lines") as usize;
-    let matcher = build_matcher(query, use_regex, case_sensitive)?;
+    let multiline = args
+        .get("multiline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // 隐藏文件默认还是不搜。`.github/workflows` 要改的时候，以前连"看一眼
+    // 现在写的是什么"都做不到（审查 F03）。
+    let include_hidden = args
+        .get("include_hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let output_mode = OutputMode::from_args(args)?;
+    let file_type = match args.get("type").and_then(Value::as_str) {
+        Some(name) if !name.trim().is_empty() => {
+            Some(crate::tools::file_types::lookup(name).ok_or_else(|| {
+                WorkspaceError::invalid_argument(format!(
+                    "Unknown type: {name}. Supported: {}",
+                    crate::tools::file_types::known_names().join(", ")
+                ))
+            })?)
+        }
+        _ => None,
+    };
+    let matcher = build_matcher(query, use_regex, case_sensitive, multiline)?;
 
     let mut matches = Vec::new();
+    // `files_with_matches` 和 `count` 各自的结果。三种模式共用一次遍历，
+    // 只是每个文件停在哪儿不一样。
+    let mut files: Vec<String> = Vec::new();
+    let mut counts: Vec<Value> = Vec::new();
     let mut warnings = Vec::new();
     let mut skipped_large = 0usize;
     let mut skipped_binary = 0usize;
     let mut truncated = false;
 
     let mut consider_file = |p: &Path| {
-        if matches.len() >= max_results {
+        // `max_results` 在三种模式下限的东西不同：content 限匹配行数，另外
+        // 两种限文件数。名字没改，语义在工具说明里写清楚。
+        let collected = match output_mode {
+            OutputMode::Content => matches.len(),
+            OutputMode::FilesWithMatches => files.len(),
+            OutputMode::Count => counts.len(),
+        };
+        if collected >= max_results {
             truncated = true;
             return false;
         }
         if !ws.is_safe_read_path(p) {
             return true;
         }
-        if ws.is_ignored_path(p, false, false) {
+        if ws.is_ignored_path(p, include_hidden, false) {
             return true;
         }
         let rel = relative_display(ws.root(), p);
         if !passes_glob_filters(&rel, &include_globs, &exclude_globs) {
+            return true;
+        }
+        if file_type.is_some_and(|file_type| !file_type.matches(&rel)) {
             return true;
         }
         let meta = match p.metadata() {
@@ -281,18 +317,54 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             FileEligibility::Unreadable => return true,
             FileEligibility::Text => {}
         }
-        let stop = search_file_streaming(
-            p,
-            &rel,
-            &matcher,
-            context_lines,
-            max_preview,
-            max_results,
-            &mut matches,
-        );
-        if stop {
-            truncated = true;
-            return false;
+        match output_mode {
+            OutputMode::Content => {
+                let stop = if matcher.is_multiline() {
+                    search_file_multiline(
+                        p,
+                        &rel,
+                        &matcher,
+                        context_lines,
+                        max_preview,
+                        max_results,
+                        &mut matches,
+                    )
+                } else {
+                    search_file_streaming(
+                        p,
+                        &rel,
+                        &matcher,
+                        context_lines,
+                        max_preview,
+                        max_results,
+                        &mut matches,
+                    )
+                };
+                if stop {
+                    truncated = true;
+                    return false;
+                }
+            }
+            // 命中一次就够，不用把这个文件读完。
+            OutputMode::FilesWithMatches => {
+                if count_file_matches(p, &matcher, Some(1)) > 0 {
+                    files.push(rel);
+                    if files.len() >= max_results {
+                        truncated = true;
+                        return false;
+                    }
+                }
+            }
+            OutputMode::Count => {
+                let count = count_file_matches(p, &matcher, None);
+                if count > 0 {
+                    counts.push(json!({ "path": rel, "count": count }));
+                    if counts.len() >= max_results {
+                        truncated = true;
+                        return false;
+                    }
+                }
+            }
         }
         true
     };
@@ -328,16 +400,62 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         ));
     }
 
+    // `total_matches` 一直是"这次返回了几条"，不是全项目的总数；三种模式下
+    // 它数的东西跟着 `max_results` 走（审查 F03 要求把这件事说清楚）。
+    let total = match output_mode {
+        OutputMode::Content => matches.len(),
+        OutputMode::FilesWithMatches => files.len(),
+        OutputMode::Count => counts.len(),
+    };
     Ok(tool_ok(json!({
         "query": query,
+        "output_mode": output_mode.as_str(),
+        "multiline": multiline,
+        "include_hidden": include_hidden,
+        "type": args.get("type").and_then(Value::as_str),
         "matches": matches,
-        "total_matches": matches.len(),
+        "files": files,
+        "counts": counts,
+        "total_matches": total,
         "truncated": truncated,
         "max_file_bytes": max_file_bytes,
         "skipped_large_files": skipped_large,
         "skipped_binary_files": skipped_binary,
         "warnings": warnings
     })))
+}
+
+/// 搜索结果返回什么。名字和语义照 ripgrep / Claude Code 的 Grep：
+/// 模型是照那套习惯写参数的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    /// 匹配行 + 上下文（默认，也是一直以来的行为）。
+    Content,
+    /// 只要有匹配的文件路径。"这个符号在哪几个文件里"这种问题，回内容是浪费。
+    FilesWithMatches,
+    /// 每个文件匹配了几行。
+    Count,
+}
+
+impl OutputMode {
+    fn from_args(args: &Value) -> Result<Self, WorkspaceError> {
+        match args.get("output_mode").and_then(Value::as_str) {
+            None | Some("content") => Ok(Self::Content),
+            Some("files_with_matches") => Ok(Self::FilesWithMatches),
+            Some("count") => Ok(Self::Count),
+            Some(other) => Err(WorkspaceError::invalid_argument(format!(
+                "Unknown output_mode: {other}. Use content, files_with_matches or count"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::FilesWithMatches => "files_with_matches",
+            Self::Count => "count",
+        }
+    }
 }
 
 enum FileEligibility {
@@ -525,7 +643,25 @@ fn build_matcher(
     query: &str,
     use_regex: bool,
     case_sensitive: bool,
+    multiline: bool,
 ) -> Result<Matcher, WorkspaceError> {
+    if multiline {
+        // 跨行匹配统一走正则，字面量先转义。这样"查一段带换行的固定文本"
+        // 也能用，而且不必为字面量再写一套跨行的大小写处理——那条路上
+        // 小写化会改变字节偏移，报出来的行号就是错的。
+        //
+        // `s` 让 `.` 也匹配换行：不打开的话 `fn a\(.*\) \{` 这种写法跨不了行，
+        // 而模型写 multiline 就是为了这个。
+        let body = if use_regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        let flags = if case_sensitive { "s" } else { "si" };
+        let pattern = Regex::new(&format!("(?{flags}:{body})"))
+            .map_err(|e| WorkspaceError::invalid_argument(format!("Invalid regex: {e}")))?;
+        return Ok(Matcher::Multiline(pattern));
+    }
     if use_regex {
         let pattern = if case_sensitive {
             Regex::new(query)
@@ -544,12 +680,14 @@ fn build_matcher(
 enum Matcher {
     Regex(Regex),
     Literal(String),
+    /// 跨行：整个文件当一个字符串匹配，而不是一行一行。
+    Multiline(Regex),
 }
 
 impl Matcher {
     fn is_match(&self, line: &str) -> bool {
         match self {
-            Matcher::Regex(re) => re.is_match(line),
+            Matcher::Regex(re) | Matcher::Multiline(re) => re.is_match(line),
             Matcher::Literal(lit) => {
                 if lit.chars().any(|c| c.is_uppercase()) {
                     line.contains(lit.as_str())
@@ -559,6 +697,125 @@ impl Matcher {
             }
         }
     }
+
+    fn is_multiline(&self) -> bool {
+        matches!(self, Matcher::Multiline(_))
+    }
+}
+
+/// 一个文件里有几处匹配。`limit` 给 `Some(1)` 时命中一次就返回——
+/// `files_with_matches` 只要知道"有没有"，没必要把 10 MB 的文件读完。
+///
+/// 数的单位和 content 模式一致：**匹配的行数**（跨行模式下是匹配的段数）。
+fn count_file_matches(path: &Path, matcher: &Matcher, limit: Option<usize>) -> usize {
+    if let Matcher::Multiline(re) = matcher {
+        let Ok(text) = fs::read_to_string(path) else {
+            return 0;
+        };
+        return match limit {
+            Some(limit) => re.find_iter(&text).take(limit).count(),
+            None => re.find_iter(&text).count(),
+        };
+    }
+
+    let Ok(file) = File::open(path) else {
+        return 0;
+    };
+    let mut reader = BufReader::new(file);
+    let limits = LineLimits {
+        keep: SEARCH_LINE_KEEP,
+        scan_limit: None,
+    };
+    let mut raw = Vec::new();
+    let mut scanned = 0u64;
+    let mut count = 0usize;
+    loop {
+        raw.clear();
+        match next_line(&mut reader, &mut raw, limits, &mut scanned) {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            // 读不动、或者中间冒出非 UTF-8：到此为止，已经数到的算数。
+            Err(_) => break,
+        }
+        let Ok(line) = std::str::from_utf8(&raw) else {
+            break;
+        };
+        if matcher.is_match(line) {
+            count += 1;
+            if limit.is_some_and(|limit| count >= limit) {
+                break;
+            }
+        }
+    }
+    count
+}
+
+/// 跨行搜索一个文件。
+///
+/// 和逐行那条路不同，这里必须把整个文件读进内存——跨行匹配本来就要看见换行
+/// 两边。文件大小已经被 `max_file_bytes` 挡过一道（默认 2 MiB）。
+///
+/// 报的行号是**匹配起点所在的行**，预览是那一行；一处匹配跨了 5 行也只报一条，
+/// 和 ripgrep 的 `-U` 一致。
+fn search_file_multiline(
+    path: &Path,
+    rel: &str,
+    matcher: &Matcher,
+    context_lines: usize,
+    max_preview: usize,
+    max_results: usize,
+    matches: &mut Vec<Value>,
+) -> bool {
+    let Matcher::Multiline(re) = matcher else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
+    // 每一行起点的字节偏移，用来把匹配位置换算成行号。
+    let mut line_starts = Vec::with_capacity(lines.len());
+    let mut at = 0usize;
+    for line in &lines {
+        line_starts.push(at);
+        at += line.len() + 1;
+    }
+
+    for found in re.find_iter(&text) {
+        let index = line_starts
+            .partition_point(|start| *start <= found.start())
+            .saturating_sub(1);
+        let line_no = index + 1;
+        let before = if context_lines == 0 {
+            Vec::new()
+        } else {
+            lines[index.saturating_sub(context_lines)..index]
+                .iter()
+                .map(|line| preview_line(line, max_preview))
+                .collect()
+        };
+        let after_end = (index + 1 + context_lines).min(lines.len());
+        let after = if context_lines == 0 || index + 1 >= lines.len() {
+            Vec::new()
+        } else {
+            lines[index + 1..after_end]
+                .iter()
+                .map(|line| preview_line(line, max_preview))
+                .collect()
+        };
+        matches.push(json!({
+            "path": rel,
+            "line": line_no,
+            "column": 1,
+            "preview": preview_line(lines[index], max_preview),
+            "before": before,
+            "after": after
+        }));
+        if matches.len() >= max_results {
+            return true;
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
