@@ -538,6 +538,21 @@ impl Hub {
                 details: json!({ "missing": missing }),
             }));
         }
+        // 超了 gld 这边上限的参数（现在只有 wait_ms）：在这边拒，不替调用方
+        // 改小——改小它会以为自己等过了（见 remote_tools::MAX_WAIT_MS）。
+        if let Some((argument, max)) = tool.over_limit(args) {
+            return plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "ARGUMENT_OUT_OF_RANGE",
+                message: format!(
+                    "{} takes {argument} up to {max} through this hub, which cuts a remote call off at {} seconds. Ask for less, and call again if the command is still running.",
+                    tool.name,
+                    crate::bridge::session::CALL_TIMEOUT.as_secs()
+                ),
+                category: "validation",
+                retryable: false,
+                details: json!({ "argument": argument, "max": max }),
+            }));
+        }
         let forwarded = tool.forward_arguments(args);
         if remote_tools::needs_coding(tool) {
             return self.call_coding(auth, tool, member, args, forwarded);
@@ -955,6 +970,9 @@ fn remote_failure(tool: &str, member: &CcnmMember, error: PeerError) -> Value {
         PeerError::Malformed { .. } => ("REMOTE_PROTOCOL_ERROR", "runtime", false),
         PeerError::Remote { .. } => ("REMOTE_REFUSED", "runtime", false),
         PeerError::Handshake(_) => ("REMOTE_PROTOCOL_MISMATCH", "runtime", false),
+        // 远端那一版没这个工具 / 不收这个参数。**调用没发出去**，所以它跟
+        // 「断在半路」是两回事：那边什么都没做，重试也没用，要升级 ccnm。
+        PeerError::Unsupported { .. } => ("REMOTE_TOOL_UNSUPPORTED", "validation", false),
     };
     tool_err(WorkspaceError::ToolDetails {
         code,
@@ -1012,7 +1030,8 @@ fn guard_message_line(stderr: &str) -> String {
 }
 
 /// coding 会话调用失败。
-fn coding_failure(tool: &str, member: &CcnmMember, error: CodingError) -> Value {
+fn coding_failure(tool_name: &str, member: &CcnmMember, error: CodingError) -> Value {
+    let tool = tool_name;
     match error {
         CodingError::NoSuchSession => tool_err(WorkspaceError::ToolDetails {
             code: "REMOTE_CODING_HANDLE_UNKNOWN",
@@ -1044,6 +1063,11 @@ fn coding_failure(tool: &str, member: &CcnmMember, error: CodingError) -> Value 
         // 写操作断在半路：**远端做没做，这边不知道**。不标可重试——
         // 重发一次 apply_patch 或 exec_command 可能是第二次执行
         // （RFC-0002 5.4 / 验收项 H07）。
+        // 远端没这个工具 / 不收这个参数：调用根本没发出去，远端什么都没做。
+        // 绝不能报成 outcome unknown——那会让人去远端翻有没有半截的改动。
+        CodingError::Peer(PeerError::Unsupported { tool, argument }) => {
+            remote_failure(tool_name, member, PeerError::Unsupported { tool, argument })
+        }
         CodingError::Peer(peer) => {
             let unknown = matches!(
                 peer,
@@ -1600,6 +1624,11 @@ mod tests {
         coding_opens_allowed: usize,
         /// 每次工具调用先睡这么久，用来制造"上一个还在跑"。
         call_delay_ms: u64,
+        /// 这个远端报自己有哪些工具（gld 握手后问一次）。默认是和白名单
+        /// 同代的那份；装老版本 ccnm 时把它删几项。
+        offers: Arc<Mutex<Vec<Value>>>,
+        /// 工具调用的结果。默认是一段文本；验图片透传时换成带 image 块的。
+        tool_result: Arc<Mutex<Option<Value>>>,
     }
 
     impl RemoteSpy {
@@ -1614,7 +1643,40 @@ mod tests {
                 black_hole: false,
                 coding_opens_allowed: usize::MAX,
                 call_delay_ms: 0,
+                offers: Arc::new(Mutex::new(crate::bridge::tools::offered_by_current_ccnm())),
+                tool_result: Arc::new(Mutex::new(None)),
             }
+        }
+
+        /// 装一个老版本的远端：这些工具它没有。
+        fn without_tools(self, missing: &[&str]) -> Self {
+            {
+                let mut offers = self.offers.lock().expect("offers");
+                offers.retain(|tool| !missing.contains(&tool["name"].as_str().unwrap_or_default()));
+            }
+            self
+        }
+
+        /// 装一个老版本的远端：这个工具它不收这个参数。
+        fn without_argument(self, tool: &str, argument: &str) -> Self {
+            {
+                let mut offers = self.offers.lock().expect("offers");
+                for offered in offers.iter_mut() {
+                    if offered["name"] == json!(tool) {
+                        offered["inputSchema"]["properties"]
+                            .as_object_mut()
+                            .expect("properties")
+                            .remove(argument);
+                    }
+                }
+            }
+            self
+        }
+
+        /// 远端这次回什么（验结果原样透传）。
+        fn answering(self, result: Value) -> Self {
+            *self.tool_result.lock().expect("tool result") = Some(result);
+            self
         }
         fn calls(&self) -> Vec<Value> {
             self.calls.lock().expect("calls").clone()
@@ -1669,6 +1731,9 @@ mod tests {
                     "protocolVersion": crate::bridge::peer::PROTOCOL_VERSION,
                     "serverInfo": { "name": "ccnm", "version": "0.7.0" }
                 }),
+                // 握手之后 gld 问一次远端有哪些工具。**不记进 calls**：
+                // 那里数的是工具调用。
+                "tools/list" => json!({ "tools": self.spy.offers.lock().expect("offers").clone() }),
                 _ => {
                     self.spy
                         .calls
@@ -1683,7 +1748,10 @@ mod tests {
                     if self.spy.black_hole {
                         return Ok(()); // 什么都不回，让调用方超时
                     }
-                    if self.spy.tool_fails {
+                    if let Some(answer) = self.spy.tool_result.lock().expect("tool result").clone()
+                    {
+                        answer
+                    } else if self.spy.tool_fails {
                         json!({
                             "content": [{ "type": "text", "text": "CCNM_E_PATH_OUTSIDE_ROOT" }],
                             "isError": true
@@ -2107,6 +2175,127 @@ mod tests {
         out["coding_handle"].as_str().expect("句柄").to_string()
     }
 
+    /// 远端那台机器上的 ccnm 比这份名单老：**在 gld 这边就拒**，说清楚是
+    /// 版本的事，而且调用一个字节都没发出去。
+    #[test]
+    fn a_remote_ccnm_that_is_too_old_is_named_not_guessed_at() {
+        let fixture = coding_fixture(RemoteSpy::new().without_tools(&["stop_command"]));
+        let handle = begin(&fixture);
+        let refused = raw_call(
+            &fixture.hub,
+            "remote_stop_command",
+            json!({ "workspace": "prod", "coding_handle": handle, "output_ref": "r-0000" }),
+        );
+        let text = refused["content"][0]["text"].as_str().unwrap_or_default();
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "REMOTE_TOOL_UNSUPPORTED",
+            "{refused}"
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["retryable"],
+            json!(false),
+            "重试也没用，要升级远端的 ccnm：{refused}"
+        );
+        assert!(text.contains("Upgrade ccnm"), "{text}");
+        assert!(
+            fixture.spy.calls().is_empty(),
+            "不该发出去：{:?}",
+            fixture.spy.calls()
+        );
+
+        // 会话还在：被拒的那次调用没碰传输层，句柄不该跟着作废。
+        let ok = raw_call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle, "cmd": ["true"] }),
+        );
+        assert_eq!(ok["isError"], json!(false), "{ok}");
+    }
+
+    /// 老版本 ccnm 会**悄悄忽略**不认识的参数（它的参数结构体不拒绝未知字段），
+    /// 于是 `run_in_background` 等于没写、命令在前台跑满 timeout，而模型以为
+    /// 自己起了一个后台命令。所以这种参数也在这边拒，并且不能报成
+    /// `REMOTE_OUTCOME_UNKNOWN`——远端什么都没做，没有半截状态要人去核对。
+    #[test]
+    fn an_argument_an_older_remote_would_ignore_is_refused_here() {
+        let fixture =
+            coding_fixture(RemoteSpy::new().without_argument("exec_command", "run_in_background"));
+        let handle = begin(&fixture);
+        let refused = raw_call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle,
+                    "cmd": ["npm", "run", "dev"], "run_in_background": true }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "REMOTE_TOOL_UNSUPPORTED",
+            "{refused}"
+        );
+        assert_ne!(
+            refused["structuredContent"]["error"]["code"], "REMOTE_OUTCOME_UNKNOWN",
+            "没发出去就不是'做没做不知道'"
+        );
+        assert!(fixture.spy.calls().is_empty());
+    }
+
+    /// `wait_ms` 超过 hub 自己的调用预算：在这边拒，不替它改小。
+    ///
+    /// 改小的话调用方会以为自己等满了；而真发出去的话，这次调用会在 60 秒
+    /// 被当成传输层出问题，连接一丢，远端 ccnm 会把这个会话起的后台命令
+    /// 一起停掉——模型等于自己把要等的那个命令弄没了。
+    #[test]
+    fn a_wait_longer_than_the_call_budget_is_refused_before_it_is_sent() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let handle = begin(&fixture);
+        let refused = raw_call(
+            &fixture.hub,
+            "remote_read_output",
+            json!({ "workspace": "prod", "coding_handle": handle,
+                    "output_ref": "r-0000", "wait_ms": 600_000 }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "ARGUMENT_OUT_OF_RANGE",
+            "{refused}"
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["details"]["max"],
+            json!(crate::bridge::tools::MAX_WAIT_MS)
+        );
+        assert!(fixture.spy.calls().is_empty(), "不该发出去");
+
+        // 预算之内的照常发，参数原样带过去。
+        let ok = raw_call(
+            &fixture.hub,
+            "remote_read_output",
+            json!({ "workspace": "prod", "coding_handle": handle,
+                    "output_ref": "r-0000", "wait_ms": 5_000 }),
+        );
+        assert_eq!(ok["isError"], json!(false), "{ok}");
+        let calls = fixture.spy.calls();
+        assert_eq!(calls[0]["arguments"]["wait_ms"], json!(5_000), "{calls:?}");
+    }
+
+    /// 远端返回的图片块原样回来：`remote_view_image` 和 `remote_read_notebook`
+    /// 靠它，而 H04 要的就是 content 一个字不改。
+    #[test]
+    fn an_image_from_the_remote_comes_back_as_an_image() {
+        let picture = json!({
+            "content": [
+                { "type": "text", "text": "shots/red.png: PNG, 73 bytes" },
+                { "type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png" }
+            ],
+            "isError": false
+        });
+        let fixture = remote_fixture(RemoteSpy::new().answering(picture.clone()));
+        let result = raw_call(
+            &fixture.hub,
+            "remote_view_image",
+            json!({ "workspace": "prod", "path": "shots/red.png" }),
+        );
+        assert_eq!(result["content"], picture["content"], "{result}");
+        assert_eq!(fixture.spy.calls()[0]["name"], json!("view_image"));
+    }
+
     /// 只读成员不该看到任何 coding 工具——列出来只会引着模型去试。
     #[test]
     fn a_read_only_remote_member_is_shown_no_coding_tool() {
@@ -2141,6 +2330,7 @@ mod tests {
             "remote_apply_patch",
             "remote_exec_command",
             "remote_read_output",
+            "remote_stop_command",
         ] {
             assert!(coding.contains(&expected.into()), "少了 {expected}");
         }

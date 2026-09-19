@@ -62,6 +62,17 @@ pub enum PeerError {
     },
     /// 握手结果不能接受，比如协议版本对不上。
     Handshake(String),
+    /// 远端这个版本的 ccnm 没有这个工具，或者它不收这个参数。**没发出去**。
+    ///
+    /// 靠握手时那份 `tools/list` 判的。存在的必要：ccnm 的参数结构体不拒绝
+    /// 不认识的字段，所以老版本收到 `run_in_background: true` 会**悄悄忽略**
+    /// 它，命令于是在前台跑满 timeout——模型拿到的却是一个像是成功起了后台
+    /// 命令的结果。宁可在这边拒，并说清楚是版本的事。
+    Unsupported {
+        tool: String,
+        /// 工具本身没有时是 `None`。
+        argument: Option<String>,
+    },
 }
 
 impl std::fmt::Display for PeerError {
@@ -97,6 +108,20 @@ impl std::fmt::Display for PeerError {
                 write!(f, "the bridge refused {method} ({code}): {message}")
             }
             PeerError::Handshake(detail) => write!(f, "the bridge handshake is unusable: {detail}"),
+            PeerError::Unsupported {
+                tool,
+                argument: None,
+            } => write!(
+                f,
+                "the ccnm on that machine has no {tool} tool, so the call was not sent: that runtime's ccnm is older than the remote tools listed here. Upgrade ccnm on that machine"
+            ),
+            PeerError::Unsupported {
+                tool,
+                argument: Some(argument),
+            } => write!(
+                f,
+                "the ccnm on that machine does not take {argument} on {tool}, so the call was not sent: that runtime's ccnm is older than the remote tools listed here and would have ignored it, doing something else instead. Upgrade ccnm on that machine, or call {tool} without {argument}"
+            ),
         }
     }
 }

@@ -137,14 +137,33 @@ gld hub remote add prod --node work --remote-workspace server
 前提：本机装了 `ccnm`，并且它能连到那台机器。gld 起的是公开命令
 `ccnm mcp bridge`，SSH 连接、凭据和对面的目录全由 ccnm 自己管，gld 不碰。
 
-**远端成员的工具是另一套，名字带 `remote_` 前缀**，目前是只读的四个：
+**远端成员的工具是另一套，名字带 `remote_` 前缀。**只读的七个，任何远端成员都有：
 
 ```text
 remote_workspace_info  workspace=prod                     对面项目的名字、git 状态、平台
 remote_read_file       workspace=prod  path=src/main.rs   读对面的文件
 remote_list_files      workspace=prod  path=src           列对面的目录
 remote_search_text     workspace=prod  query=TODO         在对面搜，只有命中结果过网络
+remote_load_skill      workspace=prod                     对面项目自带的 skill，不带名字就是列表
+remote_view_image      workspace=prod  path=shots/a.png   看对面的图（PNG/JPEG/GIF/WebP）
+remote_read_notebook   workspace=prod  path=a.ipynb       按 cell 读对面的 Jupyter notebook
 ```
+
+**能写的成员**（`--mode coding`）还多五个，都要先 `remote_coding_begin` 拿一个句柄：
+`remote_apply_patch`（改文件，含整文件覆盖和改 notebook 的 cell）、`remote_exec_command`
+（跑命令，`cmd` 是 argv、`shell` 是一行 bash）、`remote_read_output`（分页读输出）、
+`remote_stop_command`（停掉后台命令）、`remote_coding_end`（关会话、放写锁）。
+
+**长命令往后台放。**hub 对一次远端调用最多等 60 秒，超了这条连接会被丢掉、coding 会话
+跟着结束（对面还会把这个会话起的命令一起停掉）。所以跑得久的命令给 `remote_exec_command`
+加 `run_in_background: true`，马上拿到 `output_ref`，再用 `remote_read_output` 加
+`wait_ms`（最多 50000）等它，或者 `remote_stop_command` 停掉它。后台命令活不过这个
+coding 会话：`remote_coding_end`、或者两分钟没有调用，它们都会被停掉。
+
+**对面的 ccnm 太老会明说。**gld 在连上时读一次对面有哪些工具，对面没有的工具、不收的
+参数，在 gld 这边就报 `REMOTE_TOOL_UNSUPPORTED`，不发过去——老版本 ccnm 遇到不认识的
+参数是**默默忽略**，那样 `run_in_background` 会变成前台跑，模型却以为起了后台命令。
+遇到这个错就去那台机器升级 ccnm。
 
 为什么不直接复用本地那几个同名工具：因为**不是同一个契约**。gld 本机也有
 `search_text` 和 `list_files`，但两边的分页、参数和错误码都不一样。混用的话，

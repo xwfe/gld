@@ -805,7 +805,7 @@ pub enum HubRemoteCmd {
         /// 本机 ccnm 可执行程序（默认用 PATH 里的 ccnm）
         #[arg(long, value_name = "PATH")]
         ccnm: Option<String>,
-        /// 访问上限：read（默认）| coding。coding 还没实现，现在填了也只能只读
+        /// 访问上限：read（默认）| coding。coding 的成员多五个工具（改文件、跑命令、读输出、停后台命令），用之前先 remote_coding_begin 拿句柄
         #[arg(long, value_name = "MODE")]
         mode: Option<String>,
     },

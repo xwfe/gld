@@ -41,7 +41,7 @@
 //!   那条的话，一次 `remote_read_file` 就能把别人的写会话连同 `output_ref`
 //!   一起弄没。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -100,6 +100,74 @@ impl Open for Spawn {
 struct Live {
     peer: Peer<Box<dyn Transport>>,
     last_used: Instant,
+    /// 对面握手时报的工具表。
+    offered: Offered,
+}
+
+/// 远端这一版 ccnm 到底有哪些工具、每个收哪些参数。
+///
+/// **为什么要存这个。**gld 的远端工具名单跟的是 ccnm 的最新契约，Runtime 上
+/// 装的可能是旧版。旧版遇到不认识的**工具名**会明确报错，这没问题；遇到不
+/// 认识的**参数**却什么都不说——ccnm 的参数结构体没开 `deny_unknown_fields`，
+/// 多余的键直接被 serde 丢掉。于是 `run_in_background: true` 在旧版上等于没
+/// 写，命令在前台跑满 timeout，模型拿回来的却是一个"已经在后台跑了"的结果，
+/// 然后照着这个假设去调 `remote_read_output`。
+///
+/// 所以握手之后读一次 `tools/list`，调用前拿它核一遍：远端没有的工具、不收
+/// 的参数，在这边就拒，并说明是版本的事。这也正是 RFC-0002 5.2 说的「工具
+/// 允许集取……与 Runtime 实际能力的交集」。
+#[derive(Debug, Clone, Default)]
+pub struct Offered {
+    /// 工具名 → 它的 `inputSchema.properties` 里的键。
+    tools: HashMap<String, HashSet<String>>,
+}
+
+impl Offered {
+    /// 从 `tools/list` 的结果里读。看不懂的条目跳过：这里宁可少记一个工具
+    /// （调用时报"远端没有"），也不要凭空假设它有。
+    pub fn from_tools(tools: &[Value]) -> Offered {
+        let mut map = HashMap::new();
+        for tool in tools {
+            let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let arguments = tool
+                .get("inputSchema")
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object)
+                .map(|properties| properties.keys().cloned().collect())
+                .unwrap_or_default();
+            map.insert(name.to_string(), arguments);
+        }
+        Offered { tools: map }
+    }
+
+    /// 这次调用能不能发出去。
+    fn check(&self, tool: &str, arguments: &Value) -> Result<(), PeerError> {
+        let Some(accepted) = self.tools.get(tool) else {
+            return Err(PeerError::Unsupported {
+                tool: tool.to_string(),
+                argument: None,
+            });
+        };
+        let Some(given) = arguments.as_object() else {
+            return Ok(());
+        };
+        // 按参数名排序再挑第一个：同一次调用每次都报同一个参数，错误信息
+        // 才是可复现的（HashSet 的遍历顺序不是）。
+        let mut unknown: Vec<&String> = given
+            .keys()
+            .filter(|name| !accepted.contains(name.as_str()))
+            .collect();
+        unknown.sort();
+        match unknown.first() {
+            Some(argument) => Err(PeerError::Unsupported {
+                tool: tool.to_string(),
+                argument: Some((*argument).clone()),
+            }),
+            None => Ok(()),
+        }
+    }
 }
 
 /// 丢掉一条连接就等于关掉它：先让对面读到 EOF，再等它退出。
@@ -304,12 +372,12 @@ impl Connections {
         arguments: Value,
     ) -> Result<(Value, bool), PeerError> {
         if guard.is_none() {
-            *guard = Some(Live {
-                peer: self.handshake(member, mode)?,
-                last_used: Instant::now(),
-            });
+            *guard = Some(self.connect(member, mode)?);
         }
         let live = guard.as_mut().expect("刚刚连上");
+        // 远端这一版有没有这个工具、收不收这些参数。**不发出去**，所以
+        // 连接还是好的，句柄也还有效。
+        live.offered.check(tool, &arguments)?;
         let result = live.peer.call_tool(tool, arguments, self.call_timeout);
         match result {
             // 远端明确回了 JSON-RPC error 也算这条连接好着，下次还能用。
@@ -354,10 +422,7 @@ impl Connections {
         {
             let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
             if guard.is_none() {
-                *guard = Some(Live {
-                    peer: self.handshake(member, Mode::Coding)?,
-                    last_used: Instant::now(),
-                });
+                *guard = Some(self.connect(member, Mode::Coding)?);
             }
         }
         let handle = format!("rc-{}", uuid::Uuid::new_v4().simple());
@@ -401,7 +466,16 @@ impl Connections {
             Ok((value, _)) => Ok(value),
             Err(error) => {
                 // 传输层断了：这个会话没了，不能让句柄继续看着有效。
-                if !matches!(error, PeerError::Remote { .. }) {
+                //
+                // 两种错不算断：远端明确回了 JSON-RPC error（它好好地拒绝了
+                // 这次调用），以及 gld 自己拦下的「远端没这个工具/参数」——
+                // 那次调用**根本没发出去**，连接一个字节都没动过。把句柄
+                // 作废等于让模型重开一个会话（还要再抢一次远端写锁）来解决
+                // 一个升级 ccnm 才能解决的问题。
+                if !matches!(
+                    error,
+                    PeerError::Remote { .. } | PeerError::Unsupported { .. }
+                ) {
                     self.forget_lease(handle);
                 }
                 Err(CodingError::Peer(error))
@@ -566,16 +640,23 @@ impl Connections {
         }
     }
 
-    /// 开一条连接并握手。握手不成就把刚起的进程收掉，不留孤儿。
-    fn handshake(
-        &self,
-        member: &CcnmMember,
-        mode: Mode,
-    ) -> Result<Peer<Box<dyn Transport>>, PeerError> {
+    /// 开一条连接：握手，再读一次对面的工具表。任何一步不成都把刚起的进程
+    /// 收掉，不留孤儿。
+    ///
+    /// 工具表是这条连接的一部分（见 [`Offered`]），所以在这里读，而不是每次
+    /// 调用都问一遍：一条连接对着的是同一个远端进程，它的工具不会中途变。
+    fn connect(&self, member: &CcnmMember, mode: Mode) -> Result<Live, PeerError> {
         let transport = self.opener.open(member, mode)?;
         let mut peer = Peer::new(transport);
-        match peer.initialize(CLIENT_NAME, self.handshake_timeout) {
-            Ok(_) => Ok(peer),
+        let opened = peer
+            .initialize(CLIENT_NAME, self.handshake_timeout)
+            .and_then(|_| peer.list_tools(self.handshake_timeout));
+        match opened {
+            Ok(tools) => Ok(Live {
+                peer,
+                last_used: Instant::now(),
+                offered: Offered::from_tools(&tools),
+            }),
             Err(error) => {
                 peer.shutdown(CLOSE_GRACE);
                 Err(error)
@@ -638,6 +719,8 @@ mod tests {
         opened_with: Vec<String>,
         pending: Option<String>,
         closed: Arc<AtomicUsize>,
+        /// 这个远端报自己有哪些工具。
+        offers: Vec<Value>,
         /// 调用一律超时，用来验「传输层坏了就丢连接」。
         black_hole: bool,
         hold: Option<Hold>,
@@ -685,6 +768,8 @@ mod tests {
                     "protocolVersion": super::super::peer::PROTOCOL_VERSION,
                     "serverInfo": { "name": "ccnm" }
                 }),
+                // 握手之后 gld 会问一次远端有哪些工具（`Offered`）。
+                "tools/list" => json!({ "tools": self.offers.clone() }),
                 _ => json!({
                     "content": [{ "type": "text", "text": request["params"]["name"] }],
                     "isError": false
@@ -714,6 +799,8 @@ mod tests {
     struct Recording {
         argv: Mutex<Vec<(String, Vec<String>)>>,
         closed: Arc<AtomicUsize>,
+        /// 远端报的工具表。默认是和白名单同代的那份；装老版本时改它。
+        offers: Mutex<Vec<Value>>,
         black_hole: bool,
         /// 交给下一条开出来的连接，用来制造"上一个还在跑"。
         hold: Mutex<Option<Hold>>,
@@ -726,6 +813,7 @@ mod tests {
             Arc::new(Recording {
                 argv: Mutex::new(Vec::new()),
                 closed: Arc::new(AtomicUsize::new(0)),
+                offers: Mutex::new(crate::bridge::tools::offered_by_current_ccnm()),
                 black_hole: false,
                 hold: Mutex::new(None),
                 tool_calls: Arc::new(AtomicUsize::new(0)),
@@ -742,6 +830,24 @@ mod tests {
             Held {
                 entered: entered_rx,
                 release: release_tx,
+            }
+        }
+        /// 装一个老版本的远端：这个工具它没有。
+        fn without_tool(&self, missing: &str) {
+            self.offers
+                .lock()
+                .expect("offers")
+                .retain(|tool| tool["name"] != json!(missing));
+        }
+        /// 装一个老版本的远端：这个工具它不收这个参数。
+        fn without_argument(&self, tool: &str, argument: &str) {
+            for offered in self.offers.lock().expect("offers").iter_mut() {
+                if offered["name"] == json!(tool) {
+                    offered["inputSchema"]["properties"]
+                        .as_object_mut()
+                        .expect("properties")
+                        .remove(argument);
+                }
             }
         }
         fn opens(&self) -> usize {
@@ -765,6 +871,7 @@ mod tests {
                 opened_with: Vec::new(),
                 pending: None,
                 closed: self.closed.clone(),
+                offers: self.offers.lock().expect("offers").clone(),
                 black_hole: self.black_hole,
                 hold: self.hold.lock().expect("hold").take(),
                 tool_calls: self.tool_calls.clone(),
@@ -1230,5 +1337,96 @@ mod tests {
             argv[0].1,
             vec!["mcp", "bridge", "proj", "--node", "work", "--mode", "read"]
         );
+    }
+    /// 远端这一版没有的工具：**在这边就拒**，一个字节都不发出去。
+    ///
+    /// 拒得早不是为了省一次往返，是因为发过去也白发：ccnm 会回一个
+    /// "tool not found" 的协议错，而模型看到的是一句不知所云的 JSON-RPC
+    /// 错误码，猜不到问题出在"那台机器上的 ccnm 太老"。
+    #[test]
+    fn a_tool_the_remote_does_not_have_never_leaves_this_machine() {
+        let recorder = Recording::new();
+        recorder.without_tool("stop_command");
+        let connections = connections(&recorder);
+        let member = member("prod");
+
+        let error = connections
+            .call(
+                ANYONE,
+                &member,
+                "stop_command",
+                json!({ "output_ref": "r-1" }),
+            )
+            .expect_err("老版本远端没有这个工具");
+        assert!(
+            matches!(&error, PeerError::Unsupported { tool, argument: None } if tool == "stop_command"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("Upgrade ccnm"), "{error}");
+        assert_eq!(recorder.tool_calls(), 0, "不该真的发出去");
+
+        // 连接还是好的：同一条连上的别的工具照常。
+        assert!(
+            connections
+                .call(ANYONE, &member, "read_file", json!({ "path": "a.rs" }))
+                .is_ok(),
+            "拒一次不该把连接弄丢"
+        );
+        assert_eq!(recorder.opens(), 1, "也不该为此重连");
+    }
+
+    /// 远端这一版不收的参数：同样拒。
+    ///
+    /// 这条比上一条更要紧：ccnm 的参数结构体不拒绝不认识的字段，所以老版本
+    /// 收到 `run_in_background` 会**悄悄忽略**它，前台跑满 timeout，而模型
+    /// 以为自己起了一个后台命令。
+    #[test]
+    fn an_argument_the_remote_would_silently_ignore_is_refused() {
+        let recorder = Recording::new();
+        recorder.without_argument("exec_command", "run_in_background");
+        let connections = connections(&recorder);
+        let member = member("prod");
+
+        let error = connections
+            .call(
+                ANYONE,
+                &member,
+                "exec_command",
+                json!({ "cmd": ["sleep", "30"], "run_in_background": true }),
+            )
+            .expect_err("老版本远端不收这个参数");
+        assert!(
+            matches!(
+                &error,
+                PeerError::Unsupported { tool, argument: Some(argument) }
+                    if tool == "exec_command" && argument == "run_in_background"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("would have ignored it"),
+            "{error}"
+        );
+        assert_eq!(recorder.tool_calls(), 0);
+
+        // 不带那个参数的同一个工具照常。
+        assert!(connections
+            .call(ANYONE, &member, "exec_command", json!({ "cmd": ["true"] }))
+            .is_ok());
+    }
+
+    /// 工具表是握手的一部分：连一次读一次，之后每次调用不再多问。
+    #[test]
+    fn the_tool_list_is_read_once_per_connection() {
+        let recorder = Recording::new();
+        let connections = connections(&recorder);
+        let member = member("prod");
+        for _ in 0..3 {
+            connections
+                .call(ANYONE, &member, "read_file", json!({ "path": "a.rs" }))
+                .expect("读");
+        }
+        assert_eq!(recorder.opens(), 1);
+        assert_eq!(recorder.tool_calls(), 3, "三次调用，不多不少");
     }
 }
