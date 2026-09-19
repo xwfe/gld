@@ -330,7 +330,7 @@ fn alternatives_for(parts: &[String]) -> Vec<Value> {
 }
 
 /// 当前**运行时真正生效**的那份策略。
-fn policy_snapshot(ctx: &ToolContext) -> Value {
+pub(crate) fn policy_snapshot(ctx: &ToolContext) -> Value {
     let mut commands = ctx
         .policy
         .allowed_commands

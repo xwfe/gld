@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::planning::{
     ExecutionLedgerUpdate, GoalStatus, PlanStatus, PlanningMode, PlanningService, PlanningState,
@@ -34,6 +35,56 @@ fn policy_tool_err(err: PolicyError) -> Value {
             "preflight_tool": "check_command"
         }),
     })
+}
+
+/// 被拒的调用也记一笔。
+///
+/// 审查 F 要的是"策略/规划拒绝也记录脱敏审计事件"：一次没跑成的调用同样是
+/// 发生过的事，事后查"模型那半小时到底在干什么"时，只有成功记录是拼不出来的。
+///
+/// 记的是 `kind="rejected"`，和正常路径的 `started` 分开——账本得能区分
+/// "接了没跑"和"跑了"。
+///
+/// **脱敏**：只记错误码和拒绝阶段，不记命令内容、补丁正文。输入那一格沿用
+/// `operation_input`（只有"有没有参数"和调用方自己写的 reason）。
+///
+/// 范围限定在本来就要记账的工具，加上会改东西的那些：读类工具被拒（几乎只有
+/// Planning 那一种）不值得给 append-only 的日志添行。
+fn record_rejection(
+    ctx: &ToolContext,
+    operation_id: &str,
+    name: &str,
+    args: &Value,
+    output: &Value,
+) {
+    if !(should_log_operation(name) || mutating_tool_call(name, args)) {
+        return;
+    }
+    let error = output.get("error");
+    let field = |key: &str| {
+        error
+            .and_then(|error| error.get(key))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let stage = error
+        .and_then(|error| error.get("details"))
+        .and_then(|details| details.get("stage"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let _ = ctx.harness.record_operation(
+        Some(operation_id),
+        None,
+        name,
+        "rejected",
+        operation_input(args),
+        json!({
+            "ok": false,
+            "code": field("code"),
+            "category": field("category"),
+            "stage": stage
+        }),
+    );
 }
 
 fn record_execution_ledger(
@@ -295,19 +346,39 @@ fn planning_permission_error(
 
 /// **唯一工具执行入口**。MCP `tools/call` 与 Actions `POST /actions/{tool}` 必须且只能调用此函数。
 /// 策略校验、分发、错误格式在此统一，两路传输层不得另做执行前校验（Actions 仅允许额外的暴露层 `validate_actions_exposure`）。
+///
+/// `operation_id` 在**进门时**就分配，每一条返回路径都带着它走。以前它是
+/// 执行到一半才由 `record_operation` 生成的，于是策略拒绝、Planning 拒绝、
+/// 基线拒绝这些提前 return 的响应根本没有 id——出了问题，人拿着模型给的
+/// 报错在日志里对不上号（审查 D02、F）。
 pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
+    let operation_id = Uuid::new_v4().simple().to_string();
+    let mut output = dispatch_tool(ctx, name, args, &operation_id);
+    if let Some(object) = output.as_object_mut() {
+        // 内层已经写进去的就是这一个（`record_operation` 收的就是它），
+        // 这里只负责补上那些没走到记账就返回的路径。
+        object
+            .entry("operation_id")
+            .or_insert_with(|| Value::String(operation_id.clone()));
+    }
+    output
+}
+
+fn dispatch_tool(ctx: &ToolContext, name: &str, args: &Value, operation_id: &str) -> Value {
     let effective_args = apply_default_cwd(ctx, name, args);
     let planning_state = match load_planning_state(ctx) {
         Ok(state) => Some(state),
         Err(error)
             if planning_protected_tool(name, &effective_args) || name == "exec_health_check" =>
         {
-            return error
+            record_rejection(ctx, operation_id, name, &effective_args, &error);
+            return error;
         }
         Err(_) => None,
     };
     if let Some(state) = planning_state.as_ref() {
         if let Some(error) = planning_gate(state, name, &effective_args) {
+            record_rejection(ctx, operation_id, name, &effective_args, &error);
             return attach_planning_context(error, state);
         }
     }
@@ -318,6 +389,7 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         Some(&ctx.workspace),
     ) {
         let output = policy_tool_err(e);
+        record_rejection(ctx, operation_id, name, &effective_args, &output);
         return planning_state
             .as_ref()
             .map(|state| attach_planning_context(output.clone(), state))
@@ -340,11 +412,13 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         let task = ctx.harness.current_task().ok().flatten();
         if let Some(task) = task {
             if let Err(error) = ctx.harness.check_baseline(&task.id) {
-                return attach_harness_status(
+                let output = attach_harness_status(
                     ctx,
                     tool_err_code(error.code(), error.to_string(), "permission"),
                     false,
                 );
+                record_rejection(ctx, operation_id, name, &effective_args, &output);
+                return output;
             }
             let _ = ctx.harness.record_event(
                 &task.id,
@@ -364,7 +438,7 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
     let operation = if should_log_operation(name) {
         ctx.harness
             .record_operation(
-                None,
+                Some(operation_id),
                 task_id.as_deref(),
                 name,
                 "started",
@@ -982,11 +1056,29 @@ mod planning_tests {
     }
 }
 
+/// 这个工作区的执行环境长什么样。
+///
+/// **权威的那一份策略在 `policy` 里**，和 `check_command` 报的是同一个快照
+/// （`exec::policy_snapshot`），不是另算一遍。审查 A 要的就是这个：能力状态
+/// 只能有一个来源，两处各写各的迟早说出两套话，而模型没办法知道该信哪个。
+///
+/// 顶层那些老字段留着不动（有客户端在读），但值全部从同一个快照里取，
+/// 有测试钉住它们和 `check_command` 逐字相等。
+///
+/// 这个工具回答的是"这个工作区整体是什么情况"；要问**某一条具体命令**能不能
+/// 跑，用 `check_command`——它走的是真实执行那条判定，能说出是哪条规则、
+/// 程序在不在、有什么替代做法。
 pub fn check_exec_environment(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
+    let policy = crate::tools::exec::policy_snapshot(ctx);
     Ok(tool_ok(json!({
         "workspace": ctx.workspace.root_display(),
-        "permission_mode": ctx.permission_mode,
-        "network_allowed": ctx.policy.network_allowed(),
+        "policy": policy,
+        "preflight": {
+            "tool": "check_command",
+            "note": "要问某一条命令能不能跑，调 check_command：判定和 exec_command 走同一条路径，而且不会启动任何进程"
+        },
+        "permission_mode": policy["permission_mode"],
+        "network_allowed": policy["network_allowed"],
         "landlock_enabled": false,
         "filesystem_sandbox": {
             "available": false,
@@ -1000,17 +1092,17 @@ pub fn check_exec_environment(ctx: &ToolContext) -> Result<Value, WorkspaceError
         // ABSOLUTE_PATH_DENIED，然后反复重试。宁可少给能力，也不能给假的。
         "global_tmp_write": "denied",
         "workspace_exec_available": true,
-        "workspace_exec_sandbox_enforced": false,
-        "workspace_exec_boundary": "policy_only",
-        "system_command_allowlist": ctx.policy.allowed_commands.iter().cloned().collect::<Vec<_>>(),
+        "workspace_exec_sandbox_enforced": policy["sandbox_enforced"],
+        "workspace_exec_boundary": policy["execution_boundary"],
+        "system_command_allowlist": policy["allowed_commands"],
         "configured_executable_paths": ctx.executable_paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
         "workspace_local_entries": {
-            "enabled": ctx.policy.workspace_local_entries,
+            "enabled": policy["workspace_local_entries"],
             "script_extensions": ctx.policy.workspace_script_extensions.iter().cloned().collect::<Vec<_>>(),
             "resolution": "workdir_first"
         },
         // Backward-compatible alias for older MCP clients.
-        "allowed_commands": ctx.policy.allowed_commands.iter().cloned().collect::<Vec<_>>(),
+        "allowed_commands": policy["allowed_commands"],
         "warnings": ["Workspace 子进程当前允许执行，但尚未启用操作系统级文件系统沙箱"]
     })))
 }

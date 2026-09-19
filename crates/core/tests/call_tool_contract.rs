@@ -1125,3 +1125,113 @@ fn a_precondition_for_an_untouched_file_is_an_error() {
         "参数错了却把文件改了"
     );
 }
+
+/// 每一条返回路径都带 operation_id——**包括被拒的那些**。
+///
+/// 以前 id 是执行到一半由 record_operation 生成的，策略拒绝、Planning 拒绝
+/// 这些提前返回的响应根本没有；人拿着模型给的报错在日志里对不上号
+///（审查 D02、F）。
+#[test]
+fn every_response_carries_an_operation_id() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    let cases = [
+        // 成功、命令被策略拒、补丁对不上、参数不对、工具名不存在
+        ("read_file", json!({"path": "package.json"})),
+        ("exec_command", json!({"cmd": "rg --version"})),
+        (
+            "apply_patch",
+            json!({"patch": "--- a/TODO.md\n+++ b/TODO.md\n@@\n-nope\n+x\n"}),
+        ),
+        ("read_file", json!({})),
+        ("no_such_tool", json!({})),
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for (name, args) in cases {
+        let out = invoke(&ctx, name, args.clone());
+        let id = out["operation_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} 没有 operation_id: {out}"))
+            .to_string();
+        assert!(!id.is_empty(), "{name}: {out}");
+        // 每次调用一个新的，不能几次共用一个。
+        assert!(seen.insert(id), "{name} 复用了别人的 operation_id");
+    }
+}
+
+/// 被策略拒的调用要留下审计记录，而且用的是同一个 operation_id。
+#[test]
+fn a_rejected_call_is_recorded_in_the_operation_log() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    let refused = invoke(&ctx, "exec_command", json!({"cmd": "rg --version"}));
+    assert_err(&refused);
+    let operation_id = refused["operation_id"].as_str().expect("id").to_string();
+
+    let log = invoke(&ctx, "operation_log", json!({"limit": 20}));
+    let entries = log["operations"]
+        .as_array()
+        .or_else(|| log["items"].as_array())
+        .unwrap_or_else(|| panic!("操作日志的形状变了: {log}"));
+    let entry = entries
+        .iter()
+        .find(|item| item["id"].as_str() == Some(operation_id.as_str()))
+        .unwrap_or_else(|| panic!("被拒的调用没有记账: {log}"));
+    assert_eq!(entry["kind"], "rejected", "{entry}");
+    assert_eq!(entry["tool"], "exec_command");
+    assert_eq!(
+        entry["result_summary"]["code"], "POLICY_REJECTED",
+        "{entry}"
+    );
+    // 脱敏：命令内容不能进日志。
+    assert!(
+        !serde_json::to_string(entry)
+            .unwrap_or_default()
+            .contains("rg --version"),
+        "日志里带上了命令内容: {entry}"
+    );
+}
+
+/// 能力状态只能有一个来源。
+///
+/// `check_exec_environment` 和 `check_command` 都在讲"这个工作区的执行策略"。
+/// 两处各算各的，迟早会说出两套话，而模型没办法知道该信哪个（审查 A）。
+/// 这条测试把它们绑在一起：两边同名字段必须逐字相等。
+#[test]
+fn the_environment_tool_and_the_preflight_report_the_same_policy() {
+    let fx = tiny_js_fixture();
+    let ctx = common::ctx_with_allowed_commands(&fx.root, "only:pwd,cargo");
+
+    let environment = invoke(&ctx, "check_exec_environment", json!({}));
+    assert_ok(&environment);
+    let checked = invoke(&ctx, "check_command", json!({"cmd": "cargo --version"}));
+    assert_ok(&checked);
+
+    assert_eq!(
+        environment["policy"], checked["policy"],
+        "两边的策略快照对不上"
+    );
+
+    // 顶层那些老字段是兼容别名，值必须来自同一份快照。
+    let policy = &checked["policy"];
+    assert_eq!(environment["permission_mode"], policy["permission_mode"]);
+    assert_eq!(environment["network_allowed"], policy["network_allowed"]);
+    assert_eq!(environment["allowed_commands"], policy["allowed_commands"]);
+    assert_eq!(
+        environment["system_command_allowlist"],
+        policy["allowed_commands"]
+    );
+    assert_eq!(
+        environment["workspace_exec_sandbox_enforced"],
+        policy["sandbox_enforced"]
+    );
+    assert_eq!(
+        environment["workspace_local_entries"]["enabled"],
+        policy["workspace_local_entries"]
+    );
+    // 收窄过的白名单在两边都要如实反映。
+    assert_eq!(policy["allowlist_mode"], "only");
+    assert_eq!(environment["preflight"]["tool"], "check_command");
+}
