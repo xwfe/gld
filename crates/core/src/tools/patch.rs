@@ -38,11 +38,22 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     //
     // 锁是按**目录**取的，不是每个上下文一把，也不是整个进程一把：同一个目录
     // 经 hub、单工作区 listener、CLI 进来是三个 `ToolContext`，得排同一个队；
-    // 两个不同的项目则各写各的，不该互相堵。这把锁管不到别的进程、管不到
-    // `exec` 跑的命令、也管不到 Git 元数据——那几条边界写在
+    // 两个不同的项目则各写各的，不该互相堵。跨进程那一层是数据目录下的文件锁。
+    // 还管不到的（外部编辑器、后台跑的命令、Git 元数据）写在
     // `crate::tools::workspace_runtime` 的模块文档里，那一侧靠的是下面的版本
     // 前置条件和落盘前复核，两者都不是强 CAS，见 `commit_staged_bytes`。
-    let _commit_guard = (!dry_run).then(|| ctx.runtime.lock_commits());
+    let _commit_guard = if dry_run {
+        None
+    } else {
+        // 等不到就直接说。占着写权的多半是 `exec_command` 里正在跑的命令，
+        // 那一占可以到十分钟；挂在这儿等，客户端那边先超时断开，模型连"为什么
+        // 没动静"都不知道。
+        Some(
+            ctx.runtime
+                .lock_commits()
+                .ok_or_else(crate::tools::workspace_runtime::write_lock_busy)?,
+        )
+    };
 
     let file_patches = if patch.is_empty() {
         Vec::new()

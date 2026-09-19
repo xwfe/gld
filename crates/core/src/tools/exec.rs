@@ -60,6 +60,30 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
     let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
     let stdin_text = args.get("stdin").and_then(Value::as_str).unwrap_or("");
 
+    // 同步等结果的这一段占住工作区的写权。挡的是"一边跑命令一边打补丁"——那种
+    // 交叉出来的结果没法解释：命令读到的是半新半旧的文件。
+    //
+    // **占到哪为止：到这次调用返回。** 命令在 yield_time_ms 之内跑完，那就是
+    // 全程；没跑完就转后台（拿着 session_id 继续跑到 timeout_ms），那时写权
+    // 已经放了，后面这段没有保护。
+    //
+    // 这不是没想到，是刻意的：后台命令没有终点，占着写权等于把目录锁到天亮，
+    // `npm run dev` 起来之后谁也别想改代码了。现在的效果是把选择权交给调用
+    // 方——想要保护就同步等（yield_time_ms 调大，上限 30 秒），想撒手就传 0
+    // 或者让它转后台。yield_time_ms 传 0 的那一路连锁都不取。
+    //
+    // 这里不猜命令写不写文件：`cargo build` 写、`ls` 不写，靠命令文本判断只会
+    // 漏判，而漏判给人"已经协调了"的错觉。按运行形态一刀切，代价是 `sleep 5`
+    // 这种纯等待的命令也占着写权。
+    let write_guard = if yield_ms == 0 {
+        None
+    } else {
+        match ctx.runtime.lock_commits() {
+            Some(guard) => Some(guard),
+            None => return Err(crate::tools::workspace_runtime::write_lock_busy()),
+        }
+    };
+
     let result = crate::async_rt::block_on(async {
         run_command(
             ctx,
@@ -73,6 +97,9 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
         )
         .await
     });
+    // 命令已经结束（或被 kill），写权可以放了。显式写出来，是因为下面还有一段
+    // 拼结果的代码，读的人不该去想锁是在哪一行没的。
+    drop(write_guard);
 
     match result {
         Ok(mut out) => {
@@ -1214,6 +1241,61 @@ mod tests {
                 .ends_with("aEND\n"),
             "{read}"
         );
+    }
+
+    /// 同步等结果的命令占着工作区写权：这期间别人拿不到，也就打不了补丁。
+    ///
+    /// 时序：yield 窗口开了 1.5 秒，400 毫秒的时候命令必然还在里面等，那时
+    /// 写权应该是拿不到的。
+    #[cfg(unix)]
+    #[test]
+    fn a_foreground_command_holds_the_write_lock_while_it_waits() {
+        let (_workspace, _harness, ctx) = tree_workspace();
+        let runtime = Arc::clone(&ctx.runtime);
+        let ctx = Arc::new(ctx);
+        let runner = {
+            let ctx = Arc::clone(&ctx);
+            std::thread::spawn(move || {
+                call_tool(
+                    &ctx,
+                    "exec_command",
+                    &json!({ "cmd": "./spawn-tree", "timeout_ms": 3_000, "yield_time_ms": 1_500 }),
+                )
+            })
+        };
+
+        std::thread::sleep(Duration::from_millis(400));
+        let taken = runtime.lock_commits_within(Duration::from_millis(200));
+        let held_by_command = taken.is_none();
+        drop(taken);
+        let output = runner.join().expect("命令线程");
+        assert!(
+            held_by_command,
+            "命令还在同步等，写权却被别人拿走了——那就是一边跑命令一边改文件：{output}"
+        );
+    }
+
+    /// 转到后台的那一路不占写权：`npm run dev` 起来之后还得能改代码。
+    #[cfg(unix)]
+    #[test]
+    fn a_background_command_starts_even_while_the_workspace_is_locked() {
+        let (_workspace, _harness, ctx) = tree_workspace();
+        let held = ctx
+            .runtime
+            .lock_commits_within(Duration::from_millis(50))
+            .expect("没人占着却拿不到写权");
+
+        // yield_time_ms 传 0 = 立刻拿 session_id 走人，这一路根本不取写权。
+        let started = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./spawn-tree", "timeout_ms": 1_000, "yield_time_ms": 0 }),
+        );
+        assert!(
+            started.get("session_id").is_some(),
+            "写权被占着就起不了后台命令，那 dev server 之类根本没法用：{started}"
+        );
+        drop(held);
     }
 
     #[cfg(unix)]

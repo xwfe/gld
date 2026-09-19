@@ -106,6 +106,16 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
   只影响那条连接，并转成 `RpcError::Internal` 回给客户端。
 - 工具内核是同步函数，被 `spawn_blocking` 包着跑；它内部通过 `async_rt::block_on`
   驱动子进程 I/O。这是从桌面版继承的约束：`block_on` 不能在 tokio worker 线程里调用。
+- **改同一个工作区目录的写操作排一个队**，归 `tools/workspace_runtime.rs` 管：
+  一个目录一个 `WorkspaceRuntime`，按规范化路径认人，所以 hub、单项目 listener
+  和 CLI 三个入口（三个 `ToolContext`）排的是同一个队。跨进程那一层是数据目录
+  `write-locks/` 下的文件锁（`fs2`），进程死了内核自动放。等锁最多
+  `WRITE_LOCK_WAIT`（30 秒），超了报 `WORKSPACE_BUSY` 而不是挂着——因为
+  `exec_command` 也会占这把锁。
+  占锁的是：`apply_patch` 落盘，以及 `exec_command` **同步等结果的那一段**
+  （命令转后台之后就不占了）。管不到的边界——后台命令、外部编辑器、不同
+  `GLD_HOME` 的另一个 gld、Git common directory——写在那个模块的文档和
+  [security.md](security.md) 里，别当成已经隔离了。
 
 ## 加一个新命令要改哪里
 

@@ -334,7 +334,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_command",
         "Execute command",
-        "Run a bounded command in the workspace under runtime policy.",
+        "Run a bounded command in the workspace under runtime policy. While this call is waiting for the command (up to yield_time_ms), it holds the workspace write lock, so apply_patch from another session gets WORKSPACE_BUSY; once the command moves to the background the lock is released and that protection is gone.",
         false,
         true,
         true,

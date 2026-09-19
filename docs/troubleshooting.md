@@ -110,6 +110,8 @@ gld tool call exec_command cmd='cargo test'
 | `READS_CONFINED_TO_WORKSPACE`（升级到 0.3.0 后 Agent 突然读不了外部文件） | 0.3.0 起读也默认限制在工作区内，老配置升级上来一样收紧 | 确实要读外面：`gld ws set confine-reads=false`（Actions 侧 `actions.confine-reads`）。先读一下 [security.md](security.md) 再决定 |
 | `GLD_DATA_HOME_DENIED` | 想用文件工具读 gld 自己的数据目录 | 有意挡的，**关掉 confine-reads 也不给读**：那里明文存着所有工作区的密钥。要看密钥用 `gld secret show <key> --reveal` |
 | AI 报 `FILE_VERSION_CONFLICT` | 它读这个文件之后，文件被写过（你在编辑器里改的、另一个会话、`git checkout`），补丁没有落盘 | 这是它该做的事——让 AI 重新 `read_file` 再改。反复出现的话，看看是不是有别的程序在自动改这个文件（格式化工具、watch 任务） |
+| AI 报 `WORKSPACE_BUSY`，说等了 30 秒 | 同一个工作区上另一个写操作占着写权：多半是别的会话（或另一个 gld 进程）正用 `exec_command` 同步等一条命令跑完 | 等那条命令结束再让 AI 重试，这个错误是 `retryable` 的。**连着几次都这样**说明有人在反复跑长命令：让那一侧把 `yield_time_ms` 调小让命令转后台，或者把两个会话错开用 |
+| 一个会话在跑命令，另一个会话改文件却没被拦住 | 命令已经转后台了（`yield_time_ms` 到了还没跑完就会转），写权在那时就放开了——只有同步等的那一段占锁 | 想让整段都互斥就把 `yield_time_ms` 调大同步等（上限 30 秒）。这是刻意的取舍，不然 `npm run dev` 起来之后谁也改不了代码，原委见 [security.md](security.md) |
 | `FILE_CHANGED_EXTERNALLY`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹，发现任务开始后有它没记账的文件变化 | 确实是你在编辑器里改了文件的话，这是它该做的事——让 AI 重新读一遍再动手。要是你什么都没改却一直报，看下一行 |
 | 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
 | 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 跳过名单多了 `.venv/`、`coverage/`、`Library/` 等目录（[concepts.md](concepts.md#durable-task-的工作区基线)），工作区里有这些目录就跟升级前记下的指纹对不上 | 结束旧任务再开一个：`task_manage action=finish task_id=<id> allow_unverified=true`，然后 `action=start`。`<id>` 在 `action=status` 的 `task_id` 里 |
