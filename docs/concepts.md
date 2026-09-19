@@ -362,11 +362,11 @@ gld tool list                       # 看当前实际暴露了什么
 
 | 取值 | 工具数 | 说明 |
 | --- | --- | --- |
-| `compact` | 24 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
-| `core` | 38 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
-| `advanced` | 51 | 全部工具都暴露 |
-| `read-only` | 19 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
-| `compat-readonly-all` | 51 | 见下面的警告 |
+| `compact` | 25 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
+| `core` | 39 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
+| `advanced` | 52 | 全部工具都暴露 |
+| `read-only` | 20 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
+| `compat-readonly-all` | 52 | 见下面的警告 |
 
 上面的数字是当前版本 `gld tool list` 实测出来的，会随版本变；以命令输出为准。
 

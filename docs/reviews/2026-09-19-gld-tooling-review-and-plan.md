@@ -390,3 +390,59 @@ rg/gh/ssh 按能力和授权分别处理，禁止通过解释器或包装脚本�
 门禁：`cargo test --workspace` 连跑三轮都是 585 passed、0 failed；fmt、clippy 干净。
 
 **U1 到此完成。**下一步按方案是 U2（统一错误类型、operation_id、命令预检、补丁定位诊断、文件版本前置条件）。
+
+### U2 第一批：补丁失败说得出在哪儿（P01、D01 的补丁部分）
+
+E03 里那次失败给的全部信息是：`PATCH_FAILED` + `Hunk context did not match file content.` + `details = {}`，外加一句"请检查 stderr、exit_code"。模型能做的只剩重读整个项目再猜。
+
+现在每处对不上都有一条诊断：`file`、`operation`、`hunk_index`、`reason_code`、`expected_range`、`candidate_ranges`、`actual_excerpt`、`suggested_read_range`。
+
+**行号一律是磁盘原文件的 1-based 行号。**一批补丁里前面的 hunk 已经把下面的行推走了，不换算回去，模型照着 `read_file` 读到的是别处（测试 `line_numbers_in_a_diagnostic_are_the_ones_on_disk` 钉着）。同一批里前面改过这个文件时，`baseline` 标成 `earlier_in_this_patch`——那时行号和磁盘上的确实对不上，得说出来。
+
+`reason_code` 分开，因为下一步完全不同：
+
+| reason_code | 什么情况 | 模型该做什么 |
+| --- | --- | --- |
+| `context_out_of_order` | 整段上下文在文件里，只是在前一段之前 | 把两段调个个儿 |
+| `context_drifted` | 第一行还在原处，后面的变了 | 重读 `suggested_read_range`，重建这一段 |
+| `context_not_found` | 文件里根本没有这段 | 重读文件，整段重写 |
+| `context_ambiguous` | 对得上好几处（`PATCH_AMBIGUOUS`，U1 就有） | 加上下文或行号 |
+| `file_not_found` / `file_already_exists` / `deleted_earlier_in_patch` | 目标文件本身就不对 | 换操作类型 |
+
+一次把所有对不上的地方都报出来（`problem_count`、`diagnostics[]`），不是修一个报一个。同一个文件里第一段失败之后**不再检查**它剩下的段——那些段要看见前一段的结果才知道对不对——记进 `not_checked`，不算通过。诊断多于 20 条时 `diagnostics_truncated=true`。整批仍然不落盘，`details.files_changed` 明写 false。
+
+改文件时目标不存在，错误码**仍然是 `NOT_FOUND`**（照着旧码分支的客户端不受影响），只是现在带诊断。
+
+`recovery_hint` 按错误码分流：补丁失败不再提示"检查 stderr、exit_code"（那次没有 stderr 也没有 exit_code，更不该重试）；策略拒绝指向 `check_command`；超时提示先读已有输出再决定要不要重跑；回滚没做完的提示先去看现场。
+
+诊断里的纯计算（摘录、候选、建议范围）拆进 `tools/patch_diag.rs`：和落盘、回滚、权限无关，单独测。摘录最多 9 行、单行 200 字符，截断了要报 `truncated_lines`——否则模型拿截断内容当原文，重建出来的补丁一样对不上。
+
+门禁：`cargo test -p gld-core --lib tools::patch` 30 passed；`cargo test --workspace` 600 passed、0 failed；fmt、clippy 干净。
+
+### U2 第二批：命令预检 `check_command`（C01、C02、A01，顺带 F）
+
+新工具 `check_command`，参数和 `exec_command` 同一组，**不跑命令**，回答四件事：
+
+1. `decision`：`allow` / `deny` / `needs_approval`；`denied_stage` 说明卡在哪一步（policy / workdir / resolve）。
+2. `rule`：哪条规则说了算（`command_not_allowlisted`、`shell_syntax_rejected`、`external_execution`……）。
+3. `program`：`found`、`path`、`source`（`path` / `workspace_entry` / `native_builtin` / `not_found`）。**策略拒了也照样报**——"不许跑"和"没装"下一步完全不同，把前者说成后者会让模型去装一个本来就装着的东西。
+4. `policy` + `server`：生效的 permission_mode、`allowlist_mode`（`defaults` / `defaults_plus_configured` / `only`）、白名单全文、配置来源、`runtime_fingerprint`，以及服务端版本和协议版本。`build_commit` 明写 `null`——构建里没嵌提交号就不能拿版本号顶替。
+
+**判定不是另写一份**：策略走同一个 `validate_command_for_workspace`，程序解析走同一个 `resolve_program`，顺序也和 `exec_command` 一样（策略 → workdir → 原生内建 → 解析）。`check_command_and_exec_command_agree` 用四类命令钉住"预检与真跑同码同因"。
+
+预检没有副作用：不起进程、不跑 `--help`、不登录、不联网。`check_command_does_not_run_anything` 用一个**真会写文件**的命令证明这件事——预检后文件不能出现，真跑后必须出现（少了后半句，脚本失效时这条测试会假通过）。
+
+被拒时给的是**已获准**的替代工具（`rg`→`search_text`、`find`→`list_files`、`cat`→`read_file`、`ssh`→走 hub 成员），不教绕过。
+
+顺带做了方案 F 的一部分：策略拒绝原因**类型化**成 `PolicyReason`，码、机器可读原因和建议都从枚举来，不再靠 `message.contains("allowlisted")` 猜。两处行为因此变准：
+
+| 场景 | 原来 | 现在 |
+| --- | --- | --- |
+| `filesystem_scope=host` | `POLICY_REJECTED`，真正原因当前缀塞在消息里 | `EXTERNAL_EXECUTION_NOT_ALLOWED`，`details.reason=external_execution` |
+| 子进程写工作区外 | 同上 | `WORKSPACE_PATH_PROTECTED` |
+
+工具数随之 +1（compact 25 / core 39 / advanced 52 / read-only 20），文档已同步。
+
+门禁：`cargo test --workspace` 600 passed、0 failed；fmt、clippy 干净。
+
+**U2 还没做的**：`operation_id`（现在只有部分工具带）、文件版本前置条件（`FILE_VERSION_CONFLICT`、预检与执行之间的内容变化）、`check_exec_environment` 与新预检的字段收敛。
