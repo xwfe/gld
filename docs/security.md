@@ -211,6 +211,13 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 - **公网地址是靠请求头推断的**（没配 `mcp.public-url` 时）。这是给"你自己架
   nginx / cloudflared 反代"用的。全局网关那条路已经不再透传公网来的
   `X-Forwarded-*`，直连仍然认——因为反代场景需要它。
+- **写同一个项目的互斥，边界是数据目录。** 改文件时 gld 会占一把锁：同一个
+  进程里不管从 hub、单项目还是 CLI 进来都排同一个队，跨进程靠数据目录下
+  `write-locks/` 里的文件锁（进程死了内核自动放，不用人工清）。
+  **两个 gld 用不同的 `GLD_HOME` 写同一个目录，就是两个互相看不见的写者**——
+  同一台机器上要共用执行权威，`GLD_HOME` 必须一致。
+  这把锁也管不到不参与的写者：编辑器、`git checkout`、`exec_command` 里跑的
+  `sed -i`。那一侧靠补丁的版本前置条件挡，它不是强 CAS。
 
 ## 相关文档
 

@@ -18,11 +18,19 @@
 //! 管得到：同一个进程里对同一个目录的写操作，不管是从 hub、单工作区
 //! listener 还是 CLI 进来的，也不管中间 `ToolContext` 重建过几次。
 //!
+//! 管得到：**另一个 gld 进程**——守护进程和 CLI 同时在跑、开了两个实例。这一
+//! 层是 OS 文件锁，锁文件在数据目录（`GLD_HOME`，默认 `~/.config/gld`）下的
+//! `write-locks/`，进程死掉时由内核释放，不留要人工清的残留。
+//!
 //! 管不到（**别当成已经隔离了**）：
 //!
-//! - **别的进程**——另一个 gld 实例、编辑器、`git checkout`。进程内的 `Arc`
-//!   和 `Mutex` 对它们一点约束力都没有。那一侧靠的是补丁的版本前置条件和
-//!   落盘前复核，两者都不是强 CAS。
+//! - **不同数据目录的两个 gld**。锁文件按 `GLD_HOME` 存放，两个进程用不同的
+//!   `GLD_HOME` 写同一个目录，就是两个互不知晓的写域。同一台机器上要共用执行
+//!   权威，`GLD_HOME` 必须一致。ccnm 那边有同样的约束，两边近期都不打算为此
+//!   造一套跨产品的锁服务。
+//! - **不是 gld 的写者**——编辑器、`git checkout`、另一个 AI 工具。文件锁是
+//!   劝告锁（advisory），不参与的人照写不误。那一侧靠的是补丁的版本前置条件
+//!   和落盘前复核，两者都不是强 CAS。
 //! - **`exec` 跑的命令**。模型完全可以 `sed -i` 一把梭，这里拦不住。要把
 //!   命令也纳进来，得先分清只读命令和写命令，否则一个 `npm run dev` 就能
 //!   把写锁占到天亮。
@@ -34,8 +42,11 @@
 //!   "共享 Git 元数据"两级协调，不是把键一换了事。
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+
+use fs2::FileExt;
 
 /// 一个工作区目录的执行资源。
 ///
@@ -45,6 +56,33 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 #[derive(Debug)]
 pub struct WorkspaceRuntime {
     commit_lock: Mutex<()>,
+    /// 跨进程那一层的锁文件。
+    ///
+    /// `None` 表示建不出来（数据目录不可写之类）。那时只剩进程内互斥，
+    /// [`WorkspaceRuntime::lock_commits`] 会记一条 warn——为什么是降级而不是
+    /// 拒绝写，说明在那里。
+    lock_file: Option<PathBuf>,
+}
+
+/// 落盘期间握着的写权，丢掉就释放。
+///
+/// 两层：进程内的 `Mutex` 挡住同一个进程里的其他线程，OS 文件锁挡住别的 gld
+/// 进程。文件锁随 `File` 关闭而释放，进程被 kill 掉也一样（内核收 fd 的时候
+/// 就放了），所以不会留下要人工清理的残留标记。
+#[must_use = "丢掉 guard 就等于放开了写权"]
+pub struct CommitGuard<'a> {
+    _in_process: MutexGuard<'a, ()>,
+    across_processes: Option<File>,
+}
+
+impl Drop for CommitGuard<'_> {
+    fn drop(&mut self) {
+        // 关文件本身就会解锁，这里显式来一次是跟 `history::storage::HistoryLock`
+        // 保持一个写法，也免得以后有人把 File 换成别的持有方式时漏掉。
+        if let Some(file) = self.across_processes.take() {
+            let _ = FileExt::unlock(&file);
+        }
+    }
 }
 
 impl WorkspaceRuntime {
@@ -52,13 +90,88 @@ impl WorkspaceRuntime {
     ///
     /// 谁该调用：真要落盘的写操作。只读的预检（`dry_run`）不要占——预检不该
     /// 让真正的写操作排队。
-    pub fn lock_commits(&self) -> MutexGuard<'_, ()> {
+    ///
+    /// **会等**。别的进程正在写同一个目录时，这里阻塞到它写完。补丁落盘是毫
+    /// 秒级的事，等比失败好；而且持锁的进程要是死了，内核立刻放锁，不会卡死。
+    pub fn lock_commits(&self) -> CommitGuard<'_> {
         // 上一个持锁的线程 panic 过：锁里存的是 `()`，没有被弄坏的状态可言，
         // 接着用就是了——在这里 panic 掉反而会把一次正常的补丁变成失败。
-        self.commit_lock
+        let in_process = self
+            .commit_lock
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        CommitGuard {
+            _in_process: in_process,
+            across_processes: self.lock_file.as_deref().and_then(take_file_lock),
+        }
     }
+
+    /// 锁文件在哪；没有就是跨进程那一层没拿到。测试和排障用。
+    pub fn lock_file_path(&self) -> Option<&Path> {
+        self.lock_file.as_deref()
+    }
+}
+
+/// 拿这个锁文件的独占锁，拿不到就返回 `None`。
+///
+/// 拿不到时为什么是降级而不是让整次补丁失败：这一层是加固，不是唯一防线——
+/// 同进程的互斥还在，补丁自己还有版本前置条件和落盘前复核。数据目录一时不可
+/// 写（权限、磁盘满、`GLD_HOME` 指歪了）就让所有改文件的操作全部停摆，代价
+/// 比它挡住的风险大。日志会说清楚是哪一步没成。
+fn take_file_lock(path: &Path) -> Option<File> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!(
+                "打不开跨进程写锁文件 {}：{error}。这次落盘只有进程内互斥",
+                path.display()
+            );
+            return None;
+        }
+    };
+    match FileExt::lock_exclusive(&file) {
+        Ok(()) => Some(file),
+        Err(error) => {
+            eprintln!(
+                "拿不到跨进程写锁 {}：{error}。这次落盘只有进程内互斥",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// 锁文件路径：数据目录下 `write-locks/<目录路径的哈希>.lock`。
+///
+/// 为什么不按目录名而按哈希：路径里什么字符都可能有，直接当文件名会撞上长度
+/// 上限和非法字符。哈希撞了的后果是两个目录共用一把锁——多串行一点，不是少
+/// 一层保护，所以 64 位够用。
+///
+/// 为什么锁文件不放在项目里：那是用户的仓库，gld 不往里塞自己的状态文件。
+/// 代价写在模块文档里——不同 `GLD_HOME` 的两个进程互相看不见。
+fn lock_path_for(root: &Path) -> Option<PathBuf> {
+    let dir = crate::home::data_home().ok()?.join("write-locks");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "建不出写锁目录 {}：{error}。跨进程互斥这一层不可用",
+            dir.display()
+        );
+        return None;
+    }
+    let key = root.to_string_lossy();
+    Some(dir.join(format!("{:016x}.lock", fnv1a(key.as_bytes()))))
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// 规范化后的目录路径 → 资源。
@@ -94,9 +207,10 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
     let mut runtimes = RUNTIMES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Arc::clone(runtimes.entry(key).or_insert_with(|| {
+    Arc::clone(runtimes.entry(key).or_insert_with_key(|key| {
         Arc::new(WorkspaceRuntime {
             commit_lock: Mutex::new(()),
+            lock_file: lock_path_for(key),
         })
     }))
 }
@@ -179,5 +293,57 @@ mod tests {
             Arc::ptr_eq(&first.runtime, &second.runtime),
             "同一个目录的两个上下文各拿一把锁，两个入口就能同时往里写"
         );
+    }
+
+    /// 跨进程那一层：拿着写权的时候，别人打开同一个锁文件就该被挡在外面。
+    ///
+    /// 这里用第二个 `File` 句柄冒充另一个进程——`flock` 认的是打开的文件本身
+    /// （open file description），不是进程，所以同一个进程里的第二个句柄一样
+    /// 会被挡住，测得出真实行为。
+    #[test]
+    fn a_second_process_cannot_write_while_the_lock_is_held() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let runtime = runtime_for(&root);
+        let path = runtime
+            .lock_file_path()
+            .expect("数据目录在测试里是隔离的临时目录，锁文件应该建得出来")
+            .to_path_buf();
+
+        let held = runtime.lock_commits();
+        let other = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("打开锁文件");
+        assert!(
+            FileExt::try_lock_exclusive(&other).is_err(),
+            "写权被占着，另一个进程却拿到了锁——两个 gld 会同时往一个目录里写"
+        );
+
+        drop(held);
+        assert!(
+            FileExt::try_lock_exclusive(&other).is_ok(),
+            "写权放开了，别的进程还是拿不到锁"
+        );
+        let _ = FileExt::unlock(&other);
+    }
+
+    /// 两个不同的目录各有各的锁文件，不会互相挡。
+    #[test]
+    fn two_directories_do_not_block_each_other_across_processes() {
+        let a = tempdir().expect("a");
+        let b = tempdir().expect("b");
+        let a = runtime_for(&a.path().canonicalize().expect("canonical a"));
+        let b = runtime_for(&b.path().canonicalize().expect("canonical b"));
+        assert_ne!(
+            a.lock_file_path(),
+            b.lock_file_path(),
+            "两个目录共用一个锁文件，一个项目落盘会把另一个项目堵在外面"
+        );
+
+        let _held = a.lock_commits();
+        // b 的写权照样拿得到——拿不到这里会一直等，测试超时就是答案。
+        let _also = b.lock_commits();
     }
 }
