@@ -72,3 +72,37 @@
 **已知的不稳定测试**（不是本轮引入）：`tools::git::tests::run_git_kills_a_hung_git_and_what_it_spawned_at_the_limit`
 在全量并发下偶发失败（`别名没跑起来`）——它给 git 的预算只有 300 毫秒，机器忙的时候
 别名脚本来不及写 pid 文件。单独跑稳定通过。本轮没有动它，记在这里。
+
+### 2026-09-19：G2 完成
+
+**compact 档不再关掉 Skill。**以前是目录一条不给、`list_skills` / `get_skill` 也不
+暴露——项目把用法写进 `.claude/skills/`，默认配置下的 AI 完全不知道。现在两个工具
+照常暴露（compact 的工具数 25 → 27），目录有字符预算：`COMPACT_SKILL_CATALOG_CHARS`
+= 1200 字符，每条描述截到 120 字符，放不下的在末尾写
+`(N more not listed here; call list_skills to see all M.)`。
+
+不是"截断到放得下为止"就完了——**项目自己的 skill 排在主目录那批前面**。发现顺序
+本来按来源走，主目录（`scope=global`）先加，于是预算挤掉的正好是这个项目专有的那些。
+排序放在 `discover_skills` 末尾（稳定排序），`list_skills` 也跟着一致。
+
+**frontmatter 换成 `toexec-skill`**（tag `toexec-skill-v0.1.0`，gld 的第三个共享
+crate）。原来逐行找 `key:` 前缀，`description: >` 这种折行写法读出来是一个 `>`，
+那条 skill 在目录里等于没有描述。`.cursorrules` 的 `alwaysApply` 判定也换过去了，
+顺带不再区分大小写和连字符。
+
+**`gld context` 的口径跟着改**：从"注入 / 不注入"改成"扫到 N，目录里列了 M"。
+列了几条用的是 MCP 握手时同一个渲染函数（`render_skill_catalog_for_profile`），
+分开算迟早会报一个和模型看到的不一样的数。打 `·` 的那些在提示里明说没有失效——
+AI 调一次 `list_skills` 照样拿得到，只是不会自己想起来。
+
+验证：
+
+- `cargo test --workspace` 603 passed、0 failed；fmt、clippy 干净。
+- 新增单测：折行 `description` 读成正文、compact 目录报出少列了几条且其他档不受
+  预算影响、工作区 skill 排在主目录之前。
+- CLI 集成测试 `context_marks_what_is_actually_injected` 改成实测：工作区里放一个
+  `description: >` 写法的 skill，compact 档起真服务、读 MCP `initialize` 的
+  `instructions`，里面必须同时出现 skill 名字和折行描述里的标记串。
+
+G2.1–G2.3 三条验收都做了。下一块是 G3（本地搜索的输出模式 / 跨行 / 类型过滤、
+notebook 按 cell 读写），开工时再定细目。
