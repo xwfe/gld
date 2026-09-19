@@ -236,6 +236,14 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
         false,
     ),
     (
+        "check_command",
+        "Check command",
+        "Ask whether exec_command would accept this command, without running it: which rule decides, whether the program resolves, and what is allowed instead.",
+        true,
+        false,
+        false,
+    ),
+    (
         "exec_health_check",
         "Exec health check",
         "Verify the exec worker, session creation, command execution, and stdout/stderr capture.",
@@ -547,6 +555,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "request_plan_review",
     "capability_health_check",
     "check_exec_environment",
+    "check_command",
     "get_default_cwd",
     "set_default_cwd",
     "list_skills",
@@ -579,6 +588,7 @@ pub const COMPACT_TOOLS: &[&str] = &[
     "planning_manage",
     "task_manage",
     "check_exec_environment",
+    "check_command",
     "get_default_cwd",
     "set_default_cwd",
     "read_file",
@@ -604,6 +614,7 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "server_info",
     "planning_state",
     "check_exec_environment",
+    "check_command",
     "get_default_cwd",
     "list_skills",
     "get_skill",
@@ -644,6 +655,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "request_plan_review",
     "capability_health_check",
     "check_exec_environment",
+    "check_command",
     "exec_health_check",
     "get_default_cwd",
     "set_default_cwd",
@@ -712,6 +724,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "history_session_read",
     "planning_state",
     "check_exec_environment",
+    "check_command",
     "exec_health_check",
     "get_default_cwd",
     "list_skills",
@@ -1166,6 +1179,21 @@ pub fn input_schema(name: &str) -> Value {
             "required": ["patch"],
             "additionalProperties": false
         }),
+        // 和 exec_command 同一组参数：预检要判的就是"这一组参数会不会被放行"，
+        // 少一个字段就可能判出不一样的结果。
+        "check_command" => json!({
+            "type": "object",
+            "properties": {
+                "cmd": { "type": "string", "minLength": 1 },
+                "workdir": { "type": "string", "default": "." },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
+                "confirm": { "type": "boolean", "default": false },
+                "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" }
+            },
+            "description": "ok=true 只表示预检做完了；能不能跑看 decision（allow / deny / needs_approval）。不会启动进程、不联网。",
+            "required": ["cmd"],
+            "additionalProperties": false
+        }),
         "exec_command" => json!({
             "type": "object",
             "properties": {
@@ -1350,7 +1378,7 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 38);
+        assert_eq!(tools.len(), 39);
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_manage"));
         assert!(names.contains(&"planning_manage"));

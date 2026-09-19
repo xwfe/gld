@@ -664,3 +664,163 @@ fn the_reported_capabilities_match_what_writes_actually_do() {
         );
     }
 }
+
+/// 预检和真跑必须给同一个答案。
+///
+/// 这是 `check_command` 存在的前提：如果预检说能跑、真跑被拒（或者反过来），
+/// 它就不是"先问一句"，而是多一个误导来源。所以判定不是各写一份，而是同一个
+/// `validate_command_for_workspace` + 同一个 `resolve_program`；这条测试钉住
+/// 这件事（审查 A01）。
+///
+/// 被拒的三条都不会启动子进程——策略在起进程之前就拦下了。
+#[test]
+fn check_command_and_exec_command_agree() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    // (命令, 预期决定, 预期错误码)
+    let cases: &[(&str, &str, &str)] = &[
+        // 服务端自己就能答，不起进程。
+        ("pwd", "allow", ""),
+        ("rg --version", "deny", "POLICY_REJECTED"),
+        ("ls | wc -l", "deny", "POLICY_REJECTED"),
+        (
+            "rm -rf build",
+            "needs_approval",
+            "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION",
+        ),
+    ];
+
+    for (cmd, decision, code) in cases {
+        let checked = invoke(&ctx, "check_command", json!({ "cmd": cmd }));
+        assert_ok(&checked);
+        assert_eq!(checked["decision"], *decision, "{cmd}: {checked}");
+        assert_eq!(checked["side_effects"], "none");
+
+        let executed = invoke(&ctx, "exec_command", json!({ "cmd": cmd }));
+        if *decision == "allow" {
+            assert_eq!(executed["ok"], json!(true), "{cmd}: {executed}");
+        } else {
+            // 预检说的码，就是真跑会拿到的码。
+            assert_eq!(checked["code"], *code, "{cmd}: {checked}");
+            assert_eq!(executed["error"]["code"], *code, "{cmd}: {executed}");
+            assert_eq!(
+                executed["error"]["details"]["reason"], checked["rule"],
+                "{cmd}: 预检和执行的原因得一致"
+            );
+        }
+    }
+}
+
+/// 策略拒绝 ≠ 程序没装。这两件事下一步完全不同：一个是请用户改配置，另一个
+/// 是换个工具或装东西。原来拒绝信息只有一句 `Command is not allowlisted: rg`，
+/// 模型分不出来，于是换着花样重试（审查 C02）。
+#[test]
+fn a_denied_command_still_says_whether_the_program_is_installed() {
+    let fx = tiny_js_fixture();
+    // 只允许 pwd：python3 因此被拒，但它在这台机器上确实装着（别的测试在跑它）。
+    let ctx = common::ctx_with_allowed_commands(&fx.root, "only:pwd");
+
+    let checked = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": format!("{TEST_PYTHON} --version") }),
+    );
+    assert_ok(&checked);
+    assert_eq!(checked["decision"], "deny");
+    assert_eq!(checked["rule"], "command_not_allowlisted");
+    assert_eq!(checked["denied_stage"], "policy");
+    assert_eq!(
+        checked["program"]["found"],
+        json!(true),
+        "程序是装着的，别把策略拒绝说成没装：{checked}"
+    );
+    assert_eq!(checked["program"]["source"], "path");
+    assert_eq!(checked["policy"]["allowlist_mode"], "only");
+    assert_eq!(checked["needs_user_authorization"], json!(true));
+
+    // 反过来：名字根本不存在的程序，才是 found=false。
+    let missing = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": "gld-no-such-program-xyz" }),
+    );
+    assert_ok(&missing);
+    assert_eq!(missing["program"]["found"], json!(false), "{missing}");
+}
+
+/// 预检不跑东西。
+///
+/// 光看代码"没有 spawn"不算证据——这里让预检的对象是一个**真的会写文件**的
+/// 命令：预检之后文件不能出现，真跑之后必须出现。少了后半句，这条测试在脚本
+/// 根本不工作时也会通过。
+#[test]
+fn check_command_does_not_run_anything() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    fs::write(
+        fx.root.join("marker.py"),
+        "open('marker.txt', 'w').write('ran')\n",
+    )
+    .expect("write probe script");
+    let marker = fx.root.join("marker.txt");
+
+    let checked = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": format!("{TEST_PYTHON} marker.py") }),
+    );
+    assert_ok(&checked);
+    assert_eq!(checked["decision"], "allow", "{checked}");
+    assert!(!marker.exists(), "预检把命令跑了");
+
+    let executed = invoke(
+        &ctx,
+        "exec_command",
+        json!({ "cmd": format!("{TEST_PYTHON} marker.py") }),
+    );
+    assert_eq!(executed["ok"], json!(true), "{executed}");
+    assert!(marker.exists(), "探针脚本本身没工作，上面那句断言不算数");
+}
+
+/// 被拒之后给的是**已经获准**的替代工具，不是"换个解释器再试"这种绕过办法。
+#[test]
+fn a_denied_command_points_at_an_allowed_tool() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let checked = invoke(&ctx, "check_command", json!({ "cmd": "rg --version" }));
+    assert_ok(&checked);
+    let alternatives = checked["alternatives"].as_array().expect("alternatives");
+    assert!(
+        alternatives
+            .iter()
+            .any(|item| item["tool"] == "search_text"),
+        "{checked}"
+    );
+    // 白名单不是沙箱，这句话得说出来，别让人以为放行的命令被关着。
+    assert_eq!(checked["policy"]["sandbox_enforced"], json!(false));
+    assert_eq!(checked["server"]["build_commit"], json!(null));
+}
+
+/// 补丁失败不该提示"检查 stderr、exit_code"——那次没有 stderr，也没有
+/// exit_code，更不该"重试"：同一个补丁再发一遍还是对不上（审查 D01、A18）。
+#[test]
+fn a_failed_patch_is_not_told_to_check_stderr() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": "--- a/TODO.md\n+++ b/TODO.md\n@@\n-no such line in this file\n+x\n"}),
+    );
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "PATCH_FAILED", "{error}");
+    let hint = out["recovery_hint"].as_str().unwrap_or_default();
+    assert!(!hint.contains("stderr"), "{hint}");
+    assert!(hint.contains("suggested_read_range"), "{hint}");
+    assert_eq!(error["error"]["details"]["files_changed"], json!(false));
+    assert_eq!(
+        error["error"]["details"]["diagnostics"][0]["file"], "TODO.md",
+        "{error}"
+    );
+}

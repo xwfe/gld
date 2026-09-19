@@ -62,6 +62,14 @@ pub struct PolicySettings {
     pub permission_mode: String,
     /// 读工具是否只许读 Workspace 内。默认 true，见 `Workspace::confine_reads`。
     pub confine_reads: bool,
+    /// 白名单是怎么来的：`defaults`（没配）、`defaults_plus_configured`
+    /// （配了、是追加）、`only`（配了 `only:`，只允许这些）。
+    ///
+    /// 合并之后光看 `allowed_commands` 是分不出这三种的，而它们对"我该不该
+    /// 请用户改配置"的答案完全不同，预检要把这件事说出来（审查 C02）。
+    pub allowlist_mode: &'static str,
+    /// 这份策略是从哪儿来的。
+    pub config_source: &'static str,
 }
 
 impl Default for PolicySettings {
@@ -73,7 +81,21 @@ impl Default for PolicySettings {
             max_patch_bytes: 200_000,
             permission_mode: "trusted".into(),
             confine_reads: true,
+            allowlist_mode: "defaults",
+            config_source: "built-in defaults",
         }
+    }
+}
+
+/// 配置字符串对应哪种白名单模式。见 [`merge_default_allowed_commands`]。
+fn allowlist_mode(configured: &str) -> &'static str {
+    let trimmed = configured.trim();
+    if trimmed.starts_with(ONLY_PREFIX) {
+        "only"
+    } else if trimmed.is_empty() {
+        "defaults"
+    } else {
+        "defaults_plus_configured"
     }
 }
 
@@ -88,6 +110,8 @@ impl PolicySettings {
             max_patch_bytes: 200_000,
             permission_mode: runtime.permission_mode.clone(),
             confine_reads: runtime.confine_reads,
+            allowlist_mode: allowlist_mode(&runtime.allowed_commands),
+            config_source: "workspace config (mcp.allowed-commands)",
         }
     }
 
@@ -99,6 +123,8 @@ impl PolicySettings {
             max_patch_bytes: actions.max_patch_bytes as usize,
             permission_mode: actions.permission_mode.clone(),
             confine_reads: actions.confine_reads,
+            allowlist_mode: allowlist_mode(&actions.allowed_commands),
+            config_source: "actions config (allowed_commands)",
         }
     }
 
@@ -111,9 +137,112 @@ impl PolicySettings {
     }
 }
 
+/// 策略为什么不让这一步过。
+///
+/// 拆成枚举，而不是让调用方去错误消息里找关键词：消息是写给人看的，改一个
+/// 字就能让 `message.contains("allowlisted")` 这种判断悄悄失效，而它背后是
+/// "这次到底是哪条规则拒的"——预检和真实执行必须给出同一个答案（审查 F、C02）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyReason {
+    MissingCommand,
+    CommandTooLong,
+    ExternalExecution,
+    WorkdirOutsideWorkspace,
+    ShellSyntaxRejected,
+    ProtectedRepositoryAsset,
+    WorkspacePathProtected,
+    ConfirmationRequired,
+    NetworkBlocked,
+    InvalidSyntax,
+    CommandNotAllowlisted,
+    EnvironmentNotAllowed,
+    TimeoutTooLong,
+    PatchMissing,
+    PatchTooLarge,
+    ToolNotExposed,
+}
+
+impl PolicyReason {
+    /// 报给客户端的错误码。
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ExternalExecution => "EXTERNAL_EXECUTION_NOT_ALLOWED",
+            Self::ProtectedRepositoryAsset => "PROTECTED_REPOSITORY_ASSET",
+            Self::WorkspacePathProtected => "WORKSPACE_PATH_PROTECTED",
+            Self::ConfirmationRequired => "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION",
+            _ => "POLICY_REJECTED",
+        }
+    }
+
+    /// 机器可读的原因，放在 `details.reason` 和预检结果的 `rule` 里。
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::MissingCommand => "missing_command",
+            Self::CommandTooLong => "command_too_long",
+            Self::ExternalExecution => "external_execution",
+            Self::WorkdirOutsideWorkspace => "workdir_outside_workspace",
+            Self::ShellSyntaxRejected => "shell_syntax_rejected",
+            Self::ProtectedRepositoryAsset => "protected_repository_asset",
+            Self::WorkspacePathProtected => "workspace_path_protected",
+            Self::ConfirmationRequired => "confirmation_required",
+            Self::NetworkBlocked => "network_blocked",
+            Self::InvalidSyntax => "invalid_command_syntax",
+            Self::CommandNotAllowlisted => "command_not_allowlisted",
+            Self::EnvironmentNotAllowed => "environment_not_allowed",
+            Self::TimeoutTooLong => "timeout_too_long",
+            Self::PatchMissing => "patch_missing",
+            Self::PatchTooLarge => "patch_too_large",
+            Self::ToolNotExposed => "tool_not_exposed",
+        }
+    }
+
+    /// 下一步该做什么。不建议"换个解释器再试"这种绕过办法。
+    pub fn suggestion(self) -> &'static str {
+        match self {
+            Self::MissingCommand => "cmd 必须是非空字符串",
+            Self::CommandTooLong => "命令太长，拆成几条或写成工作区里的脚本",
+            Self::ExternalExecution => "把 filesystem_scope 设为 workspace，在当前 Workspace 内执行",
+            Self::WorkdirOutsideWorkspace => "workdir 只能是 Workspace 内的相对路径",
+            Self::ShellSyntaxRejected => {
+                "移除未加引号的 shell 操作符；引号内的程序参数可以保留。需要管道或重定向时，写成工作区里的脚本再执行"
+            }
+            Self::ProtectedRepositoryAsset => "不要通过子进程删除或清空 .git/.github",
+            Self::WorkspacePathProtected => "子进程只能写 Workspace 内的路径",
+            Self::ConfirmationRequired => "让用户确认这次危险操作，再带 confirm=true 重试",
+            Self::NetworkBlocked => "safe 模式不放行联网命令；需要联网请用户改 permission-mode",
+            Self::InvalidSyntax => "命令的引号没有配对，按 shell 词法修好再发",
+            Self::CommandNotAllowlisted => {
+                "改用已获准的命令或对应的只读工具；确需放开时，请用户把它加进工作区命令白名单"
+            }
+            Self::EnvironmentNotAllowed => "环境变量只能由服务端配置，不能随调用传入",
+            Self::TimeoutTooLong => "timeout_ms 不能超过 10 分钟；长任务请后台跑再轮询",
+            Self::PatchMissing => "patch 必须是非空字符串",
+            Self::PatchTooLarge => "补丁超过上限，拆成几批提交",
+            Self::ToolNotExposed => "这个工具在当前 profile 里没有暴露",
+        }
+    }
+
+    /// 是不是"等用户点头就能过"，而不是"这条路走不通"。
+    pub fn needs_approval(self) -> bool {
+        matches!(self, Self::ConfirmationRequired)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct PolicyError(pub String);
+#[error("{message}")]
+pub struct PolicyError {
+    pub reason: PolicyReason,
+    pub message: String,
+}
+
+impl PolicyError {
+    pub fn new(reason: PolicyReason, message: impl Into<String>) -> Self {
+        Self {
+            reason,
+            message: message.into(),
+        }
+    }
+}
 
 /// 配成"只允许这些"的前缀。见 [`merge_default_allowed_commands`]。
 pub const ONLY_PREFIX: &str = "only:";
@@ -228,7 +357,10 @@ pub fn validate_actions_exposure(tool_name: &str) -> Result<(), PolicyError> {
     if is_allowed_tool(tool_name) {
         Ok(())
     } else {
-        Err(PolicyError(format!("Tool is not exposed: {tool_name}")))
+        Err(PolicyError::new(
+            PolicyReason::ToolNotExposed,
+            format!("Tool is not exposed: {tool_name}"),
+        ))
     }
 }
 
@@ -244,49 +376,64 @@ pub fn validate_command_for_workspace(
     let command = arguments
         .get("cmd")
         .and_then(Value::as_str)
-        .ok_or_else(|| PolicyError("exec_command requires a non-empty cmd".into()))?;
+        .ok_or_else(|| {
+            PolicyError::new(
+                PolicyReason::MissingCommand,
+                "exec_command requires a non-empty cmd",
+            )
+        })?;
     if command.trim().is_empty() {
-        return Err(PolicyError("exec_command requires a non-empty cmd".into()));
+        return Err(PolicyError::new(
+            PolicyReason::MissingCommand,
+            "exec_command requires a non-empty cmd",
+        ));
     }
     if command.len() > 4_000 {
-        return Err(PolicyError("Command is too long".into()));
+        return Err(PolicyError::new(
+            PolicyReason::CommandTooLong,
+            "Command is too long",
+        ));
     }
     let filesystem_scope = arguments
         .get("filesystem_scope")
         .and_then(Value::as_str)
         .unwrap_or("workspace");
     if filesystem_scope != "workspace" {
-        return Err(PolicyError(
-            "EXTERNAL_EXECUTION_NOT_ALLOWED: exec_command 只允许在 Workspace 内执行".into(),
+        return Err(PolicyError::new(
+            PolicyReason::ExternalExecution,
+            "exec_command 只允许在 Workspace 内执行",
         ));
     }
     for key in ["workdir", "cwd"] {
         if let Some(workdir) = arguments.get(key).and_then(Value::as_str) {
             let path = Path::new(workdir);
             if path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
-                return Err(PolicyError(
-                    "workdir must stay inside the configured workspace".into(),
+                return Err(PolicyError::new(
+                    PolicyReason::WorkdirOutsideWorkspace,
+                    "workdir must stay inside the configured workspace",
                 ));
             }
         }
     }
     if has_forbidden_shell_syntax(command) {
-        return Err(PolicyError(
-            "Shell chaining, redirection and expansion are not allowed".into(),
+        return Err(PolicyError::new(
+            PolicyReason::ShellSyntaxRejected,
+            "Shell chaining, redirection and expansion are not allowed",
         ));
     }
     if (dangerous_command_pattern().is_match(command)
         || interpreter_mutation_pattern().is_match(command))
         && command_targets_protected_repository_asset(command)
     {
-        return Err(PolicyError(
-            "PROTECTED_REPOSITORY_ASSET: 禁止删除或递归清空 .git/.github".into(),
+        return Err(PolicyError::new(
+            PolicyReason::ProtectedRepositoryAsset,
+            "禁止删除或递归清空 .git/.github",
         ));
     }
     if interpreter_mutation_pattern().is_match(command) && command_contains_external_path(command) {
-        return Err(PolicyError(
-            "WORKSPACE_PATH_PROTECTED: workspace scope 禁止通过子进程写入 Workspace 外部路径"
-                .into(),
+        return Err(PolicyError::new(
+            PolicyReason::WorkspacePathProtected,
+            "workspace scope 禁止通过子进程写入 Workspace 外部路径",
         ));
     }
     if dangerous_command_pattern().is_match(command)
@@ -295,24 +442,28 @@ pub fn validate_command_for_workspace(
             .and_then(Value::as_bool)
             .unwrap_or(false)
     {
-        return Err(PolicyError(
-            "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION: dangerous command requires confirm=true"
-                .into(),
+        return Err(PolicyError::new(
+            PolicyReason::ConfirmationRequired,
+            "dangerous command requires confirm=true",
         ));
     }
     if !policy.skip_permission_gates()
         && network_command_pattern().is_match(command)
         && !policy.network_allowed()
     {
-        return Err(PolicyError(
-            "Network-looking commands are blocked in safe permission mode".into(),
+        return Err(PolicyError::new(
+            PolicyReason::NetworkBlocked,
+            "Network-looking commands are blocked in safe permission mode",
         ));
     }
 
-    let parts =
-        shell_words::split(command).map_err(|_| PolicyError("Invalid command syntax".into()))?;
+    let parts = shell_words::split(command)
+        .map_err(|_| PolicyError::new(PolicyReason::InvalidSyntax, "Invalid command syntax"))?;
     if parts.is_empty() {
-        return Err(PolicyError("Empty command".into()));
+        return Err(PolicyError::new(
+            PolicyReason::MissingCommand,
+            "Empty command",
+        ));
     }
 
     let executable = parts[0].trim_start_matches("./");
@@ -332,18 +483,25 @@ pub fn validate_command_for_workspace(
     if !(policy.allowed_commands.contains(stem)
         || (policy.workspace_local_entries && workspace_entry_candidate))
     {
-        return Err(PolicyError(format!("Command is not allowlisted: {stem}")));
+        return Err(PolicyError::new(
+            PolicyReason::CommandNotAllowlisted,
+            format!("Command is not allowlisted: {stem}"),
+        ));
     }
 
     if arguments.get("env").is_some() {
-        return Err(PolicyError(
-            "Environment variables cannot be supplied by GPT".into(),
+        return Err(PolicyError::new(
+            PolicyReason::EnvironmentNotAllowed,
+            "Environment variables cannot be supplied by GPT",
         ));
     }
 
     if let Some(timeout_ms) = arguments.get("timeout_ms").and_then(Value::as_u64) {
         if timeout_ms > 600_000 {
-            return Err(PolicyError("Command timeout exceeds 10 minutes".into()));
+            return Err(PolicyError::new(
+                PolicyReason::TimeoutTooLong,
+                "Command timeout exceeds 10 minutes",
+            ));
         }
     }
 
@@ -381,13 +539,21 @@ pub fn validate_patch(arguments: &Value, policy: &PolicySettings) -> Result<(), 
     let patch = arguments
         .get("patch")
         .and_then(Value::as_str)
-        .ok_or_else(|| PolicyError("apply_patch requires a patch".into()))?;
+        .ok_or_else(|| {
+            PolicyError::new(PolicyReason::PatchMissing, "apply_patch requires a patch")
+        })?;
     if patch.trim().is_empty() {
-        return Err(PolicyError("apply_patch requires a patch".into()));
+        return Err(PolicyError::new(
+            PolicyReason::PatchMissing,
+            "apply_patch requires a patch",
+        ));
     }
 
     if patch.len() > policy.max_patch_bytes {
-        return Err(PolicyError("Patch is too large".into()));
+        return Err(PolicyError::new(
+            PolicyReason::PatchTooLarge,
+            "Patch is too large",
+        ));
     }
 
     Ok(())
@@ -572,7 +738,11 @@ mod tests {
         assert!(validate_command(&json!({ "cmd": "cargo test" }), &policy).is_ok());
         let denied = validate_command(&json!({ "cmd": "python3 -c \"print(1)\"" }), &policy)
             .expect_err("python 该被拒");
-        assert!(denied.0.contains("not allowlisted"), "{}", denied.0);
+        assert_eq!(
+            denied.reason,
+            PolicyReason::CommandNotAllowlisted,
+            "{denied}"
+        );
     }
 
     /// `only:` 后面写空 = 只剩基础诊断命令，**不是**退回默认白名单。
@@ -599,7 +769,11 @@ mod tests {
         }
         let denied =
             validate_command(&json!({ "cmd": "cargo test" }), &policy).expect_err("cargo 该被拒");
-        assert!(denied.0.contains("not allowlisted"), "{}", denied.0);
+        assert_eq!(
+            denied.reason,
+            PolicyReason::CommandNotAllowlisted,
+            "{denied}"
+        );
         assert!(validate_command(&json!({ "cmd": "pwd" }), &policy).is_ok());
     }
 
@@ -652,7 +826,7 @@ mod tests {
         };
         let policy = PolicySettings::from_actions_config(&actions);
         let err = validate_patch(&json!({ "patch": "01234567890" }), &policy).unwrap_err();
-        assert!(err.0.contains("too large"));
+        assert_eq!(err.reason, PolicyReason::PatchTooLarge);
     }
 
     #[test]

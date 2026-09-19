@@ -3,6 +3,7 @@ mod common;
 use std::fs;
 
 use common::*;
+use gld_core::tools::policy::PolicyReason;
 use serde_json::json;
 
 const TRAVERSAL_PATCH: &str = r#"*** Begin Patch
@@ -158,11 +159,10 @@ fn exec_command_rejects_host_scope_even_with_confirmation() {
             "confirm": true
         }),
     );
-    assert_eq!(out["error"]["code"], "POLICY_REJECTED");
-    assert!(out["summary"]
-        .as_str()
-        .unwrap_or("")
-        .contains("EXTERNAL_EXECUTION_NOT_ALLOWED"));
+    // 这条以前报 POLICY_REJECTED，真正的原因塞在消息里当前缀——客户端要
+    // 从一句话里抠关键词才知道是越界执行还是白名单。现在原因就是错误码。
+    assert_eq!(out["error"]["code"], "EXTERNAL_EXECUTION_NOT_ALLOWED");
+    assert_eq!(out["error"]["details"]["reason"], "external_execution");
 }
 
 #[test]
@@ -242,7 +242,7 @@ fn destructive_command_targeting_git_is_always_rejected() {
         &policy,
     )
     .expect_err("删除 .git 必须拒绝");
-    assert!(error.0.contains("PROTECTED_REPOSITORY_ASSET"));
+    assert_eq!(error.reason, PolicyReason::ProtectedRepositoryAsset);
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn interpreter_command_cannot_delete_git_assets() {
         &policy,
     )
     .expect_err("解释器删除 .git 必须拒绝");
-    assert!(error.0.contains("PROTECTED_REPOSITORY_ASSET"));
+    assert_eq!(error.reason, PolicyReason::ProtectedRepositoryAsset);
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn interpreter_command_cannot_delete_github_assets() {
         &policy,
     )
     .expect_err("解释器删除 .github 必须拒绝");
-    assert!(error.0.contains("PROTECTED_REPOSITORY_ASSET"));
+    assert_eq!(error.reason, PolicyReason::ProtectedRepositoryAsset);
 }
 
 #[test]
@@ -287,7 +287,7 @@ fn interpreter_command_cannot_write_outside_workspace_scope() {
         &policy,
     )
     .expect_err("workspace scope 不得写入外部路径");
-    assert!(error.0.contains("WORKSPACE_PATH_PROTECTED"));
+    assert_eq!(error.reason, PolicyReason::WorkspacePathProtected);
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn interpreter_command_cannot_write_git_files() {
         &policy,
     )
     .expect_err("普通解释器不得写入 .git");
-    assert!(error.0.contains("PROTECTED_REPOSITORY_ASSET"));
+    assert_eq!(error.reason, PolicyReason::ProtectedRepositoryAsset);
 }
 
 #[test]
@@ -387,7 +387,7 @@ fn safe_permission_mode_blocks_network_looking_command() {
         &policy,
     )
     .expect_err("network command should be blocked in safe mode");
-    assert!(err.0.contains("Network-looking"));
+    assert_eq!(err.reason, PolicyReason::NetworkBlocked);
 }
 
 /// 默认（confine-reads=true）下，四个读工具都不能碰 Workspace 外面。

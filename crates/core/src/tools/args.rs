@@ -84,6 +84,8 @@ mod tests {
     fn owner<'a>(tool: &'a str, arg: &str) -> &'a str {
         match (tool, arg) {
             ("grep_text", _) => "search_text",
+            // 预检判的是同一组 exec_command 参数，范围当然也得是同一份。
+            ("check_command", _) => "exec_command",
             ("task_manage", "limit") => "operation_log",
             ("task_manage", "max_files") => "project_state",
             ("task_manage", "max_bytes") => "task_context",

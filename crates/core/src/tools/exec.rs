@@ -94,6 +94,287 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
     }
 }
 
+/// 这条命令现在能不能跑——**不跑它**。
+///
+/// 为什么要有这个工具：拒绝信息里只有一句 `Command is not allowlisted: rg`，
+/// 模型看不出是"没装"还是"不许跑"、该换个工具还是该请用户改配置，于是同一条
+/// 命令换着花样试五遍（审查 C01、C02、A01）。
+///
+/// 判定必须和 `exec_command` 用同一条路径：策略校验是同一个
+/// `validate_command_for_workspace`，程序解析是同一个 `resolve_program`，
+/// 顺序也一样（策略 → workdir → 原生内建 → 解析）。任何一边单独实现一套，
+/// 迟早会出现"预检说能跑、真跑被拒"。
+///
+/// 预检**不产生任何副作用**：不起进程、不跑 `--help`、不登录、不联网、不碰
+/// GitHub 和 SSH。只查白名单和文件系统。
+pub fn check_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    let cmd = args
+        .get("cmd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkspaceError::invalid_argument("cmd is required"))?;
+    let workdir_raw = args
+        .get("workdir")
+        .or_else(|| args.get("cwd"))
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+
+    // 1. 策略。和真实执行调的是同一个函数、同一份参数。
+    let policy_error = crate::tools::policy::validate_command_for_workspace(
+        args,
+        &ctx.policy,
+        Some(&ctx.workspace),
+    )
+    .err();
+
+    // 2. workdir。策略过了之后 exec_command 第一件事就是解析它。
+    let workdir = ctx.workspace.resolve_existing(workdir_raw).ok();
+    let workdir_problem = match (&policy_error, &workdir) {
+        (None, None) => Some("workdir_not_found"),
+        (None, Some(resolved)) if !resolved.path.is_dir() => Some("workdir_not_a_directory"),
+        _ => None,
+    };
+    let probe_cwd = workdir
+        .as_ref()
+        .map(|resolved| resolved.path.clone())
+        .unwrap_or_else(|| ctx.workspace.root().to_path_buf());
+
+    // 3. 程序在哪儿。**策略拒了也要查**：拒绝和没装是两回事，把 policy denied
+    // 说成"程序不存在"会让模型跑去装一个本来就装着的东西（审查 C02）。
+    let parts = shell_words::split(cmd).unwrap_or_default();
+    let builtin = native_builtin(&parts);
+    let program = probe_program(ctx, &parts, &probe_cwd, builtin);
+
+    let (decision, stage, rule, code, message, suggestion) = match (&policy_error, workdir_problem)
+    {
+        (Some(error), _) => (
+            if error.reason.needs_approval() {
+                "needs_approval"
+            } else {
+                "deny"
+            },
+            "policy",
+            error.reason.slug(),
+            Some(error.reason.code()),
+            error.message.clone(),
+            error.reason.suggestion().to_string(),
+        ),
+        (None, Some(problem)) => (
+            "deny",
+            "workdir",
+            problem,
+            Some("NOT_FOUND"),
+            format!("workdir not usable: {workdir_raw}"),
+            "workdir 必须是 Workspace 内一个已存在的目录".to_string(),
+        ),
+        (None, None) => match program["found"].as_bool() {
+            Some(false) => (
+                "deny",
+                "resolve",
+                program["reason"].as_str().unwrap_or("program_not_found"),
+                program["code"].as_str().map(|_| "COMMAND_REJECTED"),
+                program["message"].as_str().unwrap_or_default().to_string(),
+                "检查程序名拼写，或确认它在服务端的 PATH 上".to_string(),
+            ),
+            _ => (
+                "allow",
+                "none",
+                "allowed",
+                None,
+                String::new(),
+                String::new(),
+            ),
+        },
+    };
+
+    let mut result = json!({
+        "command": cmd,
+        "decision": decision,
+        "denied_stage": if decision == "allow" { Value::Null } else { Value::String(stage.into()) },
+        "rule": rule,
+        "workdir": workdir_raw,
+        "resolved_workdir": workdir.as_ref().map(|resolved| resolved.path.display().to_string()),
+        "program": program,
+        "execution_mode": if builtin.is_some() { "native_builtin" } else { "child_process" },
+        "policy": policy_snapshot(ctx),
+        "server": server_snapshot(),
+        // 预检做了什么、没做什么，明写出来。
+        "side_effects": "none",
+        "checked": ["policy", "workdir", "program_resolution"],
+        "not_checked": [
+            "命令自己会不会成功（要真跑才知道）",
+            "它启动的子进程会做什么（白名单不是沙箱）"
+        ],
+        "warnings": []
+    });
+    if let Some(object) = result.as_object_mut() {
+        if decision != "allow" {
+            object.insert("code".into(), json!(code));
+            object.insert("message".into(), json!(message));
+            object.insert("suggestion".into(), json!(suggestion));
+            object.insert(
+                "needs_user_authorization".into(),
+                json!(
+                    decision == "needs_approval"
+                        || rule == "command_not_allowlisted"
+                        || rule == "network_blocked"
+                ),
+            );
+            let alternatives = alternatives_for(&parts);
+            if !alternatives.is_empty() {
+                object.insert("alternatives".into(), json!(alternatives));
+            }
+        }
+        if builtin.is_some() {
+            object.insert(
+                "warnings".into(),
+                json!([
+                    "这条命令由服务端自己回答，不起子进程；只支持有限语法，复杂参数请改用对应的文件工具"
+                ]),
+            );
+        }
+    }
+    Ok(tool_ok(result))
+}
+
+/// 程序在不在、在哪儿。走的是真实执行那条 `resolve_program`。
+fn probe_program(ctx: &ToolContext, parts: &[String], cwd: &Path, builtin: Option<&str>) -> Value {
+    let Some(raw) = parts.first() else {
+        return json!({
+            "requested": Value::Null,
+            "found": Value::Null,
+            "source": "unknown",
+            "note": "命令是空的，没什么可解析"
+        });
+    };
+    if builtin.is_some() {
+        return json!({
+            "requested": raw,
+            "found": true,
+            "source": "native_builtin",
+            "path": Value::Null,
+            "note": "服务端内建，不需要磁盘上的可执行文件"
+        });
+    }
+    let search_path = ctx.executable_path_env();
+    match resolve_program(
+        raw,
+        cwd,
+        ctx.workspace.root(),
+        &ctx.policy,
+        search_path.as_deref(),
+    ) {
+        Ok(path) => {
+            let inside = Path::new(&path).starts_with(ctx.workspace.root());
+            json!({
+                "requested": raw,
+                "found": true,
+                "path": path,
+                "source": if inside { "workspace_entry" } else { "path" }
+            })
+        }
+        Err(error) => json!({
+            "requested": raw,
+            "found": false,
+            "path": Value::Null,
+            "source": if error.code() == "COMMAND_REJECTED" { "not_found" } else { "rejected" },
+            "reason": if error.code() == "EXECUTABLE_OUTSIDE_WORKSPACE" {
+                "executable_outside_workspace"
+            } else {
+                "program_not_found"
+            },
+            "code": error.code(),
+            "message": error.message()
+        }),
+    }
+}
+
+/// 被拒之后还能用什么。只列**已经获准**的工具，不教人绕过拒绝。
+fn alternatives_for(parts: &[String]) -> Vec<Value> {
+    let Some(name) = parts.first() else {
+        return Vec::new();
+    };
+    let name = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    let entries: &[(&str, &str)] = match name.as_str() {
+        "rg" | "ripgrep" | "ag" | "ack" | "grep" => &[(
+            "search_text",
+            "工作区文本搜索，带上下文和分页；不支持 rg 的全部参数",
+        )],
+        "find" | "fd" => &[("list_files", "按 glob 列文件，默认跳过被忽略的目录")],
+        "cat" | "head" | "tail" | "less" | "more" => {
+            &[("read_file", "按行范围读文件，超长行会截断并说明")]
+        }
+        "ls" | "dir" | "tree" => &[("list_dir", "列目录，返回可直接交给 read_file 的路径")],
+        "sed" | "awk" | "patch" => &[
+            ("apply_patch", "改文件用补丁，失败整批不落盘"),
+            ("patch_check", "先预检，不落盘"),
+        ],
+        "git" => &[
+            ("git_status", "工作区状态"),
+            ("git_diff", "有界 diff"),
+            ("git_log", "提交历史"),
+        ],
+        "ssh" | "scp" | "sftp" => &[(
+            "hub",
+            "远端机器上的事走已登记的 hub/ccnm 成员，不从这里直连",
+        )],
+        _ => &[],
+    };
+    entries
+        .iter()
+        .map(|(tool, note)| json!({ "tool": tool, "note": note }))
+        .collect()
+}
+
+/// 当前**运行时真正生效**的那份策略。
+fn policy_snapshot(ctx: &ToolContext) -> Value {
+    let mut commands = ctx
+        .policy
+        .allowed_commands
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    commands.sort();
+    // 指纹是给"我改完配置生效了没有"用的：改之前改之后各查一次，数不一样就是
+    // 生效了。它是**运行时快照**的指纹，不是磁盘上配置文件的版本号——gld 现在
+    // 没有配置版本号，不能编一个出来。
+    let fingerprint = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        commands.hash(&mut hasher);
+        ctx.policy.permission_mode.hash(&mut hasher);
+        ctx.policy.workspace_local_entries.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+    json!({
+        "permission_mode": ctx.policy.permission_mode,
+        "network_allowed": ctx.policy.network_allowed(),
+        "allowlist_mode": ctx.policy.allowlist_mode,
+        "allowed_commands": commands,
+        "workspace_local_entries": ctx.policy.workspace_local_entries,
+        "config_source": ctx.policy.config_source,
+        "runtime_fingerprint": fingerprint,
+        "fingerprint_note": "运行时生效的策略快照指纹；改配置后重查，数变了才算生效",
+        // 白名单不是沙箱：放行的命令自己能干什么，这里管不着。
+        "sandbox_enforced": false,
+        "execution_boundary": "policy_only"
+    })
+}
+
+fn server_snapshot() -> Value {
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": "2025-06-18",
+        "tool_api": crate::tools::registry::tool_api_descriptor(),
+        // 构建里没有嵌提交号，就说不知道，不能拿版本号顶替。
+        "build_commit": Value::Null
+    })
+}
+
 fn validate_child_process_scope(_ctx: &ToolContext, args: &Value) -> Result<(), WorkspaceError> {
     let scope = args
         .get("filesystem_scope")
@@ -120,6 +401,21 @@ fn validate_child_process_scope(_ctx: &ToolContext, args: &Value) -> Result<(), 
     }
 }
 
+/// 这条命令服务端自己就能答，不用起子进程。
+///
+/// 单独一个函数，是因为预检（`check_command`）必须和真实执行看法一致：
+/// 说"会起子进程"结果没起，或者反过来，模型据此做的判断就全是错的。
+fn native_builtin(parts: &[String]) -> Option<&'static str> {
+    match parts.first()?.to_ascii_lowercase().as_str() {
+        "pwd" if parts.len() == 1 => Some("pwd"),
+        "ls" => Some("ls"),
+        "dir" => Some("dir"),
+        "which" if parts.len() == 2 => Some("which"),
+        "echo" => Some("echo"),
+        _ => None,
+    }
+}
+
 fn run_native_diagnostic(
     ctx: &ToolContext,
     cmd: &str,
@@ -131,11 +427,10 @@ fn run_native_diagnostic(
         return Ok(None);
     }
 
-    let command = parts[0].to_ascii_lowercase();
-    let stdout = match command.as_str() {
-        "pwd" if parts.len() == 1 => Some(format!("{}\n", cwd.display())),
-        "ls" | "dir" => Some(list_directory(ctx, cwd, &parts[1..])?),
-        "which" if parts.len() == 2 => {
+    let stdout = match native_builtin(&parts) {
+        Some("pwd") => Some(format!("{}\n", cwd.display())),
+        Some("ls") | Some("dir") => Some(list_directory(ctx, cwd, &parts[1..])?),
+        Some("which") => {
             let search_path = ctx.executable_path_env();
             let path = which_on_path(&parts[1], cwd, search_path.as_deref()).ok_or_else(|| {
                 WorkspaceError::Tool {
@@ -147,7 +442,7 @@ fn run_native_diagnostic(
             })?;
             Some(format!("{}\n", path.display()))
         }
-        "echo" => Some(format!("{}\n", parts[1..].join(" "))),
+        Some("echo") => Some(format!("{}\n", parts[1..].join(" "))),
         _ => None,
     };
 

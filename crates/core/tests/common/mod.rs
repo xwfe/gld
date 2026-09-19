@@ -164,6 +164,27 @@ pub fn ctx_for_dangerous_mode(root: &Path) -> ToolContext {
     )
 }
 
+/// 指定命令白名单配置的上下文。`configured` 就是 `mcp.allowed-commands`
+/// 的原文，`only:` 前缀等语义由生产代码自己解析，测试不另写一份。
+pub fn ctx_with_allowed_commands(root: &Path, configured: &str) -> ToolContext {
+    isolate_data_home();
+    let workspace = gld_core::tools::Workspace::new(root.to_path_buf()).expect("workspace");
+    let actions = gld_core::workspace::ActionsConfig {
+        allowed_commands: configured.into(),
+        ..gld_core::workspace::ActionsConfig::default()
+    };
+    ToolContext::from_workspace(
+        workspace,
+        gld_core::workspace::AuthConfig {
+            auth_type: "noauth".into(),
+            ..gld_core::workspace::AuthConfig::default()
+        },
+        PolicySettings::from_actions_config(&actions),
+        "full".into(),
+        "trusted".into(),
+    )
+}
+
 /// 关掉"读只许在 Workspace 内"的上下文。
 ///
 /// 默认是开着的（0.3.0 起）。专门测越界读行为的用例得显式关掉，

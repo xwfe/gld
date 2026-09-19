@@ -15,44 +15,23 @@ use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
 use crate::tools::{exec, file, git, history, image_tool, manage, patch, planning, session, skill};
 
+/// 策略拒绝变成工具响应。
+///
+/// 码、原因和下一步都由 `PolicyReason` 给，不再从消息里找关键词——预检
+/// （`check_command`）走的是同一条判定，两边说的话必须一模一样（审查 F、A01）。
 fn policy_tool_err(err: PolicyError) -> Value {
-    let dangerous = err
-        .0
-        .strip_prefix("DANGEROUS_OPERATION_REQUIRES_CONFIRMATION: ");
-    let protected = err.0.strip_prefix("PROTECTED_REPOSITORY_ASSET: ");
-    let code = if protected.is_some() {
-        "PROTECTED_REPOSITORY_ASSET"
-    } else if dangerous.is_some() {
-        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
-    } else {
-        "POLICY_REJECTED"
-    };
-    let message = protected.or(dangerous).unwrap_or(&err.0).to_string();
-    let (reason, suggestion) = if dangerous.is_some() {
-        (
-            "confirmation_required",
-            "为危险操作补充 confirm=true，确认后再重试",
-        )
-    } else if message.contains("allowlisted") {
-        ("command_rejected", "改用允许的命令，或调整工作区命令白名单")
-    } else if message.contains("Shell chaining") {
-        (
-            "shell_syntax_rejected",
-            "移除未加引号的 shell 操作符；引号内的程序参数可以保留",
-        )
-    } else {
-        ("policy_rejected", "根据错误信息修正参数后重试")
-    };
     tool_err(WorkspaceError::ToolDetails {
-        code,
-        message,
+        code: err.reason.code(),
+        message: err.message.clone(),
         category: "policy",
         retryable: false,
         details: json!({
             "stage": "policy",
-            "reason": reason,
-            "recoverable": reason != "confirmation_required",
-            "suggestion": suggestion
+            "reason": err.reason.slug(),
+            "recoverable": !err.reason.needs_approval(),
+            "needs_approval": err.reason.needs_approval(),
+            "suggestion": err.reason.suggestion(),
+            "preflight_tool": "check_command"
         }),
     })
 }
@@ -417,6 +396,7 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "request_plan_review" => planning::request_plan_review(ctx, &effective_args),
         "server_info" => server_info(ctx),
         "check_exec_environment" => check_exec_environment(ctx),
+        "check_command" => exec::check_command(ctx, &effective_args),
         "exec_health_check" => exec::exec_health_check(ctx),
         "get_default_cwd" => get_default_cwd(ctx),
         "set_default_cwd" => set_default_cwd(ctx, &effective_args),
@@ -684,7 +664,10 @@ fn apply_default_cwd(ctx: &ToolContext, name: &str, args: &Value) -> Value {
 
     let mut effective = args.clone();
     match name {
-        "exec_command" if effective.get("workdir").is_none() && effective.get("cwd").is_none() => {
+        // 预检必须和真实执行看见同一个 workdir，否则"预检说能跑、真跑被拒"。
+        "exec_command" | "check_command"
+            if effective.get("workdir").is_none() && effective.get("cwd").is_none() =>
+        {
             effective["workdir"] = Value::String(base.clone());
         }
         "list_dir" | "list_files" | "git_status" | "git_log" => {
@@ -811,14 +794,44 @@ fn attach_harness_status(ctx: &ToolContext, mut output: Value, standalone: bool)
                 }),
             );
             if standalone {
-                attach_standalone_metadata(
-                    &mut output,
-                    "命令未成功；请检查 stderr、exit_code 或调整参数后重试。",
-                );
+                let hint = standalone_recovery_hint(&output);
+                attach_standalone_metadata(&mut output, hint);
             }
         }
     }
     output
+}
+
+/// 下一步该干什么，按**这次是怎么失败的**说。
+///
+/// 原来一律是"请检查 stderr、exit_code 或调整参数后重试"——补丁上下文对不上
+/// 时也这么说，而那次根本没有 stderr，也没有 exit_code，更不该"重试"：同一个
+/// 补丁再发一遍还是对不上（审查 D01、A18）。
+fn standalone_recovery_hint(output: &Value) -> &'static str {
+    let code = output
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match code {
+        "PATCH_FAILED" | "PATCH_AMBIGUOUS" | "NOT_FOUND" => {
+            "补丁没有落盘，工作区没有变化；按 error.details.diagnostics 里的 suggested_read_range 重读这些文件，照它们现在的样子重建对不上的那几段再提交。"
+        }
+        "PATCH_ROLLBACK_INCOMPLETE" => {
+            "补丁写到一半失败，而且回滚没做完；先看 error.message 点名的那几个文件现在是什么内容，确认现场之后再决定怎么办，不要直接重发。"
+        }
+        "POLICY_REJECTED" | "PROTECTED_REPOSITORY_ASSET" | "EXTERNAL_EXECUTION_NOT_ALLOWED"
+        | "COMMAND_REJECTED" | "EXECUTABLE_OUTSIDE_WORKSPACE" => {
+            "策略拒绝，命令没有启动，也就没有 stderr 和 exit_code；用 check_command 看是哪条规则拒的、有没有已获准的替代做法，需要放开时请用户改配置。"
+        }
+        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION" => {
+            "这一步需要用户明确授权；拿到授权后带 confirm=true 重试，不要自己绕过。"
+        }
+        "TIMEOUT" => {
+            "命令超时，但它可能已经改了东西；先用 read_output 读已经产生的输出、确认做到哪一步，再决定要不要重跑。"
+        }
+        _ => "命令未成功；请检查 stderr、exit_code 或调整参数后重试。",
+    }
 }
 
 fn attach_standalone_metadata(output: &mut Value, recovery_hint: &str) {
