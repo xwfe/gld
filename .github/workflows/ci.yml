@@ -56,8 +56,11 @@ jobs:
             || { echo "::error::docs/cli.md 与 --help 不一致，请运行 scripts/gen-cli-docs.sh 后提交"; exit 1; }
 
   windows:
-    name: Windows 编译检查
+    name: Windows 编译检查与补丁落盘测试
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -65,6 +68,24 @@ jobs:
       # Windows 上守护进程走命名管道，与 Unix domain socket 是两套实现，
       # 至少要保证它能编过；运行时行为由使用者反馈补充。
       - run: cargo check --workspace --all-targets --locked
+      # 补丁落盘这一块在 Windows 上真跑一遍。为什么单挑它：`toexec_fs::replace`
+      # 在那里的语义和 Unix 不一样（替换不了只读目标、目标被独占打开时失败），
+      # 而 gld 有 Windows 发布构建。跨仓评审 X01 修的正是这条路径上会丢文件的
+      # 老实现——它先 remove_file 再 rename，后一步失败旧文件就没了。
+      #
+      # 为什么不是 --workspace：守护进程、命名管道、进程树那些都还没在 Windows
+      # 上验过，一次全开只会得到一片红，分不出哪些是真问题。要扩就一块一块加。
+      - name: 补丁落盘测试
+        run: |
+          export GLD_HOME="$(mktemp -d)"
+          if cargo test -p gld-core --lib tools::patch --locked 2>&1 | tee test.log; then
+            exit 0
+          fi
+          # 完整日志要登录 GitHub 才看得到（仓库公开也一样），annotation 匿名
+          # 读得到。不塞这一段，外面只能看到 "exit code 101"。%0A 是换行转义。
+          msg=$(grep -E -A 3 "panicked at|^failures:|FAILED" test.log | head -40 | awk '{printf "%s%%0A", $0}')
+          echo "::error title=Windows 上的补丁落盘测试失败::$msg"
+          exit 1
 
   msrv:
     name: MSRV 编译检查 (${{ matrix.os }})
