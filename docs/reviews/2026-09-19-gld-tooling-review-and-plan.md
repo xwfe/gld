@@ -375,3 +375,18 @@ rg/gh/ssh 按能力和授权分别处理，禁止通过解释器或包装脚本�
 这一批的红测试：`tools::exec::tests::paging_output_bigger_than_the_retained_buffer_terminates`（3 MiB 输出，分页必须走到头且每页前进）、`tools::exec::tests::an_offset_the_buffer_has_dropped_is_reported_as_a_gap`、`tools::policy::tests::an_empty_only_list_keeps_only_the_basics`（原来那条 `an_empty_only_list_falls_back_to_the_defaults` 连同它的理由一起改写）、`no_configuration_at_all_still_means_the_defaults`。
 
 门禁：`cargo test --workspace` 582 passed、0 failed；fmt、clippy 干净。
+
+### U1 第三批：失败之后说的话必须是真的（P05 的前半）
+
+| 问题 | 原来的行为 | 现在 |
+| --- | --- | --- |
+| 备份读不出来 | `fs::read(&path).unwrap_or_default()`——读失败当成"原来是空的"，一旦回滚就把人家的文件写成空 | 报 `PATCH_FAILED` 并说明"什么都没改"，这个文件一个字节都不动 |
+| 回滚范围 | 把所有备份过的路径都写一遍，包括根本没被换过的 | 只回滚**真正换上去过**的文件：没动过的不需要恢复，一起写只会制造假失败、还可能盖掉别人同时做的改动 |
+| 回滚失败 | 所有错误被 `let _ =` 吞掉，消息和回滚成功时一模一样 | 新错误码 `PATCH_ROLLBACK_INCOMPLETE`，点名哪几个文件现在可能是新内容，让人先去看 |
+| 落盘顺序 | `HashMap` 的随机顺序 | 按路径排序：一批补丁中途失败时，哪些换了、哪些没换是可复现的（这条是写回滚测试时发现的——同一个测试在不同顺序下结果不同） |
+
+故障注入（审查 A10 要的）：`tools::patch::faults` 是 `#[cfg(test)]` 的线程局部开关，能让"备份读"、"替换"、"回滚写回"某一步真的失败。三条测试：备份读失败时文件不变、替换失败时先前的文件回滚回去并说"已回滚"、回滚也失败时报 `PATCH_ROLLBACK_INCOMPLETE` 且现场确实是半新半旧。
+
+门禁：`cargo test --workspace` 连跑三轮都是 585 passed、0 failed；fmt、clippy 干净。
+
+**U1 到此完成。**下一步按方案是 U2（统一错误类型、operation_id、命令预检、补丁定位诊断、文件版本前置条件）。

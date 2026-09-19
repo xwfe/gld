@@ -570,6 +570,75 @@ fn unified_old_start(header: &str) -> Option<usize> {
     })
 }
 
+/// 只在测试里用的故障注入：让备份、替换、回滚里的某一步真的失败。
+///
+/// 存在的理由是"失败之后说的话是不是真的"没法靠真实 I/O 稳定复现——
+/// 权限、磁盘满、并发都做不成可重复的单测，而这恰恰是最需要有测试的地方
+/// （审查 A10）。线程局部，不影响并行跑的别的测试。
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum Fault {
+        /// 读原文做备份时失败。
+        BackupRead(PathBuf),
+        /// 把暂存文件换上去时失败。
+        Replace(PathBuf),
+        /// 回滚写回原内容时失败。
+        Restore(PathBuf),
+    }
+
+    thread_local! {
+        static INJECTED: RefCell<Vec<Fault>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// 装一组故障，返回的守卫在测试结束时清掉它们。
+    pub(crate) struct Injected;
+
+    pub(crate) fn inject(faults: Vec<Fault>) -> Injected {
+        INJECTED.with(|slot| *slot.borrow_mut() = faults);
+        Injected
+    }
+
+    impl Drop for Injected {
+        fn drop(&mut self) {
+            INJECTED.with(|slot| slot.borrow_mut().clear());
+        }
+    }
+
+    pub(crate) fn hits(fault: &Fault) -> bool {
+        INJECTED.with(|slot| slot.borrow().contains(fault))
+    }
+
+    pub(crate) fn backup_read_fails(path: &Path) -> bool {
+        hits(&Fault::BackupRead(path.to_path_buf()))
+    }
+
+    pub(crate) fn replace_fails(path: &Path) -> bool {
+        hits(&Fault::Replace(path.to_path_buf()))
+    }
+
+    pub(crate) fn restore_fails(path: &Path) -> bool {
+        hits(&Fault::Restore(path.to_path_buf()))
+    }
+}
+
+#[cfg(not(test))]
+mod faults {
+    use std::path::Path;
+    pub(crate) fn backup_read_fails(_path: &Path) -> bool {
+        false
+    }
+    pub(crate) fn replace_fails(_path: &Path) -> bool {
+        false
+    }
+    pub(crate) fn restore_fails(_path: &Path) -> bool {
+        false
+    }
+}
+
 fn commit_staged(
     ws: &Workspace,
     staged: &HashMap<String, Option<String>>,
@@ -592,7 +661,12 @@ pub(crate) fn commit_staged_bytes(
 ) -> Result<HashMap<PathBuf, Option<Vec<u8>>>, WorkspaceError> {
     let mut backups: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
     let mut temporary_files = HashMap::new();
-    for (rel, content) in staged {
+    // **按路径排序后再落盘**，不按 HashMap 的随机顺序。一批补丁中途失败时，
+    // 哪些文件已经换上去、哪些还没有，得是可复现的——否则同一个补丁失败两次
+    // 留下的现场可能不一样，人没法照着查（审查 P05 的"错误后的真实状态"）。
+    let mut entries: Vec<(&String, &Option<Vec<u8>>)> = staged.iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    for (rel, content) in &entries {
         ws.reject_protected_write_path(rel)?;
         let resolved = if content.is_none() {
             ws.resolve_existing(rel)?
@@ -600,14 +674,31 @@ pub(crate) fn commit_staged_bytes(
             ws.resolve_for_write(rel)?
         };
         let path = resolved.path.clone();
-        backups.insert(
-            path.clone(),
-            if path.exists() && path.is_file() {
-                Some(fs::read(&path).unwrap_or_default())
-            } else {
-                None
-            },
-        );
+        // 读不出原内容就**不要动这个文件**。原来是 `unwrap_or_default()`：
+        // 读失败被当成"原来是空的"，一旦后面要回滚，写回去的就是空文件——
+        // 本来只是打补丁失败，结果把人家的文件清空了（审查 P05）。
+        let backup = if path.exists() && path.is_file() {
+            if faults::backup_read_fails(&path) {
+                cleanup_temporary_files(temporary_files.values());
+                return Err(patch_failed(format!(
+                    "cannot read {} to back it up, so nothing was changed",
+                    resolved.display
+                )));
+            }
+            match fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(err) => {
+                    cleanup_temporary_files(temporary_files.values());
+                    return Err(patch_failed(format!(
+                        "cannot read {} to back it up ({err}), so nothing was changed",
+                        resolved.display
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        backups.insert(path.clone(), backup);
         if let Some(bytes) = content {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
@@ -624,22 +715,29 @@ pub(crate) fn commit_staged_bytes(
             // 后面那次 rename 可能先持久化、内容还没有，断电后留下的是一个名字对、
             // 长度错的文件——看起来是成功的。
             if let Err(err) = toexec_fs::write_durable(&temp, bytes, mode.as_ref()) {
+                // 还没有任何文件被换上去，所以没有要回滚的东西。
                 cleanup_temporary_files(temporary_files.values());
-                restore_backups(&backups);
-                return Err(patch_failed(format!("Failed to stage file: {err}")));
+                return Err(patch_failed(format!(
+                    "Failed to stage file: {err}. Nothing was changed"
+                )));
             }
             temporary_files.insert(path.clone(), temp);
         }
     }
 
-    for (rel, content) in staged {
+    // 真正换上去的那些文件。回滚只回滚它们：还没动过的文件不需要"恢复"，
+    // 把它们一起写一遍只会制造假的失败，也盖掉别人同时做的改动。
+    let mut replaced: Vec<PathBuf> = Vec::new();
+    for (rel, content) in &entries {
         let resolved = if content.is_none() {
             ws.resolve_existing(rel)?
         } else {
             ws.resolve_for_write(rel)?
         };
         let path = resolved.path;
-        let result = if content.is_some() {
+        let result = if faults::replace_fails(&path) {
+            Err(std::io::Error::other("injected replace failure"))
+        } else if content.is_some() {
             let temp = temporary_files
                 .get(&path)
                 .cloned()
@@ -653,30 +751,71 @@ pub(crate) fn commit_staged_bytes(
         } else {
             Ok(())
         };
-        if let Err(err) = result {
-            cleanup_temporary_files(temporary_files.values());
-            restore_backups(&backups);
-            return Err(patch_failed(format!("Failed to write file: {err}")));
+        match result {
+            Ok(()) => replaced.push(path),
+            Err(err) => {
+                cleanup_temporary_files(temporary_files.values());
+                let failed = restore_backups(&backups, &replaced);
+                if failed.is_empty() {
+                    return Err(patch_failed(format!(
+                        "Failed to write file: {err}. Everything this patch had changed was rolled back"
+                    )));
+                }
+                // 回滚也失败了：工作区现在是半新半旧，**不能**说已经回滚。
+                // 人得知道去看哪几个文件。
+                let names = failed
+                    .iter()
+                    .map(|path| crate::tools::workspace::relative_display(ws.root(), path))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(rollback_incomplete(format!(
+                    "Failed to write file: {err}, and rolling back did not finish: {names} may now hold this patch's content instead of the original. Check those files before retrying"
+                )));
+            }
         }
     }
     cleanup_temporary_files(temporary_files.values());
     Ok(backups)
 }
 
-fn restore_backups(backups: &HashMap<PathBuf, Option<Vec<u8>>>) {
-    for (path, data) in backups {
-        match data {
-            None => {
-                let _ = fs::remove_file(path);
-            }
-            Some(bytes) => {
-                if let Some(parent) = path.parent() {
-                    let _ = fs::create_dir_all(parent);
+/// 把已经换上去的文件恢复成原样，返回**没能恢复的**那些。
+///
+/// 原来所有错误都被 `let _ =` 吞掉，于是"回滚失败"和"回滚成功"给调用方的
+/// 消息一模一样——而这两种情况下工作区完全不同（审查 P05）。
+fn restore_backups(
+    backups: &HashMap<PathBuf, Option<Vec<u8>>>,
+    replaced: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut failed = Vec::new();
+    for path in replaced {
+        let Some(data) = backups.get(path) else {
+            continue;
+        };
+        let result = match data {
+            // 原来没有这个文件：回滚就是把新建的删掉。
+            None => fs::remove_file(path).or_else(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(err)
                 }
-                let _ = fs::write(path, bytes);
+            }),
+            Some(bytes) => {
+                if faults::restore_fails(path) {
+                    Err(std::io::Error::other("injected restore failure"))
+                } else {
+                    if let Some(parent) = path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    fs::write(path, bytes)
+                }
             }
+        };
+        if result.is_err() {
+            failed.push(path.clone());
         }
     }
+    failed
 }
 
 fn cleanup_temporary_files<'a>(paths: impl Iterator<Item = &'a PathBuf>) {
@@ -736,6 +875,17 @@ fn patch_ambiguous(message: impl Into<String>) -> WorkspaceError {
         code: "PATCH_AMBIGUOUS",
         message: message.into(),
         category: "validation",
+        retryable: false,
+    }
+}
+
+/// 打补丁失败**而且**回滚没做干净：工作区现在半新半旧。和 `PATCH_FAILED`
+/// 分开，因为下一步完全不同——那个是"改一改再来"，这个是"先去看文件"。
+fn rollback_incomplete(message: impl Into<String>) -> WorkspaceError {
+    WorkspaceError::Tool {
+        code: "PATCH_ROLLBACK_INCOMPLETE",
+        message: message.into(),
+        category: "runtime",
         retryable: false,
     }
 }
@@ -1092,6 +1242,118 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(workspace.path().join("m.txt")).unwrap(),
             "x\ny\nz\n"
+        );
+    }
+
+    // ---- U1：失败之后说的话必须是真的（审查 P05、A10） ----
+
+    /// 备份读不出来就别动这个文件。
+    ///
+    /// 原来是 `unwrap_or_default()`：读失败被当成"原来是空的"，一旦回滚就
+    /// 把人家的文件写成空——本来只是打补丁失败。
+    #[test]
+    fn a_file_whose_backup_cannot_be_read_is_left_alone() {
+        let (_workspace, _harness, context) = context_with_file();
+        let target = context.workspace.root().join("main.rs");
+        let _injected = faults::inject(vec![faults::Fault::BackupRead(
+            target.canonicalize().unwrap_or(target.clone()),
+        )]);
+
+        let error = apply_patch(&context, &patch()).expect_err("备份读不了就该停下");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "PATCH_FAILED", "{value}");
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(message.contains("back it up"), "{message}");
+        assert!(message.contains("nothing was changed"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "old\n",
+            "文件不该被动，更不该被清空"
+        );
+    }
+
+    /// 一个文件换上去了、另一个换失败：回滚成功时要说清楚"都回滚了"。
+    #[test]
+    fn a_failed_write_rolls_the_earlier_files_back() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        std::fs::write(workspace.path().join("a.txt"), "a-old\n").expect("a");
+        std::fs::write(workspace.path().join("b.txt"), "b-old\n").expect("b");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        let b = workspace
+            .path()
+            .join("b.txt")
+            .canonicalize()
+            .expect("canonical b");
+        let _injected = faults::inject(vec![faults::Fault::Replace(b)]);
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "--- a/a.txt\n+++ b/a.txt\n@@\n-a-old\n+a-new\n--- a/b.txt\n+++ b/b.txt\n@@\n-b-old\n+b-new\n"
+            }),
+        )
+        .expect_err("第二个文件写失败");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "PATCH_FAILED", "{value}");
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rolled back"),
+            "{value}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+            "a-old\n",
+            "第一个文件该回滚回去"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("b.txt")).unwrap(),
+            "b-old\n"
+        );
+    }
+
+    /// 回滚**也**失败：绝不能说"已回滚"，要点名是哪些文件，让人去看。
+    #[test]
+    fn a_rollback_that_fails_says_which_files_are_in_doubt() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        std::fs::write(workspace.path().join("a.txt"), "a-old\n").expect("a");
+        std::fs::write(workspace.path().join("b.txt"), "b-old\n").expect("b");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        let a = workspace
+            .path()
+            .join("a.txt")
+            .canonicalize()
+            .expect("canonical a");
+        let b = workspace
+            .path()
+            .join("b.txt")
+            .canonicalize()
+            .expect("canonical b");
+        let _injected = faults::inject(vec![faults::Fault::Replace(b), faults::Fault::Restore(a)]);
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "--- a/a.txt\n+++ b/a.txt\n@@\n-a-old\n+a-new\n--- a/b.txt\n+++ b/b.txt\n@@\n-b-old\n+b-new\n"
+            }),
+        )
+        .expect_err("写失败且回滚失败");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "PATCH_ROLLBACK_INCOMPLETE", "{value}");
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(message.contains("a.txt"), "得点名是哪个文件：{message}");
+        assert!(!message.contains("was rolled back"), "{message}");
+        // 现场就是半新半旧，这正是要告诉人的：a 已经是新的了。
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+            "a-new\n"
         );
     }
 
