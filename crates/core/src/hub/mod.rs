@@ -11,8 +11,15 @@
 //!    已经这么坑过人。所以 hub 连 `set_default_cwd` / `get_default_cwd` 都不暴露。
 //! 2. **每个成员一份独立的 [`ToolContext`]**，和成员自己的监听器走同一个
 //!    [`build_tool_context`]：根目录边界、命令白名单、读限制、Planning 闸门、
-//!    Durable Task 基线、exec 会话表都跟着成员走。A 里起的 session 拿到 B 去读，
-//!    得到的是 SESSION_NOT_FOUND，而不是 A 的输出。
+//!    Durable Task 基线都跟着成员走。A 里起的 session 拿到 B 去读，得到的是
+//!    SESSION_NOT_FOUND，而不是 A 的输出。
+//!
+//!    **exec 会话表不在上下文里**，归 [`crate::tools::workspace_runtime`] 按
+//!    「目录 + 调用方主体」发。hub 的上下文是按成员 id 缓存的，所有客户端共用
+//!    一份——会话表要是挂在它上面，B 拿到 A 工具返回里的 `session_id` 就能读 A
+//!    的命令输出。所以 [`Hub::call_local`] 必须把 `auth` 带下去
+//!    （[`call_tool_as`]），换成 [`crate::tools::call_tool`] 等于把所有连接并
+//!    成一个人。
 //! 3. **只收紧、不放宽。** 一个工具要同时在 hub 的工具集和成员自己的工具集里
 //!    才能调。成员是 read-only，经 hub 照样写不了。
 //!

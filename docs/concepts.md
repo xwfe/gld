@@ -195,18 +195,23 @@ remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
 | --- | --- | --- |
 | "当前在哪个项目" | 服务端记着，所有对话共用一份 | **服务端不记**，每次调用自己带；两个对话同时各干各的也不会串。所以 hub 里没有 `set_default_cwd` |
 | 边界 | 父目录，`../proj-a` 照样读得到 | 每个项目自己的根目录，`..` 和绝对路径的规则和单独连这个工作区一样 |
-| 命令会话 | 共用一张表 | 各一张：api 里起的命令，拿它的 `session_id` 去 web 读，报 `SESSION_NOT_FOUND` |
+| 命令会话 | 共用一张表 | 按"项目 + 谁在调"分：api 里起的命令，拿它的 `session_id` 去 web 读报 `SESSION_NOT_FOUND`；**另一个客户端在 api 里读也一样报它**，见下面第四条 |
 | Planning / History / Durable Task | 全堆在父目录 | 在各自项目里（本来就存在每个项目的 `.gld/`、`docs/history-session/`） |
 | 说明文件、Skill | 只读父目录那份 | 按工作区单独取，api 的 `AGENTS.md` 不会拿去指导 web |
 | 工具集、命令白名单、读限制 | 父目录一套 | 用每个成员自己的。hub 只收紧不放宽：web 是 `read-only`，经 hub 也写不了（报 `TOOL_NOT_ALLOWED_IN_WORKSPACE`） |
 
-另外三条：
+另外四条：
 
 - **凭据不互通。** hub 有自己的一套 token / 口令，工作区的 token 打到 hub 上是 401，反过来也是。
 - **不在 hub 里的工作区，AI 看不见。** 填它的名字和填一个不存在的名字，报错一模一样，
   `list_workspaces` 里也没有它。
 - **日志各记各的。** 经 hub 对 api 的请求记在 api 自己的请求日志里（带 `[hub]` 前缀，
   `gld logs -w api` 看得到），web 的日志里没有；hub 自己在数据目录的 `logs/hub/` 里记全部。
+- **命令会话还按"谁在调"再分一层。** 同一个 api 里，另一个 OAuth 客户端拿着你的
+  `session_id` 去 `read_output` 或 `kill_session`，报的也是 `SESSION_NOT_FOUND`——
+  它连"有这么一条命令在跑"都不该知道。**前提是它们身份分得开**：`noauth` 下谁都是
+  同一个主体，共用一条 bearer 令牌的客户端也是。真要互相看不见，给每个客户端各注册
+  一个 OAuth 客户端。
 
 ### 改了什么要不要重启
 
@@ -216,8 +221,13 @@ remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
 | `gld hub set`、`gld hub regen` | hub 在跑就自动重启 |
 | 守护进程重启 | hub 自己回来（不看 `restore-on-launch` 开关）；`gld hub stop` 过的不回来 |
 
-被移出的成员、或者改了配置的成员，它经 hub 起的还在跑的命令，会在**下一次有请求进 hub 时**
-被结束——旧的会话表没人能再读到它们，留着就是孤儿进程。
+被移出的成员，它**经 hub** 起的还在跑的命令，会在下一次有请求进 hub 时被结束——
+收回的是"经这个入口访问它"的权限，所以只停经 hub 起的那些，这个项目自己的服务
+和命令行起的命令照常跑。
+
+**改了配置的成员不会被停命令。** hub 会按新配置重建它的上下文，但正在跑的命令和
+它的 `session_id` 都还在——改一行 AI 说明就把跑着的 `npm run dev` 杀掉，那是以前的
+毛病。要停命令用 `gld hub stop`（停整个 hub 经手的），或者让 AI 调 `kill_session`。
 
 ### 代价：一把钥匙开几扇门
 

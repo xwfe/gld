@@ -112,6 +112,8 @@ gld tool call exec_command cmd='cargo test'
 | AI 报 `FILE_VERSION_CONFLICT` | 它读这个文件之后，文件被写过（你在编辑器里改的、另一个会话、`git checkout`），补丁没有落盘 | 这是它该做的事——让 AI 重新 `read_file` 再改。反复出现的话，看看是不是有别的程序在自动改这个文件（格式化工具、watch 任务） |
 | AI 报 `WORKSPACE_BUSY`，说等了 30 秒 | 同一个工作区上另一个写操作占着写权：多半是别的会话（或另一个 gld 进程）正用 `exec_command` 同步等一条命令跑完 | 等那条命令结束再让 AI 重试，这个错误是 `retryable` 的。**连着几次都这样**说明有人在反复跑长命令：让那一侧把 `yield_time_ms` 调小让命令转后台，或者把两个会话错开用 |
 | 一个会话在跑命令，另一个会话改文件却没被拦住 | 命令已经转后台了（`yield_time_ms` 到了还没跑完就会转），写权在那时就放开了——只有同步等的那一段占锁 | 想让整段都互斥就把 `yield_time_ms` 调大同步等（上限 30 秒）。这是刻意的取舍，不然 `npm run dev` 起来之后谁也改不了代码，原委见 [security.md](security.md) |
+| 换了个客户端连上来，`read_output` / `kill_session` 报 `SESSION_NOT_FOUND`，`session_id` 是刚抄过来的 | 命令会话按"项目 + 谁在调"分表，不是同一个主体就看不见。换的是另一个 OAuth 客户端、或者从 hub 换到了工作区自己的地址（两套凭据两个主体） | 有意如此：别人的命令输出不该摊开。用起这条命令的那个客户端去读。真要几个客户端共用一批会话，让它们用同一份凭据连同一个入口 |
+| 同一个客户端重连之后 `session_id` 就失效了 | 不是分表的事：会话本身有寿命，命令结束或超时 30 秒后会被回收；`gld hub stop`、成员被移出 hub 也会停掉经 hub 起的命令 | 结束的命令在那 30 秒里还读得到输出，过了就只能重跑。长命令别靠重连接着读，让它把结果写文件 |
 | `FILE_CHANGED_EXTERNALLY`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹，发现任务开始后有它没记账的文件变化 | 确实是你在编辑器里改了文件的话，这是它该做的事——让 AI 重新读一遍再动手。要是你什么都没改却一直报，看下一行 |
 | 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
 | 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 跳过名单多了 `.venv/`、`coverage/`、`Library/` 等目录（[concepts.md](concepts.md#durable-task-的工作区基线)），工作区里有这些目录就跟升级前记下的指纹对不上 | 结束旧任务再开一个：`task_manage action=finish task_id=<id> allow_unverified=true`，然后 `action=start`。`<id>` 在 `action=status` 的 `task_id` 里 |
@@ -129,7 +131,8 @@ gld tool call exec_command cmd='cargo test'
 | `hub 挂了公网入口…不能用 noauth` | 有意拦的：无认证的公网 hub 等于把全部成员开放给整个互联网 | `gld hub set --auth oauth` |
 | `hub 设了经全局入口暴露，但全局入口没启用` | `--global-gateway true` 依赖全局入口 | 先配好全局入口（[connect-clients.md](connect-clients.md#多个项目共用一个域名全局入口)）；或 `gld hub set --global-gateway false` |
 | 全局入口上访问 `/hub/mcp` 返回 404 | hub 没声明走入口，入口不替它转 | `gld hub set --global-gateway true` |
-| 移出 hub 的工作区，经 hub 起的命令还在跑 | 这些命令在下一次有请求进 hub 时才被结束 | 随便再调一次 hub；或 `gld hub stop` |
+| 移出 hub 的工作区，经 hub 起的命令还在跑 | 这些命令在下一次有请求进 hub 时才被结束 | 随便再调一次 hub；或 `gld hub stop`。注意只停经 hub 起的那些——这个项目自己的服务和命令行起的命令不在范围内 |
+| 改了成员配置，以为正在跑的命令会被停掉，结果还在跑 | 0.4.0 改了：重建成员上下文不再顺手杀命令（以前改一行 AI 说明就把跑着的 `npm run dev` 杀了） | 要停就明确地停：让 AI 调 `kill_session`，或 `gld hub stop` |
 | `gld hub show` 状态是 `error` | 监听器跑着跑着退了 | 状态后面写着日志位置（数据目录下 `logs/hub/stderr.log`）；修好后 `gld hub start` |
 
 ## 数据目录与环境

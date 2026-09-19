@@ -33,7 +33,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 
 | 模块 | 职责 |
 | --- | --- |
-| `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。两个唯一入口：`tools::call_tool` 执行工具，`tools::build_tool_context` 构建上下文——MCP 监听器和 `gld tool call` 都走它，所以命令行里试出来的行为就是 AI 看到的行为 |
+| `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。两个唯一入口：`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文——MCP 监听器和 `gld tool call` 都走它，所以命令行里试出来的行为就是 AI 看到的行为 |
 | `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务单个工作区和 hub（`Endpoint` 二选一），认证、OAuth 路由、请求日志只有一份 |
 | `hub/` | 聚合入口：一条 MCP 连接按每次调用的 `workspace` 参数分到多个工作区，每个成员一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停 |
 | `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
@@ -116,6 +116,19 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
   （命令转后台之后就不占了）。管不到的边界——后台命令、外部编辑器、不同
   `GLD_HOME` 的另一个 gld、Git common directory——写在那个模块的文档和
   [security.md](security.md) 里，别当成已经隔离了。
+- **命令会话表也归同一个 `WorkspaceRuntime`，按「目录 + 调用方主体」分。**
+  主体是 `tools/caller.rs` 的 `Caller`：两条 MCP 路从监听器验完鉴权的
+  `AuthContext` 来，命令行和测试是 `local`。两个后果：
+
+  - 同一个主体换个 `ToolContext` 进来还是那张表，所以 hub 因为配置指纹变了
+    重建上下文时**不再杀掉正在跑的命令**（以前杀，理由是"表跟着旧上下文一起
+    没了"，现在理由不成立）。
+  - 不同主体的表互不可见，拿别人的 `session_id` 得到 `SESSION_NOT_FOUND`。
+    哪些主体分得开、哪些分不开，写在 `tools/caller.rs`。
+
+  所以工具内核有两个执行入口：`call_tool`（本机操作员）和 `call_tool_as`
+  （带主体，网络进来的都走它）。加新的传输层时**必须用后者**，用前者等于把
+  所有连接并成一个人。
 
 ## 加一个新命令要改哪里
 

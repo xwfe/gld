@@ -334,7 +334,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_command",
         "Execute command",
-        "Run a bounded command in the workspace under runtime policy. While this call is waiting for the command (up to yield_time_ms), it holds the workspace write lock, so apply_patch from another session gets WORKSPACE_BUSY; once the command moves to the background the lock is released and that protection is gone.",
+        "Run a bounded command in the workspace under runtime policy. While this call is waiting for the command (up to yield_time_ms), it holds the workspace write lock, so apply_patch from another session gets WORKSPACE_BUSY; once the command moves to the background the lock is released and that protection is gone. The session it returns belongs to this connection: another client cannot read or kill it.",
         false,
         true,
         true,
@@ -342,7 +342,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "write_stdin",
         "Write stdin",
-        "Write characters to a server-managed running command session.",
+        "Write characters to a server-managed running command session. Only sessions started over this connection exist here; any other session_id reports SESSION_NOT_FOUND.",
         false,
         false,
         false,
@@ -350,7 +350,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "kill_session",
         "Kill session",
-        "Terminate a server-managed running command session.",
+        "Terminate a server-managed running command session. Only sessions started over this connection exist here; any other session_id reports SESSION_NOT_FOUND.",
         false,
         true,
         false,
@@ -358,7 +358,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "read_output",
         "Read output",
-        "Read retained stdout or stderr by output_ref with per-stream byte offset pagination.",
+        "Read retained stdout or stderr by output_ref with per-stream byte offset pagination. Only sessions started over this connection exist here; any other output_ref reports SESSION_NOT_FOUND.",
         true,
         false,
         false,
