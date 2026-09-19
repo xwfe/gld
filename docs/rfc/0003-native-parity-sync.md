@@ -1,6 +1,6 @@
 # RFC-0003：跟上 ccnm 的新工具，补回 compact 档的 skills
 
-日期：2026-09-18。状态：**实施中**，进度写在第 4 节，每做完一块补一段。
+日期：2026-09-18。状态：**G1、G2、G3 全部完成**（2026-09-19），过程写在第 4 节。
 
 这是跨仓方案 v3（toexec 仓库 `docs/plan/implementation-plan-v3-native-parity.md`）第 5 节第 5 步在 gld 这一侧的落地记录。v3 要的是：经 gld / ccnm 用 AI，能力不低于在项目机器上直接跑官方 CLI。ccnm 那边的执行面已经补了一批（ccnm P36–P41），gld 要跟上。为什么这样分三块、原生 CLI 实际怎么做，都在 v3 方案和 ccnm 的研究记录里，这里只写 gld 要改什么、怎么算做完。
 
@@ -133,3 +133,42 @@ notebook 按 cell 读写），开工时再定细目。
 **G3.2（notebook 按 cell 读写）还没开工。**形状照 ccnm P40：新增只读工具
 `read_notebook`，`apply_patch` 加 `edit_notebook`，**不改** `read_file` 对 `.ipynb`
 返回 JSON 文本的既有行为（已有人照着那份文本改 notebook）。
+
+### 2026-09-19：G3.2 完成，G3 收尾
+
+第十一、十二个本机工具位：新增只读工具 `read_notebook`，`apply_patch` 加
+`notebook_edits` 参数。工具数 compact 28 / core 40 / advanced 53 / read-only 21。
+
+**形状照 ccnm P40，一处结构上不得不不同。**ccnm 的 `apply_patch` 收的是结构化
+ops 数组，所以 `edit_notebook` 是其中一个 op；gld 收的是文本补丁信封，塞不进
+"第几个 cell 换成什么"。所以在 gld 这边是**和 `patch` 并列的一个参数**
+`notebook_edits: [{path, cells:[…]}]`，`patch` 因此不再必填（两者至少给一个，
+策略层的 `validate_patch` 也跟着放宽）。cell 编辑的字段名和语义与 ccnm 一字不差。
+
+**关键的是它们在同一次事务里**：一次调用可以既改源文件又改 notebook 的 cell，
+任何一处失败整批不落盘；版本前置条件、备份回滚、进程内写锁全都照样管着它。
+同一个文件同时走 `patch` 和 `notebook_edits` 会被拒——两种改法对"原文是什么"
+的理解不一样，混在一起没人说得清。
+
+**`read_file` 一个字节没动。**对 `.ipynb` 照旧返回磁盘上那份 JSON：已经有人照着
+那段文本用普通补丁改 notebook，换成 cell 视图是行为变更，不是加法。
+
+**和 ccnm 的已知差异：图片。**ccnm 把 PNG/JPEG 输出当 MCP 图片块发出去；gld 的
+工具结果是单块的（`wrap_mcp_tool_result` 只有 `view_image` 走图片块），要发多块
+得改所有工具的传输形状。所以这里只标注"有一张 image/png，大约多少字节"，不装作
+发了。写进了模块文档和 concepts.md，没有藏着。
+
+**往返用的是和 ccnm 同一份 fixture**（`tests/fixtures/notebook/analysis.ipynb`，
+那边拿 nbformat 5.11.1 逐字节核对过）：没动过的 notebook 写回去一个字节不差——
+中文不转义、键排序、缩进 1 格、末尾换行。差一点，第一次改动就会在 git diff 里
+变成整份文件重写。gld 的 `serde_json` 没开 `preserve_order`，键本来就是排序的，
+这一条因此成立；哪天开了 `preserve_order`，这个往返测试会先红。
+
+验证：`cargo test --workspace` 637 passed、0 failed；fmt、clippy 干净。单测覆盖
+逐字节往返、四种输出的渲染（stream / display_data 的图片标注 / execute_result /
+去掉颜色码的 error）、按 cell 分页、替换清空输出、换类型丢掉代码专有键、老
+notebook 用 `cell-N` 定位、认不出的 cell id 会列出真实存在的。集成测试覆盖
+读→改→落盘的一整圈、和普通补丁同一次事务一起回滚、不是 notebook 的文件怎么报错。
+
+**G3 到此完成**（G3.1 搜索四项 + G3.2 notebook）。RFC-0003 的 G1、G2、G3 三块
+全部做完，跨仓方案 v3 第 5 节第 5 步在 gld 这一侧结束。

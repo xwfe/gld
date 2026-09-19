@@ -362,11 +362,11 @@ gld tool list                       # 看当前实际暴露了什么
 
 | 取值 | 工具数 | 说明 |
 | --- | --- | --- |
-| `compact` | 27 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
-| `core` | 39 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
-| `advanced` | 52 | 全部工具都暴露 |
-| `read-only` | 20 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
-| `compat-readonly-all` | 52 | 见下面的警告 |
+| `compact` | 28 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
+| `core` | 40 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
+| `advanced` | 53 | 全部工具都暴露 |
+| `read-only` | 21 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
+| `compat-readonly-all` | 53 | 见下面的警告 |
 
 上面的数字是当前版本 `gld tool list` 实测出来的，会随版本变；以命令输出为准。
 
@@ -401,12 +401,12 @@ Skill（扫到 14，目录里列了 9）
 ```
 
 要让它们全部进去：`gld ws set tool-profile=advanced`。
-代价是工具从 27 个涨到 52 个，加上多出来的说明和完整 Skill 目录，
+代价是工具从 28 个涨到 53 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。
 
 ### `compat-readonly-all` 不是只读
 
-名字里有 `readonly`，但它**暴露的工具和 `advanced` 完全一样（52 个，能写能执行）**。
+名字里有 `readonly`，但它**暴露的工具和 `advanced` 完全一样（53 个，能写能执行）**。
 它唯一改的是给客户端看的**标注**：把每个工具都标成 `readOnlyHint: true`、
 `destructiveHint: false`。
 
@@ -564,6 +564,39 @@ apply_patch patch=… expected_versions={"notes.md": "412-18d6b0…"}
 不对都是拒绝、不是覆盖；但操作系统层面没有"比对通过就锁住直到我写完"这种
 东西，另一个进程仍然可能刚好插在最后那几微秒里。要真正互斥，得让写方都走
 同一个 gld。
+
+---
+
+## Jupyter notebook：按 cell 读，按 cell 改
+
+`.ipynb` 是一份 JSON，一个带输出的 notebook 几万行很常见。AI 拿着那份 JSON
+手搓补丁，改对的概率很低。所以有两个专门的入口：
+
+```text
+read_notebook path=analysis.ipynb        每个 cell 一段，带 id、类型和输出
+apply_patch notebook_edits=[{path, cells:[{cell_id, new_source}]}]
+```
+
+`cell_id` 就是 `read_notebook` 显示的那个。没有 id 的老 notebook（nbformat
+4.5 之前）用 `cell-0`、`cell-1` 这样的序号，和 Claude Code 的规则一样。
+
+`edit_mode` 三种：`replace`（默认）、`insert`（插在 `cell_id` 之后，不给
+`cell_id` 就插在最前面）、`delete`。**替换一个代码 cell 会清空它的输出**——
+旧输出配新代码是骗人的。
+
+### 三件要知道的事
+
+**`read_file` 没变。**对 `.ipynb` 它照旧返回磁盘上那份 JSON。已经有人照着那段
+文本用普通补丁改 notebook，换成 cell 视图等于让那些补丁全部失效。两个入口
+并存，各用各的。
+
+**cell 编辑和普通补丁在同一次事务里。**一次 `apply_patch` 可以既改几个源文件
+又改 notebook 的 cell，任何一处失败全都不落盘。版本前置条件（上一节）一样管着
+notebook。
+
+**输出里的图片不会发给 AI**，只标注"有一张 image/png，大约多少字节"。gld 的
+工具结果是单块的，发不了图文交错。经 hub 连远端 ccnm 项目时那边会发图片——
+同一个模型在两种成员上看到的 notebook 因此略有不同，这是已知差异。
 
 ---
 
