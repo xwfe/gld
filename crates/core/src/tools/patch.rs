@@ -48,49 +48,98 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         }
     }
 
-    let mut affected = Vec::new();
-    let mut summaries = Vec::new();
+    // 一个文件在一批里可能被碰好几次（先删后加、两段 Update）。记的是
+    // **每个文件最终发生了什么**，按第一次出现的顺序：`affected_files` 回答
+    // 的是"这次改了哪些文件"，不是"应用了几段补丁"。
+    let mut order: Vec<String> = Vec::new();
+    let mut operations: HashMap<String, &'static str> = HashMap::new();
     let mut staged: HashMap<String, Option<String>> = HashMap::new();
 
     for fp in &file_patches {
         ws.reject_unsafe_text(&fp.path)?;
-        let resolved = if fp.is_new_file {
+        // 这一批里已经排过队的改动，才是这个文件"现在"的样子：同一批里
+        // 先 Add 再 Update、或者两次 Update 同一个文件，第二段要看见第一段
+        // 的结果。以前每段都重新读磁盘，最后一段 insert 覆盖前面的，前面
+        // 那次编辑就这么没了（审查 P03）。
+        let staged_before = staged
+            .get(&ws.resolve_for_write(&fp.path)?.display)
+            .cloned();
+        let resolved = if fp.is_new_file || matches!(staged_before, Some(Some(_))) {
             ws.resolve_for_write(&fp.path)?
         } else {
             ws.resolve_existing(&fp.path)?
         };
         ws.reject_write_symlink(&fp.path)?;
 
-        let original = if fp.is_new_file {
-            // An Add File envelope is replacement content even when an earlier
-            // Delete File for the same path exists in this transaction.
-            String::new()
-        } else if resolved.existed {
-            fs::read_to_string(&resolved.path)
-                .map_err(|_| WorkspaceError::not_found(format!("File not found: {}", fp.path)))?
-        } else if fp.is_new_file || fp.is_deleted {
-            String::new()
-        } else {
-            return Err(patch_failed(format!("File not found: {}", fp.path)));
+        // Add 是"新建"，不是"覆盖"。同一批里先 Delete 过它则另说：那是
+        // 明写出来的整文件替换，有测试钉着。
+        if fp.is_new_file
+            && (resolved.existed || matches!(staged_before, Some(Some(_))))
+            && !matches!(staged_before, Some(None))
+        {
+            return Err(patch_failed(format!(
+                "{} already exists; use *** Update File: {} to change it, or delete it first",
+                resolved.display, resolved.display
+            )));
+        }
+
+        let original = match &staged_before {
+            // 这一批里刚删过：Add 从空白开始，别的操作没有文件可改。
+            Some(None) if fp.is_new_file => String::new(),
+            Some(None) => {
+                return Err(patch_failed(format!(
+                    "{} was deleted earlier in this patch; add it again instead of editing it",
+                    resolved.display
+                )))
+            }
+            Some(Some(text)) if fp.is_new_file => {
+                let _ = text;
+                String::new()
+            }
+            Some(Some(text)) => text.clone(),
+            None if fp.is_new_file => String::new(),
+            None if resolved.existed => fs::read_to_string(&resolved.path)
+                .map_err(|_| WorkspaceError::not_found(format!("File not found: {}", fp.path)))?,
+            None if fp.is_deleted => String::new(),
+            None => return Err(patch_failed(format!("File not found: {}", fp.path))),
         };
 
         if fp.is_deleted {
             staged.insert(resolved.display.clone(), None);
-            affected.push(json!({ "path": resolved.display, "operation": "delete" }));
-            summaries.push(format!("D {}", resolved.display));
+            if operations
+                .insert(resolved.display.clone(), "delete")
+                .is_none()
+            {
+                order.push(resolved.display.clone());
+            }
             continue;
         }
 
         let updated = apply_hunks(&original, &fp.hunks)?;
-        let op = if resolved.existed { "update" } else { "add" };
         staged.insert(resolved.display.clone(), Some(updated));
-        affected.push(json!({ "path": resolved.display, "operation": op }));
-        summaries.push(format!(
-            "{} {}",
-            if op == "add" { "A" } else { "M" },
-            resolved.display
-        ));
+        // 文件本来就在盘上就是改，不在就是新建——先删后加的净效果因此是
+        // "改"，这一点有测试钉着。
+        let op = if resolved.existed { "update" } else { "add" };
+        if operations.insert(resolved.display.clone(), op).is_none() {
+            order.push(resolved.display.clone());
+        }
     }
+
+    let affected: Vec<Value> = order
+        .iter()
+        .map(|path| json!({ "path": path, "operation": operations[path] }))
+        .collect();
+    let summaries: Vec<String> = order
+        .iter()
+        .map(|path| {
+            let mark = match operations[path] {
+                "add" => "A",
+                "delete" => "D",
+                _ => "M",
+            };
+            format!("{mark} {path}")
+        })
+        .collect();
 
     let files_created = affected_paths(&affected, "add");
     let files_modified = affected_paths(&affected, "update");
@@ -239,6 +288,7 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
     let mut files = Vec::new();
     let mut current: Option<FilePatch> = None;
     let mut current_hunk: Option<Hunk> = None;
+    let mut ended = false;
 
     for raw_line in patch.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -247,6 +297,7 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
         }
         if line == "*** End Patch" {
             finish_codex_file(&mut files, &mut current, &mut current_hunk);
+            ended = true;
             continue;
         }
 
@@ -273,6 +324,16 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
                 current_hunk = Some(Hunk::default());
             }
             continue;
+        }
+
+        // 认识的指令都在上面。剩下的 `*** …` 一律报错，**不跳过**：真 Codex
+        // 有 `*** Move to:`，这里没实现；静默跳过的结果是模型以为文件挪了，
+        // 而磁盘上没挪（审查 P04）。
+        if let Some(directive) = line.strip_prefix("*** ") {
+            let name = directive.split(':').next().unwrap_or(directive).trim();
+            return Err(patch_failed(format!(
+                "*** {name}: is not something this patch format supports here; supported directives are *** Add File:, *** Update File:, *** Delete File:"
+            )));
         }
 
         if let Some(header) = line.strip_prefix("@@") {
@@ -308,6 +369,13 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
     }
 
     finish_codex_file(&mut files, &mut current, &mut current_hunk);
+    // 补丁被截断（网络断了、上下文满了）和补丁写完了长得一模一样，而前者
+    // 应用一半就是把文件改坏。只有信封闭合了才算数。
+    if !ended {
+        return Err(patch_failed(
+            "the patch stops before *** End Patch, so it may have been cut short; nothing was applied. Send the whole envelope",
+        ));
+    }
     Ok(files)
 }
 
@@ -390,6 +458,26 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
         let expected = hunk
             .old_start
             .map(|start| start.saturating_add_signed(shift));
+        // 会删或改行的 hunk，既没有行号也没有锚点，而上下文在剩下的文件里
+        // 匹配到不止一处：**不猜**。挑错一处就是改错地方，而且结果看起来
+        // 是成功的。纯插入不算——插哪一处都不动原有内容，而且现有补丁大量
+        // 这么写（审查 P04）。
+        if expected.is_none()
+            && hunk.anchor.is_none()
+            && hunk.lines.iter().any(|l| matches!(l, HunkLine::Remove(_)))
+        {
+            let candidates = match_positions(&lines, &hunk_old, search_from, 3);
+            if candidates.len() > 1 {
+                let places = candidates
+                    .iter()
+                    .map(|line| (line + 1).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(patch_ambiguous(format!(
+                    "this hunk's context matches more than one place (lines {places}); add surrounding lines or a @@ -line,count @@ header so it is clear which one to change"
+                )));
+            }
+        }
         let pos = find_hunk_position(&lines, &hunk_old, search_from, expected)
             .ok_or_else(|| patch_failed("Hunk context did not match file content."))?;
 
@@ -426,6 +514,18 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
         output.push_str(line_ending);
     }
     Ok(output)
+}
+
+/// 上下文在 `start` 之后命中的位置，最多找 `limit` 个（报歧义只需要证明
+/// "不止一个"，不必把整份文件找完）。
+fn match_positions(lines: &[String], pattern: &[String], start: usize, limit: usize) -> Vec<usize> {
+    if pattern.is_empty() || start > lines.len() || pattern.len() > lines.len() - start {
+        return Vec::new();
+    }
+    (start..=lines.len() - pattern.len())
+        .filter(|&i| lines[i..i + pattern.len()] == *pattern)
+        .take(limit)
+        .collect()
 }
 
 /// Where the old lines of a hunk are, at or after `start`. With a line
@@ -625,6 +725,17 @@ fn protected_repository_asset(message: impl Into<String>) -> WorkspaceError {
         code: "PROTECTED_REPOSITORY_ASSET",
         message: message.into(),
         category: "security",
+        retryable: false,
+    }
+}
+
+/// 上下文对得上好几处，谁也不能说了算。和 `PATCH_FAILED` 分开：那个是
+/// "对不上，重读文件再来"，这个是"对得上太多处，把话说清楚再来"。
+fn patch_ambiguous(message: impl Into<String>) -> WorkspaceError {
+    WorkspaceError::Tool {
+        code: "PATCH_AMBIGUOUS",
+        message: message.into(),
+        category: "validation",
         retryable: false,
     }
 }
@@ -831,6 +942,157 @@ mod tests {
         let patch =
             "--- a/m.txt\n+++ b/m.txt\n@@ -1,1 +1,3 @@\n x\n+p\n+q\n@@ -5,1 +7,1 @@\n-x\n+z\n";
         assert_eq!(apply_to(original, patch), "x\np\nq\nk\nx\nk\nz\n");
+    }
+
+    // ---- U1：不能静默改坏文件（2026-09-19 的工具审查 P02/P03/P04） ----
+
+    /// `Add File` 指向一个已经存在的文件，今天会被当成整文件覆盖：原内容
+    /// 一声不响地没了。应当报错，并告诉调用方该用 `Update File`。
+    #[test]
+    fn adding_a_file_that_already_exists_is_refused() {
+        for patch in [
+            "*** Begin Patch\n*** Add File: main.rs\n+fresh\n*** End Patch\n",
+            "--- /dev/null\n+++ b/main.rs\n@@\n+fresh\n",
+        ] {
+            let (_workspace, _harness, context) = context_with_file();
+            let error = apply_patch(&context, &json!({ "patch": patch }))
+                .expect_err("Add 一个已存在的文件应当被拒");
+            let value = error.to_error_value();
+            assert_eq!(value["code"], "PATCH_FAILED", "{value}");
+            let message = value["message"].as_str().unwrap_or_default();
+            assert!(message.contains("main.rs"), "{message}");
+            assert!(
+                message.contains("Update File"),
+                "得说清楚该用哪个：{message}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(context.workspace.root().join("main.rs")).unwrap(),
+                "old\n",
+                "被拒的补丁不能动文件"
+            );
+        }
+    }
+
+    /// 同一批里两次 Update 同一个文件：第二次今天从磁盘重新读原文，最后
+    /// `staged.insert` 把第一次的结果盖掉——第一处改动就这么丢了。
+    #[test]
+    fn two_updates_to_the_same_file_apply_one_after_another() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        std::fs::write(workspace.path().join("m.txt"), "a\nb\n").expect("file");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        apply_patch(
+            &context,
+            &json!({
+                "patch": "*** Begin Patch\n*** Update File: m.txt\n@@\n-a\n+A\n*** Update File: m.txt\n@@\n-b\n+B\n*** End Patch\n"
+            }),
+        )
+        .expect("两次编辑都该应用");
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("m.txt")).unwrap(),
+            "A\nB\n",
+            "第一次的改动被第二次盖掉了"
+        );
+    }
+
+    /// Codex 信封少了 `*** End Patch`：今天照样应用。补丁被截断过（网络、
+    /// 上下文长度）和补丁写完了，长得一模一样，而前者应用一半就是改坏。
+    #[test]
+    fn a_codex_patch_without_its_end_marker_is_refused() {
+        let (_workspace, _harness, context) = context_with_file();
+        let error = apply_patch(
+            &context,
+            &json!({ "patch": "*** Begin Patch\n*** Update File: main.rs\n@@\n-old\n+new\n" }),
+        )
+        .expect_err("缺结束标记应当被拒");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "PATCH_FAILED", "{value}");
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("*** End Patch"),
+            "{value}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(context.workspace.root().join("main.rs")).unwrap(),
+            "old\n"
+        );
+    }
+
+    /// 不认识的 `*** ` 指令（比如真 Codex 有、这里没实现的 `*** Move to:`）
+    /// 今天被静默跳过：模型以为文件挪了，实际没挪。
+    #[test]
+    fn an_unsupported_codex_directive_is_refused_instead_of_skipped() {
+        let (_workspace, _harness, context) = context_with_file();
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "*** Begin Patch\n*** Update File: main.rs\n@@\n-old\n+new\n*** Move to: moved.rs\n*** End Patch\n"
+            }),
+        )
+        .expect_err("不认识的指令应当被拒");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "PATCH_FAILED", "{value}");
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("*** Move to:"),
+            "{value}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(context.workspace.root().join("main.rs")).unwrap(),
+            "old\n"
+        );
+        assert!(!context.workspace.root().join("moved.rs").exists());
+    }
+
+    /// 上下文在文件里出现多次、又没有行号也没有锚点时，今天挑第一处改。
+    /// 挑错了就是改错地方，而且看起来是成功的。**只在这个 hunk 会删/改行时
+    /// 才算歧义**：纯插入挑哪一处都不破坏原有内容，而且现有补丁大量这么写。
+    #[test]
+    fn an_ambiguous_change_names_the_candidates_instead_of_guessing() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        std::fs::write(workspace.path().join("m.txt"), "x\ny\nx\n").expect("file");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "*** Begin Patch\n*** Update File: m.txt\n@@\n-x\n+z\n*** End Patch\n"
+            }),
+        )
+        .expect_err("两处都能匹配，应当报歧义");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "PATCH_AMBIGUOUS", "{value}");
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("1") && message.contains("3"),
+            "得给出候选行号：{message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("m.txt")).unwrap(),
+            "x\ny\nx\n"
+        );
+
+        // 给了行号就不再是歧义。
+        apply_patch(
+            &context,
+            &json!({ "patch": "--- a/m.txt\n+++ b/m.txt\n@@ -3,1 +3,1 @@\n-x\n+z\n" }),
+        )
+        .expect("行号说了是第三行");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("m.txt")).unwrap(),
+            "x\ny\nz\n"
+        );
     }
 
     #[test]
