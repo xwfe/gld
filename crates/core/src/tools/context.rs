@@ -110,7 +110,10 @@ impl ToolContext {
     ) -> Self {
         let root = workspace.root().to_path_buf();
         let sessions = Arc::new(SessionStore::new());
-        crate::tools::session::register_workspace_session_store(&root, &sessions);
+        let runtime = crate::tools::workspace_runtime::runtime_for(&root);
+        // 登记，不是共享：这个表还是这个上下文自己的，登记只为了切 plan 模式
+        // 时能把这个目录上的命令一并停掉。为什么不共享，见 WorkspaceRuntime。
+        runtime.register_session_store(&sessions);
         // 「读能不能出 Workspace」是策略的一部分，但真正执行判断的是 Workspace
         // 自己（路径解析都在那儿）。在这一个地方转交，免得每个调用点各设一次、
         // 漏掉哪个就等于悄悄放开了限制。
@@ -129,7 +132,7 @@ impl ToolContext {
             skills: Vec::new(),
             agent_context: None,
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
-            runtime: crate::tools::workspace_runtime::runtime_for(&root),
+            runtime,
             default_cwd: Mutex::new(root),
             sessions,
             usage: Arc::new(ServiceUsage::default()),

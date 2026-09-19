@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio::io::AsyncReadExt;
@@ -13,9 +12,6 @@ use crate::tools::workspace::{tool_ok, WorkspaceError};
 use serde_json::{json, Value};
 
 const SESSION_BUFFER_BYTES: usize = 1_048_576;
-
-static WORKSPACE_SESSION_STORES: OnceLock<Mutex<HashMap<PathBuf, Vec<Weak<SessionStore>>>>> =
-    OnceLock::new();
 
 #[derive(Default)]
 pub struct SessionStore {
@@ -87,34 +83,6 @@ impl SessionStore {
             })
             .count()
     }
-}
-
-pub fn register_workspace_session_store(workspace_root: &Path, store: &Arc<SessionStore>) {
-    let registry = WORKSPACE_SESSION_STORES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut registry = registry.lock().expect("workspace session registry lock");
-    let stores = registry.entry(workspace_root.to_path_buf()).or_default();
-    stores.retain(|entry| entry.strong_count() > 0);
-    if !stores
-        .iter()
-        .filter_map(Weak::upgrade)
-        .any(|registered| Arc::ptr_eq(&registered, store))
-    {
-        stores.push(Arc::downgrade(store));
-    }
-}
-
-pub fn kill_workspace_sessions(workspace_root: &Path) -> usize {
-    let stores = WORKSPACE_SESSION_STORES
-        .get()
-        .and_then(|registry| {
-            let mut registry = registry.lock().expect("workspace session registry lock");
-            let stores = registry.get_mut(workspace_root)?;
-            stores.retain(|entry| entry.strong_count() > 0);
-            Some(stores.iter().filter_map(Weak::upgrade).collect::<Vec<_>>())
-        })
-        .unwrap_or_default();
-
-    stores.into_iter().map(|store| store.terminate_all()).sum()
 }
 
 pub struct ExecSession {

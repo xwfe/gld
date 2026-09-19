@@ -44,18 +44,27 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
 
 use fs2::FileExt;
 
+use crate::tools::session::SessionStore;
+
 /// 一个工作区目录的执行资源。
 ///
-/// 现在只有写锁一件东西。会话表（`SessionStore`）还留在 `ToolContext` 里，
-/// 那是下一步：会话共享要连带解决"谁能读谁的输出"，跟授权主体绑在一起，
-/// 不能顺手塞进来。
+/// 两件东西：写锁，以及这个目录上都有哪些命令会话表。
+///
+/// **会话表是"登记"不是"共享"**：每个 `ToolContext` 还是各有各的
+/// `SessionStore`，A 入口起的命令 B 入口看不到。真要共享得先能回答"谁能读谁
+/// 的输出"，而 gld 现在没有通用的调用方主体标识——`call_local` 只知道是哪个
+/// workspace，不知道是谁在调。那是 L1 里 `AuthContext + workspace grant` 的
+/// 活，不能顺手塞进来：共享了却没有主体检查，等于把别人的命令输出摊开给所有
+/// 连进来的人。这里登记的用处只有一个——切 plan 模式时把这个目录上的命令全停掉。
 #[derive(Debug)]
 pub struct WorkspaceRuntime {
     commit_lock: Mutex<()>,
+    /// 这个目录上的会话表，弱引用：`ToolContext` 没了就跟着失效，不拖着它。
+    session_stores: Mutex<Vec<Weak<SessionStore>>>,
     /// 跨进程那一层的锁文件。
     ///
     /// `None` 表示建不出来（数据目录不可写之类）。那时只剩进程内互斥，
@@ -109,6 +118,52 @@ impl WorkspaceRuntime {
     /// 锁文件在哪；没有就是跨进程那一层没拿到。测试和排障用。
     pub fn lock_file_path(&self) -> Option<&Path> {
         self.lock_file.as_deref()
+    }
+
+    /// 把一个 `ToolContext` 的会话表登记到这个目录名下。
+    ///
+    /// 重复登记同一个表不会记两遍；已经没人用的旧表顺手清掉。
+    pub fn register_session_store(&self, store: &Arc<SessionStore>) {
+        let mut stores = self
+            .session_stores
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stores.retain(|entry| entry.strong_count() > 0);
+        if !stores
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|registered| Arc::ptr_eq(&registered, store))
+        {
+            stores.push(Arc::downgrade(store));
+        }
+    }
+
+    /// 还挂着的登记数（顺手清掉已经没人用的）。测试用。
+    #[cfg(test)]
+    fn registered_stores(&self) -> usize {
+        let mut stores = self
+            .session_stores
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stores.retain(|entry| entry.strong_count() > 0);
+        stores.len()
+    }
+
+    /// 停掉这个目录上所有还在跑的命令，返回停掉的条数。
+    ///
+    /// 切到 plan 模式时用：那时说好了"只看不动手"，还在跑的命令得停。
+    pub fn terminate_all_sessions(&self) -> usize {
+        let stores: Vec<Arc<SessionStore>> = {
+            let mut stores = self
+                .session_stores
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            stores.retain(|entry| entry.strong_count() > 0);
+            stores.iter().filter_map(Weak::upgrade).collect()
+        };
+        // 锁在这里就放开了：停命令要等子进程收尾，攥着锁会把同目录上正要登记
+        // 的新上下文一起堵住。
+        stores.into_iter().map(|store| store.terminate_all()).sum()
     }
 }
 
@@ -210,6 +265,7 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
     Arc::clone(runtimes.entry(key).or_insert_with_key(|key| {
         Arc::new(WorkspaceRuntime {
             commit_lock: Mutex::new(()),
+            session_stores: Mutex::new(Vec::new()),
             lock_file: lock_path_for(key),
         })
     }))
@@ -327,6 +383,31 @@ mod tests {
             "写权放开了，别的进程还是拿不到锁"
         );
         let _ = FileExt::unlock(&other);
+    }
+
+    /// 每个上下文都得把自己的会话表登记上来，不然切 plan 模式时停不掉它起
+    /// 的命令。上下文没了，登记跟着失效——弱引用不拖着它。
+    #[test]
+    fn every_context_on_a_directory_registers_its_session_store() {
+        use crate::tools::context::ToolContext;
+
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let runtime = runtime_for(&workspace.path().canonicalize().expect("canonical"));
+        assert_eq!(runtime.registered_stores(), 0, "还没建上下文就有登记");
+
+        let first =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("first");
+        assert_eq!(runtime.registered_stores(), 1, "上下文建好了却没登记");
+        let second =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("second");
+        assert_eq!(runtime.registered_stores(), 2, "第二个入口的会话表没登记");
+
+        drop(first);
+        drop(second);
+        assert_eq!(runtime.registered_stores(), 0, "上下文没了，登记还挂着");
     }
 
     /// 两个不同的目录各有各的锁文件，不会互相挡。

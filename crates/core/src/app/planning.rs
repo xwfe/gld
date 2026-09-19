@@ -37,7 +37,7 @@ impl App {
         let state = PlanningService::new(&path).set_mode(mode)?;
         if mode == PlanningMode::Plan {
             tokio::task::spawn_blocking(move || {
-                crate::tools::session::kill_workspace_sessions(&path)
+                crate::tools::workspace_runtime::runtime_for(&path).terminate_all_sessions()
             })
             .await
             .map_err(|error| {
