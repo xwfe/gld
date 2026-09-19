@@ -1235,3 +1235,174 @@ fn the_environment_tool_and_the_preflight_report_the_same_policy() {
     assert_eq!(policy["allowlist_mode"], "only");
     assert_eq!(environment["preflight"]["tool"], "check_command");
 }
+
+/// notebook 从读到改的一整圈：read_notebook 给 cell 视图和版本，
+/// apply_patch 的 notebook_edits 按 cell id 改，落盘的还是一份 Jupyter
+/// 打得开的 notebook（RFC-0003 G3.2）。
+#[test]
+fn a_notebook_is_read_as_cells_and_edited_by_cell_id() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let notebook = dir.path().join("analysis.ipynb");
+    let source = r##"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "aaaa1111",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "42\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(6 * 7)\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"##;
+    fs::write(&notebook, source).expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let read = invoke(&ctx, "read_notebook", json!({"path": "analysis.ipynb"}));
+    assert_ok(&read);
+    assert_eq!(read["total_cells"], json!(1));
+    assert_eq!(read["language"], "python");
+    assert_eq!(read["nbformat"], "4.5");
+    assert_eq!(read["next_start_cell"], json!(null));
+    let content = read["content"].as_str().expect("content");
+    assert!(content.contains("<cell id=\"aaaa1111\""), "{content}");
+    assert!(content.contains("print(6 * 7)"), "{content}");
+    assert!(content.contains("42"), "输出也要给出来: {content}");
+    let version = read["version"].as_str().expect("version").to_string();
+
+    // read_file 照旧给 JSON 原文：已经有人照着它用普通补丁改 notebook。
+    let raw = invoke(&ctx, "read_file", json!({"path": "analysis.ipynb"}));
+    assert_ok(&raw);
+    assert!(raw["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("\"nbformat\""));
+
+    let edited = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "notebook_edits": [{
+                "path": "analysis.ipynb",
+                "cells": [
+                    {"cell_id": "aaaa1111", "new_source": "print('changed')\n"},
+                    {"cell_id": "aaaa1111", "new_source": "# notes\n", "cell_type": "markdown", "edit_mode": "insert"}
+                ]
+            }],
+            "expected_versions": {"analysis.ipynb": version}
+        }),
+    );
+    assert_ok(&edited);
+    assert_eq!(edited["files_modified"], json!(["analysis.ipynb"]));
+
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&notebook).expect("read")).expect("json");
+    let cells = after["cells"].as_array().expect("cells");
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0]["source"], json!(["print('changed')\n"]));
+    // 换了 source 的代码 cell 不能留着旧输出——那是骗人的。
+    assert_eq!(cells[0]["outputs"], json!([]));
+    assert_eq!(cells[0]["execution_count"], json!(null));
+    assert_eq!(cells[1]["cell_type"], "markdown");
+    assert!(cells[1]["id"].as_str().expect("id").len() == 8);
+    assert!(cells[1].get("outputs").is_none(), "markdown 不该有 outputs");
+}
+
+/// cell 编辑和普通补丁共用同一次事务：别的文件失败，notebook 也不落盘。
+#[test]
+fn a_failed_patch_also_rolls_back_the_notebook_edits() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let notebook = dir.path().join("a.ipynb");
+    let source = r#"{"cells":[{"cell_type":"code","id":"c1","metadata":{},"outputs":[],"source":["x\n"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
+    fs::write(&notebook, source).expect("write");
+    fs::write(dir.path().join("notes.md"), "one\n").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            // 这一段对不上：整批都不该落盘
+            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-nope\n+two\n",
+            "notebook_edits": [{
+                "path": "a.ipynb",
+                "cells": [{"cell_id": "c1", "new_source": "y\n"}]
+            }]
+        }),
+    );
+    assert_err(&out);
+    assert_eq!(
+        fs::read_to_string(&notebook).expect("read"),
+        source,
+        "notebook 跟着别人的失败一起不落盘"
+    );
+}
+
+/// 改 notebook 时认不出来的 cell id 要报清楚，并且列出真实存在的。
+#[test]
+fn an_unknown_cell_id_is_reported_with_the_ones_that_exist() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(
+        dir.path().join("a.ipynb"),
+        r#"{"cells":[{"cell_type":"code","id":"real","metadata":{},"outputs":[],"source":["x\n"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#,
+    )
+    .expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "notebook_edits": [{"path": "a.ipynb", "cells": [{"cell_id": "ghost", "new_source": "y\n"}]}]
+        }),
+    );
+    let error = assert_err(&out);
+    let diagnostic = &error["error"]["details"]["diagnostics"][0];
+    assert_eq!(diagnostic["reason_code"], "notebook_edit_failed", "{error}");
+    assert_eq!(diagnostic["file"], "a.ipynb");
+    assert!(diagnostic["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("real"));
+}
+
+/// 不是 notebook 的文件要说清楚，而不是抛一个 JSON 解析错。
+#[test]
+fn reading_something_that_is_not_a_notebook_says_what_is_wrong() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("plain.ipynb"), "{\"a\": 1}\n").expect("write");
+    fs::write(dir.path().join("broken.ipynb"), "not json\n").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let out = invoke(&ctx, "read_notebook", json!({"path": "plain.ipynb"}));
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "INVALID_ARGUMENT");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not a Jupyter notebook"));
+
+    let broken = invoke(&ctx, "read_notebook", json!({"path": "broken.ipynb"}));
+    assert!(assert_err(&broken)["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not valid JSON"));
+}

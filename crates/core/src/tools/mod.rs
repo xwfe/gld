@@ -8,6 +8,7 @@ pub mod git;
 pub mod history;
 mod image_tool;
 pub mod manage;
+mod notebook;
 pub mod patch;
 mod patch_diag;
 pub mod planning;

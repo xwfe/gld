@@ -11,10 +11,15 @@ use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let ws = &ctx.workspace;
-    let patch = args
-        .get("patch")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkspaceError::invalid_argument("patch is required"))?;
+    // notebook 按 cell 改走另一个参数：补丁是文本信封，塞不进"第几个 cell 换
+    // 成什么"这种结构。两者在**同一次事务**里——多文件原子提交、备份回滚、
+    // 版本前置条件、进程内写锁全都照样管着它（RFC-0003 G3.2）。
+    let notebook_edits = crate::tools::notebook::notebook_edits(args)?;
+    let patch = match args.get("patch").and_then(Value::as_str) {
+        Some(patch) => patch,
+        None if notebook_edits.is_some() => "",
+        None => return Err(WorkspaceError::invalid_argument("patch is required")),
+    };
     let dry_run = args
         .get("dry_run")
         .and_then(Value::as_bool)
@@ -36,8 +41,12 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     // `commit_staged_bytes` 的说明。
     let _commit_guard = (!dry_run).then(lock_commits);
 
-    let file_patches = parse_unified_diff(patch)?;
-    if file_patches.is_empty() {
+    let file_patches = if patch.is_empty() {
+        Vec::new()
+    } else {
+        parse_unified_diff(patch)?
+    };
+    if file_patches.is_empty() && notebook_edits.is_none() {
         return Err(patch_failed("No files were modified."));
     }
     if let Some(path) = file_patches
@@ -275,6 +284,102 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         };
         staged.insert(resolved.display.clone(), Some(updated));
         if operations.insert(resolved.display.clone(), op).is_none() {
+            order.push(resolved.display.clone());
+        }
+    }
+
+    // notebook 的 cell 编辑：和上面的补丁在同一批里排队，共用同一套版本核对、
+    // 落盘和回滚。
+    for edits in notebook_edits.iter().flatten() {
+        ws.reject_unsafe_text(&edits.path)?;
+        let resolved = match ws.resolve_existing(&edits.path) {
+            Ok(resolved) => resolved,
+            Err(error) if error.code() == "NOT_FOUND" => {
+                diagnostics.push(Diagnostic::file_level(
+                    "NOT_FOUND",
+                    "file_not_found",
+                    format!(
+                        "File not found: {}; notebook_edits changes an existing notebook, it does not create one",
+                        edits.path
+                    ),
+                    edits.path.clone(),
+                    "update",
+                ));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        ws.reject_write_symlink(&edits.path)?;
+        // 同一个文件既走补丁又走 cell 编辑：拒。两种改法对"原文是什么"的理解
+        // 不一样，混在一起的结果没人说得清。
+        if staged.contains_key(&resolved.display) {
+            return Err(WorkspaceError::invalid_argument(format!(
+                "{} is changed by both patch and notebook_edits in one call; send them separately",
+                resolved.display
+            )));
+        }
+
+        let current_version = crate::tools::workspace::current_file_version(&resolved.path);
+        observed.insert(
+            resolved.display.clone(),
+            version_value(current_version.clone()),
+        );
+        if let Some(expected) = expected_versions
+            .as_ref()
+            .and_then(|map| map.get(&resolved.display))
+        {
+            if expected != &current_version {
+                diagnostics.push(Diagnostic::version_conflict(
+                    version_conflict_message(&resolved.display, expected, &current_version),
+                    resolved.display.clone(),
+                    "update",
+                    expected.clone(),
+                    current_version.clone(),
+                ));
+                continue;
+            }
+        }
+
+        let original = match fs::read(&resolved.path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                diagnostics.push(Diagnostic::file_level(
+                    "PATCH_FAILED",
+                    "file_unreadable",
+                    format!("cannot read {} ({error})", resolved.display),
+                    resolved.display.clone(),
+                    "update",
+                ));
+                continue;
+            }
+        };
+        baselines.insert(
+            resolved.display.clone(),
+            Baseline::Content(original.clone()),
+        );
+        let updated = match crate::tools::notebook::edit(&original, &resolved.display, &edits.cells)
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                diagnostics.push(Diagnostic::file_level(
+                    error.code(),
+                    "notebook_edit_failed",
+                    error.message(),
+                    resolved.display.clone(),
+                    "update",
+                ));
+                continue;
+            }
+        };
+        // 写回去的是 serde_json 序列化的结果，一定是 UTF-8。
+        let text = String::from_utf8(updated).map_err(|_| {
+            patch_failed(format!("{} did not serialize as UTF-8", resolved.display))
+        })?;
+        staged.insert(resolved.display.clone(), Some(text));
+        if operations
+            .insert(resolved.display.clone(), "update")
+            .is_none()
+        {
             order.push(resolved.display.clone());
         }
     }

@@ -14,7 +14,9 @@ use crate::planning::{
 use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
-use crate::tools::{exec, file, git, history, image_tool, manage, patch, planning, session, skill};
+use crate::tools::{
+    exec, file, git, history, image_tool, manage, notebook, patch, planning, session, skill,
+};
 
 /// 策略拒绝变成工具响应。
 ///
@@ -477,6 +479,7 @@ fn dispatch_tool(ctx: &ToolContext, name: &str, args: &Value, operation_id: &str
         "list_skills" => skill::list_skills(ctx, &effective_args),
         "get_skill" => skill::get_skill(ctx, &effective_args),
         "read_file" => file::read_file(ws, &effective_args),
+        "read_notebook" => notebook::read_notebook(ws, &effective_args),
         "list_dir" => file::list_dir(ws, &effective_args),
         "list_files" => file::list_files(ws, &effective_args),
         "search_text" | "grep_text" | "grep" => file::search_text(ws, &effective_args),
@@ -748,7 +751,8 @@ fn apply_default_cwd(ctx: &ToolContext, name: &str, args: &Value) -> Value {
             let path = effective.get("path").and_then(Value::as_str).unwrap_or(".");
             effective["path"] = Value::String(prefix_relative_path(&base, path));
         }
-        "read_file" | "search_text" | "grep_text" | "grep" | "git_blame" | "view_image" => {
+        "read_file" | "read_notebook" | "search_text" | "grep_text" | "grep" | "git_blame"
+        | "view_image" => {
             if let Some(path) = effective.get("path").and_then(Value::as_str) {
                 effective["path"] = Value::String(prefix_relative_path(&base, path));
             }

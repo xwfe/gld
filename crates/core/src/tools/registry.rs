@@ -268,6 +268,14 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
         false,
     ),
     (
+        "read_notebook",
+        "Read notebook",
+        "Read a Jupyter notebook as cells: source, outputs and cell ids, with paging. read_file still returns the raw JSON.",
+        true,
+        false,
+        false,
+    ),
+    (
         "read_file",
         "Read file",
         "Read a UTF-8 text file slice inside the configured workspace.",
@@ -561,6 +569,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "list_skills",
     "get_skill",
     "read_file",
+    "read_notebook",
     "list_dir",
     "list_files",
     "search_text",
@@ -597,6 +606,7 @@ pub const COMPACT_TOOLS: &[&str] = &[
     "get_default_cwd",
     "set_default_cwd",
     "read_file",
+    "read_notebook",
     "list_dir",
     "list_files",
     "search_text",
@@ -625,6 +635,7 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "get_skill",
     "set_default_cwd",
     "read_file",
+    "read_notebook",
     "list_dir",
     "list_files",
     "search_text",
@@ -667,6 +678,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "list_skills",
     "get_skill",
     "read_file",
+    "read_notebook",
     "list_dir",
     "list_files",
     "search_text",
@@ -735,6 +747,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "list_skills",
     "get_skill",
     "read_file",
+    "read_notebook",
     "list_dir",
     "list_files",
     "search_text",
@@ -1195,16 +1208,52 @@ pub fn input_schema(name: &str) -> Value {
             "required": ["query"],
             "additionalProperties": false
         }),
+        "read_notebook" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "start_cell": { "type": "integer", "minimum": 0, "default": 0 },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 32768 }
+            },
+            "description": "Cells come back in content as <cell id=\"…\"> blocks with their outputs. Change them with apply_patch's notebook_edits, addressing cells by the id shown here. Images in outputs are noted but not returned.",
+            "required": ["path"],
+            "additionalProperties": false
+        }),
         "apply_patch" => json!({
             "type": "object",
             "properties": {
                 "patch": { "type": "string", "minLength": 1 },
+                "notebook_edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "minLength": 1 },
+                            "cells": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "cell_id": { "type": "string", "minLength": 1 },
+                                        "new_source": { "type": "string" },
+                                        "cell_type": { "type": "string", "enum": ["code", "markdown"] },
+                                        "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"], "default": "replace" }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        },
+                        "required": ["path", "cells"],
+                        "additionalProperties": false
+                    },
+                    "description": "Cell edits for Jupyter notebooks, applied in the same transaction as patch. cell_id is what read_notebook shows; replace and delete need it, insert puts the new cell after it (or first without one). Replacing a code cell clears its outputs. Either patch or notebook_edits is required."
+                },
                 "dry_run": { "type": "boolean", "default": false },
                 "confirm": { "type": "boolean", "default": false },
                 "expected_versions": EXPECTED_VERSIONS_SCHEMA.clone(),
                 "reason": { "type": "string", "default": "" }
             },
-            "required": ["patch"],
             "additionalProperties": false
         }),
         "patch_check" => json!({
@@ -1415,7 +1464,7 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 39);
+        assert_eq!(tools.len(), 40);
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_manage"));
         assert!(names.contains(&"planning_manage"));

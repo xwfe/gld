@@ -11,6 +11,7 @@ use serde_json::Value;
 /// `(tool, argument, default, minimum, maximum)`.
 const BOUNDED: &[(&str, &str, u64, u64, u64)] = &[
     ("read_file", "max_bytes", 32_768, 1, 1_048_576),
+    ("read_notebook", "max_bytes", 32_768, 1, 1_048_576),
     ("list_dir", "max_depth", 1, 1, 20),
     ("list_dir", "max_entries", 100, 1, 10_000),
     ("list_files", "max_results", 5_000, 1, 50_000),
@@ -141,6 +142,7 @@ mod tests {
             include_str!("file.rs"),
             include_str!("git.rs"),
             include_str!("image_tool.rs"),
+            include_str!("notebook.rs"),
             include_str!("session.rs"),
             include_str!("../harness/tools.rs"),
         ];

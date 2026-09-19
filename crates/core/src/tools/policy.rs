@@ -536,18 +536,22 @@ fn workspace_local_entry_exists(
 }
 
 pub fn validate_patch(arguments: &Value, policy: &PolicySettings) -> Result<(), PolicyError> {
-    let patch = arguments
-        .get("patch")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            PolicyError::new(PolicyReason::PatchMissing, "apply_patch requires a patch")
-        })?;
-    if patch.trim().is_empty() {
-        return Err(PolicyError::new(
+    // 只改 notebook 的 cell 时没有补丁正文，那不是"参数漏了"。
+    let notebook_only = arguments
+        .get("notebook_edits")
+        .and_then(Value::as_array)
+        .is_some_and(|edits| !edits.is_empty());
+    let missing = || {
+        PolicyError::new(
             PolicyReason::PatchMissing,
-            "apply_patch requires a patch",
-        ));
-    }
+            "apply_patch requires a patch (or notebook_edits)",
+        )
+    };
+    let patch = match arguments.get("patch").and_then(Value::as_str) {
+        Some(patch) if !patch.trim().is_empty() => patch,
+        _ if notebook_only => return Ok(()),
+        _ => return Err(missing()),
+    };
 
     if patch.len() > policy.max_patch_bytes {
         return Err(PolicyError::new(
