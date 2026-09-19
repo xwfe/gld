@@ -26,7 +26,8 @@
 | G2.1 | compact 下 `list_skills` / `get_skill` 暴露，skill 目录进说明，但有总长上限，放不下的写明"还有几个，调 list_skills 看" |
 | G2.2 | skill frontmatter 用 `toexec-skill` 解析，多行 `description` 读对 |
 | G2.3 | `gld context`、文档里"compact 不带 Skill"的说法同步改 |
-| G3.* | 开工时再定 |
+| G3.1 | 本机 `search_text` 加 `output_mode`（content / files_with_matches / count）、`multiline`、`type`、`include_hidden`；默认行为不变；认不出来的 `output_mode` / `type` 报错而不是当没过滤 |
+| G3.2 | notebook 按 cell 读写（照 ccnm P40 的形状：新工具 `read_notebook`，`apply_patch` 加 `edit_notebook`，不改 `read_file` 返回 JSON 文本的既有行为） |
 
 ## 3. 不做什么
 
@@ -106,3 +107,29 @@ AI 调一次 `list_skills` 照样拿得到，只是不会自己想起来。
 
 G2.1–G2.3 三条验收都做了。下一块是 G3（本地搜索的输出模式 / 跨行 / 类型过滤、
 notebook 按 cell 读写），开工时再定细目。
+
+### 2026-09-19：G3.1 完成（G3.2 未开工）
+
+本机 `search_text` 补上四项，都是加可选参数，默认行为一个字节没变：
+
+| 参数 | 做什么 | 为什么这么定 |
+| --- | --- | --- |
+| `output_mode` | `content`（默认）/ `files_with_matches`（只给路径，在 `files[]`）/ `count`（每个文件几行，在 `counts[]`） | "这个符号在哪几个文件里"回完整内容是浪费。`max_results` 在 content 下限匹配行数、另外两种限文件数——名字没改，语义写进了工具说明 |
+| `multiline` | 一处匹配可以跨行，`.` 也匹配换行 | 报的行号是匹配**起点**那一行（和 `rg -U` 一致）。跨行统一走正则，字面量先 `regex::escape`：给字面量单写一套跨行的大小写处理，小写化会改变字节偏移，行号就错了 |
+| `type` | `rust` / `py` / `ts` / `md` 这些 ripgrep 类型名 | **不是 rg 的全集**——gld 自己遍历文件，没有那份 100 多条的表。给了不认识的类型是**报错并列出支持的**，不是不过滤：不过滤会让模型以为"这个类型里没有匹配" |
+| `include_hidden` | 也搜点开头的路径 | 默认仍然不搜。以前是硬编码 false，要改 `.github/workflows` 时连"现在写的是什么"都搜不出来 |
+
+实现上 `files_with_matches` 命中一次就不再读这个文件，`count` 才读完。gld 自己的
+数据目录任何情况下都搜不到——那道门在 `is_ignored_path` 第一句，`include_hidden`
+管不着它，已有测试 `walking_into_the_gld_data_home_is_skipped` 钉着。
+
+类型表单独放在 `tools/file_types.rs`：纯数据，好单独测，也好加。
+
+验证：`cargo test --workspace` 610 passed、0 failed；fmt、clippy 干净。新增测试
+覆盖三种输出模式在同一份内容上自洽（只列文件的那份就是有匹配的那些、计数加起来
+等于匹配行数）、跨行匹配只报一条且行号是起点、类型过滤与 `.github` 的显式搜索、
+认不出来的模式和类型都报 `INVALID_ARGUMENT`。
+
+**G3.2（notebook 按 cell 读写）还没开工。**形状照 ccnm P40：新增只读工具
+`read_notebook`，`apply_patch` 加 `edit_notebook`，**不改** `read_file` 对 `.ipynb`
+返回 JSON 文本的既有行为（已有人照着那份文本改 notebook）。
