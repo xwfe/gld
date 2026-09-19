@@ -18,6 +18,7 @@ pub mod session;
 pub mod setup;
 pub mod skill;
 pub mod workspace;
+pub mod workspace_runtime;
 
 pub use context::{SharedToolContext, ToolContext};
 /// 唯一工具执行入口；MCP 与 Actions 必须调用此函数，不得分叉实现。

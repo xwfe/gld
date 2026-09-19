@@ -30,16 +30,19 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         .unwrap_or(false);
     let expected_versions = expected_versions(args)?;
 
-    // 真要落盘的那一路，从这里开始独占，直到函数结束。
+    // 真要落盘的那一路，从这里开始独占这个工作区，直到函数结束。
     //
     // 挡的是 gld 自己的并发写者：两个 MCP 会话同时打补丁，一个读原文、另一个
     // 正在落盘，第一个算出来的新内容就是基于已经过期的原文。dry_run 不写盘，
     // 不占这把锁——预检不该让真正的写操作排队。
     //
-    // 这把锁**管不到别的进程**（编辑器、另一个 gld 实例、git checkout）。那一侧
-    // 靠的是下面的版本前置条件和落盘前复核，两者都不是强 CAS，见
-    // `commit_staged_bytes` 的说明。
-    let _commit_guard = (!dry_run).then(lock_commits);
+    // 锁是按**目录**取的，不是每个上下文一把，也不是整个进程一把：同一个目录
+    // 经 hub、单工作区 listener、CLI 进来是三个 `ToolContext`，得排同一个队；
+    // 两个不同的项目则各写各的，不该互相堵。这把锁管不到别的进程、管不到
+    // `exec` 跑的命令、也管不到 Git 元数据——那几条边界写在
+    // `crate::tools::workspace_runtime` 的模块文档里，那一侧靠的是下面的版本
+    // 前置条件和落盘前复核，两者都不是强 CAS，见 `commit_staged_bytes`。
+    let _commit_guard = (!dry_run).then(|| ctx.runtime.lock_commits());
 
     let file_patches = if patch.is_empty() {
         Vec::new()
@@ -1585,16 +1588,6 @@ fn expected_versions(
         map.insert(path.clone(), version);
     }
     Ok(Some(map))
-}
-
-/// 同一个进程里，落盘这一路串起来。见 `apply_patch` 里取锁处的说明。
-fn lock_commits() -> std::sync::MutexGuard<'static, ()> {
-    static COMMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // 上一个持锁的线程 panic 过：锁里存的是 `()`，没有被弄坏的状态可言，
-    // 接着用就是了——这里 panic 掉反而会把一次正常的补丁变成失败。
-    COMMIT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn patch_failed(message: impl Into<String>) -> WorkspaceError {

@@ -13,6 +13,7 @@ use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
 use crate::tools::session::SessionStore;
 use crate::tools::workspace::{relative_display, Workspace};
+use crate::tools::workspace_runtime::WorkspaceRuntime;
 use crate::usage::ServiceUsage;
 use crate::workspace::AuthConfig;
 
@@ -52,6 +53,12 @@ pub struct ToolContext {
     pub agent_context: Option<AgentContextRuntimeConfig>,
     pub harness: Harness,
     default_cwd: Mutex<PathBuf>,
+    /// 这个工作区目录的执行资源（现在只有写锁）。
+    ///
+    /// 按目录取，不是每个上下文各建一个：同一个目录经 hub、单工作区 listener
+    /// 和 CLI 进来是三个 `ToolContext`，写操作却必须排同一个队。见
+    /// [`crate::tools::workspace_runtime`]，那里也写清了它管不到什么。
+    pub runtime: Arc<WorkspaceRuntime>,
     pub sessions: Arc<SessionStore>,
     usage: Arc<ServiceUsage>,
     context_audit: Mutex<ContextAuditState>,
@@ -122,6 +129,7 @@ impl ToolContext {
             skills: Vec::new(),
             agent_context: None,
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
+            runtime: crate::tools::workspace_runtime::runtime_for(&root),
             default_cwd: Mutex::new(root),
             sessions,
             usage: Arc::new(ServiceUsage::default()),
