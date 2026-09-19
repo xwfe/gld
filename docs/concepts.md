@@ -362,7 +362,7 @@ gld tool list                       # 看当前实际暴露了什么
 
 | 取值 | 工具数 | 说明 |
 | --- | --- | --- |
-| `compact` | 25 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
+| `compact` | 27 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
 | `core` | 39 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
 | `advanced` | 52 | 全部工具都暴露 |
 | `read-only` | 20 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
@@ -370,13 +370,23 @@ gld tool list                       # 看当前实际暴露了什么
 
 上面的数字是当前版本 `gld tool list` 实测出来的，会随版本变；以命令输出为准。
 
-### compact 还会砍掉注入给 AI 的说明和 Skill
+### compact 还会砍掉注入给 AI 的说明，Skill 目录只给一段
 
 省 token 不只体现在工具条数上。`compact` 下：
 
 - **说明文件只注入工作区里的 `AGENTS.md`（或 `AGENTS.override.md`）一份**，
   `.cursorrules`、`CLAUDE.md`、全局说明都不进去；
-- **Skill 一个都不注入**，`list_skills` / `get_skill` 两个工具本身也不暴露。
+- **Skill 目录有字符上限**（约 1200 字符，大概 8–12 条，每条描述截到 120 字符），
+  放不下的在末尾写明"还有几个"。`list_skills` / `get_skill` 两个工具照常暴露，
+  AI 调一次就拿得到全部。
+
+> Skill 这一条 2026-09-19 改过。以前 compact 下 Skill **整个不可用**：目录一条
+> 不给，两个工具也不暴露。结果是项目把用法写进了 `.claude/skills/`，默认档下的
+> AI 却完全不知道有这回事。现在的折中是"给一段带上限的目录"——模型至少知道
+> 这里有东西，剩下的自己去问。
+>
+> 目录里**项目自己的 skill 排在前面**，主目录里那批装给所有项目用的排后面：
+> 上限挤掉谁，得是通用的那些。
 
 `gld context` 会把这件事标出来——打 `✓` 的才真的进去，打 `·` 的只是扫到了：
 
@@ -385,15 +395,18 @@ gld tool list                       # 看当前实际暴露了什么
   ✓ [codex/workspace] AGENTS.md  11 字
   · [claude/global] ~/.claude/CLAUDE.md  888 字
   · [cursor/workspace] .cursorrules  11 字
+Skill（扫到 14，目录里列了 9）
+  ✓ [claude/workspace] release  .claude/skills/release/SKILL.md
+  · [claude/global] brainstorm  ~/.claude/skills/brainstorm/SKILL.md
 ```
 
-要让它们全部生效：`gld ws set tool-profile=advanced`。
-代价是工具从 24 个涨到 51 个，加上多出来的说明和 Skill 目录，
+要让它们全部进去：`gld ws set tool-profile=advanced`。
+代价是工具从 27 个涨到 52 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。
 
 ### `compat-readonly-all` 不是只读
 
-名字里有 `readonly`，但它**暴露的工具和 `advanced` 完全一样（51 个，能写能执行）**。
+名字里有 `readonly`，但它**暴露的工具和 `advanced` 完全一样（52 个，能写能执行）**。
 它唯一改的是给客户端看的**标注**：把每个工具都标成 `readOnlyHint: true`、
 `destructiveHint: false`。
 

@@ -24,6 +24,9 @@ toexec-text = { git = "https://github.com/xwfe/toexec.git", tag = "toexec-text-v
 # 同一个仓库的第二个 crate：原子文件替换。tag 各自独立，升级一个不会
 # 顺带把另一个也换掉。
 toexec-fs = { git = "https://github.com/xwfe/toexec.git", tag = "toexec-fs-v0.2.0" }
+# 第三个：SKILL.md 的 frontmatter。gld 原来自己逐行找 `key:` 前缀，
+# `description: >` 这种多行写法读出来是一个 `>`。
+toexec-skill = { git = "https://github.com/xwfe/toexec.git", tag = "toexec-skill-v0.1.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

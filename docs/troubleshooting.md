@@ -98,7 +98,7 @@ gld tool call exec_command cmd='cargo test'
 | Agent 报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION` | 删除 / 覆盖等危险操作要求 `confirm=true` | 让 Agent 带 `confirm=true` 重试同一工具；命令行复现加 `confirm=true` |
 | Agent 说某个工具不存在 | 当前 `mcp.tool-profile` 没暴露它 | `gld tool list` 看实际暴露了什么；`gld ws set tool-profile=advanced` 换更全的工具集 |
 | 写在 `.cursorrules` / `CLAUDE.md` 里的规则 AI 不理 | 默认工具集 compact 只注入工作区里的 `AGENTS.md` 一份 | `gld context` 看谁打 `✓`（真注入）谁打 `·`（只是扫到）；要全部生效 `gld ws set tool-profile=advanced` |
-| AI 说没有 Skill 可用 | compact 下 Skill 完全不注入，`list_skills` / `get_skill` 也不暴露 | 同上，换 `tool-profile=advanced` |
+| AI 说没有 Skill 可用 | 0.4.0 起 compact 下 Skill 目录有字符上限（约 1200 字符），排在后面的没进说明 | `gld context` 看谁打 `✓`；让 AI 调一次 `list_skills` 就能拿到全部；要全部进说明用 `gld ws set tool-profile=advanced` |
 | Plan 模式下写文件被拒 | 设计如此：Plan 模式只读 | `gld planning mode direct` 或 `goal` |
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
 | 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld ws set allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |

@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::agent_context::render_skill_catalog;
+use crate::agent_context::render_skill_catalog_for_profile;
 use crate::tools::{call_tool, list_tools_for_profile, wrap_mcp_tool_result, SharedToolContext};
 
 pub type SharedState = SharedToolContext;
@@ -52,11 +52,9 @@ fn initialize_result(state: &SharedState) -> Value {
         )
     };
     let current_skills = state.current_skills();
-    let skill_catalog = if state.tool_profile == "compact" {
-        String::new()
-    } else {
-        render_skill_catalog(&current_skills)
-    };
+    // compact 以前一条都不给。现在给一段有上限的目录：放不下的在末尾写明
+    // 还有几个，模型调 list_skills 就能拿到全部（RFC-0003 G2）。
+    let skill_catalog = render_skill_catalog_for_profile(&current_skills, &state.tool_profile).text;
     let history_context = crate::tools::history::context_snapshot(state)
         .ok()
         .flatten()

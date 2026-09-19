@@ -200,17 +200,20 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
         ));
     }
 
+    let listed = if snapshot.skills_injected {
+        snapshot.skills_listed
+    } else {
+        0
+    };
     ctx.out.line(ctx.out.bold(&format!(
-        "Skill（扫到 {}，实际注入 {}）",
+        "Skill（扫到 {}，目录里列了 {}）",
         snapshot.skills.len(),
-        if snapshot.skills_injected {
-            snapshot.skills.len()
-        } else {
-            0
-        }
+        listed
     )));
-    for skill in &snapshot.skills {
-        let mark = if snapshot.skills_injected {
+    for (index, skill) in snapshot.skills.iter().enumerate() {
+        // 打 ✓ 的进了给 AI 的目录。打 · 的不是失效了——`list_skills` 照样
+        // 拿得到——只是说明里看不见，模型自己想起它的机会小。
+        let mark = if index < listed {
             ctx.out.green("✓")
         } else {
             ctx.out.dim("·")
@@ -228,13 +231,21 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
             ));
         return Ok(());
     }
-    if skipped > 0 || (!snapshot.skills.is_empty() && !snapshot.skills_injected) {
+    let skills_cut = snapshot.skills.len() > listed;
+    if skipped > 0 || skills_cut {
         ctx.out.line("");
-        ctx.out.line(ctx.out.yellow(
-            "打 · 的没有注入。默认工具集 compact 为了省 token，说明只留工作区里的 AGENTS.md，Skill 一个都不带。",
-        ));
+        if skipped > 0 {
+            ctx.out.line(ctx.out.yellow(
+                "打 · 的说明没有注入。默认工具集 compact 为了省 token，说明只留工作区里的 AGENTS.md。",
+            ));
+        }
+        if skills_cut {
+            ctx.out.line(ctx.out.yellow(
+                "打 · 的 Skill 没进目录：compact 档的目录有字符上限。它们没有失效——AI 调 list_skills 照样拿得到，只是不会自己想起来。",
+            ));
+        }
         ctx.out
-            .line(ctx.out.dim("要全部生效：gld ws set tool-profile=advanced"));
+            .line(ctx.out.dim("要全部进去：gld ws set tool-profile=advanced"));
     }
     Ok(())
 }

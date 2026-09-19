@@ -227,6 +227,11 @@ fn context_marks_what_is_actually_injected() {
     // 两份内容各带一个独一无二的标记，好在注入的文本里精确找。
     env.write("AGENTS.md", "AGENTS-MARKER-1f2e\n");
     env.write(".cursorrules", "CURSOR-MARKER-9a8b\n");
+    // description 写成 `>` 块：gld 原来逐行找 `key:`，这种写法读出来是一个 `>`。
+    env.write(
+        ".claude/skills/marker-skill/SKILL.md",
+        "---\nname: marker-skill\ndescription: >\n  SKILL-MARKER-7c6d handles releases.\n---\nBody.\n",
+    );
     let port = free_port();
     env.ok(&[
         "ws",
@@ -256,7 +261,17 @@ fn context_marks_what_is_actually_injected() {
         injected.iter().any(|path| path.contains("AGENTS.md")),
         "compact 下 AGENTS.md 应当会注入：{injected:?}"
     );
-    assert_eq!(snapshot["skillsInjected"], false, "compact 下 Skill 不注入");
+    // compact 以前一条 Skill 都不给，等于默认档下 Skill 整体不可用。现在给一段
+    // 有上限的目录（RFC-0003 G2）。
+    assert_eq!(
+        snapshot["skillsInjected"], true,
+        "compact 下 Skill 也进说明"
+    );
+    // 具体数字不断言：扫到的还包括这台机器上用户级的 skill。
+    assert!(
+        snapshot["skillsListed"].as_u64().unwrap_or(0) >= 1,
+        "至少项目里这一个要进目录：{snapshot}"
+    );
 
     let text = mcp_instructions(port);
     assert!(
@@ -266,6 +281,10 @@ fn context_marks_what_is_actually_injected() {
     assert!(
         !text.contains("CURSOR-MARKER-9a8b"),
         "报告说 .cursorrules 不注入，实际进去了"
+    );
+    assert!(
+        text.contains("marker-skill") && text.contains("SKILL-MARKER-7c6d"),
+        "compact 下 skill 目录应当进说明，多行 description 也要读对：{text}"
     );
 
     // 换成 advanced，两份都该进去，报告也要跟着变。

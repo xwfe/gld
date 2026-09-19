@@ -58,9 +58,15 @@ pub struct AgentContextSnapshot {
     /// AGENTS.md 一份。不分开报的话，`gld context` 会把 `.cursorrules`
     /// 列得像是生效了——人照着改了半天没反应，也想不到是这里。
     pub injected_instruction_paths: Vec<String>,
-    /// Skill 目录会不会被写进给 AI 的说明里。compact 工具集下不会，
-    /// 而且 `list_skills` / `get_skill` 两个工具本身也不暴露。
+    /// Skill 目录会不会被写进给 AI 的说明里。
     pub skills_injected: bool,
+    /// 目录里**实际列了几条**。
+    ///
+    /// compact 档的目录有字符预算，扫到 12 条可能只列了 8 条。没列进去的不是
+    /// 失效了——模型调 `list_skills` 照样拿得到全部——但说明里看不见，模型
+    /// 主动想起它们的机会就小。`gld context` 照这个数打勾。
+    #[serde(default)]
+    pub skills_listed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -135,10 +141,16 @@ pub fn effective_instructions(
         .collect()
 }
 
-/// compact 工具集不把 Skill 目录写进说明，`list_skills` / `get_skill`
-/// 也不在它暴露的工具里——等于 Skill 整体不可用。
-pub fn skills_are_injected(tool_profile: &str) -> bool {
-    tool_profile != "compact"
+/// 这个工具集会不会把 Skill 目录写进给 AI 的说明。
+///
+/// 现在所有档都会（2026-09-19 起）。compact 以前一条都不给，`list_skills` /
+/// `get_skill` 也不暴露，等于 Skill 整体不可用；现在改成"给一段有上限的目录"，
+/// 上限见 [`COMPACT_SKILL_CATALOG_CHARS`]。
+///
+/// 函数留着，是因为"有没有 skill 进说明"这件事 `gld context` 和 MCP 握手两边
+/// 都要问，将来再出现某个档不带目录时，改这一处就够。
+pub fn skills_are_injected(_tool_profile: &str) -> bool {
+    true
 }
 
 pub fn discover(
@@ -164,12 +176,16 @@ pub fn discover(
         .into_iter()
         .map(|document| document.path)
         .collect();
+    // 目录里实际列了几条，用的是握手时同一个渲染函数——分开算，`gld context`
+    // 迟早会报一个和模型看到的不一样的数。
+    let skills_listed = render_skill_catalog_for_profile(&skill_entries, tool_profile).listed;
     AgentContextSnapshot {
         instructions,
         skills,
         rendered_instructions,
         injected_instruction_paths,
         skills_injected: skills_are_injected(tool_profile),
+        skills_listed,
     }
 }
 
@@ -544,6 +560,11 @@ pub fn discover_skills(
             body,
         });
     }
+    // 项目自己的 skill 排前面。发现顺序是按来源来的，主目录那批（`global`）
+    // 先加，于是项目里的排在后面——compact 档的目录有字符预算，那样一来
+    // 这个项目专有的 skill 会被机器上装的通用 skill 挤掉。稳定排序，同一档
+    // 内部的顺序不变。
+    result.sort_by_key(|entry| u8::from(entry.descriptor.scope == "global"));
     result
 }
 
@@ -561,74 +582,124 @@ pub fn render_instruction_documents(documents: &[InstructionDocument]) -> String
     out.trim().to_string()
 }
 
-pub fn render_skill_catalog(skills: &[SkillEntry]) -> String {
+/// compact 档能给 skill 目录的字符数。
+///
+/// compact 是默认档，存在的理由就是省 token；但"一个都不给"的结果是模型根本
+/// 不知道这个项目有 skill（v3 方案 3.3 节）。折中是给一段有上限的目录，放不下
+/// 的明说还有几个、去哪儿看——模型照样能用 `list_skills` 拿到全部。
+///
+/// 1200 字符大约是 8–12 条（每条被截到 120 字符）。
+const COMPACT_SKILL_CATALOG_CHARS: usize = 1_200;
+
+/// compact 档下每条描述截到多少字符。
+const COMPACT_SKILL_DESCRIPTION_CHARS: usize = 120;
+
+/// 渲染好的 skill 目录，外加"目录里实际列了几条"。
+///
+/// 条数要带出来，是因为 `gld context` 得如实报：说明里列了 8 条、扫到 12 条，
+/// 剩下 4 条调 `list_skills` 能拿到。两边各算一遍迟早对不上。
+pub struct SkillCatalog {
+    pub text: String,
+    pub listed: usize,
+}
+
+pub fn render_skill_catalog_for_profile(skills: &[SkillEntry], tool_profile: &str) -> SkillCatalog {
     if skills.is_empty() {
-        return String::new();
+        return SkillCatalog {
+            text: String::new(),
+            listed: 0,
+        };
     }
+    let compact = tool_profile == "compact";
+    let description_chars = if compact {
+        COMPACT_SKILL_DESCRIPTION_CHARS
+    } else {
+        250
+    };
+    let budget = compact.then_some(COMPACT_SKILL_CATALOG_CHARS);
+
     let mut out = String::from("Available skills are loaded on demand. Use list_skills to inspect them and get_skill with a skill id to load the full SKILL.md.\n");
+    let mut listed = 0;
     for skill in skills.iter().take(50) {
         let description = skill
             .descriptor
             .description
             .chars()
-            .take(250)
+            .take(description_chars)
             .collect::<String>();
-        out.push_str(&format!(
+        let line = format!(
             "- {}: {} (provider: {}, id: {})\n",
             skill.descriptor.name, description, skill.descriptor.provider, skill.descriptor.id
+        );
+        // 预算用完就停，但至少给一条：一条都不给等于没有目录。
+        if let Some(budget) = budget {
+            if listed > 0 && out.chars().count() + line.chars().count() > budget {
+                break;
+            }
+        }
+        out.push_str(&line);
+        listed += 1;
+    }
+    if listed < skills.len() {
+        out.push_str(&format!(
+            "({} more not listed here; call list_skills to see all {}.)\n",
+            skills.len() - listed,
+            skills.len()
         ));
     }
-    out.trim().to_string()
+    SkillCatalog {
+        text: out.trim().to_string(),
+        listed,
+    }
 }
 
+/// 读一份 SKILL.md 的 name、description 和正文。
+///
+/// frontmatter 交给 `toexec-skill`（和 ccnm 共用的那一份）。gld 原来是逐行找
+/// `key:` 前缀，于是官方 skill 里常见的
+///
+/// ```text
+/// description: >
+///   Use this when …
+/// ```
+///
+/// 读出来的描述就是一个 `>`——模型看到的目录里，这条 skill 等于没有描述，
+/// 也就永远不会被选中（v3 方案 3.3 节点名的缺陷）。
+///
+/// frontmatter 读不下去（tab 缩进、引号没闭合……）时**整条跳过**：没有描述的
+/// skill 放进目录也没有用，而且我们不猜作者想写什么。
 fn parse_skill(raw: &str, path: &Path) -> Option<(String, String, String)> {
-    let (frontmatter, body) = split_frontmatter(raw);
-    let name = frontmatter_value(frontmatter, "name")
+    let (frontmatter, body) = toexec_skill::frontmatter::split(raw);
+    let parsed = toexec_skill::frontmatter::parse(frontmatter.unwrap_or_default()).ok()?;
+    let name = parsed
+        .text("name")
+        .map(str::to_string)
         .or_else(|| path.parent()?.file_name()?.to_str().map(str::to_string))?;
-    let description = frontmatter_value(frontmatter, "description")?;
-    if name.trim().is_empty() || description.trim().is_empty() || description.chars().count() > 1024
-    {
+    let description = parsed.text("description")?;
+    if name.trim().is_empty() || description.chars().count() > 1024 {
         return None;
     }
     Some((
         name.trim().to_string(),
-        description.trim().to_string(),
+        description.to_string(),
         body.trim().to_string(),
     ))
-}
-
-fn split_frontmatter(raw: &str) -> (&str, &str) {
-    let trimmed = raw.trim_start_matches('\u{feff}');
-    if !trimmed.starts_with("---") {
-        return ("", trimmed);
-    }
-    let rest = &trimmed[3..];
-    if let Some(end) = rest.find("\n---") {
-        (&rest[..end], &rest[end + 4..])
-    } else {
-        ("", trimmed)
-    }
-}
-
-fn frontmatter_value(frontmatter: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}:");
-    frontmatter.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix(&prefix)
-            .map(|value| value.trim().trim_matches(['\'', '"']).to_string())
-    })
 }
 
 fn cursor_rule_is_always_apply(path: &Path) -> bool {
     let Ok(raw) = fs::read_to_string(path) else {
         return false;
     };
-    let (frontmatter, _) = split_frontmatter(&raw);
-    frontmatter.lines().any(|line| {
-        line.trim()
-            .replace(' ', "")
-            .eq_ignore_ascii_case("alwaysapply:true")
-    })
+    let (frontmatter, _) = toexec_skill::frontmatter::split(&raw);
+    let Some(frontmatter) = frontmatter else {
+        return false;
+    };
+    // `alwaysApply` / `always_apply` / `alwaysapply` 都认（共享库的键匹配
+    // 不分大小写和连字符），`"true"` 这种带引号的也认。
+    toexec_skill::frontmatter::parse(frontmatter)
+        .ok()
+        .and_then(|fm| fm.flag("alwaysApply"))
+        .unwrap_or(false)
 }
 
 fn effective_sources(sources: &[String]) -> (Vec<String>, bool) {
@@ -1175,5 +1246,112 @@ mod tests {
         assert!(!skills
             .iter()
             .any(|skill| skill.descriptor.name == "ignored-dependency"));
+    }
+
+    /// `description: >` 是官方 skill 里最常见的写法之一。gld 原来逐行找
+    /// `key:` 前缀，读出来的描述就是一个 `>`——目录里那条 skill 等于没有描述，
+    /// 模型永远不会选它（v3 方案 3.3 节点名的缺陷）。
+    #[test]
+    fn a_folded_description_is_read_as_text_not_as_a_greater_than_sign() {
+        let root = tempfile::tempdir().expect("workspace");
+        let dir = root.path().join(".claude/skills/release");
+        fs::create_dir_all(&dir).expect("skill dir");
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: release\ndescription: >\n  Use this when cutting a release.\n  Runs the checks first.\n---\nBody.\n",
+        )
+        .expect("skill");
+
+        let skills = with_empty_home(|| discover_skills(root.path(), &[AUTO_SOURCE.into()], ""));
+        let release = skills
+            .iter()
+            .find(|skill| skill.descriptor.name == "release")
+            .expect("release skill");
+        assert!(
+            release
+                .descriptor
+                .description
+                .contains("Use this when cutting a release."),
+            "{}",
+            release.descriptor.description
+        );
+        assert!(!release.descriptor.description.starts_with('>'));
+    }
+
+    /// compact 档的目录有字符预算：放不下的不是丢掉不提，而是明说还有几个、
+    /// 去哪儿看。模型据此知道"这里还有东西"，调一次 list_skills 就拿得到。
+    #[test]
+    fn the_compact_catalog_says_how_many_it_left_out() {
+        let skills = (0..40)
+            .map(|index| SkillEntry {
+                descriptor: SkillDescriptor {
+                    id: format!("id{index:02}"),
+                    name: format!("skill-{index:02}"),
+                    description: "A".repeat(200),
+                    provider: "claude".into(),
+                    path: format!(".claude/skills/skill-{index:02}/SKILL.md"),
+                    scope: "workspace".into(),
+                },
+                body: String::new(),
+            })
+            .collect::<Vec<_>>();
+
+        let compact = render_skill_catalog_for_profile(&skills, "compact");
+        assert!(
+            compact.listed > 0 && compact.listed < skills.len(),
+            "{}",
+            compact.listed
+        );
+        assert!(
+            compact.text.chars().count() <= COMPACT_SKILL_CATALOG_CHARS + 200,
+            "{}",
+            compact.text
+        );
+        assert!(
+            compact.text.contains(&format!(
+                "{} more not listed here",
+                skills.len() - compact.listed
+            )),
+            "{}",
+            compact.text
+        );
+        assert!(compact.text.contains("call list_skills"));
+
+        // 别的档沿用原来的 50 条上限，不受这个预算影响。
+        let advanced = render_skill_catalog_for_profile(&skills, "advanced");
+        assert_eq!(advanced.listed, 40);
+    }
+
+    /// 项目自己的 skill 排在主目录那批前面：compact 的预算有限，挤掉的应该是
+    /// 通用的那些，不是这个项目专有的。
+    #[test]
+    fn workspace_skills_come_before_the_ones_installed_on_this_machine() {
+        let root = tempfile::tempdir().expect("workspace");
+        let dir = root.path().join(".claude/skills/project-only");
+        fs::create_dir_all(&dir).expect("skill dir");
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: project-only\ndescription: Project specific\n---\nBody.\n",
+        )
+        .expect("skill");
+
+        let home = tempfile::tempdir().expect("home");
+        let home_dir = home.path().join(".claude/skills/machine-wide");
+        fs::create_dir_all(&home_dir).expect("home skill dir");
+        fs::write(
+            home_dir.join("SKILL.md"),
+            "---\nname: machine-wide\ndescription: Installed for every project\n---\nBody.\n",
+        )
+        .expect("home skill");
+
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.path().to_path_buf()));
+        let skills = discover_skills(root.path(), &[AUTO_SOURCE.into()], "");
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+
+        let names = skills
+            .iter()
+            .map(|skill| skill.descriptor.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["project-only", "machine-wide"], "{names:?}");
     }
 }

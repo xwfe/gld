@@ -20,6 +20,7 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
 toexec-fs = { workspace = true }
+toexec-skill = { workspace = true }
 toexec-text = { workspace = true }
 axum = { version = "0.8", features = ["form"] }
 tower-http = { version = "0.6", features = ["cors"] }

@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::agent_context::render_skill_catalog;
+use crate::agent_context::render_skill_catalog_for_profile;
 use crate::auth::AuthContext;
 use crate::bridge::member::{CcnmMember, Mode};
 use crate::bridge::peer::PeerError;
@@ -782,12 +782,10 @@ impl Hub {
             .into_iter()
             .filter(|name| !HIDDEN_TOOLS.contains(name) && member_tools.contains(name))
             .collect();
-        // compact 下不带 Skill 目录，和单工作区 initialize 的口径一致。
-        let skills = if context.tool_profile == "compact" {
-            String::new()
-        } else {
-            render_skill_catalog(&context.current_skills())
-        };
+        // 目录怎么给（compact 有字符预算）和单工作区 initialize 走同一个函数，
+        // 两边口径不会漂。
+        let skills =
+            render_skill_catalog_for_profile(&context.current_skills(), &context.tool_profile).text;
         tool_ok(json!({
             "name": member.name,
             "path": member.path,

@@ -589,6 +589,11 @@ pub const COMPACT_TOOLS: &[&str] = &[
     "task_manage",
     "check_exec_environment",
     "check_command",
+    // compact 以前把这两个砍了，等于默认档下 Skill 整体不可用——项目把用法
+    // 写进 skill，模型却看不见（RFC-0003 G2）。目录本身有字符预算，见
+    // agent_context::COMPACT_SKILL_CATALOG_CHARS。
+    "list_skills",
+    "get_skill",
     "get_default_cwd",
     "set_default_cwd",
     "read_file",
@@ -1428,7 +1433,11 @@ mod tests {
         assert!(!names.contains(&"history_session_search"));
         assert!(!names.contains(&"history_session_read"));
         assert!(!names.contains(&"planning_state"));
-        assert!(!names.contains(&"list_skills"));
+        // compact 以前把 Skill 整个砍掉了：项目把用法写进 skill，默认档下
+        // 模型既看不见目录、也没有工具能问（RFC-0003 G2）。目录本身仍有
+        // 字符预算，工具只有两个，代价很小。
+        assert!(names.contains(&"list_skills"));
+        assert!(names.contains(&"get_skill"));
         assert!(!names.contains(&"request_permissions"));
         assert_eq!(tool_api_descriptor()["version"], "2");
     }
