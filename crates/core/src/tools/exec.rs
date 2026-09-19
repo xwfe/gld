@@ -14,7 +14,11 @@ use crate::tools::context::ToolContext;
 use crate::tools::session::{ExecSession, SessionStore};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
-pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+pub fn exec_command(
+    ctx: &ToolContext,
+    sessions: &Arc<SessionStore>,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
     let cmd = args
         .get("cmd")
         .and_then(Value::as_str)
@@ -87,6 +91,7 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
     let result = crate::async_rt::block_on(async {
         run_command(
             ctx,
+            sessions,
             cmd,
             &workdir.path,
             Duration::from_millis(timeout_ms),
@@ -541,6 +546,7 @@ fn list_directory(
 #[allow(clippy::too_many_arguments)]
 async fn run_command(
     ctx: &ToolContext,
+    sessions: &Arc<SessionStore>,
     cmd: &str,
     cwd: &Path,
     limit: Duration,
@@ -592,13 +598,13 @@ async fn run_command(
         }),
     })?;
 
-    let session = ctx.sessions.insert(ExecSession::new_with_mode(child, tty));
+    let session = sessions.insert(ExecSession::new_with_mode(child, tty));
     session.spawn_readers().await;
     let deadline = start + limit;
 
     if yield_time.is_zero() {
         let snapshot = session.snapshot(max_output);
-        spawn_timeout_monitor(ctx.sessions.clone(), session.clone(), deadline);
+        spawn_timeout_monitor(sessions.clone(), session.clone(), deadline);
         return Ok(merge_exec_result(snapshot, start, cmd, cwd, true));
     }
 
@@ -632,7 +638,7 @@ async fn run_command(
             // output), so they must stay readable for a while, like after a
             // timeout; removing the session here made every one of them
             // SESSION_NOT_FOUND.
-            schedule_session_eviction(ctx.sessions.clone(), session.session_id.clone());
+            schedule_session_eviction(sessions.clone(), session.session_id.clone());
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, false));
         }
         if !tty && Instant::now() >= deadline {
@@ -642,7 +648,7 @@ async fn run_command(
             session.wait_for_readers().await;
             let snapshot = session.snapshot(max_output);
             // Snapshot is embedded; schedule eviction so abandoned timeouts do not linger.
-            schedule_session_eviction(ctx.sessions.clone(), session.session_id.clone());
+            schedule_session_eviction(sessions.clone(), session.session_id.clone());
             return Err(WorkspaceError::ToolDetails {
                 code: "TIMEOUT",
                 message: "Command timed out.".into(),
@@ -658,7 +664,7 @@ async fn run_command(
         }
         if Instant::now() - start >= yield_time || tty {
             let snapshot = session.snapshot(max_output);
-            spawn_timeout_monitor(ctx.sessions.clone(), session.clone(), deadline);
+            spawn_timeout_monitor(sessions.clone(), session.clone(), deadline);
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, true));
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -695,7 +701,12 @@ fn schedule_session_eviction(sessions: Arc<SessionStore>, session_id: String) {
     });
 }
 
-pub fn exec_health_check(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
+/// 探针命令记在**调用方自己的**会话表里：它跟普通命令一样会起进程，超时时
+/// 也一样留下一条可读的会话，只有主人看得见。
+pub fn exec_health_check(
+    ctx: &ToolContext,
+    sessions: &Arc<SessionStore>,
+) -> Result<Value, WorkspaceError> {
     let start = Instant::now();
     let cwd = ctx.workspace.root().to_path_buf();
     #[cfg(windows)]
@@ -705,6 +716,7 @@ pub fn exec_health_check(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
 
     let result = crate::async_rt::block_on(run_command(
         ctx,
+        sessions,
         probe,
         &cwd,
         Duration::from_secs(5),

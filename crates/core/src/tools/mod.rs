@@ -1,4 +1,5 @@
 pub(crate) mod args;
+pub mod caller;
 pub mod context;
 pub mod dispatch;
 pub mod exec;
@@ -20,9 +21,11 @@ pub mod skill;
 pub mod workspace;
 pub mod workspace_runtime;
 
+pub use caller::Caller;
 pub use context::{SharedToolContext, ToolContext};
 /// 唯一工具执行入口；MCP 与 Actions 必须调用此函数，不得分叉实现。
-pub use dispatch::call_tool;
+/// 网络进来的调用走 [`call_tool_as`]，把连接的主体一起带上。
+pub use dispatch::{call_tool, call_tool_as};
 pub use policy::{validate_actions_exposure, PolicySettings};
 pub use registry::{
     exposed_tool_names, is_allowed_tool, list_tools, list_tools_for_profile, MUTATING_TOOLS,

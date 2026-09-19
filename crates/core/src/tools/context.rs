@@ -11,7 +11,6 @@ use crate::agent_context::{
 };
 use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
-use crate::tools::session::SessionStore;
 use crate::tools::workspace::{relative_display, Workspace};
 use crate::tools::workspace_runtime::WorkspaceRuntime;
 use crate::usage::ServiceUsage;
@@ -53,13 +52,18 @@ pub struct ToolContext {
     pub agent_context: Option<AgentContextRuntimeConfig>,
     pub harness: Harness,
     default_cwd: Mutex<PathBuf>,
-    /// 这个工作区目录的执行资源（现在只有写锁）。
+    /// 这个工作区目录的执行资源：写锁，和按调用方分的命令会话表。
     ///
     /// 按目录取，不是每个上下文各建一个：同一个目录经 hub、单工作区 listener
-    /// 和 CLI 进来是三个 `ToolContext`，写操作却必须排同一个队。见
-    /// [`crate::tools::workspace_runtime`]，那里也写清了它管不到什么。
+    /// 和 CLI 进来是三个 `ToolContext`，写操作却必须排同一个队，命令会话也得
+    /// 认同一个主人。见 [`crate::tools::workspace_runtime`]，那里也写清了它
+    /// 管不到什么。
+    ///
+    /// **会话表不在这儿，要用得带上调用方主体去 `runtime` 取**
+    /// （`runtime.sessions_for(caller)`）。上下文是按入口建的，主体是按连接
+    /// 来的——放上下文上，一个入口的所有连接就共用一张表，谁都能读谁的命令
+    /// 输出。
     pub runtime: Arc<WorkspaceRuntime>,
-    pub sessions: Arc<SessionStore>,
     usage: Arc<ServiceUsage>,
     context_audit: Mutex<ContextAuditState>,
 }
@@ -109,11 +113,7 @@ impl ToolContext {
         harness_root: PathBuf,
     ) -> Self {
         let root = workspace.root().to_path_buf();
-        let sessions = Arc::new(SessionStore::new());
         let runtime = crate::tools::workspace_runtime::runtime_for(&root);
-        // 登记，不是共享：这个表还是这个上下文自己的，登记只为了切 plan 模式
-        // 时能把这个目录上的命令一并停掉。为什么不共享，见 WorkspaceRuntime。
-        runtime.register_session_store(&sessions);
         // 「读能不能出 Workspace」是策略的一部分，但真正执行判断的是 Workspace
         // 自己（路径解析都在那儿）。在这一个地方转交，免得每个调用点各设一次、
         // 漏掉哪个就等于悄悄放开了限制。
@@ -134,7 +134,6 @@ impl ToolContext {
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
             runtime,
             default_cwd: Mutex::new(root),
-            sessions,
             usage: Arc::new(ServiceUsage::default()),
             context_audit: Mutex::new(ContextAuditState::default()),
         }

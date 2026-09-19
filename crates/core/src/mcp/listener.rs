@@ -26,7 +26,7 @@ use crate::logs::append_profile_log;
 use crate::mcp::server::{handle_request, SharedState};
 use crate::secret::SecretStore;
 use crate::settings::AppSettings;
-use crate::tools::{build_tool_context, SharedToolContext};
+use crate::tools::{build_tool_context, Caller, SharedToolContext};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, RuntimeConfig};
 
@@ -70,12 +70,13 @@ impl Endpoint {
 
     /// 同步跑工具，必须在 `spawn_blocking` 里调。
     ///
-    /// 单工作区的那支不用 `auth`：它没有远端成员，也就没有"这条连接属于谁"
-    /// 这个问题。
+    /// 两支都要 `auth`：它是这次调用的主体，命令会话按它分表。不传的话，
+    /// 这个入口上所有连接共用一张表，谁都能拿别人的 `session_id` 去读
+    /// （见 [`crate::tools::caller`]）。
     fn handle(&self, auth: &AuthContext, body: &Value) -> Handled {
         match self {
             Self::Workspace(context) => Handled {
-                response: handle_request(context, body),
+                response: handle_request(context, &Caller::from_auth(auth), body),
                 context: Some(context.clone()),
                 member: None,
             },

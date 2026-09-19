@@ -53,6 +53,14 @@ impl SessionStore {
             .remove(session_id);
     }
 
+    /// 一条会话都没有。
+    ///
+    /// [`crate::tools::workspace_runtime`] 拿它清理空表：主体按 OAuth
+    /// `client_id` 分，跑几天的守护进程会攒下一堆没人再来读的空壳。
+    pub fn is_empty(&self) -> bool {
+        self.sessions.lock().expect("sessions lock").is_empty()
+    }
+
     fn session_ids(&self) -> Vec<String> {
         self.sessions
             .lock()

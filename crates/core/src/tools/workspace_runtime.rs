@@ -1,8 +1,8 @@
 //! 一个工作区目录的执行资源归谁所有。
 //!
 //! 先说清楚它**不是**什么：跟 `crate::runtime`（`RuntimeSupervisor`）没关系，
-//! 那个管的是 MCP/Actions 这类服务条目的启停。这里管的是"同一个目录上的
-//! 写操作怎么排队"。
+//! 那个管的是 MCP/Actions 这类服务条目的启停。这里管的是"同一个目录上的写
+//! 操作怎么排队"和"这个目录上的命令会话归谁"。
 //!
 //! 为什么要有这么个东西：补丁落盘以前靠 `patch.rs` 里一把 `static` Mutex 串
 //! 起来，那是**整个进程一把**——hub 里项目 A 打补丁，项目 B 得排队等它，而
@@ -11,7 +11,7 @@
 //! 明说过这件事，也就随时会被下一次重构弄没。
 //!
 //! 所以把它变成一件说得出口的事：**一个目录一个 [`WorkspaceRuntime`]，谁要
-//! 写这个目录就得先找它拿锁。**
+//! 写这个目录就得先找它拿锁，谁的命令会话也在它这儿按主体分表存着。**
 //!
 //! # 管得到什么
 //!
@@ -24,6 +24,10 @@
 //!   命令在 `yield_time_ms`（默认 1 秒，上限 30 秒）之内跑完，那就是它的全程；
 //!   期间补丁得排队。挡的是"一边跑命令一边改源文件"——那种交叉出来的结果没法
 //!   解释，命令读到的是半新半旧的文件。
+//! - **命令会话归谁**。`exec_command` 起的命令记在"目录 + 调用方主体"这张表
+//!   里（[`crate::tools::caller::Caller`]）。同一个主体换个入口进来读得到自己
+//!   的 `session_id`，换个主体就完全看不见——`read_output` 那边报的是
+//!   `SESSION_NOT_FOUND`，和"这个 id 根本不存在"长得一模一样，不给枚举机会。
 //!
 //! 等写权最多等 [`WRITE_LOCK_WAIT`]，超了就报 `WORKSPACE_BUSY`，不挂着。
 //!
@@ -45,6 +49,10 @@
 //!   `GLD_HOME` 写同一个目录，就是两个互不知晓的写域。同一台机器上要共用执行
 //!   权威，`GLD_HOME` 必须一致。ccnm 那边有同样的约束，两边近期都不打算为此
 //!   造一套跨产品的锁服务。
+//! - **同一个入口上认不出"两个人"的那些情况**。会话表按主体分，但匿名连接
+//!   （`auth_type=noauth`）和共用一条 bearer 令牌的客户端本来就只有一个主体，
+//!   它们之间没有隔离可言。哪些分得开、哪些分不开，列在
+//!   [`crate::tools::caller`]。
 //! - **不是 gld 的写者**——编辑器、`git checkout`、另一个 AI 工具。文件锁是
 //!   劝告锁（advisory），不参与的人照写不误。那一侧靠的是补丁的版本前置条件
 //!   和落盘前复核，两者都不是强 CAS。
@@ -58,11 +66,12 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 
+use crate::tools::caller::Caller;
 use crate::tools::session::SessionStore;
 
 /// 等写权最多等这么久，超了就告诉调用方"有人正在写"。
@@ -82,25 +91,44 @@ const WRITE_LOCK_POLL: Duration = Duration::from_millis(20);
 
 /// 一个工作区目录的执行资源。
 ///
-/// 两件东西：写锁，以及这个目录上都有哪些命令会话表。
+/// 两件东西：写锁，以及这个目录上的命令会话表。
 ///
-/// **会话表是"登记"不是"共享"**：每个 `ToolContext` 还是各有各的
-/// `SessionStore`，A 入口起的命令 B 入口看不到。真要共享得先能回答"谁能读谁
-/// 的输出"，而 gld 现在没有通用的调用方主体标识——`call_local` 只知道是哪个
-/// workspace，不知道是谁在调。那是 L1 里 `AuthContext + workspace grant` 的
-/// 活，不能顺手塞进来：共享了却没有主体检查，等于把别人的命令输出摊开给所有
-/// 连进来的人。这里登记的用处只有一个——切 plan 模式时把这个目录上的命令全停掉。
-#[derive(Debug)]
+/// **会话表按调用方分，一个 [`Caller`] 一张。**不跟着 `ToolContext` 走，
+/// 所以两件事同时成立：
+///
+/// - 同一个主体不管经哪个 `ToolContext` 进来，看到的是同一张表。hub 里
+///   `context_for` 因为配置指纹变了重建一次上下文，正在跑的后台命令和它的
+///   `session_id` 都还在。
+/// - 不同主体看到的是不同的表，**互相根本看不见**。A 拿着 B 的 `session_id`
+///   去读，得到 `SESSION_NOT_FOUND`，跟"这个 id 不存在"一个样子，不给枚举
+///   机会。分得开哪些主体、分不开哪些，写在 [`crate::tools::caller`]。
 pub struct WorkspaceRuntime {
     commit_lock: Mutex<()>,
-    /// 这个目录上的会话表，弱引用：`ToolContext` 没了就跟着失效，不拖着它。
-    session_stores: Mutex<Vec<Weak<SessionStore>>>,
+    /// 这个目录上的命令会话表，按调用方分。
+    sessions: Mutex<HashMap<Caller, Arc<SessionStore>>>,
     /// 跨进程那一层的锁文件。
     ///
     /// `None` 表示建不出来（数据目录不可写之类）。那时只剩进程内互斥，
     /// [`WorkspaceRuntime::lock_commits`] 会记一条 warn——为什么是降级而不是
     /// 拒绝写，说明在那里。
     lock_file: Option<PathBuf>,
+}
+
+/// 排障时想知道的就这两件：跨进程那把锁落在哪个文件，以及这个目录上有几个
+/// 主体还挂着会话。**不派生 `Debug`**：里面的 `SessionStore` 一路连着
+/// `tokio::process::Child`，整个打出来既没人看又可能把命令输出带进日志。
+impl std::fmt::Debug for WorkspaceRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let callers = self
+            .sessions
+            .lock()
+            .map(|sessions| sessions.len())
+            .unwrap_or(0);
+        f.debug_struct("WorkspaceRuntime")
+            .field("lock_file", &self.lock_file)
+            .field("session_tables", &callers)
+            .finish()
+    }
 }
 
 /// 落盘期间握着的写权，丢掉就释放。
@@ -191,49 +219,69 @@ impl WorkspaceRuntime {
         self.lock_file.as_deref()
     }
 
-    /// 把一个 `ToolContext` 的会话表登记到这个目录名下。
+    /// 这个调用方在这个目录上的命令会话表；没有就建一张。
     ///
-    /// 重复登记同一个表不会记两遍；已经没人用的旧表顺手清掉。
-    pub fn register_session_store(&self, store: &Arc<SessionStore>) {
-        let mut stores = self
-            .session_stores
+    /// 同一个 `caller` 拿到的永远是同一张表，跟他经哪个 `ToolContext` 进来
+    /// 无关。换一个 `caller` 就是另一张表，两边互相看不见。
+    pub fn sessions_for(&self, caller: &Caller) -> Arc<SessionStore> {
+        let mut sessions = self
+            .sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        stores.retain(|entry| entry.strong_count() > 0);
-        if !stores
-            .iter()
-            .filter_map(Weak::upgrade)
-            .any(|registered| Arc::ptr_eq(&registered, store))
-        {
-            stores.push(Arc::downgrade(store));
-        }
+        // 顺手扔掉没人要的空表。主体按 OAuth client_id 分，守护进程一跑几天
+        // 就会攒下一堆再也不会有人来读的空壳。
+        //
+        // 两个条件缺一不可，**别改成只看 `is_empty()`**：并发请求下，线程 A
+        // 刚取走一张新建的空表还没来得及往里塞会话，线程 B 就会把它从这里清
+        // 掉；A 随后起的命令落在一张脱了钩的表上，`terminate_all_sessions`
+        // 和切 plan 模式再也停不掉它。`strong_count > 1` 说的就是"还有人拿着
+        // 它"——取表时的 `Arc::clone` 和这里的清理都在同一把锁里，所以看到的
+        // 计数是准的。
+        sessions.retain(|_, store| Arc::strong_count(store) > 1 || !store.is_empty());
+        Arc::clone(sessions.entry(caller.clone()).or_default())
     }
 
-    /// 还挂着的登记数（顺手清掉已经没人用的）。测试用。
+    /// 还留着的会话表张数（顺手清掉空的）。测试用。
     #[cfg(test)]
-    fn registered_stores(&self) -> usize {
-        let mut stores = self
-            .session_stores
+    fn session_tables(&self) -> usize {
+        let mut sessions = self
+            .sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        stores.retain(|entry| entry.strong_count() > 0);
-        stores.len()
+        sessions.retain(|_, store| !store.is_empty());
+        sessions.len()
     }
 
     /// 停掉这个目录上所有还在跑的命令，返回停掉的条数。
     ///
-    /// 切到 plan 模式时用：那时说好了"只看不动手"，还在跑的命令得停。
+    /// 切到 plan 模式时用：那时说好了"只看不动手"，还在跑的命令得停——
+    /// 不分是谁起的，因为模式是整个目录的。
     pub fn terminate_all_sessions(&self) -> usize {
+        self.terminate_sessions(|_| true)
+    }
+
+    /// 只停掉某一个入口在这个目录上起的命令，返回停掉的条数。
+    ///
+    /// hub 停掉、成员被移出 hub 时用：收回的是"经这个入口访问"的权限，
+    /// 命令行和工作区自己的监听器起的命令不该被连累。
+    pub fn terminate_sessions_in_scope(&self, scope: &str) -> usize {
+        self.terminate_sessions(|caller| caller.scope() == scope)
+    }
+
+    fn terminate_sessions(&self, matches: impl Fn(&Caller) -> bool) -> usize {
         let stores: Vec<Arc<SessionStore>> = {
-            let mut stores = self
-                .session_stores
+            let sessions = self
+                .sessions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            stores.retain(|entry| entry.strong_count() > 0);
-            stores.iter().filter_map(Weak::upgrade).collect()
+            sessions
+                .iter()
+                .filter(|(owner, _)| matches(owner))
+                .map(|(_, store)| Arc::clone(store))
+                .collect()
         };
-        // 锁在这里就放开了：停命令要等子进程收尾，攥着锁会把同目录上正要登记
-        // 的新上下文一起堵住。
+        // 锁在这里就放开了：停命令要等子进程收尾（每个最多 1.5 秒），攥着锁会
+        // 把同目录上正要取表的调用一起堵住。
         stores.into_iter().map(|store| store.terminate_all()).sum()
     }
 }
@@ -371,7 +419,7 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
     Arc::clone(runtimes.entry(key).or_insert_with_key(|key| {
         Arc::new(WorkspaceRuntime {
             commit_lock: Mutex::new(()),
-            session_stores: Mutex::new(Vec::new()),
+            sessions: Mutex::new(HashMap::new()),
             lock_file: lock_path_for(key),
         })
     }))
@@ -491,29 +539,141 @@ mod tests {
         let _ = FileExt::unlock(&other);
     }
 
-    /// 每个上下文都得把自己的会话表登记上来，不然切 plan 模式时停不掉它起
-    /// 的命令。上下文没了，登记跟着失效——弱引用不拖着它。
+    /// 同一个主体不管从哪个上下文进来，拿到的是同一张会话表；换个主体就是
+    /// 另一张。前半条是"上下文重建不丢 session_id"，后半条是"别人的命令你
+    /// 看不见"。
     #[test]
-    fn every_context_on_a_directory_registers_its_session_store() {
+    fn one_caller_keeps_its_session_table_and_another_caller_gets_a_different_one() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let runtime = runtime_for(&root);
+        let mine = caller("alpha");
+        let yours = caller("beta");
+
+        assert!(
+            Arc::ptr_eq(&runtime.sessions_for(&mine), &runtime.sessions_for(&mine)),
+            "同一个主体拿到了两张表——上下文一重建，他的 session_id 就查不到了"
+        );
+        assert!(
+            !Arc::ptr_eq(&runtime.sessions_for(&mine), &runtime.sessions_for(&yours)),
+            "两个主体共用一张表，A 拿着 B 的 session_id 就能读 B 的命令输出"
+        );
+    }
+
+    /// 同一个主体在两个目录上也是两张表：会话跟着目录走，不是跟着人走。
+    #[test]
+    fn one_caller_on_two_directories_gets_two_session_tables() {
+        let a = tempdir().expect("a");
+        let b = tempdir().expect("b");
+        let a = runtime_for(&a.path().canonicalize().expect("canonical a"));
+        let b = runtime_for(&b.path().canonicalize().expect("canonical b"));
+        let who = caller("alpha");
+
+        assert!(
+            !Arc::ptr_eq(&a.sessions_for(&who), &b.sessions_for(&who)),
+            "两个目录共用一张会话表，在 A 里起的命令会出现在 B 的会话列表里"
+        );
+    }
+
+    /// hub 的场景：同一个目录上两个上下文，同一个主体看到的是同一张表。
+    /// 这是 `context_for` 因为配置指纹变了重建上下文时，正在跑的命令不丢的
+    /// 依据。
+    #[test]
+    fn two_contexts_on_one_directory_share_one_callers_sessions() {
         use crate::tools::context::ToolContext;
 
         let workspace = tempdir().expect("workspace");
         let harness = tempdir().expect("harness");
-        let runtime = runtime_for(&workspace.path().canonicalize().expect("canonical"));
-        assert_eq!(runtime.registered_stores(), 0, "还没建上下文就有登记");
-
         let first =
             ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
                 .expect("first");
-        assert_eq!(runtime.registered_stores(), 1, "上下文建好了却没登记");
         let second =
             ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
                 .expect("second");
-        assert_eq!(runtime.registered_stores(), 2, "第二个入口的会话表没登记");
+        let who = caller("alpha");
 
-        drop(first);
-        drop(second);
-        assert_eq!(runtime.registered_stores(), 0, "上下文没了，登记还挂着");
+        assert!(
+            Arc::ptr_eq(
+                &first.runtime.sessions_for(&who),
+                &second.runtime.sessions_for(&who)
+            ),
+            "换了上下文就换了会话表——旧上下文里起的命令，客户端再也读不到了"
+        );
+    }
+
+    /// 停一个入口只停那个入口的命令：hub 停掉了，命令行起的命令还得跑着。
+    ///
+    /// 真起两个 `sleep`，不然测不出区别——`terminate_all` 对空表本来就无事可做，
+    /// 挑错表也看不出来。
+    #[cfg(unix)]
+    #[test]
+    fn stopping_one_entry_leaves_the_other_entries_alone() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let runtime = runtime_for(&root);
+        let (hub, local) = (caller("alpha"), Caller::local());
+        let hub_table = runtime.sessions_for(&hub);
+        let local_table = runtime.sessions_for(&local);
+        let hub_session = sleeping_session(&hub_table);
+        let local_session = sleeping_session(&local_table);
+
+        assert_eq!(
+            runtime.terminate_sessions_in_scope("hub"),
+            1,
+            "停 hub 这个入口，停掉的不是 hub 那条命令"
+        );
+        assert!(hub_table.get(&hub_session).is_err(), "hub 的命令没被停掉");
+        assert!(
+            local_table.get(&local_session).is_ok(),
+            "停 hub 把命令行起的命令一起杀了"
+        );
+
+        assert_eq!(runtime.terminate_all_sessions(), 1, "剩下那条命令没被停掉");
+        assert!(local_table.get(&local_session).is_err());
+    }
+
+    /// 往表里塞一条真在跑的命令，返回它的 `session_id`。
+    #[cfg(unix)]
+    fn sleeping_session(store: &SessionStore) -> String {
+        use crate::tools::session::ExecSession;
+        let child = crate::async_rt::block_on(async {
+            tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("起 sleep")
+        });
+        store.insert(ExecSession::new(child)).session_id.clone()
+    }
+
+    /// 空表会被顺手清掉，不然按 OAuth client_id 分表的守护进程跑几天就攒一堆
+    /// 空壳。清的只能是空表——还挂着会话的表扔了，那些命令就没人能停了。
+    #[test]
+    fn empty_session_tables_are_reclaimed() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let runtime = runtime_for(&root);
+
+        for id in ["alpha", "beta", "gamma"] {
+            runtime.sessions_for(&caller(id));
+        }
+        assert_eq!(
+            runtime.session_tables(),
+            0,
+            "三张表都是空的，一张都不该留着"
+        );
+    }
+
+    /// 测试里的网络主体：一个 hub 上的 OAuth 客户端。
+    fn caller(client_id: &str) -> Caller {
+        Caller::from_auth(&crate::auth::AuthContext::new(
+            crate::auth::Principal::OAuthClient {
+                client_id: client_id.into(),
+            },
+            "hub",
+        ))
     }
 
     /// 写权被占着的时候，后来的人等到上限就得到 `None`，不是一直挂着。

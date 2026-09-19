@@ -11,6 +11,7 @@ use crate::planning::{
     ExecutionLedgerUpdate, GoalStatus, PlanStatus, PlanningMode, PlanningService, PlanningState,
     PLANNING_RELATIVE_PATH,
 };
+use crate::tools::caller::Caller;
 use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
@@ -353,9 +354,21 @@ fn planning_permission_error(
 /// 执行到一半才由 `record_operation` 生成的，于是策略拒绝、Planning 拒绝、
 /// 基线拒绝这些提前 return 的响应根本没有 id——出了问题，人拿着模型给的
 /// 报错在日志里对不上号（审查 D02、F）。
+/// 本机操作员发起的调用：命令行 `gld tool call`、守护进程内部调用、测试。
+/// 网络进来的调用必须走 [`call_tool_as`]，把连接的主体带上。
 pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
+    call_tool_as(ctx, &Caller::local(), name, args)
+}
+
+/// 同上，但由调用方说明这次是**谁**在调。
+///
+/// 主体现在只影响一件事：拿到哪张命令会话表（`exec_command` 起的命令、
+/// `read_output` / `write_stdin` / `kill_session` 认的那些 `session_id`）。
+/// 换个主体就是另一张表，互相看不见。为什么要分、分得开哪些，见
+/// [`crate::tools::caller`]。
+pub fn call_tool_as(ctx: &ToolContext, caller: &Caller, name: &str, args: &Value) -> Value {
     let operation_id = Uuid::new_v4().simple().to_string();
-    let mut output = dispatch_tool(ctx, name, args, &operation_id);
+    let mut output = dispatch_tool(ctx, caller, name, args, &operation_id);
     if let Some(object) = output.as_object_mut() {
         // 内层已经写进去的就是这一个（`record_operation` 收的就是它），
         // 这里只负责补上那些没走到记账就返回的路径。
@@ -366,7 +379,13 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
     output
 }
 
-fn dispatch_tool(ctx: &ToolContext, name: &str, args: &Value, operation_id: &str) -> Value {
+fn dispatch_tool(
+    ctx: &ToolContext,
+    caller: &Caller,
+    name: &str,
+    args: &Value,
+    operation_id: &str,
+) -> Value {
     let effective_args = apply_default_cwd(ctx, name, args);
     let planning_state = match load_planning_state(ctx) {
         Ok(state) => Some(state),
@@ -473,7 +492,7 @@ fn dispatch_tool(ctx: &ToolContext, name: &str, args: &Value, operation_id: &str
         "server_info" => server_info(ctx),
         "check_exec_environment" => check_exec_environment(ctx),
         "check_command" => exec::check_command(ctx, &effective_args),
-        "exec_health_check" => exec::exec_health_check(ctx),
+        "exec_health_check" => exec::exec_health_check(ctx, &ctx.runtime.sessions_for(caller)),
         "get_default_cwd" => get_default_cwd(ctx),
         "set_default_cwd" => set_default_cwd(ctx, &effective_args),
         "list_skills" => skill::list_skills(ctx, &effective_args),
@@ -485,10 +504,14 @@ fn dispatch_tool(ctx: &ToolContext, name: &str, args: &Value, operation_id: &str
         "search_text" | "grep_text" | "grep" => file::search_text(ws, &effective_args),
         "patch_check" => patch::patch_check(ctx, &effective_args),
         "apply_patch" => patch::apply_patch(ctx, &effective_args),
-        "exec_command" => exec::exec_command(ctx, &effective_args),
-        "read_output" => session::read_output(&ctx.sessions, &effective_args),
-        "write_stdin" => session::write_stdin(&ctx.sessions, &effective_args),
-        "kill_session" => session::kill_session(&ctx.sessions, &effective_args),
+        // 这四个认 `session_id`，所以都得先问"你是谁"：会话表按目录 + 主体
+        // 分，别人的 id 在这张表里查无此人。
+        "exec_command" => {
+            exec::exec_command(ctx, &ctx.runtime.sessions_for(caller), &effective_args)
+        }
+        "read_output" => session::read_output(&ctx.runtime.sessions_for(caller), &effective_args),
+        "write_stdin" => session::write_stdin(&ctx.runtime.sessions_for(caller), &effective_args),
+        "kill_session" => session::kill_session(&ctx.runtime.sessions_for(caller), &effective_args),
         "git_status" => git::git_status(ws, &effective_args),
         "git_diff" => git::git_diff(ws, &effective_args),
         "git_log" => git::git_log(ws, &effective_args),

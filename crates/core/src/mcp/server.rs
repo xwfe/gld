@@ -1,11 +1,13 @@
 use serde_json::{json, Value};
 
 use crate::agent_context::render_skill_catalog_for_profile;
-use crate::tools::{call_tool, list_tools_for_profile, wrap_mcp_tool_result, SharedToolContext};
+use crate::tools::{
+    call_tool_as, list_tools_for_profile, wrap_mcp_tool_result, Caller, SharedToolContext,
+};
 
 pub type SharedState = SharedToolContext;
 
-pub fn handle_request(state: &SharedState, body: &Value) -> Value {
+pub fn handle_request(state: &SharedState, caller: &Caller, body: &Value) -> Value {
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let params = body.get("params").cloned().unwrap_or(Value::Null);
@@ -22,7 +24,7 @@ pub fn handle_request(state: &SharedState, body: &Value) -> Value {
             state.record_context_block("tool_definitions", &json!(tools));
             Ok(json!({ "tools": tools }))
         }
-        "tools/call" => handle_tools_call(state, &params),
+        "tools/call" => handle_tools_call(state, caller, &params),
         _ => Err(serde_json::json!({
             "code": -32601,
             "message": format!("Method not found: {method}")
@@ -103,7 +105,7 @@ fn initialize_result(state: &SharedState) -> Value {
     })
 }
 
-fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value> {
+fn handle_tools_call(state: &SharedState, caller: &Caller, params: &Value) -> Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -120,7 +122,7 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
         }));
     }
 
-    let structured = call_tool(state.as_ref(), canonical_name, &args);
+    let structured = call_tool_as(state.as_ref(), caller, canonical_name, &args);
     let result = wrap_mcp_tool_result(canonical_name, &args, structured);
     state.record_context_block("tool_return", &result);
     Ok(result)
@@ -157,7 +159,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::tools::ToolContext;
+    use crate::tools::{Caller, ToolContext};
 
     use super::{handle_request, initialize_result, tool_arguments};
 
@@ -260,6 +262,7 @@ mod tests {
         );
         let response = handle_request(
             &state,
+            &Caller::local(),
             &json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -298,6 +301,7 @@ mod tests {
 
         let response = handle_request(
             &state,
+            &Caller::local(),
             &json!({
                 "jsonrpc": "2.0",
                 "id": 1,

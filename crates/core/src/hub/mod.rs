@@ -55,7 +55,9 @@ use crate::tools::registry::{
     canonical_tool_name, exposed_tool_names, list_tools_for_profile, normalize_tool_profile,
 };
 use crate::tools::workspace::{tool_err, tool_ok, WorkspaceError};
-use crate::tools::{build_tool_context, call_tool, wrap_mcp_tool_result, SharedToolContext};
+use crate::tools::{
+    build_tool_context, call_tool_as, wrap_mcp_tool_result, Caller, SharedToolContext,
+};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, WorkspaceProfile};
 
@@ -221,8 +223,10 @@ impl Hub {
         self.usage.clone()
     }
 
-    /// 结束所有成员上下文里还在跑的命令，并关掉所有远端 bridge。
-    /// hub 停掉之后没人能再读它们的输出。
+    /// 结束**经 hub** 起的、还在跑的命令，并关掉所有远端 bridge。
+    ///
+    /// 只停 [`HUB_SCOPE`] 这个入口的：会话表按目录 + 主体分，同一个目录上
+    /// 还有命令行和工作区自己监听器起的命令，操作员停的是 hub，不该连累它们。
     ///
     /// 会阻塞等进程退出，必须在 `spawn_blocking` 里调。
     pub fn shutdown(&self) {
@@ -234,7 +238,10 @@ impl Hub {
             .map(|(_, cached)| cached)
             .collect();
         for cached in contexts {
-            cached.context.sessions.terminate_all();
+            cached
+                .context
+                .runtime
+                .terminate_sessions_in_scope(HUB_SCOPE);
         }
         // 远端 bridge 必须走正常关闭：直接留着进程不管，远端 Runtime 的写锁
         // 会留下 held 标记要人工恢复。
@@ -474,13 +481,16 @@ impl Hub {
                     }),
                 },
             ))),
-            (None, Member::Local(local)) => self.call_local(canonical, local, &args, &settings, routed),
+            (None, Member::Local(local)) => {
+                self.call_local(auth, canonical, local, &args, &settings, routed)
+            }
         }
     }
 
-    /// 本地成员：和分型之前一模一样。
+    /// 本地成员：和分型之前一模一样，只多带一个调用方主体。
     fn call_local(
         &self,
+        auth: &AuthContext,
         canonical: &str,
         member: &WorkspaceProfile,
         args: &Value,
@@ -509,7 +519,7 @@ impl Hub {
         } else if !exposed_tool_names(&context.tool_profile).contains(&canonical) {
             tool_not_in_workspace(canonical, member, &context.tool_profile)
         } else {
-            call_tool(&context, canonical, args)
+            call_tool_as(&context, &Caller::from_auth(auth), canonical, args)
         };
         let result = wrap_mcp_tool_result(canonical, args, tag_workspace(structured, member));
         context.record_context_block("tool_return", &result);
@@ -732,19 +742,21 @@ impl Hub {
             settings,
             self.usage.clone(),
         )?);
-        let stale = contexts.insert(
+        contexts.insert(
             member.id.clone(),
             CachedContext {
                 fingerprint,
                 context: context.clone(),
             },
         );
-        drop(contexts);
-        // 旧上下文里起的命令不会再有人来读（session 表跟着旧上下文一起没了），
-        // 不收掉就是孤儿进程。
-        if let Some(stale) = stale {
-            stale.context.sessions.terminate_all();
-        }
+        // 这里**不收命令**。以前是收的，理由是"旧上下文里起的命令不会再有人来
+        // 读，不收就是孤儿进程"——会话表跟着上下文走，上下文一换那些 session_id
+        // 就查不到了。现在表归目录 + 主体所有，换上下文不影响，同一个客户端接着
+        // 拿旧 session_id 读得到。
+        //
+        // 所以那个理由没了，而收命令的代价一直都在：指纹里有 AI 说明、可执行
+        // 路径这些字段，改一行全局说明就会重建一次上下文，正在跑的 `npm run dev`
+        // 被顺手杀掉。要停某个入口的命令有专门的办法，见 [`Hub::shutdown`]。
         Ok(context)
     }
 
@@ -765,8 +777,13 @@ impl Hub {
                 .collect();
             gone.iter().filter_map(|id| contexts.remove(id)).collect()
         };
+        // 只收经 hub 起的：操作员收回的是"经这个入口访问它"的权限，那个工作区
+        // 自己的监听器和命令行起的命令不在这次收回的范围里。
         for cached in departed {
-            cached.context.sessions.terminate_all();
+            cached
+                .context
+                .runtime
+                .terminate_sessions_in_scope(HUB_SCOPE);
         }
         let still_here: Vec<String> = members
             .iter()
@@ -1232,9 +1249,24 @@ mod tests {
         AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE)
     }
 
+    /// 一个具名 OAuth 客户端。两个不同的 `client_id` 是两个主体。
+    fn oauth_client(id: &str) -> AuthContext {
+        AuthContext::new(
+            crate::auth::Principal::OAuthClient {
+                client_id: id.into(),
+            },
+            HUB_SCOPE,
+        )
+    }
+
     fn call(hub: &Hub, tool: &str, arguments: Value) -> Value {
+        call_as(hub, &caller(), tool, arguments)
+    }
+
+    /// 同上，但指定是谁在调。
+    fn call_as(hub: &Hub, auth: &AuthContext, tool: &str, arguments: Value) -> Value {
         let (response, _) = hub.handle_request(
-            &caller(),
+            auth,
             &json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -1425,6 +1457,147 @@ mod tests {
             json!({ "workspace": "api", "output_ref": output_ref }),
         );
         assert_eq!(from_api["ok"], true, "{from_api}");
+
+        let killed = call(
+            &fixture.hub,
+            "kill_session",
+            json!({ "workspace": "api", "session_id": session_id }),
+        );
+        assert_eq!(killed["ok"], true, "{killed}");
+    }
+
+    /// 同一个工作区上，另一个客户端拿着你的 `session_id` 什么也读不到。
+    ///
+    /// hub 是所有对话、所有客户端共用的一条连接，成员上下文也是按成员 id 缓存
+    /// 的。会话表要是挂在上下文上，这里两个客户端看到的就是同一张表——B 拿到
+    /// A 的 `session_id`（它就在 A 的工具返回里，模型之间转述一句就有了）就能
+    /// 读 A 的命令输出。所以会话按目录 + 主体分表，这条钉的就是那件事。
+    #[test]
+    fn one_client_cannot_read_another_clients_command_session() {
+        let fixture = fixture();
+        let (alpha, beta) = (oauth_client("alpha"), oauth_client("beta"));
+
+        let started = call_as(
+            &fixture.hub,
+            &alpha,
+            "exec_command",
+            json!({
+                "workspace": "api",
+                "cmd": "python3 -c \"import time; time.sleep(5)\"",
+                "yield_time_ms": 0,
+                "timeout_ms": 10_000
+            }),
+        );
+        assert_eq!(started["ok"], true, "{started}");
+        let output_ref = started["output_refs"]["stdout"]
+            .as_str()
+            .unwrap_or_else(|| panic!("没有 output_ref：{started}"))
+            .to_string();
+        let session_id = started["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let stolen = call_as(
+            &fixture.hub,
+            &beta,
+            "read_output",
+            json!({ "workspace": "api", "output_ref": output_ref }),
+        );
+        // 报的是"查无此 id"而不是"不许读"：另一个客户端连"这条会话存在"
+        // 都不该知道。
+        assert_eq!(stolen["error"]["code"], "SESSION_NOT_FOUND", "{stolen}");
+
+        let stolen_kill = call_as(
+            &fixture.hub,
+            &beta,
+            "kill_session",
+            json!({ "workspace": "api", "session_id": session_id }),
+        );
+        assert_eq!(
+            stolen_kill["error"]["code"], "SESSION_NOT_FOUND",
+            "别人的命令被停掉了：{stolen_kill}"
+        );
+
+        let mine = call_as(
+            &fixture.hub,
+            &alpha,
+            "read_output",
+            json!({ "workspace": "api", "output_ref": output_ref }),
+        );
+        assert_eq!(mine["ok"], true, "自己的会话读不到了：{mine}");
+
+        let killed = call_as(
+            &fixture.hub,
+            &alpha,
+            "kill_session",
+            json!({ "workspace": "api", "session_id": session_id }),
+        );
+        assert_eq!(killed["ok"], true, "{killed}");
+    }
+
+    /// 配置一变，hub 就按新配置重建成员上下文。正在跑的命令不该被这件事顺手
+    /// 杀掉，`session_id` 也得还认。
+    ///
+    /// 以前是杀的，理由是"会话表跟着旧上下文一起没了，不收就是孤儿进程"。
+    /// 现在表归目录 + 主体所有，那个理由不成立了，而代价一直都在：改一行全局
+    /// AI 说明就会重建上下文，正在跑的 `npm run dev` 跟着被杀。
+    #[test]
+    fn rebuilding_a_member_context_keeps_its_running_commands() {
+        let fixture = fixture();
+        let started = call(
+            &fixture.hub,
+            "exec_command",
+            json!({
+                "workspace": "api",
+                "cmd": "python3 -c \"import time; time.sleep(5)\"",
+                "yield_time_ms": 0,
+                "timeout_ms": 10_000
+            }),
+        );
+        assert_eq!(started["ok"], true, "{started}");
+        let output_ref = started["output_refs"]["stdout"]
+            .as_str()
+            .unwrap_or_else(|| panic!("没有 output_ref：{started}"))
+            .to_string();
+        let session_id = started["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let before = fixture
+            .hub
+            .contexts
+            .lock()
+            .expect("contexts")
+            .get(&fixture.api.id)
+            .map(|cached| Arc::as_ptr(&cached.context))
+            .expect("api 的上下文");
+
+        // 指纹里有全局 AI 说明，改它就会让下一次调用重建上下文。
+        update_fixed(&fixture.hub, |_, settings| {
+            settings.global_ai_instructions = "改了一行说明".into();
+        });
+        let after_change = call(
+            &fixture.hub,
+            "read_output",
+            json!({ "workspace": "api", "output_ref": output_ref }),
+        );
+        assert_eq!(
+            after_change["ok"], true,
+            "重建上下文把正在跑的命令连输出一起弄没了：{after_change}"
+        );
+        let after = fixture
+            .hub
+            .contexts
+            .lock()
+            .expect("contexts")
+            .get(&fixture.api.id)
+            .map(|cached| Arc::as_ptr(&cached.context))
+            .expect("api 的上下文");
+        assert_ne!(
+            before, after,
+            "上下文根本没重建，这条测试没测到它该测的东西"
+        );
 
         let killed = call(
             &fixture.hub,
