@@ -554,10 +554,40 @@ pub fn file_version(meta: &std::fs::Metadata) -> String {
     format!("{}-{mtime:x}", meta.len())
 }
 
-/// 磁盘上这个路径现在的版本；不存在（或读不到属性）就是 `None`。
+/// 磁盘上这个路径现在是什么状态。
+///
+/// **三态，不是两态。**"问不出来"（权限不够、I/O 出错、那是个目录或设备）
+/// 和"确实不在"是两回事：把前者当成后者，一个"这路径应当是空的"前置条件
+/// 就会在文件其实还在的时候通过，而那正是它要挡的事（跨仓评审 X02）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileState {
+    /// 确实在，版本是这个。
+    Present(String),
+    /// 确实不在。
+    Absent,
+    /// 问不出来，附上原因。
+    Unknown(String),
+}
+
+pub fn file_state(path: &Path) -> FileState {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => FileState::Present(file_version(&meta)),
+        // 目录、fifo、设备：这个路径上有东西，但它不是一个能比版本的文件。
+        Ok(_) => FileState::Unknown("not a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => FileState::Absent,
+        Err(error) => FileState::Unknown(error.to_string()),
+    }
+}
+
+/// 磁盘上这个路径现在的版本；不在、或者问不出来都是 `None`。
+///
+/// 只给**不需要区分这两者**的地方用：比如补丁落盘之后报"新版本是多少"，
+/// 那时拿不到版本只是少给一条提示。要拿它当前置条件，用 [`file_state`]。
 pub fn current_file_version(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    meta.is_file().then(|| file_version(&meta))
+    match file_state(path) {
+        FileState::Present(version) => Some(version),
+        _ => None,
+    }
 }
 
 pub fn relative_display(root: &Path, path: &Path) -> String {

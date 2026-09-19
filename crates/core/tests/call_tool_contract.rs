@@ -1406,3 +1406,69 @@ fn reading_something_that_is_not_a_notebook_says_what_is_wrong() {
         .unwrap_or_default()
         .contains("not valid JSON"));
 }
+
+/// 读不出状态 ≠ 文件不在。
+///
+/// `current_file_version` 以前把"权限不够、I/O 出错、那是个目录"全变成
+/// `None`，而补丁逻辑拿 `None` 当"文件不存在"。于是一个"这路径应当是空的"
+/// 前置条件会在文件其实还在的时候通过——那正是它要挡的事（跨仓评审 X02）。
+#[test]
+fn a_path_whose_state_cannot_be_read_is_not_treated_as_absent() {
+    let dir = tempfile::tempdir().expect("workspace");
+    // 目录：存在，但不是能比版本的文件。metadata 成功，is_file 是 false。
+    fs::create_dir(dir.path().join("data")).expect("mkdir");
+    let ctx = ctx_for(dir.path());
+
+    // 说"data 这个路径应当什么都没有"——它其实有东西，必须拒。
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "patch": "--- a/data\n+++ b/data\n@@\n-x\n+y\n",
+            "expected_versions": {"data": null}
+        }),
+    );
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "FILE_VERSION_CONFLICT", "{error}");
+    let diagnostic = &error["error"]["details"]["diagnostics"][0];
+    assert!(
+        diagnostic["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cannot tell the state"),
+        "{diagnostic}"
+    );
+    assert_eq!(error["error"]["details"]["files_changed"], json!(false));
+
+    // 没给前置条件也一样拒：状态都问不出来，落盘前的复核同样没法做。
+    let bare = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": "--- a/data\n+++ b/data\n@@\n-x\n+y\n"}),
+    );
+    assert_eq!(
+        assert_err(&bare)["error"]["code"],
+        "FILE_VERSION_CONFLICT",
+        "{bare}"
+    );
+}
+
+/// 三态里"确实不在"那一格照旧：说它应当不在、它确实不在，就该放行。
+#[test]
+fn a_precondition_of_absent_still_passes_when_the_path_really_is_empty() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let ctx = ctx_for(dir.path());
+    let created = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "patch": "*** Begin Patch\n*** Add File: fresh.txt\n+mine\n*** End Patch\n",
+            "expected_versions": {"fresh.txt": null}
+        }),
+    );
+    assert_ok(&created);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("fresh.txt")).expect("read"),
+        "mine\n"
+    );
+}

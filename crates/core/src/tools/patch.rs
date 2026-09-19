@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::tools::context::ToolContext;
 use crate::tools::patch_diag::{Diagnostic, HunkMiss, MAX_CANDIDATES, MAX_DIAGNOSTICS};
-use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
+use crate::tools::workspace::{tool_ok, FileState, Workspace, WorkspaceError};
 
 pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let ws = &ctx.workspace;
@@ -131,40 +131,25 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         };
         ws.reject_write_symlink(&fp.path)?;
 
-        // 这个文件现在是什么版本。第一次碰到它的时候记下来：给 patch_check
+        // 这个文件现在是什么状态。第一次碰到它的时候记下来：给 patch_check
         // 交回给模型，也当作落盘前复核的基线。
-        let current_version = crate::tools::workspace::current_file_version(&resolved.path);
         if !observed.contains_key(&resolved.display) {
+            let state = crate::tools::workspace::file_state(&resolved.path);
+            if let Some(diagnostic) = version_precondition(
+                &resolved.display,
+                operation_label(fp),
+                &state,
+                &expected_versions,
+            ) {
+                diagnostics.push(diagnostic);
+                failed_files.insert(resolved.display.clone());
+                continue;
+            }
             observed.insert(
                 resolved.display.clone(),
-                version_value(current_version.clone()),
+                version_value(state_version(&state)),
             );
-            baselines.insert(
-                resolved.display.clone(),
-                match &current_version {
-                    Some(version) => Baseline::Version(version.clone()),
-                    None => Baseline::Absent,
-                },
-            );
-            // 调用方给了前置条件就核对。给的是 `read_file` / `patch_check`
-            // 当时看到的版本；对不上说明这份补丁是照着一份已经过时的内容做的，
-            // 写下去就是把中间那次改动盖掉（审查 C3、A09）。
-            if let Some(expected) = expected_versions
-                .as_ref()
-                .and_then(|map| map.get(&resolved.display))
-            {
-                if expected != &current_version {
-                    diagnostics.push(Diagnostic::version_conflict(
-                        version_conflict_message(&resolved.display, expected, &current_version),
-                        resolved.display.clone(),
-                        operation_label(fp),
-                        expected.clone(),
-                        current_version.clone(),
-                    ));
-                    failed_files.insert(resolved.display.clone());
-                    continue;
-                }
-            }
+            baselines.insert(resolved.display.clone(), Baseline::from_state(&state));
         }
 
         // Add 是"新建"，不是"覆盖"。同一批里先 Delete 过它则另说：那是
@@ -319,26 +304,17 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
             )));
         }
 
-        let current_version = crate::tools::workspace::current_file_version(&resolved.path);
+        let state = crate::tools::workspace::file_state(&resolved.path);
+        if let Some(diagnostic) =
+            version_precondition(&resolved.display, "update", &state, &expected_versions)
+        {
+            diagnostics.push(diagnostic);
+            continue;
+        }
         observed.insert(
             resolved.display.clone(),
-            version_value(current_version.clone()),
+            version_value(state_version(&state)),
         );
-        if let Some(expected) = expected_versions
-            .as_ref()
-            .and_then(|map| map.get(&resolved.display))
-        {
-            if expected != &current_version {
-                diagnostics.push(Diagnostic::version_conflict(
-                    version_conflict_message(&resolved.display, expected, &current_version),
-                    resolved.display.clone(),
-                    "update",
-                    expected.clone(),
-                    current_version.clone(),
-                ));
-                continue;
-            }
-        }
 
         let original = match fs::read(&resolved.path) {
             Ok(bytes) => bytes,
@@ -1113,6 +1089,15 @@ pub(crate) enum Baseline {
 }
 
 impl Baseline {
+    fn from_state(state: &FileState) -> Self {
+        match state {
+            FileState::Present(version) => Self::Version(version.clone()),
+            FileState::Absent => Self::Absent,
+            // 进不到这儿：状态问不出来的文件在前面就被拒了。
+            FileState::Unknown(_) => Self::Absent,
+        }
+    }
+
     /// 磁盘上现在这一份，还是算补丁时的那一份吗。
     ///
     /// `on_disk` 是刚读出来的内容；路径上没有文件时是 `None`。
@@ -1133,13 +1118,16 @@ impl Baseline {
                 ))),
             },
             Self::Version(expected) => {
-                let actual = crate::tools::workspace::current_file_version(path);
-                match actual {
+                match crate::tools::workspace::file_state(path) {
                     // 删掉的东西已经不在了：结果一样，不算冲突。
-                    None => Ok(()),
-                    Some(actual) if &actual == expected => Ok(()),
-                    Some(actual) => Err(version_conflict(format!(
+                    FileState::Absent => Ok(()),
+                    FileState::Present(actual) if &actual == expected => Ok(()),
+                    FileState::Present(actual) => Err(version_conflict(format!(
                         "{display} changed while this patch was being prepared (version {expected} is now {actual}); nothing was written"
+                    ))),
+                    // 问不出来就不写：说不清的时候动手，正是这道门要拦的。
+                    FileState::Unknown(reason) => Err(version_conflict(format!(
+                        "cannot tell the state of {display} ({reason}) before writing it; nothing was written"
                     ))),
                 }
             }
@@ -1472,6 +1460,57 @@ fn version_conflict(message: impl Into<String>) -> WorkspaceError {
 
 fn version_value(version: Option<String>) -> Value {
     version.map(Value::String).unwrap_or(Value::Null)
+}
+
+fn state_version(state: &FileState) -> Option<String> {
+    match state {
+        FileState::Present(version) => Some(version.clone()),
+        _ => None,
+    }
+}
+
+/// 核对调用方给的版本前置条件；过不了就给一条诊断。
+///
+/// 三态各自的判法（跨仓评审 X02）：
+///
+/// | 磁盘上 | 说"应当是版本 v" | 说"应当什么都没有"（null） | 没给前置条件 |
+/// | --- | --- | --- | --- |
+/// | 在，版本一样 | 过 | 冲突：它在 | 过 |
+/// | 在，版本不同 | 冲突：被写过 | 冲突：它在 | 过 |
+/// | 确实不在 | 冲突：没了 | 过 | 过 |
+/// | **问不出来** | **拒** | **拒** | **拒** |
+///
+/// 最后一行是这次收口的重点：读不出属性不等于文件不在。把它当成"不在"，
+/// 一个"这路径应当是空的"前置条件就会在文件其实还在的时候放行。没给前置
+/// 条件也照样拒——状态都问不出来，后面的落盘复核同样没法做。
+fn version_precondition(
+    display: &str,
+    operation: &'static str,
+    state: &FileState,
+    expected_versions: &Option<HashMap<String, Option<String>>>,
+) -> Option<Diagnostic> {
+    if let FileState::Unknown(reason) = state {
+        return Some(Diagnostic::version_conflict(
+            format!(
+                "cannot tell the state of {display} ({reason}), so this patch's preconditions cannot be checked; nothing was written"
+            ),
+            display.to_string(),
+            operation,
+            None,
+            None,
+        ));
+    }
+    let expected = expected_versions.as_ref()?.get(display)?;
+    let actual = state_version(state);
+    (expected != &actual).then(|| {
+        Diagnostic::version_conflict(
+            version_conflict_message(display, expected, &actual),
+            display.to_string(),
+            operation,
+            expected.clone(),
+            actual,
+        )
+    })
 }
 
 fn version_conflict_message(
