@@ -471,4 +471,22 @@ E03 里那次失败给的全部信息是：`PATCH_FAILED` + `Hunk context did no
 
 门禁：`cargo test --workspace` 617 passed、0 failed；fmt、clippy 干净。
 
-**U2 还没做的**：`operation_id`（现在只有部分工具带）、`check_exec_environment` 与新预检的字段收敛。
+### U2 第四批：operation_id 与能力状态的单一来源（D02、F、A 的收尾）
+
+两件都是"说话方式"，不改任何执行行为。
+
+**`operation_id` 进门就发。**以前它是执行到一半由 `record_operation` 生成的，于是策略拒绝、Planning 拒绝、基线拒绝这些提前 `return` 的响应根本没有 id——人拿着模型给的报错，在操作日志里对不上号。现在 `call_tool` 变成一层薄壳：进门分配 id，内层分发，出门统一盖章（内层已经写过的就是同一个，因为 `record_operation` 收的就是它）。
+
+**被拒的调用也记账**，`kind="rejected"`，和正常路径的 `started` 分开——账本得能区分"接了没跑"和"跑了"。脱敏：只记错误码、分类和拒绝阶段，命令内容和补丁正文不进日志（测试断言 `rg --version` 不出现在记录里）。范围限定在本来就要记账的工具加上会改东西的那些：操作日志是 append-only 的，读类工具被拒不值得添行。
+
+**`check_exec_environment` 和 `check_command` 不再各算各的。**两个工具都在讲"这个工作区的执行策略"，各写一份迟早说出两套话，而模型没办法知道该信哪个（方案 A 明说不要相互重叠的能力状态源）。现在前者的 `policy` 就是后者那一份快照（`exec::policy_snapshot`），顶层老字段留着做兼容别名，值全部从同一份快照取；一条测试把两边同名字段逐字绑死。前者另加 `preflight` 一格指向后者：一个答"这个工作区整体什么情况"，一个答"这一条命令能不能跑"。
+
+门禁：`cargo test --workspace` 620 passed、0 failed；fmt、clippy 干净。
+
+### U2 到此完成
+
+对照第 4 节 U2 那一行的清单：统一错误类型（第二批的 `PolicyReason`、第一批的补丁诊断、第三批的 `FILE_VERSION_CONFLICT`）、`operation_id`、命令预检、策略/构建版本（`runtime_fingerprint` 与 `build_commit: null`）、补丁定位、文件版本前置条件——六项都做了。完成条件"模型无需猜测即可判断下一步是重读、修参数、等待还是请求授权"由按错误码分流的 `recovery_hint` 承担。
+
+**U2 范围内没做、留给后面的**：A18 的"失败响应体量受限"。现在一个补丁失败的响应里仍然挂着完整的 harness 能力状态和 planning_context。要瘦身就得改响应形状，属于会影响现有客户端的变更，单独排期比夹在 U2 里做安全。
+
+下一阶段按方案是 U3（结构化执行入口、受控的 `rg`/`gh` 规则、SSH 边界说明、`.github` 分类）。
