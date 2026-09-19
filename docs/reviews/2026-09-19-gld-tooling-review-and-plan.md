@@ -359,4 +359,19 @@ rg/gh/ssh 按能力和授权分别处理，禁止通过解释器或包装脚本�
 
 顺带：`affected_files` 改成"每个文件最终发生了什么"，同一文件被改两段只报一次，先删后加仍报 `update`。
 
-**还没做**（U1 剩余）：备份/回滚失败的真实状态（`unwrap_or_default()`、忽略回滚错误）要配故障注入，和空 `only:` 权限扩大、输出游标停滞一起放下一批。
+**还没做**（U1 剩余）：备份/回滚失败的真实状态（`unwrap_or_default()`、忽略回滚错误）要配故障注入，单列一批。
+
+### U1 第二批：空 `only:` 与输出游标（C03、X01）
+
+| 问题 | 原来的行为（实测） | 现在 |
+| --- | --- | --- |
+| C03 `allowed-commands=only:`（列表为空） | 回退到**默认全集**：cargo、pytest、python3、node 全都能跑——一个想收紧权限的配置把权限放到了最大 | 只剩基础诊断命令（pwd / ls / cat / grep），`cargo test` 被拒。完全不配（空字符串）仍然是默认白名单：那是"没说"，不是"只允许这些" |
+| X01 `read_output` 越过 1 MiB 保留缓冲 | `offset` 按保留缓冲算、有没有下一页按累计字节算。实测 3 MiB 输出读到 `offset=1048576` 时回空内容、`next_offset` 还是 `1048576`——照着它再读就是死循环 | 偏移改成**整条流里的绝对位置**；读得到的那段是 `[retained_from, total)`，每页 `next_offset` 严格前进，读完就是 `None` |
+| X01 附带：旧 offset 落在已被挤掉的区间 | 悄悄当成缓冲的第一个字节，报 `offset: 0`——把 2 MiB 之后的内容说成开头 | 报实际起点 `offset`、丢了多少 `dropped_bytes`，外加一条 `no longer retained` 警告 |
+| X01 附带：分页接缝劈开多字节字符 | 每页接缝上多出替换字符 | 截到字符边界再返回，下一页从那里接着读（`limit` 小到装不下一个字符时照原样给，保证能前进） |
+
+`read_output` 的结果多了 `retained_from`、`dropped_bytes`、`running`、`complete` 四格；`offset` 的含义从"缓冲下标"改成"流内绝对位置"——这是**行为变更**，但原来的含义配上原来的判据本来就自相矛盾。
+
+这一批的红测试：`tools::exec::tests::paging_output_bigger_than_the_retained_buffer_terminates`（3 MiB 输出，分页必须走到头且每页前进）、`tools::exec::tests::an_offset_the_buffer_has_dropped_is_reported_as_a_gap`、`tools::policy::tests::an_empty_only_list_keeps_only_the_basics`（原来那条 `an_empty_only_list_falls_back_to_the_defaults` 连同它的理由一起改写）、`no_configuration_at_all_still_means_the_defaults`。
+
+门禁：`cargo test --workspace` 582 passed、0 failed；fmt、clippy 干净。

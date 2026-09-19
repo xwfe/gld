@@ -762,6 +762,118 @@ mod tests {
         Ok(())
     }
 
+    /// 输出多到把保留缓冲（1 MiB）挤满时，分页必须能走到头。
+    ///
+    /// 原来走不到：`offset` 是保留缓冲里的位置，`next_offset` 却拿累计字节数
+    /// 判断"还有没有"。读到缓冲末尾之后，每次都回一个空页、`next_offset` 和
+    /// 传进去的 offset 一模一样——调用方照着它再读，就是死循环（审查 X01）。
+    #[cfg(unix)]
+    #[test]
+    fn paging_output_bigger_than_the_retained_buffer_terminates() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let script = workspace.path().join("flood");
+        // 3 MiB，是保留缓冲的三倍。
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nhead -c 3145728 /dev/zero | tr '\\000' a\n",
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("meta").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        let output = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./flood", "timeout_ms": 30_000, "yield_time_ms": 30_000, "max_output_bytes": 1024 }),
+        );
+        assert_eq!(output["command_ok"], true, "{output}");
+        let stdout_ref = output["output_refs"]["stdout"]
+            .as_str()
+            .expect("stdout ref")
+            .to_string();
+
+        let mut offset = 0u64;
+        let mut pages = 0;
+        let mut read_bytes = 0usize;
+        loop {
+            let page = call_tool(
+                &ctx,
+                "read_output",
+                &json!({ "output_ref": stdout_ref, "offset": offset, "limit": 262_144 }),
+            );
+            assert_eq!(page["ok"], true, "{page}");
+            read_bytes += page["content"].as_str().unwrap_or_default().len();
+            pages += 1;
+            assert!(pages < 64, "分页没走到头，第 {pages} 页还在原地：{page}");
+            match page["next_offset"].as_u64() {
+                Some(next) => {
+                    assert!(next > offset, "next_offset 没有前进：{page}");
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        // 缓冲只留最后 1 MiB，所以读到的不会是全部 3 MiB——但必须读得到
+        // 留下来的那一段，而且要能停。
+        assert!(read_bytes >= 1_000_000, "只读到 {read_bytes} 字节");
+    }
+
+    /// 缓冲已经把开头挤掉了，还照着旧 offset 来读：不能假装那些字节还在。
+    #[cfg(unix)]
+    #[test]
+    fn an_offset_the_buffer_has_dropped_is_reported_as_a_gap() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let script = workspace.path().join("flood");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nhead -c 3145728 /dev/zero | tr '\\000' a\n",
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("meta").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        let output = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./flood", "timeout_ms": 30_000, "yield_time_ms": 30_000, "max_output_bytes": 1024 }),
+        );
+        let stdout_ref = output["output_refs"]["stdout"]
+            .as_str()
+            .expect("stdout ref")
+            .to_string();
+
+        let page = call_tool(
+            &ctx,
+            "read_output",
+            &json!({ "output_ref": stdout_ref, "offset": 0, "limit": 4096 }),
+        );
+        // 前 2 MiB 已经被挤掉了：说清楚从哪儿开始、丢了多少，而不是把
+        // 缓冲里的第一个字节当成第 0 个字节。
+        assert!(page["offset"].as_u64().unwrap_or(0) > 0, "{page}");
+        assert!(page["dropped_bytes"].as_u64().unwrap_or(0) > 0, "{page}");
+        assert!(
+            page["warnings"]
+                .as_array()
+                .map(|w| w.iter().any(|item| item
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("no longer retained")))
+                .unwrap_or(false),
+            "{page}"
+        );
+    }
+
     /// A command that finishes before yield_time, with more output than
     /// max_output_bytes: the result says "truncated" and hands out
     /// output_refs, so those refs have to be readable.

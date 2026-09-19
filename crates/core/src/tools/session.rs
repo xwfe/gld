@@ -389,32 +389,81 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     let (data, total_stream_bytes) = session.retained_stream_bytes(stream);
     let requested_offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = crate::tools::args::bounded(args, "read_output", "limit") as usize;
-    let buffer_offset = requested_offset.min(data.len());
-    let chunk = &data[buffer_offset..data.len().min(buffer_offset + limit)];
-    let next_offset = if buffer_offset + chunk.len() < total_stream_bytes {
-        Some((buffer_offset + chunk.len()) as u64)
-    } else {
-        None
-    };
+    let mut warnings: Vec<String> = Vec::new();
+    if ref_stream == "full" {
+        warnings.push(
+            "legacy full output_ref defaults to stdout; use output_refs for stable stream paging"
+                .into(),
+        );
+    }
+
+    // **偏移是整条流里的绝对位置**，不是保留缓冲里的下标。缓冲只留最后
+    // SESSION_BUFFER_BYTES 个字节，所以它对应的是 [retained_from, total)
+    // 这一段。原来两套坐标混着用：offset 按缓冲算、有没有下一页按累计算，
+    // 于是读到缓冲末尾之后每次都回一个空页、next_offset 和传进来的一样，
+    // 调用方照着它再读就是死循环（审查 X01）。
+    let retained_from = total_stream_bytes.saturating_sub(data.len());
+    if requested_offset > total_stream_bytes {
+        return Err(WorkspaceError::invalid_argument(format!(
+            "offset {requested_offset} is past the end of this stream ({total_stream_bytes} bytes so far)"
+        )));
+    }
+    let start = requested_offset.max(retained_from);
+    let dropped = start.saturating_sub(requested_offset);
+    if dropped > 0 {
+        warnings.push(format!(
+            "{dropped} bytes before offset {start} are no longer retained: only the last {} bytes of this stream are kept",
+            data.len()
+        ));
+    }
+
+    let from = start - retained_from;
+    let mut take = data.len().saturating_sub(from).min(limit);
+    // 别把一个多字节字符劈成两半：截到字符边界，下一页从那里接着读。
+    // 劈开的后果是每一页接缝上都多出一个替换字符，而那不是命令输出的内容。
+    if from + take < data.len() {
+        take = utf8_boundary(&data[from..from + take]);
+        if take == 0 {
+            // limit 小到装不下一个字符：照原样给出去，至少能前进。
+            take = data.len().saturating_sub(from).min(limit);
+        }
+    }
+    let chunk = &data[from..from + take];
+    let next = start + chunk.len();
+    let running = !session.has_exited();
+    // 还有留着的字节没给完才有下一页。命令还在跑、但此刻没有新字节时，
+    // next_offset 是空——不是"读完了"，而是"现在没有更多"，`complete`
+    // 那一格说的才是流有没有结束。
+    let next_offset = (next < total_stream_bytes).then_some(next as u64);
 
     Ok(tool_ok(json!({
         "output_ref": output_ref,
         "stream_output_ref": format!("session:{session_id}:{stream}"),
         "stream": stream,
-        "offset": buffer_offset,
+        "offset": start,
         "requested_offset": requested_offset,
+        "dropped_bytes": dropped,
+        "retained_from": retained_from,
         "limit": limit,
         "content": String::from_utf8_lossy(chunk),
         "next_offset": next_offset,
         "total_retained_bytes": data.len(),
         "total_stream_bytes": total_stream_bytes,
+        "complete": !running && next >= total_stream_bytes,
+        "running": running,
         "truncated": next_offset.is_some(),
-        "warnings": if ref_stream == "full" {
-            vec!["legacy full output_ref defaults to stdout; use output_refs for stable stream paging"]
-        } else {
-            Vec::<&str>::new()
-        }
+        "warnings": warnings
     })))
+}
+
+/// 这段字节里，最后一个完整 UTF-8 字符结束的位置。
+///
+/// 全是完整字符就是它自己的长度；末尾挂着半个字符就退到那个字符之前。
+fn utf8_boundary(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) => error.valid_up_to(),
+    }
 }
 
 pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {

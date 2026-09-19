@@ -120,11 +120,16 @@ pub const ONLY_PREFIX: &str = "only:";
 
 pub fn parse_allowed_commands(configured: &str) -> HashSet<String> {
     let trimmed = configured.trim();
-    let trimmed = trimmed.strip_prefix(ONLY_PREFIX).unwrap_or(trimmed);
-    if trimmed.trim().is_empty() {
+    let only = trimmed.starts_with(ONLY_PREFIX);
+    let listed = trimmed.strip_prefix(ONLY_PREFIX).unwrap_or(trimmed).trim();
+    // 什么都没配 = 没表态，用默认白名单。写了 `only:` 而列表是空的 = 表了态
+    // 「只允许我列的这些」，那就一个都不加——**不能**因为列表空了就回到默认
+    // 全集，那是把一个想收紧权限的配置放到最大（审查 C03）。基础诊断命令
+    // 两种写法下都保留，所以"收紧到极限"也还能看清楚工作区长什么样。
+    if listed.is_empty() && !only {
         return default_allowed_command_set();
     }
-    let mut commands: HashSet<String> = trimmed
+    let mut commands: HashSet<String> = listed
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -570,15 +575,41 @@ mod tests {
         assert!(denied.0.contains("not allowlisted"), "{}", denied.0);
     }
 
-    /// `only:` 后面写空等于没配，退回默认白名单——
-    /// 别让一个手滑的 `only:` 把工作区变成什么都不能跑。
+    /// `only:` 后面写空 = 只剩基础诊断命令，**不是**退回默认白名单。
+    ///
+    /// 原来是退回默认全集，理由写的是"别让一个手滑的 only: 把工作区变成
+    /// 什么都不能跑"。但基础诊断命令（pwd / ls / cat / grep）本来就一直
+    /// 保留，所以那个代价并不成立；而一个想收紧权限的配置反而把权限放到
+    /// 最大，是权限开关最不该有的方向（审查 C03）。
     #[test]
-    fn an_empty_only_list_falls_back_to_the_defaults() {
+    fn an_empty_only_list_keeps_only_the_basics() {
         let policy = PolicySettings::from_actions_config(&ActionsConfig {
             allowed_commands: "only:".into(),
             ..ActionsConfig::default()
         });
 
+        for removed in ["cargo", "pytest", "python3", "node"] {
+            assert!(
+                !policy.allowed_commands.contains(removed),
+                "only: 之后不该还有 {removed}"
+            );
+        }
+        for kept in ["pwd", "ls", "cat", "grep"] {
+            assert!(policy.allowed_commands.contains(kept), "{kept} 该保留");
+        }
+        let denied =
+            validate_command(&json!({ "cmd": "cargo test" }), &policy).expect_err("cargo 该被拒");
+        assert!(denied.0.contains("not allowlisted"), "{}", denied.0);
+        assert!(validate_command(&json!({ "cmd": "pwd" }), &policy).is_ok());
+    }
+
+    /// 完全没配（空字符串）仍然是默认白名单：那是"没说"，不是"只允许这些"。
+    #[test]
+    fn no_configuration_at_all_still_means_the_defaults() {
+        let policy = PolicySettings::from_actions_config(&ActionsConfig {
+            allowed_commands: String::new(),
+            ..ActionsConfig::default()
+        });
         assert!(policy.allowed_commands.contains("cargo"));
         assert!(policy.allowed_commands.contains("pytest"));
     }
