@@ -502,8 +502,8 @@ fn dispatch_tool(
         "list_dir" => file::list_dir(ws, &effective_args),
         "list_files" => file::list_files(ws, &effective_args),
         "search_text" | "grep_text" | "grep" => file::search_text(ws, &effective_args),
-        "patch_check" => patch::patch_check(ctx, &effective_args),
-        "apply_patch" => patch::apply_patch(ctx, &effective_args),
+        "patch_check" => patch::patch_check(ctx, caller, &effective_args),
+        "apply_patch" => patch::apply_patch(ctx, caller, &effective_args),
         // 这四个认 `session_id`，所以都得先问"你是谁"：会话表按目录 + 主体
         // 分，别人的 id 在这张表里查无此人。
         "exec_command" => {

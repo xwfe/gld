@@ -20,6 +20,10 @@
 //! - **另一个 gld 进程**——守护进程和 CLI 同时在跑、开了两个实例。这一层是 OS
 //!   文件锁，锁文件在数据目录（`GLD_HOME`，默认 `~/.config/gld`）下的
 //!   `write-locks/`，进程死掉时由内核释放，不留要人工清的残留。
+//! - **每条命令起来的那一刻**。`exec_command` 先拿到写权才 spawn 进程，所以
+//!   命令看到的文件树不会是别人写到一半的——一个补丁改三个文件**不是**原子的
+//!   （原子的只有单个文件的替换）。转后台那一路（`yield_time_ms: 0`）占的就
+//!   只有这一瞬间。
 //! - **`exec_command` 同步等结果的那一段**，也就是从命令起来到这次调用返回。
 //!   命令在 `yield_time_ms`（默认 1 秒，上限 30 秒）之内跑完，那就是它的全程；
 //!   期间补丁得排队。挡的是"一边跑命令一边改源文件"——那种交叉出来的结果没法
@@ -35,12 +39,19 @@
 //!
 //! - **转到后台之后的命令**。`yield_time_ms` 到了命令还没跑完，`exec_command`
 //!   就带着 `session_id` 先返回，命令继续跑到 `timeout_ms`（上限十分钟）——**那
-//!   一段没有写权保护**。传 `yield_time_ms: 0` 的那一路连锁都不取。
+//!   一段没有写互斥**。
 //!
 //!   这不是漏了，是刻意的：后台命令没有终点，占着写权等于把目录锁到天亮，
-//!   `npm run dev` 起来之后谁也别想改代码了，而那恰恰是日常工作流。现在的效果
-//!   是把选择权交给调用方——要保护就同步等，要撒手就让它转后台。代价是"跑一个
-//!   五分钟的测试，同时改源文件"这件事拦不住，只有前几秒拦得住。
+//!   `npm run dev` 起来之后谁也别想改代码了，而那恰恰是日常工作流。
+//!
+//!   **补的是让两边都看得见**，不是挡住：
+//!
+//!   - 命令那边——会话快照里的 `workspace_writes_since_start` 说"你起来之后这
+//!     个工作区落过几次盘"。不是 0 就意味着它编译/测试的可能是改之前的代码。
+//!   - 写的那边——`apply_patch` 的 `warnings` 说"这儿还有几条命令在跑"，自己
+//!     起的给 `session_id`（停得掉），别人起的只给数量。
+//!
+//!   看得见不等于挡得住：谁也不挡谁，要不要停、认不认那条结果，判断留给调用方。
 //! - **命令到底写没写文件，这里不猜**。`cargo build`、`npm install` 写文件，
 //!   `ls` 不写，靠命令文本判断只会漏判——漏判比不做更糟，它给人"已经协调了"
 //!   的错觉。所以按运行形态一刀切：同步等结果的都占，不管它实际写不写，代价
@@ -66,6 +77,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -106,6 +118,12 @@ pub struct WorkspaceRuntime {
     commit_lock: Mutex<()>,
     /// 这个目录上的命令会话表，按调用方分。
     sessions: Mutex<HashMap<Caller, Arc<SessionStore>>>,
+    /// 这个目录落过多少次盘（`apply_patch` 提交一次算一次）。
+    ///
+    /// 只增不减，绕回去要 5.8e11 年。正在跑的命令记下自己起来时的值，差值就是
+    /// "我跑的这段时间里工作区被改过几次"——后台命令期间没有写互斥，这个数是
+    /// 事后判断命令结果可不可信的唯一依据。
+    writes: Arc<AtomicU64>,
     /// 跨进程那一层的锁文件。
     ///
     /// `None` 表示建不出来（数据目录不可写之类）。那时只剩进程内互斥，
@@ -129,6 +147,34 @@ impl std::fmt::Debug for WorkspaceRuntime {
             .field("session_tables", &callers)
             .finish()
     }
+}
+
+/// 一个目录上还在跑的命令，从某个调用方的角度看过去。
+#[derive(Debug, Default)]
+pub struct RunningCommands {
+    /// 这个调用方自己起的。它读得到这些输出，也 kill 得掉。
+    pub mine: Vec<RunningCommand>,
+    /// 别人起的有几条。**故意只给数量**，理由见
+    /// [`WorkspaceRuntime::running_commands`]。
+    pub others: usize,
+}
+
+impl RunningCommands {
+    pub fn total(&self) -> usize {
+        self.mine.len() + self.others
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+}
+
+/// 一条还在跑的命令。
+#[derive(Debug, Clone)]
+pub struct RunningCommand {
+    pub session_id: String,
+    pub command: String,
+    pub running_ms: u128,
 }
 
 /// 落盘期间握着的写权，丢掉就释放。
@@ -217,6 +263,60 @@ impl WorkspaceRuntime {
     /// 锁文件在哪；没有就是跨进程那一层没拿到。测试和排障用。
     pub fn lock_file_path(&self) -> Option<&Path> {
         self.lock_file.as_deref()
+    }
+
+    /// 记一次落盘。`apply_patch` 真写进去之后调，`dry_run` 不调。
+    ///
+    /// 为什么不挂在写锁释放上：`exec_command` 同步跑一条 `ls` 也占写锁，按
+    /// 释放计数的话它会被算成一次写，正在跑的命令那边就看到一个虚高的数字，
+    /// 于是这个数字就不能用来判断"我的结果还作不作数"了。
+    pub fn record_write(&self) {
+        self.writes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 落盘计数器本身，交给新起的命令记下"我起来时是多少"。
+    ///
+    /// 给的是计数器而不是 `Arc<WorkspaceRuntime>`：后者持有会话表、会话表持有
+    /// 命令，拿整个 runtime 就成环了。
+    pub fn write_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.writes)
+    }
+
+    /// 这个目录上还在跑的命令，按"是不是你起的"分开。
+    ///
+    /// **别人的只给个数。**命令文本是另一个主体的东西，刚按主体把会话分开，
+    /// 转头把命令行摊开给所有人看就白分了。数量本身不泄露内容，而它是模型
+    /// 判断"我现在改文件安不安全"要的最低信息。
+    ///
+    /// 内部会挨个问子进程死没死，用 `block_on`，不能在 tokio 异步 worker
+    /// 线程里调。
+    pub fn running_commands(&self, caller: &Caller) -> RunningCommands {
+        let tables: Vec<(bool, Arc<SessionStore>)> = {
+            let sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sessions
+                .iter()
+                .map(|(owner, store)| (owner == caller, Arc::clone(store)))
+                .collect()
+        };
+        let mut mine = Vec::new();
+        let mut others = 0usize;
+        for (is_mine, store) in tables {
+            for session in store.running() {
+                if is_mine {
+                    mine.push(RunningCommand {
+                        session_id: session.session_id.clone(),
+                        command: session.command.clone(),
+                        running_ms: session.started_at.elapsed().as_millis(),
+                    });
+                } else {
+                    others += 1;
+                }
+            }
+        }
+        RunningCommands { mine, others }
     }
 
     /// 这个调用方在这个目录上的命令会话表；没有就建一张。
@@ -420,6 +520,7 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
         Arc::new(WorkspaceRuntime {
             commit_lock: Mutex::new(()),
             sessions: Mutex::new(HashMap::new()),
+            writes: Arc::new(AtomicU64::new(0)),
             lock_file: lock_path_for(key),
         })
     }))

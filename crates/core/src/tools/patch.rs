@@ -5,11 +5,16 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::tools::caller::Caller;
 use crate::tools::context::ToolContext;
 use crate::tools::patch_diag::{Diagnostic, HunkMiss, MAX_CANDIDATES, MAX_DIAGNOSTICS};
 use crate::tools::workspace::{tool_ok, FileState, Workspace, WorkspaceError};
 
-pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+pub fn apply_patch(
+    ctx: &ToolContext,
+    caller: &Caller,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
     let ws = &ctx.workspace;
     // notebook 按 cell 改走另一个参数：补丁是文本信封，塞不进"第几个 cell 换
     // 成什么"这种结构。两者在**同一次事务**里——多文件原子提交、备份回滚、
@@ -416,6 +421,9 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
 
     if !dry_run {
         let _transaction_backups = commit_staged(ws, &staged, &baselines)?;
+        // 落盘成功才记这一笔：正在跑的命令拿它算"我起来之后工作区被改过几次"，
+        // 记成失败的那次会让一条本来可信的命令结果显得不可信。
+        ctx.runtime.record_write();
         let change_id = Uuid::new_v4().simple().to_string();
         // 落盘之后的新版本：接着改同一个文件时原样传回 expected_versions，
         // 不用再 read_file 一遍。
@@ -439,7 +447,7 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
             "files_deleted": files_deleted,
             "file_versions": new_versions,
             "recovery": "git",
-            "warnings": []
+            "warnings": commands_still_running_warnings(ctx, caller)
         })));
     }
 
@@ -460,10 +468,58 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     })))
 }
 
-pub fn patch_check(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+/// 补丁已经落盘了，但这个目录上还有命令在跑——它们读到的文件可能和刚写进去
+/// 的不一样。
+///
+/// **为什么是写完之后提醒，而不是拦下来**：后台命令没有终点，拦住等于"只要有
+/// 个 dev server 在跑就不能改代码"，那恰恰是日常工作流。这条提示要做到的是让
+/// 模型**能判断**：自己起的命令直接给 `session_id`，它可以停掉重跑，也可以
+/// 认下"那条结果是基于旧代码的"。
+///
+/// 别人起的只报个数。命令文本是另一个主体的东西，会话刚按主体分开，这里摊开
+/// 就白分了（见 [`crate::tools::caller`]）。
+fn commands_still_running_warnings(ctx: &ToolContext, caller: &Caller) -> Vec<String> {
+    let running = ctx.runtime.running_commands(caller);
+    let mut warnings = Vec::new();
+    for command in &running.mine {
+        warnings.push(format!(
+            "Command still running while this patch landed: {} (session {}, {}s so far). \
+             It may have read these files before the change, so its result can describe the old code. \
+             kill_session and run it again if that matters.",
+            short_command(&command.command),
+            command.session_id,
+            command.running_ms / 1000
+        ));
+    }
+    if running.others > 0 {
+        warnings.push(format!(
+            "{} command(s) started over another connection are also running in this workspace and may be reading these files.",
+            running.others
+        ));
+    }
+    warnings
+}
+
+/// 命令文本进警告时截一下：整条 `cargo test --workspace --all-features …` 会把
+/// 提示淹掉，而模型认出是哪条命令只需要开头。
+fn short_command(command: &str) -> String {
+    const MAX: usize = 60;
+    let trimmed = command.trim();
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(MAX).collect();
+    format!("{head}…")
+}
+
+pub fn patch_check(
+    ctx: &ToolContext,
+    caller: &Caller,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
     let mut check_args = args.clone();
     check_args["dry_run"] = Value::Bool(true);
-    let mut result = apply_patch(ctx, &check_args)?;
+    let mut result = apply_patch(ctx, caller, &check_args)?;
     if let Some(object) = result.as_object_mut() {
         object.insert("preflight".into(), Value::Bool(true));
     }
@@ -1653,6 +1709,7 @@ mod tests {
 
         apply_patch(
             &context,
+            &Caller::local(),
             &json!({ "patch": "--- a/run.sh\n+++ b/run.sh\n@@\n-old\n+new\n" }),
         )
         .expect("apply");
@@ -1677,6 +1734,7 @@ mod tests {
         let (workspace, _harness, context) = context_with_file();
         apply_patch(
             &context,
+            &Caller::local(),
             &json!({ "patch": "--- /dev/null\n+++ b/added.txt\n@@\n+hello\n" }),
         )
         .expect("apply");
@@ -1692,7 +1750,7 @@ mod tests {
     #[test]
     fn patch_check_does_not_modify_workspace() {
         let (_workspace, _harness, context) = context_with_file();
-        let result = patch_check(&context, &patch()).expect("patch check");
+        let result = patch_check(&context, &Caller::local(), &patch()).expect("patch check");
         assert_eq!(result["preflight"], true);
         assert_eq!(
             std::fs::read_to_string(context.workspace.root().join("main.rs")).unwrap(),
@@ -1723,6 +1781,7 @@ mod tests {
         let (_workspace, _harness, context) = context_with_file();
         let result = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "*** Begin Patch\n*** Delete File: main.rs\n*** Add File: main.rs\n+fresh\n*** End Patch\n"
             }),
@@ -1740,6 +1799,7 @@ mod tests {
         let (_workspace, _harness, context) = context_with_file();
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "--- a/main.rs\n+++ b/main.rs\n@@\n-old\n+new\n--- a/missing.rs\n+++ b/missing.rs\n@@\n-old\n+new\n"
             }),
@@ -1777,6 +1837,7 @@ mod tests {
         // 是 `line 41`——整段对不上，只有第一行还在。
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "--- a/m.txt\n+++ b/m.txt\n@@ -40,2 +40,2 @@\n-line 40\n-line forty-one\n+line forty\n+line forty-one\n"
             }),
@@ -1838,6 +1899,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "--- a/m.txt\n+++ b/m.txt\n@@\n-gamma\n+GAMMA\n@@\n-alpha\n+ALPHA\n"
             }),
@@ -1870,6 +1932,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": concat!(
                     "--- a/a.txt\n+++ b/a.txt\n@@\n-a-nope\n+a-new\n",
@@ -1917,6 +1980,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": concat!(
                     "--- a/m.txt\n+++ b/m.txt\n@@\n-nope\n+changed\n",
@@ -1947,7 +2011,8 @@ mod tests {
             std::fs::write(&target, "someone else wrote this\n").expect("外部写入");
         });
 
-        let error = apply_patch(&context, &patch()).expect_err("文件变了，应当拒绝");
+        let error =
+            apply_patch(&context, &Caller::local(), &patch()).expect_err("文件变了，应当拒绝");
         let value = error.to_error_value();
         assert_eq!(value["code"], "FILE_VERSION_CONFLICT", "{value}");
         assert_eq!(
@@ -1970,6 +2035,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "*** Begin Patch\n*** Add File: fresh.txt\n+mine\n*** End Patch\n"
             }),
@@ -2000,6 +2066,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "*** Begin Patch\n*** Delete File: main.rs\n*** End Patch\n",
                 "confirm": true
@@ -2034,6 +2101,7 @@ mod tests {
         // `line 25` / `line twenty-six`，而文件里第 26 行是 `line 26`。
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": concat!(
                     "--- a/m.txt\n+++ b/m.txt\n@@ -2,0 +2,3 @@\n+extra a\n+extra b\n+extra c\n",
@@ -2111,7 +2179,7 @@ mod tests {
             "--- /dev/null\n+++ b/main.rs\n@@\n+fresh\n",
         ] {
             let (_workspace, _harness, context) = context_with_file();
-            let error = apply_patch(&context, &json!({ "patch": patch }))
+            let error = apply_patch(&context, &Caller::local(), &json!({ "patch": patch }))
                 .expect_err("Add 一个已存在的文件应当被拒");
             let value = error.to_error_value();
             assert_eq!(value["code"], "PATCH_FAILED", "{value}");
@@ -2142,6 +2210,7 @@ mod tests {
 
         apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "*** Begin Patch\n*** Update File: m.txt\n@@\n-a\n+A\n*** Update File: m.txt\n@@\n-b\n+B\n*** End Patch\n"
             }),
@@ -2162,6 +2231,7 @@ mod tests {
         let (_workspace, _harness, context) = context_with_file();
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({ "patch": "*** Begin Patch\n*** Update File: main.rs\n@@\n-old\n+new\n" }),
         )
         .expect_err("缺结束标记应当被拒");
@@ -2187,6 +2257,7 @@ mod tests {
         let (_workspace, _harness, context) = context_with_file();
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "*** Begin Patch\n*** Update File: main.rs\n@@\n-old\n+new\n*** Move to: moved.rs\n*** End Patch\n"
             }),
@@ -2222,6 +2293,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "*** Begin Patch\n*** Update File: m.txt\n@@\n-x\n+z\n*** End Patch\n"
             }),
@@ -2242,6 +2314,7 @@ mod tests {
         // 给了行号就不再是歧义。
         apply_patch(
             &context,
+            &Caller::local(),
             &json!({ "patch": "--- a/m.txt\n+++ b/m.txt\n@@ -3,1 +3,1 @@\n-x\n+z\n" }),
         )
         .expect("行号说了是第三行");
@@ -2265,7 +2338,8 @@ mod tests {
             target.canonicalize().unwrap_or(target.clone()),
         )]);
 
-        let error = apply_patch(&context, &patch()).expect_err("备份读不了就该停下");
+        let error =
+            apply_patch(&context, &Caller::local(), &patch()).expect_err("备份读不了就该停下");
         let value = error.to_error_value();
         assert_eq!(value["code"], "PATCH_FAILED", "{value}");
         let message = value["message"].as_str().unwrap_or_default();
@@ -2301,6 +2375,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "--- a/a.txt\n+++ b/a.txt\n@@\n-a-old\n+a-new\n--- a/b.txt\n+++ b/b.txt\n@@\n-b-old\n+b-new\n"
             }),
@@ -2350,6 +2425,7 @@ mod tests {
 
         let error = apply_patch(
             &context,
+            &Caller::local(),
             &json!({
                 "patch": "--- a/a.txt\n+++ b/a.txt\n@@\n-a-old\n+a-new\n--- a/b.txt\n+++ b/b.txt\n@@\n-b-old\n+b-new\n"
             }),

@@ -112,9 +112,13 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
   `write-locks/` 下的文件锁（`fs2`），进程死了内核自动放。等锁最多
   `WRITE_LOCK_WAIT`（30 秒），超了报 `WORKSPACE_BUSY` 而不是挂着——因为
   `exec_command` 也会占这把锁。
-  占锁的是：`apply_patch` 落盘，以及 `exec_command` **同步等结果的那一段**
-  （命令转后台之后就不占了）。管不到的边界——后台命令、外部编辑器、不同
-  `GLD_HOME` 的另一个 gld、Git common directory——写在那个模块的文档和
+  占锁的是：`apply_patch` 落盘，以及 `exec_command` **从起进程到这次调用返回**
+  那一段——转后台的那一路（`yield_time_ms: 0`）占的就只有 spawn 那一瞬间，
+  为的是命令别看到一个写了一半的文件树（多文件补丁不是原子的）。
+  后台那段没有互斥，改用双向可见顶上：命令那边看会话快照的
+  `workspace_writes_since_start`，写那边看 `apply_patch` 的 `warnings`
+  （自己的命令给 `session_id`，别人的只给数量）。其余管不到的边界——外部编辑器、
+  不同 `GLD_HOME` 的另一个 gld、Git common directory——写在那个模块的文档和
   [security.md](security.md) 里，别当成已经隔离了。
 - **命令会话表也归同一个 `WorkspaceRuntime`，按「目录 + 调用方主体」分。**
   主体是 `tools/caller.rs` 的 `Caller`：两条 MCP 路从监听器验完鉴权的

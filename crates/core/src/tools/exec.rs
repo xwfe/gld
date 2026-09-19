@@ -64,28 +64,28 @@ pub fn exec_command(
     let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
     let stdin_text = args.get("stdin").and_then(Value::as_str).unwrap_or("");
 
-    // 同步等结果的这一段占住工作区的写权。挡的是"一边跑命令一边打补丁"——那种
-    // 交叉出来的结果没法解释：命令读到的是半新半旧的文件。
+    // **每条命令起来之前都要先拿到工作区的写权**，不管它是同步等还是转后台。
+    // 挡的是"一边跑命令一边打补丁"——那种交叉出来的结果没法解释：命令读到的是
+    // 半新半旧的文件。一个补丁改三个文件不是原子的（单个文件的替换才是），
+    // 正好落在中间起来的命令看到的就是改了一个半的文件树。
     //
     // **占到哪为止：到这次调用返回。** 命令在 yield_time_ms 之内跑完，那就是
-    // 全程；没跑完就转后台（拿着 session_id 继续跑到 timeout_ms），那时写权
-    // 已经放了，后面这段没有保护。
+    // 全程；没跑完就转后台（拿着 session_id 继续跑到 timeout_ms），写权在返回
+    // 那一刻就放了，**后面那段没有互斥**。传 yield_time_ms: 0 的那一路，占的
+    // 就只有起进程的这一瞬间。
     //
-    // 这不是没想到，是刻意的：后台命令没有终点，占着写权等于把目录锁到天亮，
-    // `npm run dev` 起来之后谁也别想改代码了。现在的效果是把选择权交给调用
-    // 方——想要保护就同步等（yield_time_ms 调大，上限 30 秒），想撒手就传 0
-    // 或者让它转后台。yield_time_ms 传 0 的那一路连锁都不取。
+    // 后台那段为什么不继续占：后台命令没有终点可言，占着写权等于把目录锁到
+    // 天亮，`npm run dev` 起来之后谁也别想改代码了。补的是另一条路——
+    // 会话快照里的 `workspace_writes_since_start` 告诉命令这边"你跑的这段时间
+    // 工作区被改过几次"，`apply_patch` 的 warnings 告诉写的那边"这儿还有几条
+    // 命令在跑"。两边都看得见，但谁也不挡谁。
     //
     // 这里不猜命令写不写文件：`cargo build` 写、`ls` 不写，靠命令文本判断只会
     // 漏判，而漏判给人"已经协调了"的错觉。按运行形态一刀切，代价是 `sleep 5`
     // 这种纯等待的命令也占着写权。
-    let write_guard = if yield_ms == 0 {
-        None
-    } else {
-        match ctx.runtime.lock_commits() {
-            Some(guard) => Some(guard),
-            None => return Err(crate::tools::workspace_runtime::write_lock_busy()),
-        }
+    let write_guard = match ctx.runtime.lock_commits() {
+        Some(guard) => guard,
+        None => return Err(crate::tools::workspace_runtime::write_lock_busy()),
     };
 
     let result = crate::async_rt::block_on(async {
@@ -102,8 +102,9 @@ pub fn exec_command(
         )
         .await
     });
-    // 命令已经结束（或被 kill），写权可以放了。显式写出来，是因为下面还有一段
-    // 拼结果的代码，读的人不该去想锁是在哪一行没的。
+    // 到这儿命令要么已经结束（或被 kill），要么转后台了，写权都可以放了。
+    // 显式写出来，是因为下面还有一段拼结果的代码，读的人不该去想锁是在哪一行
+    // 没的。
     drop(write_guard);
 
     match result {
@@ -598,7 +599,12 @@ async fn run_command(
         }),
     })?;
 
-    let session = sessions.insert(ExecSession::new_with_mode(child, tty));
+    let session = sessions.insert(ExecSession::new_with_mode(
+        child,
+        tty,
+        cmd.to_string(),
+        ctx.runtime.write_counter(),
+    ));
     session.spawn_readers().await;
     let deadline = start + limit;
 
@@ -1287,17 +1293,36 @@ mod tests {
         );
     }
 
-    /// 转到后台的那一路不占写权：`npm run dev` 起来之后还得能改代码。
+    /// 后台命令**起来之前**也要拿到写权：起进程那一瞬间看到的文件树不能是
+    /// 别人写到一半的。
+    ///
+    /// 这条以前断言的是反面（"写权被占着也照起"）。改掉是因为那条规则有个说不
+    /// 通的地方：`yield_time_ms: 1` 要等锁、`yield_time_ms: 0` 完全不等，同一条
+    /// 命令只因为参数差 1 就走了两套并发语义。而一个补丁改三个文件不是原子的，
+    /// 正好落在中间起来的命令看到的就是改了一个半的文件树。
+    ///
+    /// 拿到之后立刻放：后台那段照旧没有互斥，见
+    /// [`a_background_command_does_not_keep_the_write_lock`]。
     #[cfg(unix)]
     #[test]
-    fn a_background_command_starts_even_while_the_workspace_is_locked() {
+    fn a_background_command_waits_for_the_write_lock_before_it_starts() {
         let (_workspace, _harness, ctx) = tree_workspace();
         let held = ctx
             .runtime
             .lock_commits_within(Duration::from_millis(50))
             .expect("没人占着却拿不到写权");
 
-        // yield_time_ms 传 0 = 立刻拿 session_id 走人，这一路根本不取写权。
+        let refused = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./spawn-tree", "timeout_ms": 1_000, "yield_time_ms": 0 }),
+        );
+        assert_eq!(
+            refused["error"]["code"], "WORKSPACE_BUSY",
+            "有人正在写，后台命令却起来了——它看到的可能是改了一半的文件树：{refused}"
+        );
+
+        drop(held);
         let started = call_tool(
             &ctx,
             "exec_command",
@@ -1305,9 +1330,160 @@ mod tests {
         );
         assert!(
             started.get("session_id").is_some(),
-            "写权被占着就起不了后台命令，那 dev server 之类根本没法用：{started}"
+            "写权放开了还是起不来：{started}"
         );
-        drop(held);
+    }
+
+    /// 后台命令跑着的时候落了盘，命令那边看得见：快照里的
+    /// `workspace_writes_since_start` 从 0 变成 1。
+    ///
+    /// 后台那段没有互斥，这个数就是事后判断"这条命令的结果还作不作数"的唯一
+    /// 依据——它编译的可能是改之前的代码。
+    #[cfg(unix)]
+    #[test]
+    fn a_running_command_sees_that_the_workspace_was_written() {
+        let (_workspace, _harness, ctx) = tree_workspace();
+        let started = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./spawn-tree", "timeout_ms": 5_000, "yield_time_ms": 0 }),
+        );
+        let session_id = started["session_id"].as_str().expect("session id");
+        assert_eq!(
+            started["workspace_writes_since_start"], 0,
+            "还没人写就报写过了：{started}"
+        );
+
+        let patched = call_tool(
+            &ctx,
+            "apply_patch",
+            &json!({ "patch": "*** Begin Patch\n*** Add File: while-running.txt\n+hello\n*** End Patch\n" }),
+        );
+        assert_eq!(patched["ok"], true, "{patched}");
+
+        let after = call_tool(
+            &ctx,
+            "read_output",
+            &json!({ "output_ref": format!("session:{session_id}:stdout") }),
+        );
+        assert_eq!(after["ok"], true, "{after}");
+        let snapshot = call_tool(
+            &ctx,
+            "write_stdin",
+            &json!({ "session_id": session_id, "chars": "", "yield_time_ms": 0 }),
+        );
+        assert_eq!(
+            snapshot["workspace_writes_since_start"], 1,
+            "命令跑着的时候工作区被改了，它却什么都不知道：{snapshot}"
+        );
+    }
+
+    /// 反过来：命令还在跑的时候打补丁，补丁的结果里得说一声。
+    ///
+    /// 不是拦下来——后台命令没有终点，拦住等于"有 dev server 就不能改代码"。
+    /// 提示要做到的是让模型能判断：自己起的命令直接给 `session_id`，停掉重跑
+    /// 还是认下"那条结果基于旧代码"，由它决定。
+    #[cfg(unix)]
+    #[test]
+    fn a_patch_says_which_of_my_commands_are_still_running() {
+        let (_workspace, _harness, ctx) = tree_workspace();
+        let quiet = call_tool(
+            &ctx,
+            "apply_patch",
+            &json!({ "patch": "*** Begin Patch\n*** Add File: first.txt\n+hello\n*** End Patch\n" }),
+        );
+        assert_eq!(
+            quiet["warnings"],
+            json!([]),
+            "没有命令在跑却警告了：{quiet}"
+        );
+
+        let started = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./spawn-tree", "timeout_ms": 5_000, "yield_time_ms": 0 }),
+        );
+        let session_id = started["session_id"].as_str().expect("session id");
+
+        let noisy = call_tool(
+            &ctx,
+            "apply_patch",
+            &json!({ "patch": "*** Begin Patch\n*** Add File: second.txt\n+hello\n*** End Patch\n" }),
+        );
+        assert_eq!(noisy["ok"], true, "{noisy}");
+        let warnings = noisy["warnings"].to_string();
+        assert!(
+            warnings.contains(session_id),
+            "警告里没给 session_id，模型想停都不知道停哪条：{warnings}"
+        );
+        assert!(
+            warnings.contains("spawn-tree"),
+            "警告里没说是哪条命令：{warnings}"
+        );
+    }
+
+    /// 已经跑完的命令不算"还在跑"。
+    ///
+    /// 这条钉的是那次主动 refresh：命令自己结束时没人通知服务端，
+    /// `has_exited` 要等有人来读或者超时监视器到点才翻。不主动问一遍的话，
+    /// 一条早就结束的命令会一直被算进警告里，那条提示就成了狼来了——每次
+    /// 打补丁都报，模型很快就不看了。
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_already_finished_is_not_reported_as_running() {
+        let (workspace, _harness, ctx) = tree_workspace();
+        let quick = workspace.path().join("quick");
+        std::fs::write(&quick, "#!/bin/sh\nexit 0\n").expect("script");
+        let mut permissions = std::fs::metadata(&quick).expect("meta").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+        }
+        std::fs::set_permissions(&quick, permissions).expect("chmod");
+
+        // yield_time_ms: 0 = 起完就走，谁也没去读过它的状态。
+        let started = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./quick", "timeout_ms": 5_000, "yield_time_ms": 0 }),
+        );
+        assert!(started.get("session_id").is_some(), "{started}");
+        // 给它一点时间退出。退出这件事本身不会有人来记账。
+        std::thread::sleep(Duration::from_millis(300));
+
+        let patched = call_tool(
+            &ctx,
+            "apply_patch",
+            &json!({ "patch": "*** Begin Patch\n*** Add File: after-exit.txt\n+hello\n*** End Patch\n" }),
+        );
+        assert_eq!(
+            patched["warnings"],
+            json!([]),
+            "命令早就退了还被算成在跑：{patched}"
+        );
+    }
+
+    /// 起完就放：`npm run dev` 转后台之后，别人照样改得了代码。
+    ///
+    /// 这是刻意的取舍——后台命令没有终点，一直占着等于把目录锁到天亮。代价
+    /// （后台那段没有互斥）由两边的可见性来兜：命令这边看
+    /// `workspace_writes_since_start`，写的那边看 `apply_patch` 的 warnings。
+    #[cfg(unix)]
+    #[test]
+    fn a_background_command_does_not_keep_the_write_lock() {
+        let (_workspace, _harness, ctx) = tree_workspace();
+        let started = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "./spawn-tree", "timeout_ms": 3_000, "yield_time_ms": 0 }),
+        );
+        assert!(started.get("session_id").is_some(), "{started}");
+
+        let taken = ctx.runtime.lock_commits_within(Duration::from_millis(200));
+        assert!(
+            taken.is_some(),
+            "命令转后台了还攥着写权，那有个 dev server 在跑就谁也改不了代码"
+        );
     }
 
     #[cfg(unix)]

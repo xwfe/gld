@@ -318,7 +318,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "apply_patch",
         "Apply patch",
-        "Apply a patch envelope transactionally inside the workspace.",
+        "Apply a patch envelope transactionally inside the workspace. On success, warnings lists commands still running here, whose results may describe the code as it was before this patch.",
         false,
         true,
         false,
@@ -334,7 +334,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_command",
         "Execute command",
-        "Run a bounded command in the workspace under runtime policy. While this call is waiting for the command (up to yield_time_ms), it holds the workspace write lock, so apply_patch from another session gets WORKSPACE_BUSY; once the command moves to the background the lock is released and that protection is gone. The session it returns belongs to this connection: another client cannot read or kill it.",
+        "Run a bounded command in the workspace under runtime policy. Every command takes the workspace write lock before it starts, so it never sees a half-written tree; the lock is held until this call returns (up to yield_time_ms) and released once the command moves to the background, so apply_patch from another session gets WORKSPACE_BUSY only while this call is waiting. A background command is not protected after that: its workspace_writes_since_start says how many times the workspace was written since it started, and anything above 0 means its result may describe older code. The session it returns belongs to this connection: another client cannot read or kill it.",
         false,
         true,
         true,

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -61,6 +61,32 @@ impl SessionStore {
         self.sessions.lock().expect("sessions lock").is_empty()
     }
 
+    /// 表里还在跑的命令。
+    ///
+    /// **会先问一遍每个子进程死没死**：命令自己跑完时没人通知这边，
+    /// `has_exited` 要等有人来读（`read_output`）或者超时监视器到点才更新。
+    /// 不问就直接报，一条早就结束的 `cargo test` 会一直被算成"还在跑"，
+    /// 那条警告就成了狼来了。
+    ///
+    /// 内部用 `block_on`，不能在 tokio 异步 worker 线程里调。
+    pub fn running(&self) -> Vec<Arc<ExecSession>> {
+        let all: Vec<Arc<ExecSession>> = self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .values()
+            .cloned()
+            .collect();
+        // 锁在这里就放开了：下面要等每个子进程回话，攥着锁会把同一张表上
+        // 正要起命令的调用堵住。
+        all.into_iter()
+            .filter(|session| {
+                crate::async_rt::block_on(session.refresh_status());
+                !session.has_exited()
+            })
+            .collect()
+    }
+
     fn session_ids(&self) -> Vec<String> {
         self.sessions
             .lock()
@@ -95,10 +121,20 @@ impl SessionStore {
 
 pub struct ExecSession {
     pub session_id: String,
+    /// 跑的是哪条命令。只给起它的那个主体看，见
+    /// [`crate::tools::workspace_runtime::WorkspaceRuntime::running_commands`]。
+    pub command: String,
     pub(crate) child: AsyncMutex<Child>,
     pub stdin: AsyncMutex<Option<ChildStdin>>,
     stdin_open: Mutex<bool>,
     interactive: bool,
+    /// 这个工作区的落盘计数器，和 `WorkspaceRuntime` 共用一个。
+    ///
+    /// 存计数器本身而不是 `WorkspaceRuntime`：后者持有会话表、会话表持有这里，
+    /// 拿 `Arc<WorkspaceRuntime>` 就成环了，谁也放不掉。
+    workspace_writes: Arc<AtomicU64>,
+    /// 这条命令起来的那一刻，上面那个计数是多少。
+    writes_at_start: u64,
     stdout: Mutex<Vec<u8>>,
     stderr: Mutex<Vec<u8>>,
     stdout_total: Mutex<usize>,
@@ -111,20 +147,31 @@ pub struct ExecSession {
 }
 
 impl ExecSession {
+    /// 测试用：没有命令文本，也不跟任何工作区的落盘计数。
+    #[cfg(test)]
     pub fn new(child: Child) -> Self {
-        Self::new_with_mode(child, false)
+        Self::new_with_mode(child, false, String::new(), Arc::new(AtomicU64::new(0)))
     }
 
-    pub fn new_with_mode(mut child: Child, interactive: bool) -> Self {
+    pub fn new_with_mode(
+        mut child: Child,
+        interactive: bool,
+        command: String,
+        workspace_writes: Arc<AtomicU64>,
+    ) -> Self {
         let session_id = Uuid::new_v4().to_string();
         let stdin = child.stdin.take();
         let stdin_open = stdin.is_some();
+        let writes_at_start = workspace_writes.load(Ordering::Acquire);
         Self {
             session_id,
+            command,
             child: AsyncMutex::new(child),
             stdin: AsyncMutex::new(stdin),
             stdin_open: Mutex::new(stdin_open),
             interactive,
+            workspace_writes,
+            writes_at_start,
             stdout: Mutex::new(Vec::new()),
             stderr: Mutex::new(Vec::new()),
             stdout_total: Mutex::new(0),
@@ -231,6 +278,13 @@ impl ExecSession {
         self.exited.load(Ordering::Acquire)
     }
 
+    /// 这条命令起来之后，工作区落过几次盘。
+    pub fn workspace_writes_since_start(&self) -> u64 {
+        self.workspace_writes
+            .load(Ordering::Acquire)
+            .saturating_sub(self.writes_at_start)
+    }
+
     pub fn mark_termination_reason(&self, reason: &str) {
         *self.termination_reason.lock().expect("termination lock") = Some(reason.to_string());
     }
@@ -303,6 +357,11 @@ impl ExecSession {
             "stdout_truncated": stdout.truncated,
             "stderr_truncated": stderr.truncated,
             "elapsed_ms": self.started_at.elapsed().as_millis(),
+            // 这条命令起来之后，这个工作区落过几次盘（apply_patch 提交一次算
+            // 一次）。**不是 0 就说明命令读到的文件和现在的不一样**——它可能
+            // 编译了旧代码，也可能中途读到了改了一半的文件树。后台命令期间
+            // 没有写互斥，这个数就是事后判断结果可不可信的唯一依据。
+            "workspace_writes_since_start": self.workspace_writes_since_start(),
             "output_refs": {
                 "stdout": format!("session:{}:stdout", self.session_id),
                 "stderr": format!("session:{}:stderr", self.session_id)
