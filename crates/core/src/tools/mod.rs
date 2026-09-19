@@ -8,6 +8,7 @@ pub mod history;
 mod image_tool;
 pub mod manage;
 pub mod patch;
+mod patch_diag;
 pub mod planning;
 pub mod policy;
 pub mod registry;

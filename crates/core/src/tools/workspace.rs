@@ -52,6 +52,12 @@ impl WorkspaceError {
         }
     }
 
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Tool { code, .. } | Self::ToolDetails { code, .. } => code,
+        }
+    }
+
     pub fn invalid_argument(message: impl Into<String>) -> Self {
         Self::Tool {
             code: "INVALID_ARGUMENT",

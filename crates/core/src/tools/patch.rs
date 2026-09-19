@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::tools::context::ToolContext;
+use crate::tools::patch_diag::{Diagnostic, HunkMiss, MAX_CANDIDATES, MAX_DIAGNOSTICS};
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -54,6 +55,12 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     let mut order: Vec<String> = Vec::new();
     let mut operations: HashMap<String, &'static str> = HashMap::new();
     let mut staged: HashMap<String, Option<String>> = HashMap::new();
+    // 对不上的地方一次报清楚，而不是报第一个就走。一个文件里第一段失败之后
+    // 就不再检查这个文件剩下的段——它们要看见前一段的结果才知道对不对，接着
+    // 检查只会连锁误报；那些段记进 `not_checked`，不能算作通过（审查 C2）。
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut failed_files: HashSet<String> = HashSet::new();
+    let mut not_checked: Vec<Value> = Vec::new();
 
     for fp in &file_patches {
         ws.reject_unsafe_text(&fp.path)?;
@@ -61,13 +68,40 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
         // 先 Add 再 Update、或者两次 Update 同一个文件，第二段要看见第一段
         // 的结果。以前每段都重新读磁盘，最后一段 insert 覆盖前面的，前面
         // 那次编辑就这么没了（审查 P03）。
-        let staged_before = staged
-            .get(&ws.resolve_for_write(&fp.path)?.display)
-            .cloned();
+        let write_display = ws.resolve_for_write(&fp.path)?.display;
+        if failed_files.contains(&write_display) {
+            not_checked.push(json!({
+                "file": write_display,
+                "reason_code": "earlier_failure_in_same_file"
+            }));
+            continue;
+        }
+        let staged_before = staged.get(&write_display).cloned();
         let resolved = if fp.is_new_file || matches!(staged_before, Some(Some(_))) {
             ws.resolve_for_write(&fp.path)?
         } else {
-            ws.resolve_existing(&fp.path)?
+            match ws.resolve_existing(&fp.path) {
+                Ok(resolved) => resolved,
+                // 要改的文件根本不在：这是"改错了目标"，和权限、越界不是
+                // 一回事，收进诊断，剩下的文件接着检查。
+                Err(error) if error.code() == "NOT_FOUND" => {
+                    diagnostics.push(Diagnostic::file_level(
+                        // 错误码还是 NOT_FOUND：这条一直就是这么报的，改码等于
+                        // 让照着旧码分支的客户端突然走进 else。带上的诊断是新的。
+                        "NOT_FOUND",
+                        "file_not_found",
+                        format!(
+                            "File not found: {}; use *** Add File: to create it",
+                            fp.path
+                        ),
+                        fp.path.clone(),
+                        if fp.is_deleted { "delete" } else { "update" },
+                    ));
+                    failed_files.insert(write_display);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         };
         ws.reject_write_symlink(&fp.path)?;
 
@@ -77,20 +111,36 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
             && (resolved.existed || matches!(staged_before, Some(Some(_))))
             && !matches!(staged_before, Some(None))
         {
-            return Err(patch_failed(format!(
-                "{} already exists; use *** Update File: {} to change it, or delete it first",
-                resolved.display, resolved.display
-            )));
+            diagnostics.push(Diagnostic::file_level(
+                "PATCH_FAILED",
+                "file_already_exists",
+                format!(
+                    "{} already exists; use *** Update File: {} to change it, or delete it first",
+                    resolved.display, resolved.display
+                ),
+                resolved.display.clone(),
+                "add",
+            ));
+            failed_files.insert(resolved.display.clone());
+            continue;
         }
 
         let original = match &staged_before {
             // 这一批里刚删过：Add 从空白开始，别的操作没有文件可改。
             Some(None) if fp.is_new_file => String::new(),
             Some(None) => {
-                return Err(patch_failed(format!(
-                    "{} was deleted earlier in this patch; add it again instead of editing it",
-                    resolved.display
-                )))
+                diagnostics.push(Diagnostic::file_level(
+                    "PATCH_FAILED",
+                    "deleted_earlier_in_patch",
+                    format!(
+                        "{} was deleted earlier in this patch; add it again instead of editing it",
+                        resolved.display
+                    ),
+                    resolved.display.clone(),
+                    "update",
+                ));
+                failed_files.insert(resolved.display.clone());
+                continue;
             }
             Some(Some(text)) if fp.is_new_file => {
                 let _ = text;
@@ -98,10 +148,32 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
             }
             Some(Some(text)) => text.clone(),
             None if fp.is_new_file => String::new(),
-            None if resolved.existed => fs::read_to_string(&resolved.path)
-                .map_err(|_| WorkspaceError::not_found(format!("File not found: {}", fp.path)))?,
+            None if resolved.existed => match fs::read_to_string(&resolved.path) {
+                Ok(text) => text,
+                Err(error) => {
+                    diagnostics.push(Diagnostic::file_level(
+                        "PATCH_FAILED",
+                        "file_unreadable",
+                        format!("cannot read {} ({error})", resolved.display),
+                        resolved.display.clone(),
+                        "update",
+                    ));
+                    failed_files.insert(resolved.display.clone());
+                    continue;
+                }
+            },
             None if fp.is_deleted => String::new(),
-            None => return Err(patch_failed(format!("File not found: {}", fp.path))),
+            None => {
+                diagnostics.push(Diagnostic::file_level(
+                    "NOT_FOUND",
+                    "file_not_found",
+                    format!("File not found: {}", fp.path),
+                    fp.path.clone(),
+                    "update",
+                ));
+                failed_files.insert(resolved.display.clone());
+                continue;
+            }
         };
 
         if fp.is_deleted {
@@ -115,14 +187,38 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
             continue;
         }
 
-        let updated = apply_hunks(&original, &fp.hunks)?;
-        staged.insert(resolved.display.clone(), Some(updated));
         // 文件本来就在盘上就是改，不在就是新建——先删后加的净效果因此是
         // "改"，这一点有测试钉着。
         let op = if resolved.existed { "update" } else { "add" };
+        let updated = match apply_hunks(&original, &fp.hunks) {
+            Ok(text) => text,
+            Err(miss) => {
+                // 拿什么当原文比的：同一批里前面改过这个文件，行号就和磁盘上
+                // 那份对不上，得说清楚，否则模型会以为 read_file 读错了。
+                let baseline = if staged_before.is_some() {
+                    "earlier_in_this_patch"
+                } else {
+                    "file_on_disk"
+                };
+                diagnostics.push(Diagnostic::from_hunk_miss(
+                    resolved.display.clone(),
+                    op,
+                    baseline,
+                    &original,
+                    miss,
+                ));
+                failed_files.insert(resolved.display.clone());
+                continue;
+            }
+        };
+        staged.insert(resolved.display.clone(), Some(updated));
         if operations.insert(resolved.display.clone(), op).is_none() {
             order.push(resolved.display.clone());
         }
+    }
+
+    if !diagnostics.is_empty() {
+        return Err(patch_diagnostics(diagnostics, not_checked));
     }
 
     let affected: Vec<Value> = order
@@ -414,7 +510,15 @@ fn parse_diff_path(raw: &str) -> String {
     path.replace('\\', "/")
 }
 
-fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError> {
+/// 改后文件里的 0-based 行号，换算回**原文件**的 1-based 行号。
+///
+/// 前面几段 hunk 已经把下面的行推上推下了（`shift` 就是净增减），而模型
+/// 拿到行号是要去 `read_file` 磁盘上那份文件的，不换算就对不上。
+fn to_original_line(index: usize, shift: isize) -> usize {
+    ((index as isize - shift).max(0) as usize) + 1
+}
+
+fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, HunkMiss> {
     let line_ending = if original.contains("\r\n") {
         "\r\n"
     } else {
@@ -436,14 +540,22 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
     // the original file, and earlier hunks have moved everything below them.
     let mut shift: isize = 0;
 
-    for hunk in hunks {
+    for (hunk_index, hunk) in hunks.iter().enumerate() {
         if let Some(anchor) = &hunk.anchor {
-            let at = lines[search_from..]
+            let Some(at) = lines[search_from..]
                 .iter()
                 .position(|line| line.trim() == anchor)
-                .ok_or_else(|| {
-                    patch_failed(format!("Hunk header did not match any line: @@ {anchor}"))
-                })?;
+            else {
+                return Err(HunkMiss {
+                    code: "PATCH_FAILED",
+                    reason_code: "anchor_not_found",
+                    message: format!("Hunk header did not match any line: @@ {anchor}"),
+                    hunk_index,
+                    expected_range: None,
+                    candidate_ranges: Vec::new(),
+                    center_line: to_original_line(search_from, shift),
+                });
+            };
             search_from += at + 1;
         }
         let hunk_old: Vec<String> = hunk
@@ -462,24 +574,43 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
         // 匹配到不止一处：**不猜**。挑错一处就是改错地方，而且结果看起来
         // 是成功的。纯插入不算——插哪一处都不动原有内容，而且现有补丁大量
         // 这么写（审查 P04）。
+        //
+        // 错误码和 `PATCH_FAILED` 分开，因为下一步不一样：那个是"对不上，
+        // 重读文件再来"，这个是"对得上太多处，把话说清楚再来"。
         if expected.is_none()
             && hunk.anchor.is_none()
             && hunk.lines.iter().any(|l| matches!(l, HunkLine::Remove(_)))
         {
-            let candidates = match_positions(&lines, &hunk_old, search_from, 3);
+            let candidates = match_positions(&lines, &hunk_old, search_from, MAX_CANDIDATES);
             if candidates.len() > 1 {
                 let places = candidates
                     .iter()
-                    .map(|line| (line + 1).to_string())
+                    .map(|line| to_original_line(*line, shift).to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                return Err(patch_ambiguous(format!(
-                    "this hunk's context matches more than one place (lines {places}); add surrounding lines or a @@ -line,count @@ header so it is clear which one to change"
-                )));
+                return Err(HunkMiss {
+                    code: "PATCH_AMBIGUOUS",
+                    reason_code: "context_ambiguous",
+                    message: format!(
+                        "this hunk's context matches more than one place (lines {places}); add surrounding lines or a @@ -line,count @@ header so it is clear which one to change"
+                    ),
+                    hunk_index,
+                    expected_range: None,
+                    candidate_ranges: ranges_at(&candidates, hunk_old.len(), shift),
+                    center_line: to_original_line(candidates[0], shift),
+                });
             }
         }
-        let pos = find_hunk_position(&lines, &hunk_old, search_from, expected)
-            .ok_or_else(|| patch_failed("Hunk context did not match file content."))?;
+        let Some(pos) = find_hunk_position(&lines, &hunk_old, search_from, expected) else {
+            return Err(context_miss(
+                &lines,
+                &hunk_old,
+                search_from,
+                expected,
+                shift,
+                hunk_index,
+            ));
+        };
 
         let mut idx = pos;
         for hl in &hunk.lines {
@@ -514,6 +645,107 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError>
         output.push_str(line_ending);
     }
     Ok(output)
+}
+
+/// 一组命中位置（改后 0-based）变成原文件的 1-based 闭区间。
+fn ranges_at(positions: &[usize], length: usize, shift: isize) -> Vec<(usize, usize)> {
+    positions
+        .iter()
+        .map(|position| {
+            let start = to_original_line(*position, shift);
+            (start, start + length.saturating_sub(1))
+        })
+        .collect()
+}
+
+/// 上下文没对上时，把"它可能在哪儿"找出来。
+///
+/// 顺着找三层，越往后越松：
+/// 1. 整段上下文在文件里别的地方——多半是前面的 hunk 顺序写反了；
+/// 2. 上下文的第一行还在，只是漂走了——文件被人改过，行号过期；
+/// 3. 什么都找不到——这段补丁和这个文件对不上，得整段重写。
+///
+/// 三种情况下模型该做的事不一样，所以 reason_code 要分开：原来一律
+/// `Hunk context did not match file content.`，连是哪个文件都没有（审查 E03）。
+fn context_miss(
+    lines: &[String],
+    hunk_old: &[String],
+    search_from: usize,
+    expected: Option<usize>,
+    shift: isize,
+    hunk_index: usize,
+) -> HunkMiss {
+    let expected_range = expected.map(|start| {
+        let start = to_original_line(start, shift);
+        (start, start + hunk_old.len().saturating_sub(1))
+    });
+
+    let elsewhere = match_positions(lines, hunk_old, 0, MAX_CANDIDATES);
+    if !elsewhere.is_empty() {
+        let ranges = ranges_at(&elsewhere, hunk_old.len(), shift);
+        let places = ranges
+            .iter()
+            .map(|(start, _)| start.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return HunkMiss {
+            code: "PATCH_FAILED",
+            reason_code: "context_out_of_order",
+            message: format!(
+                "this hunk's context is in the file (around line {places}) but not after the previous hunk; hunks must be in file order"
+            ),
+            hunk_index,
+            expected_range,
+            center_line: ranges[0].0,
+            candidate_ranges: ranges,
+        };
+    }
+
+    // 退一步：整段对不上，那第一行呢。找得到就说明文件被改过、行号过期，
+    // 模型重读那一段就能修好；找不到才是真的对不上。
+    let first_line = hunk_old.iter().find(|line| !line.trim().is_empty());
+    let drifted = first_line
+        .map(|needle| {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.trim() == needle.trim())
+                .map(|(index, _)| index)
+                .take(MAX_CANDIDATES)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !drifted.is_empty() {
+        let ranges = ranges_at(&drifted, hunk_old.len(), shift);
+        let places = ranges
+            .iter()
+            .map(|(start, _)| start.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return HunkMiss {
+            code: "PATCH_FAILED",
+            reason_code: "context_drifted",
+            message: format!(
+                "this hunk's context did not match; its first line is still there (line {places}), so the rest has changed since the patch was written. Re-read that range and rebuild this hunk"
+            ),
+            hunk_index,
+            expected_range,
+            center_line: ranges[0].0,
+            candidate_ranges: ranges,
+        };
+    }
+
+    HunkMiss {
+        code: "PATCH_FAILED",
+        reason_code: "context_not_found",
+        message: "this hunk's context is nowhere in the file; re-read the file and rebuild this hunk from what is actually there".into(),
+        hunk_index,
+        expected_range,
+        candidate_ranges: Vec::new(),
+        center_line: expected_range
+            .map(|(start, _)| start)
+            .unwrap_or_else(|| to_original_line(search_from, shift)),
+    }
 }
 
 /// 上下文在 `start` 之后命中的位置，最多找 `limit` 个（报歧义只需要证明
@@ -868,17 +1100,6 @@ fn protected_repository_asset(message: impl Into<String>) -> WorkspaceError {
     }
 }
 
-/// 上下文对得上好几处，谁也不能说了算。和 `PATCH_FAILED` 分开：那个是
-/// "对不上，重读文件再来"，这个是"对得上太多处，把话说清楚再来"。
-fn patch_ambiguous(message: impl Into<String>) -> WorkspaceError {
-    WorkspaceError::Tool {
-        code: "PATCH_AMBIGUOUS",
-        message: message.into(),
-        category: "validation",
-        retryable: false,
-    }
-}
-
 /// 打补丁失败**而且**回滚没做干净：工作区现在半新半旧。和 `PATCH_FAILED`
 /// 分开，因为下一步完全不同——那个是"改一改再来"，这个是"先去看文件"。
 fn rollback_incomplete(message: impl Into<String>) -> WorkspaceError {
@@ -887,6 +1108,55 @@ fn rollback_incomplete(message: impl Into<String>) -> WorkspaceError {
         message: message.into(),
         category: "runtime",
         retryable: false,
+    }
+}
+
+/// 把收集到的诊断变成一个错误。
+///
+/// 整体错误码取第一条：`PATCH_AMBIGUOUS` 和 `PATCH_FAILED` 的下一步不一样，
+/// 而多条失败时第一条才是模型最先要修的那个。消息里点名文件和第几段——
+/// 原来只有一句 `Hunk context did not match file content.`，模型只能靠重读
+/// 整个项目去猜（审查 P01、E03）。
+fn patch_diagnostics(diagnostics: Vec<Diagnostic>, not_checked: Vec<Value>) -> WorkspaceError {
+    let first = diagnostics.first().expect("at least one diagnostic");
+    let code = first.code;
+    let mut message = match first.hunk_index {
+        Some(index) => format!("{}: hunk #{}: {}", first.file, index + 1, first.message),
+        None => format!("{}: {}", first.file, first.message),
+    };
+    if diagnostics.len() > 1 {
+        message.push_str(&format!(
+            " ({} problems in this patch; see details.diagnostics)",
+            diagnostics.len()
+        ));
+    }
+    let truncated = diagnostics.len() > MAX_DIAGNOSTICS;
+    let listed = diagnostics
+        .iter()
+        .take(MAX_DIAGNOSTICS)
+        .map(Diagnostic::to_value)
+        .collect::<Vec<_>>();
+    WorkspaceError::ToolDetails {
+        code,
+        message,
+        // 分类跟着错误码走：NOT_FOUND 一直是 not_found 类，别因为它现在从
+        // 补丁诊断里出来就换一个类别。
+        category: if code == "NOT_FOUND" {
+            "not_found"
+        } else {
+            "validation"
+        },
+        retryable: false,
+        details: json!({
+            "stage": "patch",
+            // 校验失败一律整批不落盘。说出来，模型才不会先去"收拾现场"。
+            "files_changed": false,
+            "problem_count": diagnostics.len(),
+            "diagnostics": listed,
+            "diagnostics_truncated": truncated,
+            "not_checked": not_checked,
+            "suggestion": "按 diagnostics[].suggested_read_range 重读这些文件，照它们现在的样子重建对不上的那几段，再把整个补丁重新提交"
+        }),
     }
 }
 
@@ -1044,6 +1314,220 @@ mod tests {
     fn apply_to(original: &str, patch: &str) -> String {
         let files = parse_unified_diff(patch).expect("parse");
         apply_hunks(original, &files[0].hunks).expect("apply")
+    }
+
+    /// 上下文对不上的时候，得说清楚是哪个文件、第几段、文件现在长什么样、
+    /// 该重读哪一段。原来只有一句 `Hunk context did not match file content.`
+    /// 和一个空的 details，模型除了重读整个项目没有别的办法（审查 E03、P01）。
+    #[test]
+    fn a_hunk_that_does_not_match_says_where_to_look() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let body = (1..=60)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(workspace.path().join("m.txt"), format!("{body}\n")).expect("file");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        // 补丁以为第 40、41 行是 `line 40` / `line forty-one`，而文件里第 41 行
+        // 是 `line 41`——整段对不上，只有第一行还在。
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "--- a/m.txt\n+++ b/m.txt\n@@ -40,2 +40,2 @@\n-line 40\n-line forty-one\n+line forty\n+line forty-one\n"
+            }),
+        )
+        .expect_err("第二行对不上");
+        let value = error.to_error_value();
+        assert_eq!(value["code"], "PATCH_FAILED", "{value}");
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("m.txt") && message.contains("hunk #1"),
+            "消息得点名文件和第几段：{message}"
+        );
+
+        let details = &value["details"];
+        assert_eq!(details["files_changed"], json!(false));
+        assert_eq!(details["problem_count"], json!(1));
+        let diagnostic = &details["diagnostics"][0];
+        assert_eq!(diagnostic["file"], "m.txt");
+        assert_eq!(diagnostic["operation"], "update");
+        assert_eq!(diagnostic["baseline"], "file_on_disk");
+        assert_eq!(diagnostic["hunk_index"], json!(0));
+        // 第一行还在原处：这是"重读那一段"，不是"整个补丁都不对"。
+        assert_eq!(diagnostic["reason_code"], "context_drifted", "{diagnostic}");
+        assert_eq!(diagnostic["expected_range"]["start_line"], json!(40));
+        assert_eq!(
+            diagnostic["candidate_ranges"][0]["start_line"],
+            json!(40),
+            "{diagnostic}"
+        );
+        // 建议重读的范围里必须真的包含那一行，照着读就能重建这段补丁。
+        let start = diagnostic["suggested_read_range"]["start_line"]
+            .as_u64()
+            .expect("start");
+        let end = diagnostic["suggested_read_range"]["end_line"]
+            .as_u64()
+            .expect("end");
+        assert!(start <= 40 && end >= 40, "{diagnostic}");
+        let excerpt = &diagnostic["actual_excerpt"];
+        assert!(
+            excerpt["lines"]
+                .as_array()
+                .expect("lines")
+                .iter()
+                .any(|line| line == "line 40"),
+            "摘录要给出文件现在的样子：{excerpt}"
+        );
+    }
+
+    /// 两段的顺序写反了：上下文确实在文件里，只是在前一段之前。这跟"文件里
+    /// 根本没有这段"是两码事——前者把两段调个个儿就能过。
+    #[test]
+    fn hunks_written_out_of_file_order_say_so() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        std::fs::write(workspace.path().join("m.txt"), "alpha\nbeta\ngamma\n").expect("file");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": "--- a/m.txt\n+++ b/m.txt\n@@\n-gamma\n+GAMMA\n@@\n-alpha\n+ALPHA\n"
+            }),
+        )
+        .expect_err("第二段在第一段前面");
+        let diagnostic = &error.to_error_value()["details"]["diagnostics"][0];
+        assert_eq!(
+            diagnostic["reason_code"], "context_out_of_order",
+            "{diagnostic}"
+        );
+        assert_eq!(diagnostic["hunk_index"], json!(1));
+        assert_eq!(diagnostic["candidate_ranges"][0]["start_line"], json!(1));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("m.txt")).unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
+    }
+
+    /// 多个文件各自出问题：一次都报出来，而不是修一个报一个；并且一个字节
+    /// 都不能落盘（审查 A08、C2）。
+    #[test]
+    fn every_file_that_fails_gets_its_own_diagnostic_and_nothing_is_written() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        std::fs::write(workspace.path().join("a.txt"), "a-old\n").expect("a");
+        std::fs::write(workspace.path().join("b.txt"), "b-old\n").expect("b");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": concat!(
+                    "--- a/a.txt\n+++ b/a.txt\n@@\n-a-nope\n+a-new\n",
+                    "--- a/b.txt\n+++ b/b.txt\n@@\n-b-nope\n+b-new\n",
+                    "--- a/missing.txt\n+++ b/missing.txt\n@@\n-x\n+y\n"
+                )
+            }),
+        )
+        .expect_err("三个文件都有问题");
+        let value = error.to_error_value();
+        let details = &value["details"];
+        assert_eq!(details["problem_count"], json!(3), "{details}");
+        let files = details["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .map(|item| item["file"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec!["a.txt", "b.txt", "missing.txt"]);
+        assert_eq!(
+            details["diagnostics"][2]["reason_code"], "file_not_found",
+            "{details}"
+        );
+        assert_eq!(details["diagnostics_truncated"], json!(false));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+            "a-old\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("b.txt")).unwrap(),
+            "b-old\n"
+        );
+    }
+
+    /// 同一个文件里第一段就失败了，后面几段**不检查**——它们要看见前一段的
+    /// 结果才知道对不对。不检查就得说没检查，不能让人以为剩下的都没问题。
+    #[test]
+    fn hunks_after_a_failure_in_the_same_file_are_reported_as_unchecked() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        std::fs::write(workspace.path().join("m.txt"), "one\ntwo\n").expect("file");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": concat!(
+                    "--- a/m.txt\n+++ b/m.txt\n@@\n-nope\n+changed\n",
+                    "--- a/m.txt\n+++ b/m.txt\n@@\n-two\n+2\n"
+                )
+            }),
+        )
+        .expect_err("第一段就对不上");
+        let details = &error.to_error_value()["details"];
+        assert_eq!(details["problem_count"], json!(1), "{details}");
+        assert_eq!(details["not_checked"][0]["file"], "m.txt");
+        assert_eq!(
+            details["not_checked"][0]["reason_code"],
+            "earlier_failure_in_same_file"
+        );
+    }
+
+    /// 前一段加了几行之后，后一段报的行号必须还是**原文件**的行号——模型拿
+    /// 这个行号去 read_file，读的是磁盘上那份，不是改到一半的中间结果。
+    #[test]
+    fn line_numbers_in_a_diagnostic_are_the_ones_on_disk() {
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let body = (1..=30)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(workspace.path().join("m.txt"), format!("{body}\n")).expect("file");
+        let context =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+
+        // 第一段在第 2 行插进去 3 行；第二段以为第 25、26 行是
+        // `line 25` / `line twenty-six`，而文件里第 26 行是 `line 26`。
+        let error = apply_patch(
+            &context,
+            &json!({
+                "patch": concat!(
+                    "--- a/m.txt\n+++ b/m.txt\n@@ -2,0 +2,3 @@\n+extra a\n+extra b\n+extra c\n",
+                    "@@ -25,2 +28,2 @@\n-line 25\n-line twenty-six\n+line 25!\n+line 26!\n"
+                )
+            }),
+        )
+        .expect_err("第二段对不上");
+        let diagnostic = &error.to_error_value()["details"]["diagnostics"][0];
+        assert_eq!(diagnostic["hunk_index"], json!(1), "{diagnostic}");
+        // `line 25` 在磁盘上就是第 25 行；插入的 3 行不能算进去。
+        assert_eq!(
+            diagnostic["candidate_ranges"][0]["start_line"],
+            json!(25),
+            "{diagnostic}"
+        );
     }
 
     /// The same line twice; the header says which one.
@@ -1363,7 +1847,8 @@ mod tests {
             "*** Begin Patch\n*** Update File: m.rs\n@@ fn missing() {\n-x\n+y\n*** End Patch\n",
         )
         .expect("parse");
-        let error = apply_hunks("x\n", &files[0].hunks).expect_err("no such block");
-        assert_eq!(error.to_error_value()["code"], "PATCH_FAILED");
+        let miss = apply_hunks("x\n", &files[0].hunks).expect_err("no such block");
+        assert_eq!(miss.code, "PATCH_FAILED");
+        assert_eq!(miss.reason_code, "anchor_not_found");
     }
 }
