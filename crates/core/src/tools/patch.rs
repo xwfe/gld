@@ -1254,17 +1254,29 @@ pub(crate) fn commit_staged_bytes(
             ws.resolve_for_write(rel)?
         };
         let path = resolved.path;
-        let result = if faults::replace_fails(&path) {
-            Err(std::io::Error::other("injected replace failure"))
-        } else if content.is_some() {
+        let result = if content.is_some() {
             let temp = temporary_files
                 .get(&path)
                 .cloned()
                 .ok_or_else(|| patch_failed("Staged file is missing"));
             match temp {
-                Ok(temp) => toexec_fs::replace(&temp, &path),
+                // 注入失败的办法是把暂存文件换成一个不存在的路径，让
+                // `toexec_fs::replace` **真的**失败一次。以前是在调用之前直接
+                // 返回 Err，那样共享库根本没被调到——它在 Windows 上曾经先
+                // 删目标再 rename、失败就把旧文件弄丢（跨仓评审 X01），这条
+                // 路径上的测试却照样是绿的。
+                Ok(temp) => {
+                    let staged = if faults::replace_fails(&path) {
+                        temp.with_file_name("this-staged-file-does-not-exist")
+                    } else {
+                        temp
+                    };
+                    toexec_fs::replace(&staged, &path)
+                }
                 Err(error) => Err(std::io::Error::other(error.to_string())),
             }
+        } else if faults::replace_fails(&path) {
+            Err(std::io::Error::other("injected replace failure"))
         } else if path.exists() && path.is_file() {
             fs::remove_file(&path)
         } else {
@@ -2263,6 +2275,10 @@ mod tests {
     }
 
     /// 一个文件换上去了、另一个换失败：回滚成功时要说清楚"都回滚了"。
+    ///
+    /// 注入的失败是"暂存文件不见了"，所以 `toexec_fs::replace` 真的被调了一
+    /// 次并且真的失败——这条同时钉住共享库那条不可退让的约束（X01：替换失败
+    /// 旧目标原样还在），下面对 `b.txt` 仍是 `b-old` 的断言才有意义。
     #[test]
     fn a_failed_write_rolls_the_earlier_files_back() {
         let workspace = tempdir().expect("workspace");
