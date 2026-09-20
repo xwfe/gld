@@ -684,15 +684,18 @@ mod tests {
             pid_file.display()
         );
 
-        let started = Instant::now();
-        let result = run_git(
-            dir.path(),
-            &["-c", &alias, "hang"],
-            Duration::from_millis(300),
-        );
-        let elapsed = started.elapsed();
-
-        assert!(elapsed < Duration::from_secs(3), "等了 {elapsed:?} 才返回");
+        // 预算不能太小。这里要赛跑的是 fork/exec 三层（git → sh → echo）能不能在
+        // 超时之前把 pid 落盘：超时一到整个进程组就被杀，没写成的话文件永远不会
+        // 出现，下面读 pid 那步就报"别名没跑起来"——看着像别名写错了，其实是机器
+        // 忙。原来给 300 毫秒，在 CI 的 macOS runner 上偶发失败。2 秒对一个 echo
+        // 绰绰有余，而别名里是 sleep 20，所以照样一定超时。
+        let result = {
+            let started = Instant::now();
+            let result = run_git(dir.path(), &["-c", &alias, "hang"], Duration::from_secs(2));
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(5), "等了 {elapsed:?} 才返回");
+            result
+        };
         let error = result.err().expect("超时应当报错");
         assert!(
             error.to_error_value()["code"] == "TIMEOUT",

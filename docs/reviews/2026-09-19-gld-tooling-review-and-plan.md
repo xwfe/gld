@@ -342,7 +342,7 @@ rg/gh/ssh 按能力和授权分别处理，禁止通过解释器或包装脚本�
 
 - 起点 HEAD：`c822d5f`（RFC-0003 的 G1 已提交——远端工具跟上 ccnm P36–P41、按远端 `tools/list` 拦下调用、`wait_ms` 预算）。审查提到的"工作区不干净"就是这批改动，已完整保留、原样提交，没有 reset 或覆盖。
 - 基线测试：`cargo test --workspace` 574 passed、0 failed（G1 提交前那次门禁）。
-- 已知不稳定（不是本轮引入）：`tools::git::tests::run_git_kills_a_hung_git_and_what_it_spawned_at_the_limit` 在全量并发下偶发失败——它给 git 的预算只有 300 毫秒，机器忙时别名脚本来不及写 pid 文件；单独跑稳定通过。
+- 已知不稳定（不是本轮引入）：`tools::git::tests::run_git_kills_a_hung_git_and_what_it_spawned_at_the_limit` 在全量并发下偶发失败——它给 git 的预算只有 300 毫秒，机器忙时别名脚本来不及写 pid 文件；单独跑稳定通过。**2026-09-20 修了**：预算提到 2 秒，见 [RFC-0003](../rfc/0003-native-parity-sync.md)。
 - 运行中的守护进程没有构建提交号，所以本节所有结论都以**当前工作树的源码和测试**为准，不声称和某个已安装二进制逐字一致。
 
 ### U1 第一批：不能静默改坏文件（P02、P03、P04）
