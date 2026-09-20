@@ -5,6 +5,8 @@
 
 use std::net::TcpListener;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 pub struct Env {
     pub home: tempfile::TempDir,
@@ -128,10 +130,44 @@ impl Default for Env {
 }
 
 /// 找一个当前空闲的端口。测试并行跑，写死端口会互相踩。
+/// 测试要用的端口下界。**故意落在内核自动分配范围之外**，理由见 [`free_port`]。
+const PORT_LOW: u16 = 20000;
+/// 上界。Linux 默认从 32768 起自动分配，留一点余量。
+const PORT_SPAN: u32 = 12000;
+
+/// 一个空闲的本地端口，从 20000–32000 里挑。
+///
+/// **别改回 `TcpListener::bind(("127.0.0.1", 0))` 那种写法。** 那是让内核从它的
+/// 自动分配池里挑一个（macOS 是 49152–65535，`sysctl net.inet.ip.portrange`；
+/// Linux 默认 32768–60999），拿到号就把 listener 关掉，然后指望被测的 gld 稍后
+/// 还能 bind 上。问题是这中间有一段窗口，而**那个池子是全系统共用的**：窗口里
+/// 任何一次 `bind(0)`——另一个测试起的 gld、守护进程的 socket、HTTP 客户端的本地
+/// 端口——都可能把这个号拿走。
+///
+/// 撞上的现象是 `gld start` 报
+///
+/// ```text
+/// 错误：本地 Actions 端口 49884 已被占用：/…/target/debug/gld（pid 20914）
+/// ```
+///
+/// 看着像"端口没放干净"，其实是两边要了同一个号。窗口有多宽取决于机器多忙，所以
+/// **CI 上偶发、本机怎么跑都不复现**（2026-09-20 的 macOS CI 就是这么红的，20 次
+/// 里红 2 次）。注意也测不出来："连着取 400 个端口有没有重复"是查不到这个的——
+/// 内核给号是顺序往前的，重复的不是号，而是号被池子里的别人抢走了。
+///
+/// 从 20000 起就没这回事：这一段不在任何一个系统的自动分配范围里，只有明确写了
+/// 端口号的人才会碰它，而那只有我们自己的测试。进程内用原子计数往前走，同一个号
+/// 不发第二次；起点按 pid 错开，免得并行跑的几个测试二进制从同一处开始找；最后
+/// 还是 bind 一次确认当前真的空闲。
 pub fn free_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static NEXT: OnceLock<AtomicU32> = OnceLock::new();
+    let next = NEXT.get_or_init(|| AtomicU32::new(std::process::id()));
+
+    for _ in 0..PORT_SPAN {
+        let port = PORT_LOW + (next.fetch_add(1, Ordering::Relaxed) % PORT_SPAN) as u16;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("20000–32000 之间没有一个空闲端口");
 }
