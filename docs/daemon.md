@@ -14,9 +14,9 @@ pid           9363
 版本          0.4.0（协议 2）
 运行时长      2h 13m
 运行中的服务  2
-数据目录      /Users/you/.gld
-socket        /Users/you/.gld/daemon.sock
-日志          /Users/you/.gld/logs/daemon.log
+数据目录      /Users/you/.config/gld
+socket        /Users/you/.config/gld/daemon.sock
+日志          /Users/you/.config/gld/logs/daemon.log
 ```
 
 不在跑时打印一行提示，**退出码 3**——写脚本时用它判断，不用解析文字。
@@ -146,8 +146,8 @@ macOS launchd（`~/Library/LaunchAgents/dev.gld.daemon.plist`）：
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/you/.gld/logs/daemon.log</string>
-  <key>StandardErrorPath</key><string>/Users/you/.gld/logs/daemon.log</string>
+  <key>StandardOutPath</key><string>/Users/you/.config/gld/logs/daemon.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/.config/gld/logs/daemon.log</string>
 </dict></plist>
 ```
 
