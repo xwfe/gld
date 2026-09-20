@@ -444,7 +444,10 @@ fn retained_session_timeout_stops_the_process_after_deadline() {
     assert_eq!(payload["status"], "running");
     assert_eq!(payload["transport_ok"], true);
     assert_eq!(payload["command_ok"], Value::Null);
-    assert_eq!(payload["stdin_open"], true);
+    // 没给 stdin = `stdin_mode: close`，起来就关掉它（U4 第二批）。以前这里
+    // 是开着的，而那个"开着"永远不会有数据——读 stdin 的命令因此挂到超时。
+    assert_eq!(payload["stdin_mode"], "close");
+    assert_eq!(payload["stdin_open"], false);
     let session_id = payload["session_id"].as_str().expect("session id");
 
     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1293,6 +1296,69 @@ fn a_patch_built_on_a_stale_read_is_refused() {
         hint.contains("read_file") && !hint.contains("stderr"),
         "{hint}"
     );
+}
+
+/// stdin 有三种状态，不是两种（审查 X03、验收 A17）。
+///
+/// 最要命的是第三条：`yield_time_ms=0` 以前在写 stdin **之前**就返回了，
+/// 初始输入整个丢掉，命令拿着一个永远没数据的 stdin 挂到超时。
+#[cfg(unix)]
+#[test]
+fn stdin_has_three_states_and_none_of_them_loses_the_input() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    // 一、不给输入 = 起来就关。读 stdin 的命令拿到 EOF 正常结束，不会挂到超时。
+    let closed = invoke(
+        &ctx,
+        "exec_command",
+        json!({ "argv": ["cat"], "timeout_ms": 5000 }),
+    );
+    assert_eq!(closed["ok"], json!(true), "{closed}");
+    assert_eq!(closed["stdin_mode"], "close", "{closed}");
+    assert_eq!(closed["exit_code"], 0, "cat 该读到 EOF 就退出：{closed}");
+    assert_eq!(closed["pty"], json!(false));
+
+    // 二、给了输入 = 写进去再关。
+    let once = invoke(
+        &ctx,
+        "exec_command",
+        json!({ "argv": ["cat"], "stdin": "hello\n", "timeout_ms": 5000 }),
+    );
+    assert_eq!(once["stdin_mode"], "once", "{once}");
+    assert_eq!(once["stdout"], "hello\n", "{once}");
+
+    // 三、yield_time_ms=0 直接转后台，初始输入也不能丢。
+    let backgrounded = invoke(
+        &ctx,
+        "exec_command",
+        json!({
+            "argv": ["cat"],
+            "stdin": "kept\n",
+            "yield_time_ms": 0,
+            "timeout_ms": 5000
+        }),
+    );
+    assert_eq!(backgrounded["stdin_mode"], "once", "{backgrounded}");
+    let session_id = backgrounded["session_id"]
+        .as_str()
+        .expect("转后台要给 session_id")
+        .to_string();
+    // 命令拿到输入之后就会结束；读回来的必须是那段输入。
+    let mut seen = String::new();
+    for _ in 0..50 {
+        let out = invoke(
+            &ctx,
+            "read_output",
+            json!({ "output_ref": format!("session:{session_id}:stdout") }),
+        );
+        seen = out["content"].as_str().unwrap_or_default().to_string();
+        if !seen.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(seen, "kept\n", "yield_time_ms=0 把初始输入丢了");
 }
 
 /// 零结果有好几种，得分得出来是哪一种。

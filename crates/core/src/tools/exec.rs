@@ -15,6 +15,100 @@ use crate::tools::context::ToolContext;
 use crate::tools::session::{ExecSession, SessionStore};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
+/// 这条命令的 stdin 怎么办。三种状态，不是两种（方案 E、审查 X03）。
+///
+/// 以前只有"给了 stdin 就写进去再关"和"什么都不做"两条路，而"什么都不做"
+/// 意味着 stdin 一直开着却永远没有数据：`cat`、`grep foo` 这种读标准输入的
+/// 命令会一路挂到 `timeout_ms`，看起来像卡死，其实是在等一个永远不来的输入。
+#[derive(Debug, Clone)]
+pub enum StdinPlan {
+    /// 不给输入，起来就关。命令读 stdin 立刻拿到 EOF，该结束就结束。
+    CloseImmediately,
+    /// 一次性输入，写完就关。
+    Once(String),
+    /// 保持打开，后面用 `write_stdin` 接着喂。
+    ///
+    /// **底下是管道，不是 PTY**：认终端才肯交互的程序（`less`、`ssh` 的密码
+    /// 提示、带颜色的 REPL）不会因为这个开关就变得可用。真 PTY 是另一件事，
+    /// 没做（方案 E：不能只改描述就声称终端程序已兼容）。
+    Interactive(String),
+}
+
+impl StdinPlan {
+    fn from_args(args: &Value) -> Result<Self, WorkspaceError> {
+        let text = args
+            .get("stdin")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        // `tty` 是老名字，语义一直是"保持 stdin 开着"，不是"给个终端"。
+        let interactive = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
+        match args.get("stdin_mode").and_then(Value::as_str) {
+            None => Ok(if interactive {
+                Self::Interactive(text)
+            } else if text.is_empty() {
+                Self::CloseImmediately
+            } else {
+                Self::Once(text)
+            }),
+            Some("close") => Ok(Self::CloseImmediately),
+            Some("once") => Ok(Self::Once(text)),
+            Some("interactive") => Ok(Self::Interactive(text)),
+            Some(other) => Err(WorkspaceError::invalid_argument(format!(
+                "Unknown stdin_mode: {other}. Use close, once or interactive"
+            ))),
+        }
+    }
+
+    fn keeps_stdin_open(&self) -> bool {
+        matches!(self, Self::Interactive(_))
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::CloseImmediately => "close",
+            Self::Once(_) => "once",
+            Self::Interactive(_) => "interactive",
+        }
+    }
+}
+
+/// 按计划把初始输入写进去，该关的关掉。
+async fn apply_stdin_plan(
+    session: &std::sync::Arc<ExecSession>,
+    plan: &StdinPlan,
+) -> Result<(), WorkspaceError> {
+    use tokio::io::AsyncWriteExt;
+    let text = match plan {
+        StdinPlan::CloseImmediately => "",
+        StdinPlan::Once(text) | StdinPlan::Interactive(text) => text.as_str(),
+    };
+    let mut stdin_guard = session.stdin.lock().await;
+    if let Some(stdin) = stdin_guard.as_mut() {
+        if !text.is_empty() {
+            stdin
+                .write_all(text.as_bytes())
+                .await
+                .map_err(|_| WorkspaceError::Tool {
+                    code: "SESSION_CLOSED",
+                    message: "Failed to write stdin.".into(),
+                    category: "runtime",
+                    retryable: false,
+                })?;
+            stdin.flush().await.ok();
+        }
+        if !plan.keeps_stdin_open() {
+            let _ = stdin.shutdown().await;
+        }
+    }
+    if !plan.keeps_stdin_open() {
+        *stdin_guard = None;
+        drop(stdin_guard);
+        session.mark_stdin_closed();
+    }
+    Ok(())
+}
+
 /// 取命令本身失败了（`cmd` 与 `argv` 都给、argv 里混了数字、引号没配对……）。
 ///
 /// 这些在策略那一层就会先被拦下并带着 `PolicyReason` 报出去，所以走到执行
@@ -71,8 +165,7 @@ pub fn exec_command(
     let timeout_ms = crate::tools::args::bounded(args, "exec_command", "timeout_ms");
     let max_output = crate::tools::args::bounded(args, "exec_command", "max_output_bytes") as usize;
     let yield_ms = crate::tools::args::bounded(args, "exec_command", "yield_time_ms");
-    let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
-    let stdin_text = args.get("stdin").and_then(Value::as_str).unwrap_or("");
+    let stdin_plan = StdinPlan::from_args(args)?;
 
     // **每条命令起来之前都要先拿到工作区的写权**，不管它是同步等还是转后台。
     // 挡的是"一边跑命令一边打补丁"——那种交叉出来的结果没法解释：命令读到的是
@@ -107,8 +200,7 @@ pub fn exec_command(
             Duration::from_millis(timeout_ms),
             Duration::from_millis(yield_ms),
             max_output,
-            tty,
-            stdin_text,
+            &stdin_plan,
         )
         .await
     });
@@ -127,6 +219,15 @@ pub fn exec_command(
                     Value::String("policy_only".into()),
                 );
                 object.insert("child_process".into(), Value::Bool(true));
+                // stdin 这次是怎么安排的：close（起来就关，命令读到 EOF）、
+                // once（写完就关）、interactive（留着，用 write_stdin 接着喂）。
+                // `pty` 永远是 false：interactive 底下是管道，认终端的程序
+                // 不会因为它变得可用（审查 X03）。
+                object.insert(
+                    "stdin_mode".into(),
+                    Value::String(stdin_plan.as_str().into()),
+                );
+                object.insert("pty".into(), Value::Bool(false));
             }
             Ok(tool_ok(out))
         }
@@ -598,9 +699,9 @@ async fn run_command(
     limit: Duration,
     yield_time: Duration,
     max_output: usize,
-    tty: bool,
-    stdin_text: &str,
+    stdin_plan: &StdinPlan,
 ) -> Result<Value, WorkspaceError> {
+    let tty = stdin_plan.keeps_stdin_open();
     let cmd = spec.display.as_str();
     let search_path = ctx.executable_path_env();
     let (program, args) = parse_and_resolve(
@@ -654,31 +755,16 @@ async fn run_command(
     session.spawn_readers().await;
     let deadline = start + limit;
 
+    // **stdin 先安排好，再考虑要不要立刻返回。**顺序反过来的后果是
+    // `yield_time_ms: 0` 那一路把初始输入整个丢掉：命令拿到一个开着、却永远
+    // 不会有数据的 stdin，于是挂到超时——而调用方明明传了 stdin（审查 X03、
+    // 方案 E "先设置输入/EOF 语义，再进行 yield"）。
+    apply_stdin_plan(&session, stdin_plan).await?;
+
     if yield_time.is_zero() {
         let snapshot = session.snapshot(max_output);
         spawn_timeout_monitor(sessions.clone(), session.clone(), deadline);
         return Ok(merge_exec_result(snapshot, start, cmd, cwd, true));
-    }
-
-    if !tty && !stdin_text.is_empty() {
-        let mut stdin_guard = session.stdin.lock().await;
-        if let Some(stdin) = stdin_guard.as_mut() {
-            use tokio::io::AsyncWriteExt;
-            if !stdin_text.is_empty() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
-                    .await
-                    .map_err(|_| WorkspaceError::Tool {
-                        code: "SESSION_CLOSED",
-                        message: "Failed to write stdin.".into(),
-                        category: "runtime",
-                        retryable: false,
-                    })?;
-            }
-            let _ = stdin.shutdown().await;
-        }
-        *stdin_guard = None;
-        session.mark_stdin_closed();
     }
 
     loop {
@@ -723,9 +809,6 @@ async fn run_command(
     }
 }
 
-/// How long a finished, timed-out or background session stays readable before map eviction.
-const SESSION_EVICT_AFTER_TIMEOUT: Duration = Duration::from_secs(30);
-
 fn spawn_timeout_monitor(
     sessions: Arc<SessionStore>,
     session: Arc<ExecSession>,
@@ -746,9 +829,14 @@ fn spawn_timeout_monitor(
     });
 }
 
+/// 到保留期就把会话从表里去掉，把那两个 1 MiB 的缓冲还回去。
+///
+/// **判据不在这里**，在 `SessionStore::sweep`：这个定时器只是让内存早点还，
+/// 睡过头或者根本没跑（进程被 SIGKILL）也不影响正确性，下一次 get / insert
+/// 会扫到它。保留期统一从进程结束那一刻算（审查 X02）。
 fn schedule_session_eviction(sessions: Arc<SessionStore>, session_id: String) {
     crate::async_rt::spawn(async move {
-        tokio::time::sleep(SESSION_EVICT_AFTER_TIMEOUT).await;
+        tokio::time::sleep(sessions.retention()).await;
         sessions.remove(&session_id);
     });
 }
@@ -783,8 +871,7 @@ pub fn exec_health_check(
         Duration::from_secs(5),
         Duration::from_secs(5),
         16_384,
-        false,
-        "",
+        &StdinPlan::CloseImmediately,
     ));
 
     let mut response = json!({

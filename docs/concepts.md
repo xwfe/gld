@@ -546,6 +546,49 @@ History 档案（`docs/history-session/`）计入指纹，但 history 工具写�
 
 ---
 
+## 命令的输出能读多久，stdin 怎么关
+
+**输出保留 5 分钟，从进程结束那一刻算起**，和 `timeout_ms` 无关——一条给了
+10 分钟上限、跑 3 秒就完的命令，和一条本来就跑 3 秒的命令，保留期一样长。
+`read_output` 每次都回 `expires_in_ms`（还剩多久）和 `retention_ms`（总共多久）；
+还在跑的命令没有这个数，它的保留期还没开始算。
+
+同一个工作区最多留 **32 条已经结束**的会话，超了就把结束得最早的那条收掉
+（还在跑的一条都不动）。每条会话的 stdout / stderr 各留最后 1 MiB。
+
+到期之后再拿那个 `session_id`，报的是 `SESSION_EXPIRED` 而不是
+`SESSION_NOT_FOUND`——**这两个不是一回事**：前者是"确实有过，输出已经放掉了，
+重跑一次"，后者是"这个 id 从来没存在过，你记错了"。`details.reason` 说清是哪种：
+
+| `reason` | 意思 |
+| --- | --- |
+| `expired` | 保留期到了 |
+| `evicted_over_quota` | 结束的会话太多，它是最早那条 |
+| `terminated` | 被停掉了：`kill_session`、切到 plan 模式、工作区被移出 hub |
+
+（**另一个客户端**拿你的 `session_id` 来读，报的仍然是 `SESSION_NOT_FOUND`——
+会话表按"项目 + 谁在调"分，它连"有过这么一条"都不该知道。）
+
+**stdin 有三种状态**，`exec_command` 的 `stdin_mode` 说了算：
+
+| `stdin_mode` | 什么时候是默认 | 行为 |
+| --- | --- | --- |
+| `close` | 没给 `stdin` | 起来就关。`cat`、`grep foo` 这种读标准输入的命令立刻拿到 EOF 正常结束，**不会挂到超时** |
+| `once` | 给了 `stdin` | 写进去，然后关 |
+| `interactive` | 给了 `tty: true` | 写进去，留着不关，后面用 `write_stdin` 接着喂 |
+
+三种都在这次调用返回**之前**就安排好，所以 `yield_time_ms: 0`（起了就转后台）
+也不会丢掉初始输入。
+
+`tty: true` 是 `stdin_mode=interactive` 的老名字，它**不给命令一个终端**：底下
+是管道，认 TTY 才肯工作的程序（`less`、要密码的 `ssh`、带颜色的 REPL）不会因为
+它变得可用。结果里的 `pty` 永远是 `false`。真 PTY 是另一件事，现在没有。
+
+`write_stdin` 最多等 **5 秒**。管道缓冲是有限的（Linux 64 KiB，macOS 更小），
+对面不读的话写满就卡住；到点报 `STDIN_WRITE_TIMEOUT`，并**说清写进去了多少
+字节**（`details.bytes_written`）——"写了一半"和"一个字节都没写"，接下来该做的
+事不一样。
+
 ## 文件版本：别让补丁盖掉别人的改动
 
 `read_file` 和 `patch_check` 会回一个 `version`，`apply_patch` 收

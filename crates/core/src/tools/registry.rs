@@ -1310,8 +1310,13 @@ pub fn input_schema(name: &str) -> Value {
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 32768 },
                 "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
-                "tty": { "type": "boolean", "default": false },
+                "tty": { "type": "boolean", "default": false, "description": "Deprecated name for stdin_mode=interactive. It keeps stdin open — it does NOT give the command a terminal: this is a pipe, so programs that require a TTY still will not work." },
                 "stdin": { "type": "string", "default": "" },
+                "stdin_mode": {
+                    "type": "string",
+                    "enum": ["close", "once", "interactive"],
+                    "description": "close (default when no stdin is given): stdin is closed right away, so a command that reads it gets EOF instead of hanging until timeout. once (default when stdin is given): write it, then close. interactive: write it and keep stdin open for write_stdin. Applied before the call returns, so yield_time_ms=0 keeps the initial input."
+                },
                 "confirm": { "type": "boolean", "default": false },
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" },
                 "reason": { "type": "string", "default": "" }

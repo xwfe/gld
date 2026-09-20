@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdin};
@@ -13,9 +13,46 @@ use serde_json::{json, Value};
 
 const SESSION_BUFFER_BYTES: usize = 1_048_576;
 
-#[derive(Default)]
+/// 进程结束之后，它的输出还能读多久。
+///
+/// **和命令的 timeout 是两件事**：以前内联跑完的会话 30 秒后回收，转后台那条
+/// 路的回收时点却挂在命令自己的 deadline 上——同样是"跑完了"，能读多久取决于
+/// 当初怎么调的，而调用方没有任何办法知道还剩多少时间（审查 X02）。现在统一
+/// 从进程结束那一刻起算，结果里回 `expires_in_ms`。
+const SESSION_RETENTION: Duration = Duration::from_secs(300);
+
+/// 最多留几条**已经结束**的会话。
+///
+/// 每条会话的两个流各留 1 MiB，纯靠时间回收的话，一个跑了几百条命令的会话表
+/// 能占到几百 MiB。还在跑的不算在内——那些不能动。
+const MAX_FINISHED_SESSIONS: usize = 32;
+
+/// 最多记几条回收记录。
+///
+/// 记它是为了让"这个 id 过期了"和"从来没有这个 id"分得开（方案 E：过期、
+/// 无效引用要能区分）。只存 id、原因、什么时候回收的，不留输出。
+const MAX_TOMBSTONES: usize = 128;
+
+struct Tombstone {
+    id: String,
+    reason: &'static str,
+    at: Instant,
+}
+
 pub struct SessionStore {
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
+    graveyard: Mutex<VecDeque<Tombstone>>,
+    retention: Duration,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            graveyard: Mutex::new(VecDeque::new()),
+            retention: SESSION_RETENTION,
+        }
+    }
 }
 
 impl SessionStore {
@@ -23,7 +60,102 @@ impl SessionStore {
         Self::default()
     }
 
+    /// 自定义保留期。给测试用：把它设成 0 就不用真的等 5 分钟，也不用
+    /// sleep（验收 A16 要的"不靠真实 sleep 堆慢测试"）。
+    pub fn with_retention(retention: Duration) -> Self {
+        Self {
+            retention,
+            ..Self::default()
+        }
+    }
+
+    pub fn retention(&self) -> Duration {
+        self.retention
+    }
+
+    /// 清掉过期的和超出配额的。
+    ///
+    /// 惰性做：每次 insert / get 顺手扫一遍，不另起定时器。定时器那条路仍然
+    /// 存在（`exec` 里的 eviction 任务）用来及时还内存，但**判据只有这一处**。
+    fn sweep(&self) {
+        let mut sessions = self.sessions.lock().expect("sessions lock");
+        let mut expired: Vec<(String, &'static str)> = Vec::new();
+        for (id, session) in sessions.iter() {
+            if let Some(ago) = session.finished_ago() {
+                if ago >= self.retention {
+                    expired.push((id.clone(), "expired"));
+                }
+            }
+        }
+        // 配额：结束得最早的先走。还在跑的一条都不动。
+        let mut finished: Vec<(String, Duration)> = sessions
+            .iter()
+            .filter(|(id, _)| !expired.iter().any(|(gone, _)| gone == *id))
+            .filter_map(|(id, session)| session.finished_ago().map(|ago| (id.clone(), ago)))
+            .collect();
+        if finished.len() > MAX_FINISHED_SESSIONS {
+            // 结束得越久的排在越前面，先淘汰它们。
+            finished.sort_by_key(|(_, ago)| std::cmp::Reverse(*ago));
+            let over_quota = finished.len() - MAX_FINISHED_SESSIONS;
+            for (id, _) in finished.into_iter().take(over_quota) {
+                expired.push((id, "evicted_over_quota"));
+            }
+        }
+        for (id, reason) in expired {
+            sessions.remove(&id);
+            self.bury(&id, reason);
+        }
+    }
+
+    fn bury(&self, id: &str, reason: &'static str) {
+        let mut graveyard = self.graveyard.lock().expect("graveyard lock");
+        if graveyard.len() >= MAX_TOMBSTONES {
+            graveyard.pop_front();
+        }
+        graveyard.push_back(Tombstone {
+            id: id.to_string(),
+            reason,
+            at: Instant::now(),
+        });
+    }
+
+    fn tombstone_error(&self, session_id: &str) -> Option<WorkspaceError> {
+        let graveyard = self.graveyard.lock().expect("graveyard lock");
+        let stone = graveyard
+            .iter()
+            .rev()
+            .find(|stone| stone.id == session_id)?;
+        let seconds = stone.at.elapsed().as_secs();
+        let why = match stone.reason {
+            "expired" => format!(
+                "its output was kept for {}s after the process exited and has been released",
+                self.retention.as_secs()
+            ),
+            "evicted_over_quota" => format!(
+                "the workspace keeps at most {MAX_FINISHED_SESSIONS} finished sessions and this was the oldest"
+            ),
+            "terminated" => {
+                "it was stopped (kill_session, switching to plan mode, or the workspace leaving the hub) and its output was released".to_string()
+            }
+            _ => "it was removed".to_string(),
+        };
+        Some(WorkspaceError::ToolDetails {
+            code: "SESSION_EXPIRED",
+            message: format!(
+                "Session {session_id} existed but {why} ({seconds}s ago). Re-run the command; the output cannot be recovered."
+            ),
+            category: "not_found",
+            retryable: false,
+            details: json!({
+                "reason": stone.reason,
+                "retention_seconds": self.retention.as_secs(),
+                "released_seconds_ago": seconds
+            }),
+        })
+    }
+
     pub fn insert(&self, session: ExecSession) -> Arc<ExecSession> {
+        self.sweep();
         let arc = Arc::new(session);
         self.sessions
             .lock()
@@ -33,24 +165,51 @@ impl SessionStore {
     }
 
     pub fn get(&self, session_id: &str) -> Result<Arc<ExecSession>, WorkspaceError> {
-        self.sessions
+        self.sweep();
+        if let Some(session) = self
+            .sessions
             .lock()
             .expect("sessions lock")
             .get(session_id)
             .cloned()
-            .ok_or_else(|| WorkspaceError::Tool {
-                code: "SESSION_NOT_FOUND",
-                message: format!("Session not found: {session_id}"),
-                category: "not_found",
-                retryable: false,
-            })
+        {
+            return Ok(session);
+        }
+        // 这个 id 曾经存在过吗？"过期了"和"编了一个 id"下一步完全不同：前者
+        // 重跑命令，后者是自己记错了句柄（方案 E）。
+        if let Some(error) = self.tombstone_error(session_id) {
+            return Err(error);
+        }
+        Err(WorkspaceError::Tool {
+            code: "SESSION_NOT_FOUND",
+            message: format!("Session not found: {session_id}"),
+            category: "not_found",
+            retryable: false,
+        })
     }
 
+    /// 保留期到了，把它从表里去掉。
     pub fn remove(&self, session_id: &str) {
-        self.sessions
+        self.remove_with_reason(session_id, "expired");
+    }
+
+    /// 被主动停掉（`kill_session`、切 plan 模式、成员被移出 hub）。
+    ///
+    /// 和"过期"分开记：拿着句柄回来的人应该知道这条命令是**被停了**，
+    /// 而不是自己来晚了。
+    pub fn remove_terminated(&self, session_id: &str) {
+        self.remove_with_reason(session_id, "terminated");
+    }
+
+    fn remove_with_reason(&self, session_id: &str, reason: &'static str) {
+        let removed = self
+            .sessions
             .lock()
             .expect("sessions lock")
             .remove(session_id);
+        if removed.is_some() {
+            self.bury(session_id, reason);
+        }
     }
 
     /// 一条会话都没有。
@@ -142,6 +301,10 @@ pub struct ExecSession {
     pub started_at: Instant,
     pub exit_code: Mutex<Option<i32>>,
     exited: AtomicBool,
+    /// 进程结束的那一刻。输出的保留期从这里算起，**和命令的 timeout 无关**
+    /// ——一条 10 分钟的命令跑完 3 秒就该和跑完 3 秒的短命令一样开始计时
+    /// （审查 X02、方案 E）。
+    finished_at: Mutex<Option<Instant>>,
     termination_reason: Mutex<Option<String>>,
     reader_tasks: AsyncMutex<Vec<crate::async_rt::JoinHandle<()>>>,
 }
@@ -179,6 +342,7 @@ impl ExecSession {
             started_at: Instant::now(),
             exit_code: Mutex::new(None),
             exited: AtomicBool::new(false),
+            finished_at: Mutex::new(None),
             termination_reason: Mutex::new(None),
             reader_tasks: AsyncMutex::new(Vec::new()),
         }
@@ -267,6 +431,11 @@ impl ExecSession {
     fn record_exit_status(&self, status: std::process::ExitStatus) {
         *self.exit_code.lock().expect("exit_code lock") = status.code();
         self.exited.store(true, Ordering::Release);
+        let mut finished = self.finished_at.lock().expect("finished_at lock");
+        if finished.is_none() {
+            *finished = Some(Instant::now());
+        }
+        drop(finished);
         *self.stdin_open.lock().expect("stdin_open lock") = false;
         let mut reason = self.termination_reason.lock().expect("termination lock");
         if reason.is_none() {
@@ -276,6 +445,19 @@ impl ExecSession {
 
     pub(crate) fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
+    }
+
+    /// 进程结束了多久。还在跑就是 `None`。
+    pub fn finished_ago(&self) -> Option<Duration> {
+        self.finished_at
+            .lock()
+            .expect("finished_at lock")
+            .map(|at| at.elapsed())
+    }
+
+    /// 还能读多久。还在跑的会话没有这个数——保留期从进程结束才开始算。
+    pub fn expires_in(&self, retention: Duration) -> Option<Duration> {
+        self.finished_ago().map(|ago| retention.saturating_sub(ago))
     }
 
     /// 这条命令起来之后，工作区落过几次盘。
@@ -357,6 +539,9 @@ impl ExecSession {
             "stdout_truncated": stdout.truncated,
             "stderr_truncated": stderr.truncated,
             "elapsed_ms": self.started_at.elapsed().as_millis(),
+            // 进程结束多久了。还在跑就是 null。保留期还剩多少由 read_output
+            // 回（那里知道 store 的 retention），这里只给事实。
+            "finished_ms_ago": self.finished_ago().map(|ago| ago.as_millis() as u64),
             // 这条命令起来之后，这个工作区落过几次盘（apply_patch 提交一次算
             // 一次）。**不是 0 就说明命令读到的文件和现在的不一样**——它可能
             // 编译了旧代码，也可能中途读到了改了一半的文件树。后台命令期间
@@ -486,9 +671,79 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         "total_stream_bytes": total_stream_bytes,
         "complete": !running && next >= total_stream_bytes,
         "running": running,
+        // 这份输出还能读多久。**从进程结束那一刻算起**，和命令的 timeout 无关；
+        // 还在跑的会话没有这个数（审查 X02）。到点之后再来读，拿到的是
+        // SESSION_EXPIRED 而不是 SESSION_NOT_FOUND。
+        "expires_in_ms": session
+            .expires_in(store.retention())
+            .map(|left| left.as_millis() as u64),
+        "retention_ms": store.retention().as_millis() as u64,
         "truncated": next_offset.is_some(),
         "warnings": warnings
     })))
+}
+
+/// 一次 `write_stdin` 最多等多久。
+///
+/// 管道的缓冲是有限的（Linux 64 KiB，macOS 更小）。命令**不读** stdin 时，
+/// 写满之后这一写就再也不返回——而它跑在 `block_on` 里，等于把这次工具调用
+/// 永久挂住，调用方连"它没在读"都不知道（方案 E：写入阻塞也必须受
+/// timeout/cancel 管理，验收 A17）。
+const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 分段写，超时就停下并**如实说写进去了多少**。
+///
+/// 不用 `write_all`：它超时之后没法知道已经写了几个字节，而"写了一半"和
+/// "一个字节都没写"对调用方是两件事。
+async fn write_stdin_bounded(stdin: &mut ChildStdin, bytes: &[u8]) -> Result<(), WorkspaceError> {
+    use tokio::io::AsyncWriteExt;
+    let deadline = Instant::now() + STDIN_WRITE_TIMEOUT;
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let stalled = |written: usize| {
+            WorkspaceError::ToolDetails {
+            code: "STDIN_WRITE_TIMEOUT",
+            message: format!(
+                "the command is not reading stdin: {written} of {} bytes went in within {}s. It may not read standard input at all, or it is still busy with the previous input.",
+                bytes.len(),
+                STDIN_WRITE_TIMEOUT.as_secs()
+            ),
+            category: "runtime",
+            retryable: true,
+            details: json!({
+                "bytes_written": written,
+                "bytes_requested": bytes.len(),
+                "timeout_seconds": STDIN_WRITE_TIMEOUT.as_secs()
+            }),
+        }
+        };
+        if left.is_zero() {
+            return Err(stalled(written));
+        }
+        match tokio::time::timeout(left, stdin.write(&bytes[written..])).await {
+            // 写回 0 字节：管道另一头没了。
+            Ok(Ok(0)) => {
+                return Err(WorkspaceError::Tool {
+                    code: "SESSION_CLOSED",
+                    message: "Session stdin is closed.".into(),
+                    category: "runtime",
+                    retryable: false,
+                })
+            }
+            Ok(Ok(n)) => written += n,
+            Ok(Err(_)) => {
+                return Err(WorkspaceError::Tool {
+                    code: "SESSION_CLOSED",
+                    message: "Session stdin is closed.".into(),
+                    category: "runtime",
+                    retryable: false,
+                })
+            }
+            Err(_) => return Err(stalled(written)),
+        }
+    }
+    Ok(())
 }
 
 /// 这段字节里，最后一个完整 UTF-8 字符结束的位置。
@@ -533,17 +788,7 @@ pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, Workspac
             retryable: false,
         })?;
         use tokio::io::AsyncWriteExt;
-        crate::async_rt::block_on(async {
-            stdin
-                .write_all(chars.as_bytes())
-                .await
-                .map_err(|_| WorkspaceError::Tool {
-                    code: "SESSION_CLOSED",
-                    message: "Session stdin is closed.".into(),
-                    category: "runtime",
-                    retryable: false,
-                })
-        })?;
+        crate::async_rt::block_on(write_stdin_bounded(stdin, chars.as_bytes()))?;
         let _ = crate::async_rt::block_on(stdin.flush());
     }
 
@@ -612,7 +857,7 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
     }
 
     if evicted {
-        store.remove(session_id);
+        store.remove_terminated(session_id);
     }
 
     Ok(tool_ok(payload))
@@ -668,5 +913,159 @@ fn signal_process_tree(pid: u32, _signal: &str) {
             let _ = TerminateProcess(handle, 1);
             let _ = CloseHandle(handle);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 造一条已经跑完的会话。用 `true` 是因为它立刻退出，不用等、也不用 sleep。
+    fn finished_session(store: &SessionStore) -> String {
+        let child = crate::async_rt::block_on(async {
+            tokio::process::Command::new("true")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("起 true")
+        });
+        let session = store.insert(ExecSession::new(child));
+        // 等它真的退出并记下结束时刻：保留期从这一刻起算。
+        crate::async_rt::block_on(async {
+            let _ = session.child.lock().await.wait().await;
+        });
+        crate::async_rt::block_on(session.refresh_status());
+        session.session_id.clone()
+    }
+
+    /// 过期的句柄和瞎编的句柄不是一回事：前者重跑命令，后者是自己记错了。
+    ///
+    /// 保留期设成 0，所以不用真的等 5 分钟，也没有 sleep（验收 A16）。
+    #[test]
+    fn an_expired_handle_is_not_the_same_as_an_unknown_one() {
+        let store = SessionStore::with_retention(Duration::ZERO);
+        let id = finished_session(&store);
+
+        let Err(expired) = store.get(&id) else {
+            panic!("保留期是 0，这条该没了");
+        };
+        assert_eq!(expired.code(), "SESSION_EXPIRED", "{}", expired.message());
+        assert!(
+            expired.message().contains("Re-run"),
+            "要说清下一步：{}",
+            expired.message()
+        );
+
+        let Err(unknown) = store.get("00000000-0000-0000-0000-000000000000") else {
+            panic!("这个 id 从来没存在过");
+        };
+        assert_eq!(unknown.code(), "SESSION_NOT_FOUND");
+    }
+
+    /// 还在跑的会话不会被保留期扫掉——保留期从**进程结束**才开始算。
+    #[test]
+    fn a_running_session_is_never_swept() {
+        let store = SessionStore::with_retention(Duration::ZERO);
+        let child = crate::async_rt::block_on(async {
+            tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("起 sleep")
+        });
+        let id = store.insert(ExecSession::new(child)).session_id.clone();
+
+        assert!(store.get(&id).is_ok(), "在跑的会话被当成过期的清掉了");
+        let session = store.get(&id).expect("还在");
+        assert!(session.finished_ago().is_none());
+        assert!(session.expires_in(Duration::from_secs(300)).is_none());
+
+        crate::async_rt::block_on(session.kill_and_wait());
+    }
+
+    /// 结束的会话超过配额时，**结束得最早的**先走，还在跑的一条都不动。
+    #[test]
+    fn finished_sessions_are_capped_and_the_oldest_goes_first() {
+        let store = SessionStore::with_retention(Duration::from_secs(3600));
+        let mut ids = Vec::new();
+        for _ in 0..(MAX_FINISHED_SESSIONS + 4) {
+            ids.push(finished_session(&store));
+        }
+        let alive = ids.iter().filter(|id| store.get(id).is_ok()).count();
+        assert!(
+            alive <= MAX_FINISHED_SESSIONS,
+            "配额没生效，还留着 {alive} 条"
+        );
+        // 最早那几条应当已经被回收，而且报的是"过期"而不是"没见过"。
+        let Err(first) = store.get(&ids[0]) else {
+            panic!("最早那条该被挤掉");
+        };
+        assert_eq!(first.code(), "SESSION_EXPIRED", "{}", first.message());
+        assert!(
+            store.get(ids.last().expect("最后一条")).is_ok(),
+            "刚结束的那条不该被挤掉"
+        );
+    }
+
+    /// 命令不读 stdin 时，写不进去要**有个头**，而且要说清写进去了多少。
+    ///
+    /// 不封顶的话这次调用永远不返回（它跑在 block_on 里），调用方连"对面没在
+    /// 读"都不知道（验收 A17 的输入背压）。这里直接调有界写，传一个比管道
+    /// 缓冲大得多的块，对面是个从不读 stdin 的 `sleep`。
+    #[test]
+    fn writing_to_a_command_that_never_reads_stdin_gives_up_and_says_how_far_it_got() {
+        let mut child = crate::async_rt::block_on(async {
+            tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("起 sleep")
+        });
+        let mut stdin = child.stdin.take().expect("stdin");
+        // 8 MiB：任何平台的管道缓冲都装不下，所以一定会卡在中途。
+        let payload = vec![b'x'; 8 * 1024 * 1024];
+        let started = Instant::now();
+        let error = crate::async_rt::block_on(async {
+            write_stdin_bounded(&mut stdin, &payload)
+                .await
+                .expect_err("对面不读，这一写不该成功")
+        });
+        assert_eq!(error.code(), "STDIN_WRITE_TIMEOUT", "{}", error.message());
+        assert!(
+            error.message().contains("not reading stdin"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            started.elapsed() < STDIN_WRITE_TIMEOUT + Duration::from_secs(5),
+            "超时没起作用，等了 {:?}",
+            started.elapsed()
+        );
+        crate::async_rt::block_on(async {
+            let _ = child.kill().await;
+        });
+    }
+
+    /// `read_output` 要说清这份输出还能读多久。
+    #[test]
+    fn read_output_says_how_long_the_output_still_lives() {
+        let store = SessionStore::with_retention(Duration::from_secs(300));
+        let id = finished_session(&store);
+        let out = read_output(
+            &store,
+            &json!({ "output_ref": format!("session:{id}:stdout") }),
+        )
+        .expect("read_output");
+        assert_eq!(out["retention_ms"], 300_000u64);
+        let left = out["expires_in_ms"]
+            .as_u64()
+            .expect("已结束的会话要给这个数");
+        assert!(left > 0 && left <= 300_000, "{out}");
     }
 }
