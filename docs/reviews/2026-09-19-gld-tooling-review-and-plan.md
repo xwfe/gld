@@ -540,3 +540,38 @@ E03 里那次失败给的全部信息是：`PATCH_FAILED` + `Hunk context did no
 **内建的 `ls` 不再冒充系统 ls。**它是服务端自己答的极简实现，以前 `ls -la` 会把 `-la` 当成目录名、报"路径不存在"——看着像目录没了。现在带 flag 直接说清它是什么、该用 `list_dir` 还是 `list_files`，结果里那句 warning 也从 "native diagnostic without child process" 换成了说得出所以然的一句。同时修了它的相对参数解析：`ls inner` 以前从**工作区根**解析，现在按 `workdir` 解析，和在真实 shell 里输入它的结果一致（方案 B 的原生 ls 一条）。
 
 **U3 里没做的**：`build_commit` 仍然是 `null`（诊断里报运行构建 SHA 属于 G-B / 跨仓 X10，要改构建脚本）；"未授权 SSH 不建立连接"只有"策略在 spawn 之前拒"这一层证据（代码路径如此，也有 `check_command` 的 `side_effects=none` 钉着），没有抓包那种证据；A04 的 Windows 分支没在本机跑过，靠 CI 的 Windows 格。
+
+### U4 第一批：读的那一面，返回值要能用（F01、F02、F03）
+
+**路径 round-trip（F01、复现 E06、验收 A12）。**根目录的 `list_dir` 以前给的是 `/Cargo.toml`：前面那个斜杠让 `read_file` 把它当成系统根下的绝对路径，报 `NOT_FOUND`。根因是工作区根算出来的相对路径是空串，拼接时多了一个斜杠。现在 `relative_display` 把根规范成 `"."`，**只在这一处规范**，`git.rs` 里那份重复判断删掉。测试串的是 `list_dir → read_file` 和 `→ patch_check`。
+
+**零结果分得出种类（F02、复现 E07、验收 A13）。**glob 匹配的是工作区相对全路径，所以 `path="crates"` 下搜 `"exec.rs"` 永远是空——而这和"搜了但没匹配"、"这下面没有可读文本"看起来一模一样。现在结果里回 `search_root`、`glob_base`、`scanned_files`、`rejected_by_glob`、`rejected_by_type`，零结果的 warning 直接给出能用的写法（`**/exec.rs`）；schema 里也写明了基准。
+
+**遍历剪枝（F03、验收 A14）。**以前进了 `node_modules` 再逐个文件丢弃。现在被忽略的目录整棵不进；只用于剪枝，文件那层的两道检查照旧，剪错了顶多多走一段路。
+
+**长行不再假装搜完了。**超过 1 MiB 的行只有前 1 MiB 参与匹配，以前它和"这行里没有"长得一样；现在有 `lines_truncated_for_search` 加一条 warning。
+
+### U4 第二批：输出能读多久、stdin 怎么关（X02、X03）
+
+**输出寿命统一了（X02、验收 A16）。**以前内联跑完的会话 30 秒后回收，转后台那条路的回收时点却挂在命令自己的 deadline 上——同样是"跑完了"，能读多久取决于当初怎么调的，而调用方没办法知道还剩多少。现在一律**从进程结束那一刻起算 5 分钟**，`read_output` 回 `expires_in_ms` 和 `retention_ms`。判据在 `SessionStore::sweep`（惰性，每次 get/insert 扫一遍），定时器只负责早点把内存还回去，睡过头也不影响正确性。
+
+配额：同一张表最多留 **32 条已结束**的会话，超了结束得最早的先走，**还在跑的一条都不动**。
+
+**过期和瞎编分得开了。**到期之后再拿那个 id，报 `SESSION_EXPIRED`（带 `released_seconds_ago`、`retention_seconds`）而不是 `SESSION_NOT_FOUND`——前者是"确实有过，重跑一次"，后者是"这个 id 从来没存在过"。这是**新错误码**，按码分支的客户端会看到它。墓碑表只存 id、原因、回收时刻，最多 128 条，不留输出。测试把保留期设成 0 来验，没有 sleep（A16 要的"虚拟时钟"就是这个意思）。
+
+**stdin 有三种状态了（X03、验收 A17）。**以前只有"给了就写完关掉"和"什么都不做"，而"什么都不做"意味着 stdin 一直开着却永远没有数据：`cat`、`grep foo` 会一路挂到 `timeout_ms`。现在 `stdin_mode` 有 `close`（没给 stdin 时的默认，起来就关，命令读到 EOF）、`once`（给了 stdin 时的默认）、`interactive`（留着，用 `write_stdin` 接着喂）。
+
+**而且三种都在这次调用返回之前就安排好**——以前 `yield_time_ms: 0` 那一路在写 stdin **之前**就 return 了，初始输入整个丢掉，命令拿着一个永远没数据的 stdin 挂到超时。这条有回归测试钉着。
+
+`tty: true` 保留为 `interactive` 的老名字，但说清了它**不给终端**：底下是管道，认 TTY 的程序不会因为它变得可用，结果里的 `pty` 永远是 `false`（方案 E：不能只改描述就声称终端程序已兼容）。真 PTY 没做。
+
+**写 stdin 不再可能永久挂住。**管道缓冲是有限的（Linux 64 KiB，macOS 更小），命令**不读** stdin 时 `write_all` 写满之后就再也不返回——而它跑在 `block_on` 里，这次工具调用就永久挂住了。现在分段写、5 秒封顶，超时报 `STDIN_WRITE_TIMEOUT` 并**如实说写进去了多少字节**（用 `write` 循环而不是 `write_all`，就是为了这个数）。
+
+**这一批动了两条既有断言**，都是行为真的变了，不是为了让测试变绿：
+
+- `switching_to_plan_mode_stops_running_commands_through_the_daemon` 原来断言 `SESSION_NOT_FOUND`，现在是 `SESSION_EXPIRED` + `reason=terminated`——被 plan 模式停掉的句柄确实存在过，报"没见过"是错的。跨主体拿别人的 `session_id` 仍然报 `SESSION_NOT_FOUND`（会话表按主体分，墓碑也分），那条语义没变。
+- `retained_session_timeout_stops_the_process_after_deadline` 原来断言 `stdin_open: true`；没给 stdin 的调用现在是 `stdin_mode: close`，起来就关。那个"开着"永远不会有数据，正是它让读 stdin 的命令挂到超时。
+
+**跨平台**：stdin 三态那条集成测试标了 `#[cfg(unix)]`（要 `cat` 和真实管道行为），Windows 上只有编译和其余测试在 CI 里跑，**没有手工验过**。`StdinPlan` 本身没有平台分支，关管道走的是 tokio 同一套。
+
+**U4 里没做的**：搜索结果的稳定续查游标——现在给的是"缩小范围怎么做"的建议加上明确的 `truncated`，方案 D 允许这两者取其一，游标要先定义稳定排序，单独排期更安全；真 PTY；`read_file` 的有界字节续读（现有的是按行续读加长行 warning）。
