@@ -174,11 +174,8 @@ pub fn git_log(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let max_count_arg = format!("--max-count={}", max_count + 1);
     let skip_arg = format!("--skip={skip}");
     let pretty = "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1e";
-    let path_filter = if resolved.display.is_empty() {
-        ".".to_string()
-    } else {
-        resolved.display.clone()
-    };
+    // 工作区根就是 `"."`，规范化在 `relative_display` 里做了，这里不再判一次。
+    let path_filter = resolved.display.clone();
     let mut cmd_args = vec![
         "log",
         max_count_arg.as_str(),

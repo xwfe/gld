@@ -597,6 +597,13 @@ pub fn current_file_version(path: &Path) -> Option<String> {
     }
 }
 
+/// 工作区内的路径长什么样：**无前导 `/` 的相对路径**，工作区根本身是 `"."`。
+///
+/// 根目录以前得到的是空串，于是 `list_dir` 在根上列出来的路径是 `/Cargo.toml`
+/// ——拿它回头调 `read_file` 会被当成系统根下的绝对路径，报 `NOT_FOUND`
+/// （审查 F01、复现 E06）。工具的返回值必须能原样喂回工具，不能要求调用方
+/// 自己去掉那个斜杠。**规范化只在这一处做**，别的地方再判一次空串就是第二份
+/// 真相（方案 D）。
 pub fn relative_display(root: &Path, path: &Path) -> String {
     let display = path
         .strip_prefix(root)
@@ -610,6 +617,9 @@ pub fn relative_display(root: &Path, path: &Path) -> String {
         if let Some(normal) = display.strip_prefix("//?/") {
             return normal.to_string();
         }
+    }
+    if display.is_empty() {
+        return ".".to_string();
     }
     display
 }

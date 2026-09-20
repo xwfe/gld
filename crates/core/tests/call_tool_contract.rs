@@ -1295,6 +1295,145 @@ fn a_patch_built_on_a_stale_read_is_refused() {
     );
 }
 
+/// 零结果有好几种，得分得出来是哪一种。
+///
+/// 以前三种都只回一个空数组：glob 基准写错、文件全被跳过、真的没匹配，看起来
+/// 一模一样，而下一步完全不同（审查 F02、复现 E07、验收 A13）。
+#[test]
+fn an_empty_search_result_says_which_kind_of_empty_it_is() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::create_dir_all(dir.path().join("crates/core")).expect("建目录");
+    fs::write(dir.path().join("crates/core/exec.rs"), "fn run() {}\n").expect("写文件");
+    let ctx = ctx_for(dir.path());
+
+    // 一、glob 基准写错：在子目录里搜 "exec.rs"，它匹配的是工作区相对全路径。
+    let wrong_base = invoke(
+        &ctx,
+        "search_text",
+        json!({ "query": "run", "path": "crates", "glob": "exec.rs" }),
+    );
+    assert_ok(&wrong_base);
+    assert_eq!(wrong_base["total_matches"], 0, "{wrong_base}");
+    assert_eq!(wrong_base["scanned_files"], 0, "{wrong_base}");
+    assert!(
+        wrong_base["rejected_by_glob"].as_u64().unwrap_or(0) > 0,
+        "{wrong_base}"
+    );
+    assert_eq!(wrong_base["glob_base"], "workspace");
+    assert_eq!(wrong_base["search_root"], "crates");
+    let warning = wrong_base["warnings"][0].as_str().unwrap_or_default();
+    assert!(
+        warning.contains("**/exec.rs"),
+        "要给出能用的写法：{wrong_base}"
+    );
+
+    // 二、同一个意图，按工作区基准写就有结果。
+    let right_base = invoke(
+        &ctx,
+        "search_text",
+        json!({ "query": "run", "path": "crates", "glob": "**/exec.rs" }),
+    );
+    assert_eq!(right_base["total_matches"], 1, "{right_base}");
+    assert_eq!(right_base["scanned_files"], 1, "{right_base}");
+
+    // 三、真的搜过但没匹配：和上面两种不是一回事。
+    let no_match = invoke(
+        &ctx,
+        "search_text",
+        json!({ "query": "gld-no-such-symbol", "path": "crates" }),
+    );
+    assert_eq!(no_match["total_matches"], 0, "{no_match}");
+    assert_eq!(no_match["scanned_files"], 1, "{no_match}");
+    let warning = no_match["warnings"][0].as_str().unwrap_or_default();
+    assert!(warning.contains("none contained the query"), "{no_match}");
+}
+
+/// 被忽略的目录在**遍历阶段**就不进，不是进去之后再逐个文件丢。
+///
+/// 验收 A14。判据不能是"结果里没有它"——那在剪枝之前也成立；这里让
+/// `node_modules` 里躺着一个必然匹配的文件，再确认扫描计数没把它算进去。
+#[test]
+fn ignored_directories_are_pruned_before_their_files_are_touched() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::create_dir_all(dir.path().join("node_modules/pkg")).expect("建目录");
+    fs::write(dir.path().join("node_modules/pkg/index.js"), "needle\n").expect("写文件");
+    fs::write(dir.path().join("src.js"), "needle\n").expect("写文件");
+    let ctx = ctx_for(dir.path());
+
+    let out = invoke(&ctx, "search_text", json!({ "query": "needle" }));
+    assert_ok(&out);
+    assert_eq!(out["total_matches"], 1, "node_modules 不该被搜：{out}");
+    assert_eq!(
+        out["scanned_files"], 1,
+        "被忽略目录里的文件连读都不该读：{out}"
+    );
+
+    // list_files 同一条规矩。
+    let listed = invoke(&ctx, "list_files", json!({ "patterns": ["**/*.js"] }));
+    let paths: Vec<&str> = listed["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .filter_map(|f| f["path"].as_str())
+        .collect();
+    assert_eq!(paths, vec!["src.js"], "{listed}");
+}
+
+/// 工具吐出来的路径，原样喂回工具就得能用。
+///
+/// 根目录的 `list_dir` 以前给的是 `/Cargo.toml`——前面那个斜杠让 `read_file`
+/// 把它当成系统根下的绝对路径，报 `NOT_FOUND`，模型得自己悟出要去掉它
+/// （审查 F01、复现 E06）。这条测试串的是 `list_dir → read_file`
+/// 和 `list_dir → patch_check`，A12 要的就是这个。
+#[test]
+fn paths_from_list_dir_can_be_fed_straight_back_in() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("top.md"), "one\n").expect("写根目录文件");
+    fs::create_dir_all(dir.path().join("pkg")).expect("建子目录");
+    fs::write(dir.path().join("pkg/inner.md"), "two\n").expect("写子目录文件");
+    let ctx = ctx_for(dir.path());
+
+    for (listed_at, expected_path, expected_body) in
+        [(".", "top.md", "one\n"), ("pkg", "pkg/inner.md", "two\n")]
+    {
+        let listed = invoke(&ctx, "list_dir", json!({ "path": listed_at }));
+        assert_ok(&listed);
+        let entry_path = listed["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|entry| entry["type"] == "file")
+            .and_then(|entry| entry["path"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(entry_path, expected_path, "{listed}");
+        assert!(
+            !entry_path.starts_with('/'),
+            "工作区内的路径不带前导斜杠：{listed}"
+        );
+
+        let read = invoke(&ctx, "read_file", json!({ "path": entry_path.clone() }));
+        assert_ok(&read);
+        assert_eq!(read["content"], expected_body, "{read}");
+
+        let checked = invoke(
+            &ctx,
+            "patch_check",
+            json!({
+                "patch": format!(
+                    "--- a/{entry_path}\n+++ b/{entry_path}\n@@\n-{}+changed\n",
+                    expected_body
+                )
+            }),
+        );
+        assert_ok(&checked);
+    }
+
+    // 根目录自己也要是能往回传的东西，不是空串。
+    let root = invoke(&ctx, "list_dir", json!({ "path": "." }));
+    assert_eq!(root["path"], ".", "{root}");
+}
+
 /// patch_check 回的 `observed_versions` 原样交给 apply_patch 就能过；
 /// apply_patch 回的 `file_versions` 又能接着用于下一次改动。
 #[test]

@@ -892,6 +892,11 @@ static ARGV_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     })
 });
 
+/// glob 的基准是**工作区根**，不是 `path`。这件事以前只在代码里，模型在子目录
+/// 里搜 `exec.rs` 得到零结果，看不出是"没有这个文件"还是"glob 基准不对"
+/// （审查 F02、复现 E07）。结果里同时回 `glob_base` 和 `search_root`。
+const GLOB_BASE_DESCRIPTION: &str = "Glob patterns match the path relative to the WORKSPACE ROOT, not to `path`. Under path=\"crates\", the pattern \"exec.rs\" matches nothing — write \"**/exec.rs\" or the full \"crates/**/exec.rs\". The result echoes glob_base and search_root.";
+
 const COMMAND_CMD_DESCRIPTION: &str = "One command line, split with shell word rules but NOT run through a shell: unquoted ;, &&, |, > and $() are rejected. Use argv when an argument itself contains those characters.";
 
 pub fn input_schema(name: &str) -> Value {
@@ -1171,9 +1176,9 @@ pub fn input_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "default": "." },
-                "patterns": { "type": "array", "items": { "type": "string" } },
+                "patterns": { "type": "array", "items": { "type": "string" }, "description": GLOB_BASE_DESCRIPTION },
                 "glob": { "type": "string", "description": "Alias for a single patterns entry" },
-                "exclude_patterns": { "type": "array", "items": { "type": "string" } },
+                "exclude_patterns": { "type": "array", "items": { "type": "string" }, "description": GLOB_BASE_DESCRIPTION },
                 "include_hidden": { "type": "boolean", "default": false },
                 "include_ignored": { "type": "boolean", "default": false },
                 "max_results": { "type": "integer", "minimum": 1, "maximum": 50000, "default": 5000 }
@@ -1186,8 +1191,8 @@ pub fn input_schema(name: &str) -> Value {
                 "query": { "type": "string", "minLength": 1 },
                 "path": { "type": "string", "default": "." },
                 "glob": { "type": "string", "description": "Alias appended to include_globs" },
-                "include_globs": { "type": "array", "items": { "type": "string" } },
-                "exclude_globs": { "type": "array", "items": { "type": "string" } },
+                "include_globs": { "type": "array", "items": { "type": "string" }, "description": GLOB_BASE_DESCRIPTION },
+                "exclude_globs": { "type": "array", "items": { "type": "string" }, "description": GLOB_BASE_DESCRIPTION },
                 "regex": { "type": "boolean", "default": false },
                 "case_sensitive": { "type": "boolean", "default": false },
                 "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 0 },

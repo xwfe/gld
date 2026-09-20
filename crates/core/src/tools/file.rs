@@ -181,9 +181,16 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
 
     let mut files = Vec::new();
     let mut truncated = false;
+    // 有多少文件是被 patterns 挡在外面的。零结果时用它区分"这下面根本没文件"
+    // 和"有文件但 glob 没对上"（审查 F02）。
+    let mut rejected_by_pattern = 0usize;
     for entry in WalkDir::new(&resolved.path)
         .follow_links(false)
         .into_iter()
+        // 被忽略的目录整棵不进，不是进去之后再逐个文件丢（审查 F03、验收 A14）。
+        .filter_entry(|entry| {
+            keep_walking_into(ws, &resolved.path, entry, include_hidden || include_ignored)
+        })
         .filter_map(Result::ok)
     {
         let p = entry.path();
@@ -194,9 +201,6 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
             continue;
         }
         if ws.is_ignored_path(p, include_hidden, include_ignored) {
-            if entry.file_type().is_dir() {
-                continue;
-            }
             continue;
         }
         if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
@@ -204,9 +208,11 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
         }
         let rel = relative_display(ws.root(), p);
         if !patterns.iter().any(|pat| glob_match(pat, &rel)) {
+            rejected_by_pattern += 1;
             continue;
         }
         if exclude_patterns.iter().any(|pat| glob_match(pat, &rel)) {
+            rejected_by_pattern += 1;
             continue;
         }
         let meta = p.symlink_metadata().ok();
@@ -222,11 +228,23 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
         }
     }
     files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    let mut warnings: Vec<String> = Vec::new();
+    if truncated {
+        warnings.push(format!(
+            "result limit reached ({max_results}); give a deeper path or a narrower pattern"
+        ));
+    } else if files.is_empty() && rejected_by_pattern > 0 {
+        warnings.push(format!(
+            "{rejected_by_pattern} file(s) were rejected by patterns. Patterns match the path relative to the WORKSPACE ROOT, not to `path` — under path=\"crates\" the pattern \"exec.rs\" matches nothing; write \"**/exec.rs\"."
+        ));
+    }
     Ok(tool_ok(json!({
         "path": resolved.display,
         "files": files,
         "truncated": truncated,
-        "warnings": if truncated { vec!["result limit reached"] } else { vec![] }
+        "glob_base": "workspace",
+        "rejected_by_pattern": rejected_by_pattern,
+        "warnings": warnings
     })))
 }
 
@@ -282,6 +300,16 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     let mut skipped_large = 0usize;
     let mut skipped_binary = 0usize;
     let mut truncated = false;
+    // 零结果有好几种，它们的下一步完全不同：没有文件通过 glob（八成是 glob
+    // 写错了基准）、文件都被跳过了（太大 / 二进制）、真的搜了但没匹配。以前
+    // 三种都只回一个空数组，模型无从分辨（审查 F02、复现 E07）。
+    let mut scanned = 0usize;
+    // 一行超过 SEARCH_LINE_KEEP（1 MiB）时，只有前 1 MiB 参与匹配，尾部既没搜
+    // 也不会出现在预览里。不说的话它和"这一行里没有"长得一模一样（方案 D：
+    // 超过保留长度的行不能默默表现为完整扫描）。
+    let mut long_lines = 0usize;
+    let mut rejected_by_glob = 0usize;
+    let mut rejected_by_type = 0usize;
 
     let mut consider_file = |p: &Path| {
         // `max_results` 在三种模式下限的东西不同：content 限匹配行数，另外
@@ -303,9 +331,11 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         }
         let rel = relative_display(ws.root(), p);
         if !passes_glob_filters(&rel, &include_globs, &exclude_globs) {
+            rejected_by_glob += 1;
             return true;
         }
         if file_type.is_some_and(|file_type| !file_type.matches(&rel)) {
+            rejected_by_type += 1;
             return true;
         }
         let meta = match p.metadata() {
@@ -324,6 +354,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             FileEligibility::Unreadable => return true,
             FileEligibility::Text => {}
         }
+        scanned += 1;
         match output_mode {
             OutputMode::Content => {
                 let stop = if matcher.is_multiline() {
@@ -345,6 +376,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
                         max_preview,
                         max_results,
                         &mut matches,
+                        &mut long_lines,
                     )
                 };
                 if stop {
@@ -354,7 +386,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             }
             // 命中一次就够，不用把这个文件读完。
             OutputMode::FilesWithMatches => {
-                if count_file_matches(p, &matcher, Some(1)) > 0 {
+                if count_file_matches(p, &matcher, Some(1), &mut long_lines) > 0 {
                     files.push(rel);
                     if files.len() >= max_results {
                         truncated = true;
@@ -363,7 +395,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
                 }
             }
             OutputMode::Count => {
-                let count = count_file_matches(p, &matcher, None);
+                let count = count_file_matches(p, &matcher, None, &mut long_lines);
                 if count > 0 {
                     counts.push(json!({ "path": rel, "count": count }));
                     if counts.len() >= max_results {
@@ -382,6 +414,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         for entry in WalkDir::new(&resolved.path)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|entry| keep_walking_into(ws, &resolved.path, entry, include_hidden))
             .filter_map(Result::ok)
         {
             if !entry.file_type().is_file() {
@@ -394,7 +427,9 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     }
 
     if truncated {
-        warnings.push("result limit reached; scan stopped early".to_string());
+        warnings.push(format!(
+            "result limit reached ({max_results}); scan stopped early — narrow the query, give a deeper path, or raise max_results. Counts below describe what was scanned before stopping, not the whole project."
+        ));
     }
     if skipped_large > 0 {
         warnings.push(format!(
@@ -406,6 +441,11 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             "skipped {skipped_binary} binary or non-utf8 file(s)"
         ));
     }
+    if long_lines > 0 {
+        warnings.push(format!(
+            "{long_lines} line(s) are longer than {SEARCH_LINE_KEEP} bytes; only their first {SEARCH_LINE_KEEP} bytes were searched, the rest was not read"
+        ));
+    }
 
     // `total_matches` 一直是"这次返回了几条"，不是全项目的总数；三种模式下
     // 它数的东西跟着 `max_results` 走（审查 F03 要求把这件事说清楚）。
@@ -414,6 +454,26 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         OutputMode::FilesWithMatches => files.len(),
         OutputMode::Count => counts.len(),
     };
+    // 一个都没搜到的时候，说清是哪一种"没有"。
+    if total == 0 && !truncated {
+        if scanned == 0 && rejected_by_glob > 0 {
+            warnings.push(format!(
+                "no file matched the globs, so nothing was searched: {rejected_by_glob} file(s) were rejected by include/exclude_globs. Globs match the path relative to the WORKSPACE ROOT, not to `path` — searching path=\"crates\" for glob \"exec.rs\" finds nothing; write \"**/exec.rs\"."
+            ));
+        } else if scanned == 0 && rejected_by_type > 0 {
+            warnings.push(format!(
+                "no file matched type={}, so nothing was searched ({rejected_by_type} file(s) rejected)",
+                args.get("type").and_then(Value::as_str).unwrap_or("")
+            ));
+        } else if scanned == 0 {
+            warnings
+                .push("no readable text file under this path, so nothing was searched".to_string());
+        } else {
+            warnings.push(format!(
+                "searched {scanned} file(s), none contained the query"
+            ));
+        }
+    }
     Ok(tool_ok(json!({
         "query": query,
         "output_mode": output_mode.as_str(),
@@ -428,6 +488,15 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         "max_file_bytes": max_file_bytes,
         "skipped_large_files": skipped_large,
         "skipped_binary_files": skipped_binary,
+        // 这次到底搜了什么：搜索根、glob 的基准、有多少文件真被读过、多少
+        // 在过滤器那一步就没进来。零结果因此可以被解释，而不是只回一个空数组
+        //（审查 F02 / F03，验收 A13）。
+        "search_root": resolved.display,
+        "glob_base": "workspace",
+        "scanned_files": scanned,
+        "lines_truncated_for_search": long_lines,
+        "rejected_by_glob": rejected_by_glob,
+        "rejected_by_type": rejected_by_type,
         "warnings": warnings
     })))
 }
@@ -488,6 +557,7 @@ fn file_text_eligibility(path: &Path) -> FileEligibility {
 }
 
 /// Stream a file line-by-line. Returns true when `max_results` is reached.
+#[allow(clippy::too_many_arguments)]
 fn search_file_streaming(
     path: &Path,
     rel: &str,
@@ -496,6 +566,7 @@ fn search_file_streaming(
     max_preview: usize,
     max_results: usize,
     matches: &mut Vec<Value>,
+    long_lines: &mut usize,
 ) -> bool {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -524,6 +595,9 @@ fn search_file_streaming(
                 flush_pending(&mut pending, matches, max_results);
                 return matches.len() >= max_results;
             }
+        }
+        if raw.len() >= SEARCH_LINE_KEEP {
+            *long_lines += 1;
         }
         let line = match std::str::from_utf8(&raw) {
             Ok(text) => text.to_string(),
@@ -714,7 +788,12 @@ impl Matcher {
 /// `files_with_matches` 只要知道"有没有"，没必要把 10 MB 的文件读完。
 ///
 /// 数的单位和 content 模式一致：**匹配的行数**（跨行模式下是匹配的段数）。
-fn count_file_matches(path: &Path, matcher: &Matcher, limit: Option<usize>) -> usize {
+fn count_file_matches(
+    path: &Path,
+    matcher: &Matcher,
+    limit: Option<usize>,
+    long_lines: &mut usize,
+) -> usize {
     if let Matcher::Multiline(re) = matcher {
         let Ok(text) = fs::read_to_string(path) else {
             return 0;
@@ -743,6 +822,9 @@ fn count_file_matches(path: &Path, matcher: &Matcher, limit: Option<usize>) -> u
             Ok(None) => break,
             // 读不动、或者中间冒出非 UTF-8：到此为止，已经数到的算数。
             Err(_) => break,
+        }
+        if raw.len() >= SEARCH_LINE_KEEP {
+            *long_lines += 1;
         }
         let Ok(line) = std::str::from_utf8(&raw) else {
             break;
@@ -1035,6 +1117,31 @@ fn utf8_chunk_ok(tail: &mut Vec<u8>, mut chunk: &[u8]) -> bool {
     }
 }
 
+/// 该不该走进这个目录。
+///
+/// 以前是走进去之后再逐个文件丢弃：`node_modules` 里几万个文件每个都要
+/// `metadata()` 一次，一次搜索能因此多花几秒，而它们没有一个会进结果
+/// （审查 F03、验收 A14）。现在整棵不进。
+///
+/// **只用来剪枝，不放宽任何检查**：文件那一层的 `is_safe_read_path` 和
+/// `is_ignored_path` 照旧各判一遍，所以这里判错了顶多是多走一段路，不会让
+/// 不该读的文件进结果。
+fn keep_walking_into(
+    ws: &Workspace,
+    root: &Path,
+    entry: &walkdir::DirEntry,
+    include_hidden: bool,
+) -> bool {
+    // 起点自己永远要进：调用方明确指了它，哪怕它叫 .github。
+    if entry.path() == root {
+        return true;
+    }
+    if !entry.file_type().is_dir() {
+        return true;
+    }
+    !ws.is_ignored_path(entry.path(), include_hidden, false)
+}
+
 fn string_list_arg(args: &Value, key: &str) -> Vec<String> {
     args.get(key)
         .and_then(Value::as_array)
@@ -1310,6 +1417,23 @@ mod tests {
             late["matches"].as_array().expect("matches").is_empty(),
             "保留上限之后的内容不该被搜到：{late}"
         );
+        // 搜不到和"这一行根本没搜完"是两件事，结果里必须分得出来（方案 D）。
+        assert_eq!(late["lines_truncated_for_search"], 1, "{late}");
+        let warnings = late["warnings"].as_array().expect("warnings");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap_or_default().contains("longer than")),
+            "没搜完的那一行要说出来：{late}"
+        );
+        // 正常长度的文件不该背上这条提示。
+        std::fs::write(dir.path().join("small.txt"), "needle-early\n").expect("write");
+        let small = search_text(
+            &ws,
+            &json!({ "query": "needle-early", "path": "small.txt" }),
+        )
+        .expect("search");
+        assert_eq!(small["lines_truncated_for_search"], 0, "{small}");
     }
 
     /// 结果里所有字符串加起来多少字节。context 的克隆全都落在这里，所以这个
