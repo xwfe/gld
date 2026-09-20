@@ -85,6 +85,7 @@ gld destroy                   # 连配置和密钥一起删掉；项目文件不
 | 改这个项目的代码 | [architecture.md](docs/architecture.md)、[development.md](docs/development.md) |
 | 看共享 Rust 内核、hub 接 ccnm 远端工具的方案和落地记录（已实施，第 9 节） | [RFC-0002](docs/rfc/0002-shared-kernel-and-ccnm-hub.md) |
 | 看 hub 怎么跟上 ccnm 的新工具、compact 档怎么放回 skills（实施中） | [RFC-0003](docs/rfc/0003-native-parity-sync.md) |
+| 看三仓重构中的 gld 职责、优先修复项与验收依赖 | [跨项目重构落地清单](docs/reviews/2026-09-19-cross-project-refactor-actions.md) |
 
 ## Credits
 
