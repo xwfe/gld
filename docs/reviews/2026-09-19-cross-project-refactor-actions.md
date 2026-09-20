@@ -102,6 +102,14 @@ L1 剩下的大头是**单项目 scoped view 和 grant**（表里第二、三行
 
 **还没做的**：租约显示与续租预算（这轮只是把回收阈值改对，没有把租约摆到模型面前）；X06 的语义能力协商（嵌套 patch 操作、stdin/TTY、输出引用代次）；durable Job——那要 ccnm 升 `ccnm.workspace-mcp/2` 或显式协商，本轮连提都没提。ccnm 那半边的权威语义写在它的协议第 6 节（四个时钟、session-bound、取消等待不等于取消命令、终态只有 Runtime 说了算），本轮的修就是照着它做的。
 
+### ccnm 那边同日又收紧了两处，gld 都不受影响（2026-09-20）
+
+**写权不再被错误交出**（ccnm P43）：它的会话结束时若有命令停不掉，写锁留在 `held` 而不是标成可用，下一个 coding 会话被拒。对 gld 的意义是 `remote_coding_begin` 可能拿到一个新的拒绝理由——`workspace write guard was kept on purpose`，话里点名还剩哪些 `output_ref`。它和原来的 busy / unknown 一样是启动失败，`connect` 那条路已经把远端 stderr 带回来了，不用改代码。
+
+**服务端开始自己验参数**（ccnm P44）：`exec_command`、`apply_patch`、`stop_command` 连同 `files[]` 的嵌套结构不再接受未声明的字段，超界的 `timeout_ms` / `preview_bytes` 从静默钳制改为拒绝。**gld 不受影响**，因为 `bridge::session::Offered` 本来就只转发远端 schema 里有的参数——这次收紧反而让那道检查有了依据：ccnm 的 `tools/list` 现在每个工具都发 `additionalProperties`，写工具是 `false`、只读是 `true`。
+
+**可以顺手做、但这轮没做**：`Offered` 现在只比工具名和顶层参数名，可以改成也认 `additionalProperties`——远端说不收额外字段时，gld 这边多带一个参数就能提前拦住，而不是发出去等它拒。这属于 X06 那条「语义能力协商」的一小块，留着。
+
 ## 5. 剩余能力的顺序
 
 G3.2 notebook 沿 RFC-0003 做：新增 `read_notebook`，补按 cell 编辑，保持 `read_file` 返回 JSON 的契约。不因为 ccnm 工具形状相同，就复制其整个事务实现。
