@@ -32,6 +32,10 @@ toexec 的 Windows 替换修复是依赖门禁：当前共享库先删除目标�
 
 本会话服务报告 `0.4.0`、24 工具，没有 HEAD 已有的 `check_command`、`list_skills`、`get_skill`；本会话搜索 schema 也未显示新增参数。暂不能确定是二进制、重启、profile 还是缓存问题。
 
+**2026-09-20 补：就是二进制旧了。**把 `~/.local/bin/gld` 换成 0.5.0 的本机构建并 `gld daemon restart` 之后，`gld tool list` 给出 **28 个工具**，上面点名缺的三个全都在，`read_notebook`、`view_image` 也在；`gld tool schema search_text` 的 `output_mode` / `multiline` / `type` / `include_hidden` 四个新参数一个不少。profile 没动过，缓存也不是原因。
+
+**但这只走到验收四步里的第三步。** "源码有"（HEAD）、"构建有"（0.5.0 二进制）、"daemon 正在用"（`gld tool list` 问的就是守护进程里的工具内核）这三步现在都有证据；**"客户端看得到"还没走**——那要一个真实 MCP 客户端经 HTTP + OAuth 连上来做 `tools/list`，本轮没做。诊断里补运行构建 SHA 那一条也还没做，所以下次再遇到同样的困惑，判断依据仍然只有版本号字符串。
+
 给诊断补运行构建 SHA、工具/schema 摘要、profile/config revision、所用依赖与远端能力代次。默认只返回简短诊断，完整审计按需读。经操作员批准更新后，从真实客户端重新发现并调用这些能力，才记为已部署。
 
 验收：能判断“源码有”“构建有”“daemon 正在用”“客户端看得到”分别是哪一步；不能只比较 CLI 的 version 字符串。**本文件不授权重启或替换本会话正在使用的服务。**
