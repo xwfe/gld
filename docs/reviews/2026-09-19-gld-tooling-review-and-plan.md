@@ -497,4 +497,46 @@ E03 里那次失败给的全部信息是：`PATCH_FAILED` + `Hunk context did no
 
 `current_file_version` 留着，但只给不需要区分这两者的地方用（补丁落盘后报"新版本是多少"，那时拿不到只是少给一条提示），注释里写明了这条分工。
 
-下一阶段按方案是 U3（结构化执行入口、受控的 `rg`/`gh` 规则、SSH 边界说明、`.github` 分类）。跨仓评审另有两条 P0/P1 直接落在 gld：X01（`toexec-fs` 在 Windows 上先删后 rename，失败会丢原文件）和 X03（hub 的执行资源所有权），都不在 U 系列里，需要单独排。
+下一阶段按方案是 U3（结构化执行入口、受控的 `rg`/`gh` 规则、SSH 边界说明、`.github` 分类）。跨仓评审另有两条 P0/P1 直接落在 gld：X01（`toexec-fs` 在 Windows 上先删后 rename，失败会丢原文件）和 X03（hub 的执行资源所有权），都不在 U 系列里，需要单独排。**这两条后来都做完了**：X01 在 `e03372d`（升到 `toexec-fs` 0.2.1，并让替换的故障注入真的走共享库）加 `1a533a4`（Windows 上真跑补丁落盘测试），X03 在 `d947b90` / `dc6532c` / `91f45d8`。
+
+### U3 第一批：`.git` 和 `.github` 不是同一种东西（C05、A06）
+
+**新建一个 `.github/workflows/ci.yml` 以前报「禁止删除仓库保护资产」。**不是删除，理由也对不上，而修 Actions 是日常维护——用户撞到这堵墙只能绕开工具去写文件（复现记录 E02）。
+
+根因是同一件事在两个地方各判一遍（`patch.rs::is_protected_repository_asset`、`workspace.rs::reject_protected_write_path`），两边都把 `.git` 和 `.github` 当成同一种东西。现在合成一个分类器 `tools/write_class.rs`，按"改了会发生什么"分：
+
+| 路径 | 改 | 删 |
+| --- | --- | --- |
+| `.git/**` | 拒 | 拒 |
+| `.github/workflows/**`、`.github/actions/**` | 要 `confirm=true` | 要 `confirm=true` |
+| `.github/CODEOWNERS` | 要 `confirm=true` | 要 `confirm=true` |
+| `.github/**` 其他 | 放行 | 要 `confirm=true` |
+| 关键文件（`Cargo.toml`、`package.json`、`README*`…） | 放行 | 要 `confirm=true`（原有行为） |
+
+**这是放宽，所以配一条反向的补偿**：`confirm` 之后，落盘结果和预检结果的 `warnings` 里点名这次改的是"GitHub 的行为"而不只是工作树（方案 C4 明说不能把 `.github` 标成无风险配置）。`notebook_edits` 走同一道门，否则 `.github/workflows/x.ipynb` 能从旁边绕过去。
+
+行为变更带来一条既有断言的修改：`patch_check_rejects_all_git_and_github_writes` 断言的正是被修掉的那个行为，拆成 `.git` 仍然全拒 + `.github` 三种情况各一条。
+
+**子进程那一层没有跟着放宽**：`policy.rs` 看的是命令文本，仍然把 `.git` 和 `.github` 一起当删除保护对象——从命令文本里分不出"改一行 workflow"和"把 `.github` 递归删掉"。两层宽严不同是有意的，写在 `write_class` 的模块文档里。
+
+### U3 第二批：命令怎么进来，以及 `gh` / `ssh` 的规矩（C04、C01、C02、A03、A04、A05）
+
+**结构化入口 `argv`。**以前只有 `cmd` 一行字符串：先按 shell 的规矩挑掉 `|` `;` `>`，再拆开直接 spawn——接口长得像 shell，执行却不是。模型想跑 `rg "foo|bar"` 得自己琢磨引号，加错就被"不允许 shell 串联"拒掉，而那个 `|` 只是正则。现在 `argv: ["rg", "foo|bar", "src"]`，参数逐格送进内核。
+
+两种形式在 `tools/command_spec.rs` 合成同一个 `CommandSpec`，**权限是同一套**：白名单、危险命令、联网、受保护路径、程序解析全都只认它。唯一的区别是 `argv` 不做 shell 操作符检测（它的参数不经过 shell）。两个都给报 `conflicting_command_forms`，不猜哪个算数。长度上限量的是合成之后的那一行，拆成一千格也绕不过去。
+
+测试证明的不是"没报错"，而是**进程真的收到了原样的字符串**：脚本把 `argv[1]` 打回来，内容是 `a b|c;d\ne`。
+
+**裸命令名现在先查 PATH。**以前工作区里放一个叫 `python` 的文件，`python --version` 跑的就是它——而白名单批准的是"python 这个系统命令"，批的和跑的不是同一个东西（方案 B、审查 A04）。shell 也不把 `.` 放进 PATH，同一个道理。工作区里的脚本没有因此失去入口：PATH 上查不到的名字仍然回落到工作区，写 `./build` 一直是明确指路。
+
+**`gh` 加进白名单 = 只读诊断。**`gh run view` 和 `gh run rerun` 只差一个词，按"首个单词是 gh"分不出来。名单是允许制：`run list|view`、`workflow list|view`、`pr list|view|diff|checks|status`、`issue list|view|status`、`release list|view`、`repo view`、`cache list`、`label list`、`auth status`、`gh version|status` 放行，其余一律拒（`github_command_not_read_only`），包括 `gh api`——一个 `-X POST` 就是任意写接口。gh 以后新增的子命令默认也不放行。
+
+**`ssh` / `scp` / `rsync` 有自己的拒绝原因**（`remote_shell_not_allowed`），提示直接指向 hub / ccnm 远端成员，而不是笼统的"不在白名单"——后者会让模型改用 `scp`、改用 `paramiko` 接着试。文档同时写明：**把 `ssh` 加进白名单就是放开任意远端 shell**，gld 不限制目标主机，也挡不住端口转发，这件事没有中间档。
+
+**`rg` 没有进默认白名单**，方案里也没要求进：首选仍然是 `search_text`（有上下文、分页、类型过滤，不用放开任何命令）。要 `rg` 的项目按追加写法加进去就行，文档写在 security.md。
+
+`safe` 模式的联网命令模式补上了 `gh`——它显然要出网，漏掉它等于 safe 模式下有一个联网后门。
+
+**内建的 `ls` 不再冒充系统 ls。**它是服务端自己答的极简实现，以前 `ls -la` 会把 `-la` 当成目录名、报"路径不存在"——看着像目录没了。现在带 flag 直接说清它是什么、该用 `list_dir` 还是 `list_files`，结果里那句 warning 也从 "native diagnostic without child process" 换成了说得出所以然的一句。同时修了它的相对参数解析：`ls inner` 以前从**工作区根**解析，现在按 `workdir` 解析，和在真实 shell 里输入它的结果一致（方案 B 的原生 ls 一条）。
+
+**U3 里没做的**：`build_commit` 仍然是 `null`（诊断里报运行构建 SHA 属于 G-B / 跨仓 X10，要改构建脚本）；"未授权 SSH 不建立连接"只有"策略在 spawn 之前拒"这一层证据（代码路径如此，也有 `check_command` 的 `side_effects=none` 钉着），没有抓包那种证据；A04 的 Windows 分支没在本机跑过，靠 CI 的 Windows 格。
