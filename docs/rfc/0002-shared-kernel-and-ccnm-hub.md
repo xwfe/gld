@@ -2,7 +2,7 @@
 
 日期：2026-09-15。方向已由用户确认；本文为实施方案。**2026-09-16 已实施**：共享内核 K1/K2 与 hub 接入 H1–H8 都落地了，逐项对照在第 9 节的补记；正文其余部分保留为当时的方案。Codex 原生 exec-server 那条线不在 gld 里，ccnm 做完 P21–P30 后于 2026-09-17 封存（ccnm P32）；三种客户端（Claude Code、Codex、Web AI 经 gld hub）都走同一条 MCP + 共享库路径，最终目标是三种客户端 × macOS / Linux / Windows，现状汇总在 toexec v2 计划第 0.1 节，gld 这一侧的含义见第 9 节最后的补记。
 
-本 RFC 替代 [RFC-0001 的 WebCodex 服务采用路线](0001-shared-workspace-runtime.md)。不增加第三个 Server，不部署 WebCodex，不重写模型循环。原[证据附录](0001-shared-workspace-runtime-evidence.md)中的源码事实继续适用，不继续执行其中的服务准入计划。
+本 RFC 替代 RFC-0001 的 WebCodex 服务采用路线。不增加第三个 Server，不部署 WebCodex，不重写模型循环。RFC-0001 正文与它的证据附录已于 2026-09-20 删除（那条路线从未执行，留着只会让人以为还有第三个 Server 要接），原文在 git 历史里。
 
 ## 1. 已确认目标
 
