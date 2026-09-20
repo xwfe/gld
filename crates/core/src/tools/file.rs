@@ -299,6 +299,9 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     let mut warnings = Vec::new();
     let mut skipped_large = 0usize;
     let mut skipped_binary = 0usize;
+    // 打不开的文件（权限不够、正被换掉、坏软链）。以前它和"搜过了没匹配"
+    // 一样是静悄悄的（验收 A13 要求"权限跳过"能区分出来）。
+    let mut skipped_unreadable = 0usize;
     let mut truncated = false;
     // 零结果有好几种，它们的下一步完全不同：没有文件通过 glob（八成是 glob
     // 写错了基准）、文件都被跳过了（太大 / 二进制）、真的搜了但没匹配。以前
@@ -351,7 +354,10 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
                 skipped_binary += 1;
                 return true;
             }
-            FileEligibility::Unreadable => return true,
+            FileEligibility::Unreadable => {
+                skipped_unreadable += 1;
+                return true;
+            }
             FileEligibility::Text => {}
         }
         scanned += 1;
@@ -441,6 +447,11 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             "skipped {skipped_binary} binary or non-utf8 file(s)"
         ));
     }
+    if skipped_unreadable > 0 {
+        warnings.push(format!(
+            "skipped {skipped_unreadable} file(s) that could not be opened (permissions, or they changed while scanning)"
+        ));
+    }
     if long_lines > 0 {
         warnings.push(format!(
             "{long_lines} line(s) are longer than {SEARCH_LINE_KEEP} bytes; only their first {SEARCH_LINE_KEEP} bytes were searched, the rest was not read"
@@ -488,6 +499,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         "max_file_bytes": max_file_bytes,
         "skipped_large_files": skipped_large,
         "skipped_binary_files": skipped_binary,
+        "skipped_unreadable_files": skipped_unreadable,
         // 这次到底搜了什么：搜索根、glob 的基准、有多少文件真被读过、多少
         // 在过滤器那一步就没进来。零结果因此可以被解释，而不是只回一个空数组
         //（审查 F02 / F03，验收 A13）。
