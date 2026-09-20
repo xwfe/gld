@@ -217,10 +217,10 @@ fn deleting_git_assets_is_always_rejected() {
 }
 
 #[test]
-fn patch_check_rejects_all_git_and_github_writes() {
+fn patch_check_rejects_every_write_into_git_internals() {
     let fx = tiny_js_fixture();
     let ctx = ctx_for(&fx.root);
-    for path in [".git/probe.txt", ".github/probe.yml"] {
+    for path in [".git/probe.txt", ".git/hooks/pre-commit"] {
         let out = invoke(
             &ctx,
             "apply_patch",
@@ -229,8 +229,98 @@ fn patch_check_rejects_all_git_and_github_writes() {
                 "patch": format!("*** Begin Patch\n*** Add File: {path}\n+probe\n*** End Patch\n")
             }),
         );
-        assert_eq!(out["error"]["code"], "PROTECTED_REPOSITORY_ASSET");
+        assert_eq!(out["error"]["code"], "PROTECTED_REPOSITORY_ASSET", "{path}");
     }
+}
+
+/// 以前这条路是死的：新建 `.github/workflows/ci.yml` 报「禁止删除仓库保护
+/// 资产」——不是删除，理由也对不上，于是用户只能绕开工具去改 Actions
+/// （审查 C05 / E02）。现在它是一次需要确认的修改。
+#[test]
+fn creating_a_workflow_asks_for_confirmation_then_goes_through() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let patch =
+        "*** Begin Patch\n*** Add File: .github/workflows/ci.yml\n+name: ci\n*** End Patch\n";
+
+    let blocked = invoke(&ctx, "apply_patch", json!({"patch": patch}));
+    assert_eq!(
+        blocked["error"]["code"],
+        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
+    );
+    let message = blocked["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("CI"),
+        "拒绝理由要说清批的是什么: {message}"
+    );
+    assert!(
+        !fx.root.join(".github/workflows/ci.yml").exists(),
+        "被拒的调用不能留下文件"
+    );
+
+    let applied = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": patch, "confirm": true}),
+    );
+    assert_ok(&applied);
+    assert_eq!(
+        fs::read_to_string(fx.root.join(".github/workflows/ci.yml")).expect("workflow 落盘"),
+        "name: ci\n"
+    );
+    // 批准之后仍然要在结果里点名：它改的是 GitHub 上的行为，不只是这棵树。
+    let warnings = applied["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("ci_workflow")),
+        "落盘结果要点名敏感改动: {applied}"
+    );
+}
+
+/// `.github/` 不是只有 workflow：issue 模板改起来就是普通文件。
+#[test]
+fn ordinary_github_config_edits_do_not_need_confirmation() {
+    let fx = tiny_js_fixture();
+    fs::create_dir_all(fx.root.join(".github/ISSUE_TEMPLATE")).expect("建模板目录");
+    fs::write(fx.root.join(".github/ISSUE_TEMPLATE/bug.md"), "old\n").expect("写模板");
+    let ctx = ctx_for(&fx.root);
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "patch": "*** Begin Patch\n*** Update File: .github/ISSUE_TEMPLATE/bug.md\n@@\n-old\n+new\n*** End Patch\n"
+        }),
+    );
+    assert_ok(&out);
+    assert_eq!(
+        fs::read_to_string(fx.root.join(".github/ISSUE_TEMPLATE/bug.md")).expect("读回模板"),
+        "new\n"
+    );
+}
+
+/// 删除是另一回事：`.github/` 里的东西删掉都要确认。
+#[test]
+fn deleting_github_config_still_requires_confirmation() {
+    let fx = tiny_js_fixture();
+    fs::create_dir_all(fx.root.join(".github")).expect("建 .github");
+    fs::write(fx.root.join(".github/CODEOWNERS"), "* @team\n").expect("写 CODEOWNERS");
+    let ctx = ctx_for(&fx.root);
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({
+            "patch": "*** Begin Patch\n*** Delete File: .github/CODEOWNERS\n*** End Patch\n"
+        }),
+    );
+    assert_eq!(
+        out["error"]["code"],
+        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
+    );
+    assert!(
+        fx.root.join(".github/CODEOWNERS").exists(),
+        "被拒的删除不能真的删掉"
+    );
 }
 
 #[test]

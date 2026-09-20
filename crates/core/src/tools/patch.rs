@@ -9,6 +9,7 @@ use crate::tools::caller::Caller;
 use crate::tools::context::ToolContext;
 use crate::tools::patch_diag::{Diagnostic, HunkMiss, MAX_CANDIDATES, MAX_DIAGNOSTICS};
 use crate::tools::workspace::{tool_ok, FileState, Workspace, WorkspaceError};
+use crate::tools::write_class::{Verdict, WriteClass};
 
 pub fn apply_patch(
     ctx: &ToolContext,
@@ -68,24 +69,17 @@ pub fn apply_patch(
     if file_patches.is_empty() && notebook_edits.is_none() {
         return Err(patch_failed("No files were modified."));
     }
-    if let Some(path) = file_patches
-        .iter()
-        .find(|file| is_protected_repository_asset(&file.path))
-        .map(|file| file.path.as_str())
-    {
-        return Err(protected_repository_asset(format!(
-            "禁止删除仓库保护资产: {path}"
-        )));
+    // 每个目标先过写权限分类器：`.git/` 一律不写，`.github/` 按改的是什么分开
+    // （workflow 和 CODEOWNERS 要 confirm，模板之类照常改），关键文件仍然只在
+    // 删除时要 confirm。规则和理由都在 `tools::write_class`，这里不再判第二遍。
+    for file in &file_patches {
+        gate_write(&file.path, file.is_deleted, confirm)?;
     }
-    if !confirm {
-        if let Some(path) = file_patches
-            .iter()
-            .find(|file| file.is_deleted && is_critical_file(&file.path))
-            .map(|file| file.path.as_str())
-        {
-            return Err(dangerous_operation(format!(
-                "删除关键项目文件需要 confirm=true: {path}"
-            )));
+    // notebook 的 cell 编辑和文本补丁在同一次事务里，写的也是工作区里的文件，
+    // 所以走同一道门——否则 `.github/workflows/x.ipynb` 这种路径能从旁边绕过去。
+    if let Some(edits) = notebook_edits.as_ref() {
+        for edit in edits {
+            gate_write(&edit.path, false, confirm)?;
         }
     }
 
@@ -447,7 +441,10 @@ pub fn apply_patch(
             "files_deleted": files_deleted,
             "file_versions": new_versions,
             "recovery": "git",
-            "warnings": commands_still_running_warnings(ctx, caller)
+            "warnings": sensitive_write_warnings(&order)
+                .into_iter()
+                .chain(commands_still_running_warnings(ctx, caller))
+                .collect::<Vec<_>>()
         })));
     }
 
@@ -464,8 +461,29 @@ pub fn apply_patch(
         // 有人动过这些文件就会被拒——**预检通过不是通行证**，它只说明"刚才
         // 这一刻能过"（审查 C3）。
         "observed_versions": observed,
-        "warnings": []
+        "warnings": sensitive_write_warnings(&order)
     })))
+}
+
+/// 这批补丁里有没有"改的不只是工作树"的文件。
+///
+/// `confirm=true` 已经是一次明确的批准，但批准之后没人再提起这件事——落盘结果
+/// 和预检结果都只说"改了几个文件"。CI 工作流和 CODEOWNERS 的效果发生在
+/// GitHub 上，不在这棵树里，值得在结果里点名（方案 C4：不能把 `.github`
+/// 标成无风险配置）。
+fn sensitive_write_warnings(order: &[String]) -> Vec<String> {
+    order
+        .iter()
+        .filter_map(|path| {
+            let class = WriteClass::of(path);
+            class.is_sensitive().then(|| {
+                format!(
+                    "{path} ({}): this changes what GitHub does — CI execution or review requirements — not just the working tree.",
+                    class.slug()
+                )
+            })
+        })
+        .collect()
 }
 
 /// 补丁已经落盘了，但这个目录上还有命令在跑——它们读到的文件可能和刚写进去
@@ -1425,30 +1443,23 @@ fn cleanup_temporary_files<'a>(paths: impl Iterator<Item = &'a PathBuf>) {
     }
 }
 
-fn is_critical_file(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    let first = normalized.split('/').next().unwrap_or("");
-    if matches!(first, ".git" | ".github") {
-        return true;
+/// 这个写目标过不过得去。分类和理由都来自 [`WriteClass`]，这里只负责把判定
+/// 翻译成错误码：走不通的是 `PROTECTED_REPOSITORY_ASSET`，等确认的是
+/// `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`。两个码都是原来就有的，客户端
+/// 按码分支的代码不用改。
+fn gate_write(path: &str, is_delete: bool, confirm: bool) -> Result<(), WorkspaceError> {
+    let class = WriteClass::of(path);
+    let verdict = if is_delete {
+        class.delete()
+    } else {
+        class.modify()
+    };
+    match verdict {
+        Verdict::Allow => Ok(()),
+        Verdict::NeedsConfirm(_) if confirm => Ok(()),
+        Verdict::NeedsConfirm(why) => Err(dangerous_operation(format!("{path}：{why}"))),
+        Verdict::Deny(why) => Err(protected_repository_asset(format!("{path}：{why}"))),
     }
-    let name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
-    name == ".gitignore"
-        || name == "Cargo.toml"
-        || name == "Cargo.lock"
-        || name == "package.json"
-        || name == "package-lock.json"
-        || name == "pnpm-lock.yaml"
-        || name == "tauri.conf.json"
-        || name.starts_with("README")
-        || name.starts_with("LICENSE")
-        || name.starts_with("vite.config.")
-        || name == "pyproject.toml"
-}
-
-fn is_protected_repository_asset(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    let first = normalized.split('/').next().unwrap_or("");
-    matches!(first, ".git" | ".github")
 }
 
 fn dangerous_operation(message: impl Into<String>) -> WorkspaceError {

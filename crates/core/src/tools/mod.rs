@@ -20,6 +20,7 @@ pub mod setup;
 pub mod skill;
 pub mod workspace;
 pub mod workspace_runtime;
+pub mod write_class;
 
 pub use caller::Caller;
 pub use context::{SharedToolContext, ToolContext};

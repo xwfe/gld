@@ -442,13 +442,20 @@ impl Workspace {
         Ok(())
     }
 
+    /// 落盘路径上的最后一道：`.git/` 永远不让普通文件工具写。
+    ///
+    /// 只管 `.git/`。`.github/` 归
+    /// [`crate::tools::write_class`]——那里按"改的是 workflow 还是 issue 模板"
+    /// 分开判，需要确认的要确认。这里再拦一遍 `.github` 的话，分类器放行的
+    /// 修改会在快落盘时被一个说不清理由的错误挡掉。
     pub fn reject_protected_write_path(&self, raw_path: &str) -> WorkspaceResult<()> {
         let normalized = raw_path.replace('\\', "/");
+        let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
         let first = normalized.split('/').next().unwrap_or("");
-        if matches!(first, ".git" | ".github") {
+        if first == ".git" {
             return Err(WorkspaceError::Tool {
                 code: "PROTECTED_PATH",
-                message: format!("禁止普通文件操作写入受保护目录: {raw_path}"),
+                message: format!("禁止普通文件操作写入 Git 内部目录: {raw_path}"),
                 category: "security",
                 retryable: false,
             });

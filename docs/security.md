@@ -25,7 +25,7 @@ gld doctor                 # 配置自洽性；认证缺密钥这类会报 ✗
 | --- | --- | --- |
 | 执行命令 | 工作区目录内 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码** |
 | 读文件 | 工作区内 | 0.3.0 起默认收紧，见下 |
-| 写文件 | 工作区内 | 绝对路径和 `..` 都会被拒；`.git` / `.github` 另外受保护 |
+| 写文件 | 工作区内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
 | 读 Git 历史 | 工作区内 | status / diff / log / show / blame |
 
 **聚合入口（hub）的凭据管的是它的全部成员。** 把上表的"工作区"换成"hub 里的每一个
@@ -62,6 +62,35 @@ gld ws set confine-reads=false      # Actions 侧写全 actions.confine-reads
 这两道门都只对文件类工具生效。`exec_command` 里 `cat ~/.config/gld/data/profiles.json`
 照样能读到——它本来就是"以你的身份执行任意代码"，没有再挡一层的意义。
 真要收紧执行能力看下面第 2、3 条。
+
+### 写文件：`.git/` 和 `.github/` 不是一回事
+
+`.git/` 是 Git 自己的对象库和配置，`apply_patch` **永远不写它**，报
+`PROTECTED_REPOSITORY_ASSET`；要动仓库状态请让模型用 `git` 命令。
+
+`.github/` 是仓库源文件，改 workflow 本来就是日常维护的一部分。以前它和
+`.git/` 被同等封锁，结果连"新建一个 `.github/workflows/ci.yml`"都报「禁止
+删除仓库保护资产」，用户只能绕过工具去写文件——那才是真的没人管。现在按
+改的是什么分开：
+
+| 路径 | 改 | 删 |
+| --- | --- | --- |
+| `.git/**` | 拒 | 拒 |
+| `.github/workflows/**`、`.github/actions/**` | 要 `confirm=true` | 要 `confirm=true` |
+| `.github/CODEOWNERS` | 要 `confirm=true` | 要 `confirm=true` |
+| `.github/**` 其他（issue 模板等） | 直接改 | 要 `confirm=true` |
+| `Cargo.toml`、`package.json`、`README*` 等关键文件 | 直接改 | 要 `confirm=true` |
+
+要确认的那几条，拒绝消息里写明**为什么**（"改完之后 GitHub 上跑的就是新内容"），
+落盘之后结果的 `warnings` 里还会再点一次名——`confirm=true` 是一次批准，
+但别让它悄悄过去。
+
+**`confirm=true` 不等于用户点了头**：它只表示这次调用带了确认意图。真正的授权
+来自谁能连上这个服务（token、profile、hub 成员表），模型自己就能填这个字段。
+所以 `.github` 的这道门挡的是"顺手改了没人注意到"，不是"恶意调用方"。
+
+子进程那一层更保守：命令文本里出现删除或递归清空 `.git` / `.github` 一律拒，
+因为从命令文本里分不清"改一行 workflow"和"把 `.github` 删掉"。
 
 ## 提示词注入是真实的
 
