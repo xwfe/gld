@@ -155,10 +155,16 @@ remote_read_notebook   workspace=prod  path=a.ipynb       按 cell 读对面的 
 `remote_stop_command`（停掉后台命令）、`remote_coding_end`（关会话、放写锁）。
 
 **长命令往后台放。**hub 对一次远端调用最多等 60 秒，超了这条连接会被丢掉、coding 会话
-跟着结束（对面还会把这个会话起的命令一起停掉）。所以跑得久的命令给 `remote_exec_command`
-加 `run_in_background: true`，马上拿到 `output_ref`，再用 `remote_read_output` 加
-`wait_ms`（最多 50000）等它，或者 `remote_stop_command` 停掉它。后台命令活不过这个
-coding 会话：`remote_coding_end`、或者两分钟没有调用，它们都会被停掉。
+跟着结束（对面还会把这个会话起的命令一起停掉）。所以前台命令在这边封顶 50 秒：不给
+`timeout_ms` 就替你填上，要更久会被拒——那不是小气，是**替你躲开一次连坐**：一条跑过
+头的前台命令会把同一个会话里所有后台任务一起带走。跑得久的给 `remote_exec_command` 加
+`run_in_background: true`，马上拿到 `output_ref`，再用 `remote_read_output` 加
+`wait_ms`（最多 50000）等它，或者 `remote_stop_command` 停掉它。
+
+后台命令活不过这个 coding 会话：`remote_coding_end` 会停掉它们；没人调用的会话也会被
+收掉，**挂着后台命令时是十分钟，没挂着是两分钟**。十分钟不是"可以一直跑"——会话占着
+那台机器上这个项目的写锁。真要长活的服务（dev server 之类），交给那台机器上的
+systemd / launchd，ccnm 只负责起它。
 
 **对面的 ccnm 太老会明说。**gld 在连上时读一次对面有哪些工具，对面没有的工具、不收的
 参数，在 gld 这边就报 `REMOTE_TOOL_UNSUPPORTED`，不发过去——老版本 ccnm 遇到不认识的
