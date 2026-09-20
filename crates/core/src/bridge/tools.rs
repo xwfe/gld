@@ -276,7 +276,7 @@ pub const CODING_TOOLS: &[RemoteTool] = &[
     RemoteTool {
         name: "remote_exec_command",
         remote_name: "exec_command",
-        description: "Run a command in a remote workspace. Give either `cmd`, a program and its arguments as an array, NOT a shell line: there are no pipes, redirection or globs -- or `shell`, one line that the remote machine runs with bash -c, where pipes and && work. Long output stays on that machine; what comes back is the head and tail plus an output_ref for remote_read_output. Anything that takes more than about a minute belongs in the background: this hub cuts a call off after 60 seconds and that ends the coding session, so set run_in_background, then watch it with remote_read_output wait_ms and end it with remote_stop_command. This runs with the full access of the account the remote runtime uses.",
+        description: "Run a command in a remote workspace. Give either `cmd`, a program and its arguments as an array, NOT a shell line: there are no pipes, redirection or globs -- or `shell`, one line that the remote machine runs with bash -c, where pipes and && work. Long output stays on that machine; what comes back is the head and tail plus an output_ref for remote_read_output. Anything that takes more than about 50 seconds belongs in the background: a foreground command is killed at 50 seconds through this hub, which cuts a remote call off at 60. Set run_in_background, then watch it with remote_read_output wait_ms and end it with remote_stop_command. This runs with the full access of the account the remote runtime uses.",
         arguments: &[
             arg(
                 "cmd",
@@ -285,12 +285,12 @@ pub const CODING_TOOLS: &[RemoteTool] = &[
             ),
             arg("shell", Type::String, "One line run with bash -c on the remote machine, e.g. `cargo test 2>&1 | tail -50`. Give this or `cmd`."),
             arg("cwd", Type::String, "Directory to run in, relative to the workspace root."),
-            arg("timeout_ms", Type::Integer, "Kill the command after this long. Default 120000, max 600000. In the background there is no limit unless you give one."),
+            arg("timeout_ms", Type::Integer, "Kill the command after this long. In the foreground this hub caps it at 50000 and fills that in when you leave it out; asking for more is refused, because the hub cuts a remote call off at 60 seconds. In the background there is no limit unless you give one, up to 600000."),
             arg("preview_bytes", Type::Integer, "Bytes of output to return inline. Default 4096, max 16384."),
             arg(
                 "run_in_background",
                 Type::Boolean,
-                "Return at once with the output_ref and leave the command running. It is stopped when this coding session ends -- remote_coding_end, or two minutes with no call on it.",
+                "Return at once with the output_ref and leave the command running. It is stopped when this coding session ends -- remote_coding_end, or ten minutes with no call on the session while a background command is running (two minutes once none is).",
             ),
         ],
         effect: Effect::Exec,
@@ -337,6 +337,58 @@ pub const CODING_TOOLS: &[RemoteTool] = &[
 /// 的那个命令弄没了。留 10 秒给网络和远端的答复。**超了是拒，不是改小**：
 /// 替调用方把 10 分钟改成 50 秒，它会以为自己等过了。
 pub const MAX_WAIT_MS: u64 = 50_000;
+
+/// 前台 `exec_command` 在这边的期限上限，毫秒。和 [`MAX_WAIT_MS`] 同源同理。
+///
+/// **这一条修的是一个必踩的坑。**ccnm 的 `timeout_ms` 不给就是 120000
+/// （它自己的默认值），而 hub 单次远端调用的预算只有 60 秒——默认值本身就
+/// 比预算长一倍。于是一条在远端正常跑到两分钟的前台命令，会在 hub 这边先
+/// 超时，连接被当成传输层出问题丢掉，coding 会话跟着结束，**远端随即停掉
+/// 这个会话起的所有后台命令**。出事的是前台那条，陪葬的是后台那些，而且
+/// 模型看到的只是一句超时。
+///
+/// 所以前台命令在这边封顶 50 秒：到点是**远端**杀掉它并正常回一个结果
+/// （状态行写 `killed on its timeout`），模型看得见，会话也还在。
+/// 要跑更久就 `run_in_background`，那条调用立刻返回，期限是命令自己的事、
+/// 与 hub 的调用预算无关。
+pub const MAX_FOREGROUND_TIMEOUT_MS: u64 = MAX_WAIT_MS;
+
+/// 这次 `exec_command` 的 `timeout_ms` 该怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForegroundTimeout {
+    /// 不是 `exec_command`，或者是后台调用：期限不归 hub 管。
+    NotMine,
+    /// 前台，而且调用方没给期限——替它填一个 hub 撑得住的。
+    Fill(u64),
+    /// 前台，但要的期限比 hub 的调用预算还长。
+    TooLong { max: u64 },
+}
+
+/// 判断一次调用的 `timeout_ms`，见 [`MAX_FOREGROUND_TIMEOUT_MS`]。
+///
+/// [`Fill`](ForegroundTimeout::Fill) 是 [`RemoteTool::forward_arguments`]
+/// 「只挑不改」的唯一例外：不填的话远端会用它自己的 120000，那个默认值必然
+/// 打爆 hub 的预算。填进去的值也写在工具说明里，调用方不会以为自己拿到了
+/// 两分钟。调用方**自己给**的期限一律不改小——那和 `wait_ms` 一样，改小会
+/// 让它以为自己等过了。
+pub fn foreground_timeout(tool: &RemoteTool, incoming: &Value) -> ForegroundTimeout {
+    if tool.remote_name != "exec_command" {
+        return ForegroundTimeout::NotMine;
+    }
+    if incoming.get("run_in_background") == Some(&Value::Bool(true)) {
+        return ForegroundTimeout::NotMine;
+    }
+    match incoming.get("timeout_ms").and_then(Value::as_u64) {
+        Some(given) if given > MAX_FOREGROUND_TIMEOUT_MS => ForegroundTimeout::TooLong {
+            max: MAX_FOREGROUND_TIMEOUT_MS,
+        },
+        // 给了个撑得住的值，或者给了个 ccnm 会自己拒的东西（负数、字符串、
+        // 0）——后者原样送过去让远端按自己的契约拒，不在这边猜。
+        Some(_) => ForegroundTimeout::NotMine,
+        None if incoming.get("timeout_ms").is_some() => ForegroundTimeout::NotMine,
+        None => ForegroundTimeout::Fill(MAX_FOREGROUND_TIMEOUT_MS),
+    }
+}
 
 /// 按 hub 这边的名字找工具。找不到就是没开放——不去问远端有没有。
 ///
@@ -941,5 +993,52 @@ mod tests {
             );
         }
         assert!(names("remote_list_files").contains(&"include_hidden"));
+    }
+
+    /// `timeout_ms` 分前台后台两套规矩，见 [`MAX_FOREGROUND_TIMEOUT_MS`]。
+    #[test]
+    fn a_foreground_deadline_is_capped_but_a_background_one_is_not() {
+        let exec = find("remote_exec_command").expect("工具在");
+        let read = find("remote_read_file").expect("工具在");
+
+        // 前台没给：替它填一个 hub 撑得住的。远端那个 120 秒的默认值会打爆
+        // 60 秒的调用预算，连带停掉这个会话的所有后台命令。
+        assert_eq!(
+            foreground_timeout(exec, &json!({ "cmd": ["cargo", "test"] })),
+            ForegroundTimeout::Fill(MAX_FOREGROUND_TIMEOUT_MS)
+        );
+        // 前台给了撑得住的：原样送过去。
+        assert_eq!(
+            foreground_timeout(exec, &json!({ "cmd": ["x"], "timeout_ms": 1_000 })),
+            ForegroundTimeout::NotMine
+        );
+        // 前台要得太久：拒，不改小。
+        assert_eq!(
+            foreground_timeout(exec, &json!({ "cmd": ["x"], "timeout_ms": 600_000 })),
+            ForegroundTimeout::TooLong {
+                max: MAX_FOREGROUND_TIMEOUT_MS
+            }
+        );
+        // 后台：期限是命令自己的事，多久都行，也不替它填。
+        for arguments in [
+            json!({ "cmd": ["x"], "run_in_background": true }),
+            json!({ "cmd": ["x"], "run_in_background": true, "timeout_ms": 600_000 }),
+        ] {
+            assert_eq!(
+                foreground_timeout(exec, &arguments),
+                ForegroundTimeout::NotMine,
+                "{arguments}"
+            );
+        }
+        // 不是数字的 timeout_ms 不在这边猜，原样送过去让远端按自己的契约拒。
+        assert_eq!(
+            foreground_timeout(exec, &json!({ "cmd": ["x"], "timeout_ms": "soon" })),
+            ForegroundTimeout::NotMine
+        );
+        // 别的工具没有这条规矩。
+        assert_eq!(
+            foreground_timeout(read, &json!({ "path": "a.txt" })),
+            ForegroundTimeout::NotMine
+        );
     }
 }

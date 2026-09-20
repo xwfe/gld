@@ -23,7 +23,17 @@
 //! | [`CLOSE_GRACE`] | 5 秒 | 等对面自己收尾释放写锁的时间，到点才动手杀 |
 //!
 //! coding 另有一个 [`CODING_IDLE_AFTER`]（2 分钟），比只读的短，因为它占着
-//! 远端工作树的写锁。握手、单次调用和关闭宽限两种模式共用。
+//! 远端工作树的写锁；这条连接上还挂着后台命令时改用
+//! [`CODING_IDLE_WITH_BACKGROUND`]（10 分钟），否则两分钟就把别人正跑着的
+//! 构建收掉了。握手、单次调用和关闭宽限两种模式共用。
+//!
+//! **[`CALL_TIMEOUT`] 是 hub 自己的预算，远端不知道它。**所以两个往远端发的
+//! 时间参数要在这边先压住：`wait_ms` 超了就拒
+//! （[`remote_tools::MAX_WAIT_MS`](super::tools::MAX_WAIT_MS)），前台
+//! `exec_command` 不给期限就替它填一个
+//! （[`MAX_FOREGROUND_TIMEOUT_MS`](super::tools::MAX_FOREGROUND_TIMEOUT_MS)）
+//! ——ccnm 的默认期限是 120 秒，比这里的预算长一倍，撞上去就是连接被丢、
+//! coding 会话结束、远端把这个会话的后台命令全停掉。
 //!
 //! ## coding 会话
 //!
@@ -53,7 +63,18 @@ use super::peer::{ChildTransport, Peer, PeerError, Transport};
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
-pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
+
+/// 关一条连接时，等对面自己收尾多久才动手杀。
+///
+/// **不能比远端收尾要的时间短。**ccnm 读到 EOF 之后要停掉这个会话起的所有
+/// 命令才退出：每条先 TERM、2 秒后 KILL，一个信号都够不着的等 10 秒才放弃
+/// （它的 `jobs::STOP_GIVE_UP`）。原来这里给 5 秒，正常情况够——真实组合测试
+/// （`tests/ccnm_background_lifecycle.rs`）在机器忙的时候跑出了不够的那次：
+/// gld 到点 `SIGKILL` 了 ccnm，而 **ccnm 一旦被强杀，它起的进程组就没人收**，
+/// 那个 `sleep 60` 的 ppid 变成 1，留在远端；远端写锁的 `held` 标记也还在，
+/// 要人工恢复。所以宁可多等：这个等待几乎从不用满（正常几百毫秒），而用满
+/// 之后的代价是远端留孤儿。
+pub const CLOSE_GRACE: Duration = Duration::from_secs(20);
 
 /// coding 会话闲多久就收掉。
 ///
@@ -61,9 +82,24 @@ pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// 机器上所有想写这个项目的人（包括 ccnm 自己的 Managed session）。一轮
 /// patch → test → 看结果 从不会停两分钟；真停了就说明这轮结束了。
 ///
-/// 跑着的 `exec_command` 不受它影响：调用在途时槽位的锁拿不到，
-/// [`Slot::is_idle`] 一律判为"不闲"。
+/// 跑着的**前台** `exec_command` 不受它影响：调用在途时槽位的锁拿不到，
+/// [`Slot::is_idle`] 一律判为"不闲"。后台命令不一样，见
+/// [`CODING_IDLE_WITH_BACKGROUND`]。
 pub const CODING_IDLE_AFTER: Duration = Duration::from_secs(2 * 60);
+
+/// 这条连接上还有后台命令没被停掉时，coding 会话闲多久才收。
+///
+/// **两分钟对后台命令是错的判据。**`run_in_background` 起的命令一返回就不再
+/// 是"在途调用"，[`Slot::is_idle`] 那两道判断都看不见它：槽位没人持有、锁拿
+/// 得到、`last_used` 停在启动那一刻。于是模型起一个构建、转头去想别的事，
+/// 两分钟后下一个请求进来找槽位，就顺手把这条连接收了——远端 ccnm 在连接结束
+/// 时会停掉这个会话起的所有命令，那个构建就这么没了，而且没人说过一句话。
+///
+/// 所以有后台命令挂着的时候换一个长阈值。它**不是**"任务可以永远跑"：写锁还
+/// 占着别人的工作树，十分钟是个有尽头的数，正好也是 ccnm 前台命令的最长期限。
+/// 真要长活的服务，那是 Runtime 上 systemd / launchd 的事，不是一条 MCP 连接
+/// 能担的（ccnm 协议第 6 节：session-bound，没有租约也没有跨连接恢复）。
+pub const CODING_IDLE_WITH_BACKGROUND: Duration = Duration::from_secs(10 * 60);
 
 /// 同一个 coding 会话上已经有调用在跑时，第二个调用等多久才报"忙"。
 ///
@@ -102,6 +138,16 @@ struct Live {
     last_used: Instant,
     /// 对面握手时报的工具表。
     offered: Offered,
+    /// 这条连接上起了多少个后台命令还没被显式停掉。
+    ///
+    /// 只看**请求**：`exec_command` 带 `run_in_background: true` 成功了就 +1，
+    /// `stop_command` 成功了就 -1。不去解析远端结果的文本——那是 ccnm 的契约，
+    /// 措辞一变这边就会跟着错，而这个数只用来挑一个空闲阈值
+    /// （[`CODING_IDLE_WITH_BACKGROUND`]），不精确的代价是连接多活一会儿。
+    ///
+    /// 因此它是个**上界**：命令自己跑完了没人来 `stop_command`，数就一直挂着。
+    /// 长阈值到点照样回收，所以挂着的锁有明确尽头。
+    background: usize,
 }
 
 /// 远端这一版 ccnm 到底有哪些工具、每个收哪些参数。
@@ -206,13 +252,25 @@ impl Slot {
     /// 两道判断都是「有没有别人在用」：
     /// - 除了连接表自己还有人持有这个槽位，说明有请求刚拿走它、马上要用；
     /// - 锁拿不到，说明有调用正在途中。
-    fn is_idle(&self, after: Duration) -> bool {
+    ///
+    /// 第三道是后台命令：它**不在**上面两道里——`run_in_background` 的调用早
+    /// 就返回了，槽位空着、锁拿得到、`last_used` 停在启动那一刻。所以这条连接
+    /// 上还挂着后台命令时换 `with_background` 这个长阈值，见
+    /// [`CODING_IDLE_WITH_BACKGROUND`]。
+    fn is_idle(&self, after: Duration, with_background: Duration) -> bool {
         if Arc::strong_count(&self.connection) > 1 {
             return false;
         }
         match self.connection.try_lock() {
             Ok(guard) => match guard.as_ref() {
-                Some(live) => live.last_used.elapsed() >= after,
+                Some(live) => {
+                    let after = if live.background > 0 {
+                        with_background
+                    } else {
+                        after
+                    };
+                    live.last_used.elapsed() >= after
+                }
                 // 槽位占着但连接没开起来，留着没用。
                 None => true,
             },
@@ -221,11 +279,49 @@ impl Slot {
     }
 }
 
+/// 一次调用对「这条连接上挂着几个后台命令」的影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundChange {
+    None,
+    Started,
+    Stopped,
+}
+
+impl BackgroundChange {
+    fn apply(self, count: usize) -> usize {
+        match self {
+            BackgroundChange::None => count,
+            BackgroundChange::Started => count + 1,
+            // 停一个早就自己结束的命令也走这里。数只是个上界（见
+            // [`Live::background`]），减多了顶多让连接早点被回收，不会让它
+            // 多占着别人的写锁。
+            BackgroundChange::Stopped => count.saturating_sub(1),
+        }
+    }
+}
+
+/// 只看请求，不看结果——理由见 [`Live::background`]。
+fn background_change(tool: &str, arguments: &Value) -> BackgroundChange {
+    match tool {
+        "exec_command" if arguments.get("run_in_background") == Some(&Value::Bool(true)) => {
+            BackgroundChange::Started
+        }
+        "stop_command" => BackgroundChange::Stopped,
+        _ => BackgroundChange::None,
+    }
+}
+
+/// MCP 结果里的 `isError`：这个工具没干成。跟传输层的错是两回事。
+fn is_tool_error(result: &Value) -> bool {
+    result.get("isError") == Some(&Value::Bool(true))
+}
+
 /// hub 手里所有远端连接。
 pub struct Connections {
     opener: Box<dyn Open>,
     idle_after: Duration,
     coding_idle_after: Duration,
+    coding_idle_with_background: Duration,
     coding_busy_grace: Duration,
     handshake_timeout: Duration,
     call_timeout: Duration,
@@ -265,13 +361,22 @@ pub enum CodingError {
 impl std::fmt::Display for CodingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // 空闲回收是**顺手把句柄也忘掉**的（见 `slot` 里的 `reclaimed`），
+            // 所以一个刚被回收的会话在这里报的是 NoSuchSession，不是
+            // SessionEnded。话里必须提一句后台命令，否则模型只知道"这个句柄
+            // 没用"，会以为它起的那个构建还在远端跑着——那正是评审 X04 说的
+            // "不能静默消失"。两种情况都说，不区分谁是谁：区分等于帮人枚举
+            // 别人的会话。
             CodingError::NoSuchSession => write!(
                 f,
-                "that coding handle is not open on this workspace; call remote_coding_begin first"
+                "that coding handle is not open on this workspace -- either it was never opened \
+                 here, or the session has ended and anything it had running in the background on \
+                 that machine was stopped with it; call remote_coding_begin for a new one"
             ),
             CodingError::SessionEnded => write!(
                 f,
-                "that coding session has ended, so its output_ref values are gone too; \
+                "that coding session has ended, so anything it had running in the background on \
+                 that machine was stopped with it and its output_ref values are gone; \
                  call remote_coding_begin for a new one"
             ),
             CodingError::Busy => write!(
@@ -296,6 +401,7 @@ impl Connections {
             opener,
             idle_after: IDLE_AFTER,
             coding_idle_after: CODING_IDLE_AFTER,
+            coding_idle_with_background: CODING_IDLE_WITH_BACKGROUND,
             coding_busy_grace: CODING_BUSY_GRACE,
             handshake_timeout: HANDSHAKE_TIMEOUT,
             call_timeout: CALL_TIMEOUT,
@@ -310,6 +416,16 @@ impl Connections {
         self.coding_idle_after = idle_after;
         self.handshake_timeout = call_timeout;
         self.call_timeout = call_timeout;
+        self
+    }
+
+    /// 挂着后台命令时的空闲阈值。默认 [`CODING_IDLE_WITH_BACKGROUND`]；
+    /// 测试把它调到几十毫秒，免得为了验这条真的等十分钟。
+    ///
+    /// **[`with_budgets`](Self::with_budgets) 不动它**：那条改的是普通空闲
+    /// 阈值，而这两个数要能分开设，否则测不出"有后台命令时用的是另一个"。
+    pub fn with_background_idle(mut self, after: Duration) -> Self {
+        self.coding_idle_with_background = after;
         self
     }
 
@@ -378,11 +494,17 @@ impl Connections {
         // 远端这一版有没有这个工具、收不收这些参数。**不发出去**，所以
         // 连接还是好的，句柄也还有效。
         live.offered.check(tool, &arguments)?;
+        // 这次调用起不起后台命令、停不停一个，要在 arguments 交出去之前看。
+        let change = background_change(tool, &arguments);
         let result = live.peer.call_tool(tool, arguments, self.call_timeout);
         match result {
             // 远端明确回了 JSON-RPC error 也算这条连接好着，下次还能用。
             Ok(value) => {
                 live.last_used = Instant::now();
+                // 工具自己失败了（`isError`）不算数：命令根本没起来。
+                if !is_tool_error(&value) {
+                    live.background = change.apply(live.background);
+                }
                 Ok((value, true))
             }
             Err(PeerError::Remote {
@@ -400,7 +522,12 @@ impl Connections {
             // 超时、写不进去、对面关了、回了看不懂的东西——传输层已经不可信，
             // 留着它下一次调用会读到上一次的残留回复。丢掉，下次重连。
             Err(other) => {
-                guard.take();
+                // 关连接要等对面停掉它起的命令（最长 [`CLOSE_GRACE`]），这件事
+                // **不能占着槽位的锁做**：那会让这个成员的下一个请求跟着堵住，
+                // 而它本来只需要重连。`retain` 和 `end_coding` 早就是这么写的。
+                let dead = guard.take();
+                drop(guard);
+                drop(dead);
                 Err(other)
             }
         }
@@ -594,7 +721,9 @@ impl Connections {
             let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
             let idle: Vec<Key> = live
                 .iter()
-                .filter(|(key, slot)| *key != want && slot.is_idle(self.idle_for(key.1)))
+                .filter(|(key, slot)| {
+                    *key != want && slot.is_idle(self.idle_for(key.1), self.idle_with_background())
+                })
                 .map(|(key, _)| key.clone())
                 .collect();
             for key in idle {
@@ -640,6 +769,12 @@ impl Connections {
         }
     }
 
+    /// 挂着后台命令时改用的那个。只有 coding 连接会有后台命令（read 模式没有
+    /// `exec_command`），所以这里不分模式。
+    fn idle_with_background(&self) -> Duration {
+        self.coding_idle_with_background
+    }
+
     /// 开一条连接：握手，再读一次对面的工具表。任何一步不成都把刚起的进程
     /// 收掉，不留孤儿。
     ///
@@ -656,6 +791,7 @@ impl Connections {
                 peer,
                 last_used: Instant::now(),
                 offered: Offered::from_tools(&tools),
+                background: 0,
             }),
             Err(error) => {
                 peer.shutdown(CLOSE_GRACE);
@@ -1192,6 +1328,90 @@ mod tests {
         );
         assert_eq!(pool.coding_count(), 0, "句柄不能留着");
         assert!(recorder.closes() >= 1, "连接该关掉，写锁该还回去");
+    }
+
+    /// 挂着后台命令的时候，两分钟那个阈值不算数。
+    ///
+    /// `run_in_background` 的调用一返回就不再是"在途调用"：槽位没人持有、锁
+    /// 拿得到、`last_used` 停在启动那一刻。原来这三样加起来就等于"闲着"，于是
+    /// 模型起一个构建、转头去想别的事，两分钟后别人的请求一进来就把这条连接
+    /// 收了，远端随即停掉那个构建——而且没人说过一句话。
+    #[test]
+    fn a_background_command_holds_the_session_past_the_plain_idle_limit() {
+        let recorder = Recording::new();
+        let pool = Connections::with_opener(Box::new(recorder.clone()))
+            .with_budgets(Duration::from_millis(30), Duration::from_millis(200))
+            .with_background_idle(Duration::from_secs(60));
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+        pool.call_coding(
+            ANYONE,
+            &m,
+            &handle,
+            "exec_command",
+            json!({ "cmd": ["npm", "run", "dev"], "run_in_background": true }),
+        )
+        .expect("起后台命令");
+
+        std::thread::sleep(Duration::from_millis(60));
+        pool.call(ANYONE, &member("someone-else"), "read_file", json!({}))
+            .expect("别人的调用触发回收扫描");
+
+        // 普通阈值（30 毫秒）早过了，长阈值（60 秒）还早：会话该留着。
+        pool.call_coding(
+            ANYONE,
+            &m,
+            &handle,
+            "read_output",
+            json!({ "output_ref": "r-1" }),
+        )
+        .expect("挂着后台命令的会话不该被收掉");
+    }
+
+    /// 停掉它之后，会话回到原来那个短阈值——长阈值不是"从此不收"。
+    ///
+    /// 顺带验一句话：会话被收之后的报错要说清楚后台命令也跟着没了，不然模型
+    /// 只知道"会话结束了"，会以为那个构建还在远端跑。
+    #[test]
+    fn stopping_the_background_command_puts_the_short_idle_limit_back() {
+        let recorder = Recording::new();
+        let pool = Connections::with_opener(Box::new(recorder.clone()))
+            .with_budgets(Duration::from_millis(30), Duration::from_millis(200))
+            .with_background_idle(Duration::from_secs(60));
+        let m = coding_member("m1");
+        let handle = pool.begin_coding(ANYONE, &m).expect("开会话");
+        pool.call_coding(
+            ANYONE,
+            &m,
+            &handle,
+            "exec_command",
+            json!({ "cmd": ["npm", "run", "dev"], "run_in_background": true }),
+        )
+        .expect("起后台命令");
+        pool.call_coding(
+            ANYONE,
+            &m,
+            &handle,
+            "stop_command",
+            json!({ "output_ref": "r-1" }),
+        )
+        .expect("停掉它");
+
+        std::thread::sleep(Duration::from_millis(60));
+        pool.call(ANYONE, &member("someone-else"), "read_file", json!({}))
+            .expect("别人的调用触发回收扫描");
+
+        let err = pool
+            .call_coding(ANYONE, &m, &handle, "apply_patch", json!({}))
+            .expect_err("没有后台命令挂着了，该按短阈值收掉");
+        assert!(
+            matches!(err, CodingError::NoSuchSession | CodingError::SessionEnded),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("background"),
+            "话里要说清后台命令也没了：{err}"
+        );
     }
 
     /// 成员被移出 hub：连接和句柄一起作废。

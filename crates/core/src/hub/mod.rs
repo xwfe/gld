@@ -570,7 +570,27 @@ impl Hub {
                 details: json!({ "argument": argument, "max": max }),
             }));
         }
-        let forwarded = tool.forward_arguments(args);
+        // exec_command 的期限要分前台后台看：后台的期限是命令自己的事（调用
+        // 立刻返回），前台的却要跟 hub 的调用预算比——远端那个 120000 的默认
+        // 值本身就打得爆它，见 remote_tools::MAX_FOREGROUND_TIMEOUT_MS。
+        let foreground = remote_tools::foreground_timeout(tool, args);
+        if let remote_tools::ForegroundTimeout::TooLong { max } = foreground {
+            return plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "ARGUMENT_OUT_OF_RANGE",
+                message: format!(
+                    "{} takes timeout_ms up to {max} in the foreground through this hub, which cuts a remote call off at {} seconds; a longer call would end the coding session and stop every background command in it. Set run_in_background instead, then watch it with remote_read_output.",
+                    tool.name,
+                    crate::bridge::session::CALL_TIMEOUT.as_secs()
+                ),
+                category: "validation",
+                retryable: false,
+                details: json!({ "argument": "timeout_ms", "max": max }),
+            }));
+        }
+        let mut forwarded = tool.forward_arguments(args);
+        if let remote_tools::ForegroundTimeout::Fill(ms) = foreground {
+            forwarded["timeout_ms"] = json!(ms);
+        }
         if remote_tools::needs_coding(tool) {
             return self.call_coding(auth, tool, member, args, forwarded);
         }
@@ -1099,7 +1119,7 @@ fn coding_failure(tool_name: &str, member: &CcnmMember, error: CodingError) -> V
                 tool_err(WorkspaceError::ToolDetails {
                     code: "REMOTE_OUTCOME_UNKNOWN",
                     message: format!(
-                        "{tool} on {} lost the connection mid-call, so whether the remote machine did it is unknown: {peer}. Check the remote workspace before trying again; do not just resend.",
+                        "{tool} on {} lost the connection mid-call, so whether the remote machine did it is unknown: {peer}. The coding session went with the connection, and so did anything it had running in the background there. Check the remote workspace before trying again; do not just resend.",
                         member.name
                     ),
                     category: "runtime",
@@ -2453,6 +2473,99 @@ mod tests {
         assert_eq!(calls[0]["arguments"]["wait_ms"], json!(5_000), "{calls:?}");
     }
 
+    /// 前台 `exec_command` 不给期限时，hub 替它填一个自己撑得住的。
+    ///
+    /// **这是唯一一处替调用方改参数**，因为不改必踩：ccnm 那边不给 `timeout_ms`
+    /// 就是 120 秒，比 hub 的 60 秒调用预算长一倍。真让它跑满，这次调用会在
+    /// 60 秒被当成传输层出问题，连接一丢，远端把这个会话起的**所有后台命令**
+    /// 一起停掉——出事的是前台这条，陪葬的是后台那些，而模型只看到一句超时。
+    #[test]
+    fn a_foreground_command_gets_a_deadline_the_hub_can_wait_out() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let handle = begin(&fixture);
+
+        let ok = raw_call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle, "cmd": ["cargo", "test"] }),
+        );
+        assert_eq!(ok["isError"], json!(false), "{ok}");
+        assert_eq!(
+            fixture.spy.calls()[0]["arguments"]["timeout_ms"],
+            json!(crate::bridge::tools::MAX_FOREGROUND_TIMEOUT_MS),
+            "前台没给期限就该填上 hub 撑得住的那个"
+        );
+
+        // 自己给的、撑得住的期限原样带过去，一个字不改。
+        let ok = raw_call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle,
+                    "cmd": ["cargo", "test"], "timeout_ms": 3_000 }),
+        );
+        assert_eq!(ok["isError"], json!(false), "{ok}");
+        assert_eq!(
+            fixture.spy.calls()[1]["arguments"]["timeout_ms"],
+            json!(3_000)
+        );
+
+        // 后台命令不管：调用立刻返回，期限是那条命令自己的事。
+        let ok = raw_call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle,
+                    "cmd": ["npm", "run", "dev"], "run_in_background": true }),
+        );
+        assert_eq!(ok["isError"], json!(false), "{ok}");
+        assert_eq!(
+            fixture.spy.calls()[2]["arguments"].get("timeout_ms"),
+            None,
+            "后台调用不该被塞一个期限进去"
+        );
+    }
+
+    /// 前台要一个比 hub 调用预算还长的期限：在这边拒，并指路 `run_in_background`。
+    ///
+    /// 不替它改小——那和 `wait_ms` 一样，改小它会以为自己拿到了那么久。
+    #[test]
+    fn a_foreground_deadline_past_the_call_budget_is_refused_and_says_what_to_do() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let handle = begin(&fixture);
+        let refused = raw_call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle,
+                    "cmd": ["cargo", "build", "--release"], "timeout_ms": 600_000 }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "ARGUMENT_OUT_OF_RANGE",
+            "{refused}"
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["details"]["max"],
+            json!(crate::bridge::tools::MAX_FOREGROUND_TIMEOUT_MS)
+        );
+        let text = refused["structuredContent"]["error"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("run_in_background"), "{text}");
+        assert!(fixture.spy.calls().is_empty(), "不该发出去");
+
+        // 同样长的期限，后台要就给：那条调用立刻返回，撞不上 hub 的预算。
+        let ok = raw_call(
+            &fixture.hub,
+            "remote_exec_command",
+            json!({ "workspace": "prod", "coding_handle": handle,
+                    "cmd": ["cargo", "build", "--release"],
+                    "timeout_ms": 600_000, "run_in_background": true }),
+        );
+        assert_eq!(ok["isError"], json!(false), "{ok}");
+        assert_eq!(
+            fixture.spy.calls()[0]["arguments"]["timeout_ms"],
+            json!(600_000)
+        );
+    }
+
     /// 远端返回的图片块原样回来：`remote_view_image` 和 `remote_read_notebook`
     /// 靠它，而 H04 要的就是 content 一个字不改。
     #[test]
@@ -2876,6 +2989,16 @@ mod tests {
         );
         assert_eq!(unknown["error"]["code"], "REMOTE_OUTCOME_UNKNOWN");
         assert_eq!(unknown["error"]["retryable"], json!(false), "{unknown}");
+        // 连接一丢，远端就把这个会话起的后台命令全停了（ccnm 协议第 6 节）。
+        // 这件事是确定的，得说出来——不然模型只知道"这次调用结果未知"，会
+        // 以为它起的那个构建还在跑。
+        assert!(
+            unknown["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("running in the background"),
+            "{unknown}"
+        );
     }
 
     /// 前一个跑完之后，同一个句柄接着能用——"忙"是暂时的，不是会话作废了。
