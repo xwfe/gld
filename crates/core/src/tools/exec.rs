@@ -10,19 +10,29 @@ use tokio::process::Command;
 
 use std::sync::Arc;
 
+use crate::tools::command_spec::CommandSpec;
 use crate::tools::context::ToolContext;
 use crate::tools::session::{ExecSession, SessionStore};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
+
+/// 取命令本身失败了（`cmd` 与 `argv` 都给、argv 里混了数字、引号没配对……）。
+///
+/// 这些在策略那一层就会先被拦下并带着 `PolicyReason` 报出去，所以走到执行
+/// 路径上的只剩防御性的一份；映射成参数错误即可，不为它再造一个错误码。
+fn spec_error(error: crate::tools::policy::PolicyError) -> WorkspaceError {
+    WorkspaceError::invalid_argument(error.message)
+}
 
 pub fn exec_command(
     ctx: &ToolContext,
     sessions: &Arc<SessionStore>,
     args: &Value,
 ) -> Result<Value, WorkspaceError> {
-    let cmd = args
-        .get("cmd")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkspaceError::invalid_argument("cmd is required"))?;
+    // `cmd`（一行）和 `argv`（逐格）在这里合成同一个东西，后面的解析、执行、
+    // 记账都只认它。策略那一层刚刚用同一个 `CommandSpec::from_args` 判过一遍，
+    // 所以这里再构造一次不会得出不同的结论——真出错也是它先报。
+    let spec = CommandSpec::from_args(args).map_err(spec_error)?;
+    let cmd = spec.display.as_str();
     let workdir_raw = args
         .get("workdir")
         .or_else(|| args.get("cwd"))
@@ -40,7 +50,7 @@ pub fn exec_command(
         .unwrap_or("workspace")
         .to_string();
     validate_child_process_scope(ctx, args)?;
-    if let Some(result) = run_native_diagnostic(ctx, cmd, &workdir.path)? {
+    if let Some(result) = run_native_diagnostic(ctx, &spec, &workdir.path)? {
         let mut result = result;
         if let Some(object) = result.as_object_mut() {
             object.insert(
@@ -92,7 +102,7 @@ pub fn exec_command(
         run_command(
             ctx,
             sessions,
-            cmd,
+            &spec,
             &workdir.path,
             Duration::from_millis(timeout_ms),
             Duration::from_millis(yield_ms),
@@ -141,10 +151,15 @@ pub fn exec_command(
 /// 预检**不产生任何副作用**：不起进程、不跑 `--help`、不登录、不联网、不碰
 /// GitHub 和 SSH。只查白名单和文件系统。
 pub fn check_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
-    let cmd = args
-        .get("cmd")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkspaceError::invalid_argument("cmd is required"))?;
+    // 两种形式都收，和 exec_command 同一个构造函数。取不出命令来（两个都给、
+    // argv 里混了非字符串）本身就是一种判定结果，不能让预检自己先报错退出——
+    // 那样模型得到的是"预检坏了"，而不是"你这样传不行"。
+    let spec = CommandSpec::from_args(args);
+    let cmd = spec
+        .as_ref()
+        .map(|spec| spec.display.clone())
+        .unwrap_or_else(|_| command_echo(args));
+    let cmd = cmd.as_str();
     let workdir_raw = args
         .get("workdir")
         .or_else(|| args.get("cwd"))
@@ -173,7 +188,11 @@ pub fn check_command(ctx: &ToolContext, args: &Value) -> Result<Value, Workspace
 
     // 3. 程序在哪儿。**策略拒了也要查**：拒绝和没装是两回事，把 policy denied
     // 说成"程序不存在"会让模型跑去装一个本来就装着的东西（审查 C02）。
-    let parts = shell_words::split(cmd).unwrap_or_default();
+    let parts = spec
+        .as_ref()
+        .ok()
+        .and_then(|spec| spec.resolved_parts().ok())
+        .unwrap_or_default();
     let builtin = native_builtin(&parts);
     let program = probe_program(ctx, &parts, &probe_cwd, builtin);
 
@@ -267,6 +286,20 @@ pub fn check_command(ctx: &ToolContext, args: &Value) -> Result<Value, Workspace
         }
     }
     Ok(tool_ok(result))
+}
+
+/// 连命令都取不出来时，结果里的 `command` 显示什么。
+///
+/// 照着调用方给的原样回显一点，好让人认出自己发的是哪一次；两种形式都没给
+/// 就是空串。
+fn command_echo(args: &Value) -> String {
+    if let Some(cmd) = args.get("cmd").and_then(Value::as_str) {
+        return cmd.to_string();
+    }
+    match args.get("argv") {
+        Some(argv) => argv.to_string(),
+        None => String::new(),
+    }
 }
 
 /// 程序在不在、在哪儿。走的是真实执行那条 `resolve_program`。
@@ -451,11 +484,11 @@ fn native_builtin(parts: &[String]) -> Option<&'static str> {
 
 fn run_native_diagnostic(
     ctx: &ToolContext,
-    cmd: &str,
+    spec: &CommandSpec,
     cwd: &Path,
 ) -> Result<Option<Value>, WorkspaceError> {
-    let parts = shell_words::split(cmd)
-        .map_err(|_| WorkspaceError::invalid_argument("Invalid command syntax"))?;
+    let cmd = spec.display.as_str();
+    let parts = spec.resolved_parts().map_err(spec_error)?;
     if parts.is_empty() {
         return Ok(None);
     }
@@ -496,7 +529,9 @@ fn run_native_diagnostic(
             "elapsed_ms": 0,
             "execution_mode": "native_builtin",
             "command_runner": "native_builtin",
-            "warnings": ["native diagnostic without child process"]
+            // 说清它是什么：服务端自己答的，不是系统上那个同名命令。只说
+            // "没起子进程"的话，`ls` 少了 `-la` 的信息会被当成机器出了问题。
+            "warnings": ["answered by the server itself, no child process: this is a minimal built-in (pwd / ls / dir / which / echo), not the system command. Options are not accepted — use list_dir, list_files or read_file for anything more."]
         })
     }))
 }
@@ -506,9 +541,19 @@ fn list_directory(
     cwd: &Path,
     args: &[String],
 ) -> Result<String, WorkspaceError> {
+    // 服务端内建的 `ls` 是个极简实现，不是系统 ls。带 flag 来的多半以为它是，
+    // 而 `-la` 会被当成目录名，报出来的是"路径不存在"——看着像目录没了
+    // （方案 B 的原生 ls 一条）。直接说清楚它是什么、该用哪个工具。
+    if let Some(flag) = args.iter().find(|arg| arg.starts_with('-')) {
+        return Err(WorkspaceError::invalid_argument(format!(
+            "原生 ls/dir 不接受选项（{flag}）：它是服务端内建的目录列表，只支持 `ls [目录]`。要大小、时间、类型用 list_dir，要按 glob 找文件用 list_files"
+        )));
+    }
     let target = match args {
         [] => cwd.to_path_buf(),
-        [path] => ctx.workspace.resolve_existing(path)?.path,
+        // 相对路径按 **workdir** 解析，不是工作区根：`workdir=crates` 时
+        // `ls src` 指的是 `crates/src`，跟在真实 shell 里输入它的结果一致。
+        [path] => ctx.workspace.resolve_existing_at(cwd, path)?.path,
         _ => {
             return Err(WorkspaceError::invalid_argument(
                 "ls/dir accepts at most one directory path",
@@ -548,7 +593,7 @@ fn list_directory(
 async fn run_command(
     ctx: &ToolContext,
     sessions: &Arc<SessionStore>,
-    cmd: &str,
+    spec: &CommandSpec,
     cwd: &Path,
     limit: Duration,
     yield_time: Duration,
@@ -556,9 +601,10 @@ async fn run_command(
     tty: bool,
     stdin_text: &str,
 ) -> Result<Value, WorkspaceError> {
+    let cmd = spec.display.as_str();
     let search_path = ctx.executable_path_env();
     let (program, args) = parse_and_resolve(
-        cmd,
+        spec,
         cwd,
         ctx.workspace.root(),
         &ctx.policy,
@@ -716,14 +762,23 @@ pub fn exec_health_check(
     let start = Instant::now();
     let cwd = ctx.workspace.root().to_path_buf();
     #[cfg(windows)]
-    let probe = r#"cmd.exe /d /c "echo exec-health && echo exec-health-stderr 1>&2""#;
+    let probe = CommandSpec::internal(vec![
+        "cmd.exe",
+        "/d",
+        "/c",
+        "echo exec-health && echo exec-health-stderr 1>&2",
+    ]);
     #[cfg(not(windows))]
-    let probe = r#"sh -c "printf exec-health; printf exec-health-stderr >&2""#;
+    let probe = CommandSpec::internal(vec![
+        "sh",
+        "-c",
+        "printf exec-health; printf exec-health-stderr >&2",
+    ]);
 
     let result = crate::async_rt::block_on(run_command(
         ctx,
         sessions,
-        probe,
+        &probe,
         &cwd,
         Duration::from_secs(5),
         Duration::from_secs(5),
@@ -875,17 +930,13 @@ fn merge_exec_result(
 }
 
 fn parse_and_resolve(
-    cmd: &str,
+    spec: &CommandSpec,
     cwd: &Path,
     workspace_root: &Path,
     policy: &crate::tools::policy::PolicySettings,
     search_path: Option<&OsStr>,
 ) -> Result<(String, Vec<String>), WorkspaceError> {
-    let parts = shell_words::split(cmd)
-        .map_err(|_| WorkspaceError::invalid_argument("Invalid command syntax"))?;
-    if parts.is_empty() {
-        return Err(WorkspaceError::invalid_argument("Empty command"));
-    }
+    let parts = spec.resolved_parts().map_err(spec_error)?;
 
     let program = resolve_program(&parts[0], cwd, workspace_root, policy, search_path)?;
     Ok((program, parts[1..].to_vec()))
@@ -904,6 +955,18 @@ fn resolve_program(
     }
 
     let explicit_path = trimmed.contains(['/', '\\']);
+    // **裸名先查 PATH。**以前是反过来的：工作区里放一个叫 `python` 的文件，
+    // `python --version` 跑的就是它——而白名单批准的是"python 这个系统命令"。
+    // 批的和跑的不是同一个东西，正是方案 B 要消除的那种错位。shell 也不把
+    // `.` 放进 PATH，同一个道理。
+    //
+    // 工作区里的脚本没有因此失去入口：PATH 上查不到的名字仍然回落到工作区
+    // （下面那段），写 `./build` 或 `scripts/build.sh` 则一直是明确指路。
+    if !explicit_path && !Path::new(trimmed).is_absolute() {
+        if let Some(found) = which_on_path(trimmed, cwd, search_path) {
+            return Ok(found.to_string_lossy().into_owned());
+        }
+    }
     let candidate = if Path::new(trimmed).is_absolute() {
         Path::new(trimmed).to_path_buf()
     } else {

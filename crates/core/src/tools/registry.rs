@@ -878,6 +878,22 @@ static EXPECTED_VERSIONS_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLoc
     })
 });
 
+/// `exec_command` / `check_command` 的结构化命令入口。
+///
+/// 和 `cmd` 二选一。给 `argv` 的时候参数原样送进内核，不经过任何 shell，所以
+/// 引号、换行、`|` 都是数据；`cmd` 那一行仍然按 shell 词法拆、仍然禁止未加引号
+/// 的操作符（审查 C04）。
+static ARGV_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1,
+        "description": "Program plus arguments, one per element: [\"rg\", \"foo|bar\", \"src\"]. Arguments go to the process as-is — no shell, so quotes, newlines and | are data, not operators. Use this instead of cmd whenever an argument contains shell characters. Give cmd or argv, never both."
+    })
+});
+
+const COMMAND_CMD_DESCRIPTION: &str = "One command line, split with shell word rules but NOT run through a shell: unquoted ;, &&, |, > and $() are rejected. Use argv when an argument itself contains those characters.";
+
 pub fn input_schema(name: &str) -> Value {
     match name {
         "history_manage" => history_manage_schema(),
@@ -1270,20 +1286,21 @@ pub fn input_schema(name: &str) -> Value {
         "check_command" => json!({
             "type": "object",
             "properties": {
-                "cmd": { "type": "string", "minLength": 1 },
+                "cmd": { "type": "string", "minLength": 1, "description": COMMAND_CMD_DESCRIPTION },
+                "argv": ARGV_SCHEMA.clone(),
                 "workdir": { "type": "string", "default": "." },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
                 "confirm": { "type": "boolean", "default": false },
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" }
             },
-            "description": "ok=true 只表示预检做完了；能不能跑看 decision（allow / deny / needs_approval）。不会启动进程、不联网。",
-            "required": ["cmd"],
+            "description": "ok=true 只表示预检做完了；能不能跑看 decision（allow / deny / needs_approval）。不会启动进程、不联网。给 cmd 或 argv，二选一。",
             "additionalProperties": false
         }),
         "exec_command" => json!({
             "type": "object",
             "properties": {
-                "cmd": { "type": "string", "minLength": 1 },
+                "cmd": { "type": "string", "minLength": 1, "description": COMMAND_CMD_DESCRIPTION },
+                "argv": ARGV_SCHEMA.clone(),
                 "workdir": { "type": "string", "default": "." },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 32768 },
@@ -1294,7 +1311,10 @@ pub fn input_schema(name: &str) -> Value {
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" },
                 "reason": { "type": "string", "default": "" }
             },
-            "required": ["cmd"],
+            // 不用 `oneOf` / `required` 表达"cmd 和 argv 二选一"：工具 schema
+            // 一直是平的（`core_catalog_...` 那条测试钉着），Actions 那条出口
+            // 也吃不下组合关键字。二选一由服务端判，两个都不给报
+            // missing_command，两个都给报 conflicting_command_forms。
             "additionalProperties": false
         }),
         "write_stdin" => json!({

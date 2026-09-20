@@ -2445,7 +2445,7 @@ tool-profile              compact | core | advanced | read-only | compat-readonl
 permission-mode           trusted | dangerous                                          工具权限模式；两者的写入边界完全一样（都只能写工作区内），见 docs/concepts.md
 history-recording         true | false                                                 是否允许把会话检查点写入 docs/history-session
 history-context           逗号分隔的编号，或空                                         新会话注入哪些历史档案（有界快照）
-allowed-commands          逗号分隔                                                     在默认白名单之外追加的命令；写成 only:cargo,git 则表示只允许这些
+allowed-commands          逗号分隔                                                     在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md
 confine-reads             true | false                                                 读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
 executable-paths          路径列表（换行或分号分隔）                                   额外的可执行文件搜索路径
 ai-instructions           文本                                                         注入 Agent 的工作区级说明

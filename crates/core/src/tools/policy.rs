@@ -3,6 +3,7 @@ use std::path::{Component, Path};
 
 use serde_json::Value;
 
+use crate::tools::command_spec::CommandSpec;
 use crate::tools::workspace::Workspace;
 use crate::workspace::ActionsConfig;
 
@@ -145,6 +146,8 @@ impl PolicySettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyReason {
     MissingCommand,
+    /// `cmd` 和 `argv` 同时给了。不猜哪个算数。
+    ConflictingCommandForms,
     CommandTooLong,
     ExternalExecution,
     WorkdirOutsideWorkspace,
@@ -155,6 +158,10 @@ pub enum PolicyReason {
     NetworkBlocked,
     InvalidSyntax,
     CommandNotAllowlisted,
+    /// `ssh` / `scp` 这类直连远端的命令。
+    RemoteShellNotAllowed,
+    /// `gh` 的这个子命令不在只读诊断名单里。
+    GithubCommandNotReadOnly,
     EnvironmentNotAllowed,
     TimeoutTooLong,
     PatchMissing,
@@ -178,6 +185,7 @@ impl PolicyReason {
     pub fn slug(self) -> &'static str {
         match self {
             Self::MissingCommand => "missing_command",
+            Self::ConflictingCommandForms => "conflicting_command_forms",
             Self::CommandTooLong => "command_too_long",
             Self::ExternalExecution => "external_execution",
             Self::WorkdirOutsideWorkspace => "workdir_outside_workspace",
@@ -188,6 +196,8 @@ impl PolicyReason {
             Self::NetworkBlocked => "network_blocked",
             Self::InvalidSyntax => "invalid_command_syntax",
             Self::CommandNotAllowlisted => "command_not_allowlisted",
+            Self::RemoteShellNotAllowed => "remote_shell_not_allowed",
+            Self::GithubCommandNotReadOnly => "github_command_not_read_only",
             Self::EnvironmentNotAllowed => "environment_not_allowed",
             Self::TimeoutTooLong => "timeout_too_long",
             Self::PatchMissing => "patch_missing",
@@ -199,7 +209,10 @@ impl PolicyReason {
     /// 下一步该做什么。不建议"换个解释器再试"这种绕过办法。
     pub fn suggestion(self) -> &'static str {
         match self {
-            Self::MissingCommand => "cmd 必须是非空字符串",
+            Self::MissingCommand => "给 cmd（一行命令）或 argv（程序 + 参数逐格给），二选一",
+            Self::ConflictingCommandForms => {
+                "cmd 和 argv 只给一个：一行命令用 cmd，参数里带引号、换行或 | 的用 argv"
+            }
             Self::CommandTooLong => "命令太长，拆成几条或写成工作区里的脚本",
             Self::ExternalExecution => "把 filesystem_scope 设为 workspace，在当前 Workspace 内执行",
             Self::WorkdirOutsideWorkspace => "workdir 只能是 Workspace 内的相对路径",
@@ -213,6 +226,12 @@ impl PolicyReason {
             Self::InvalidSyntax => "命令的引号没有配对，按 shell 词法修好再发",
             Self::CommandNotAllowlisted => {
                 "改用已获准的命令或对应的只读工具；确需放开时，请用户把它加进工作区命令白名单"
+            }
+            Self::RemoteShellNotAllowed => {
+                "远端机器上的事走已登记的 hub / ccnm 远端成员；确实要从这台机器直连，得由用户把它加进白名单，那等于放开任意远端 shell，gld 不限制目标"
+            }
+            Self::GithubCommandNotReadOnly => {
+                "gh 只放行只读诊断（run list/view、workflow view、pr view/diff/checks、issue view、release view、repo view、auth status）。rerun、合并、release、secret、gh api 这类会改 GitHub 的操作请用户自己在终端做"
             }
             Self::EnvironmentNotAllowed => "环境变量只能由服务端配置，不能随调用传入",
             Self::TimeoutTooLong => "timeout_ms 不能超过 10 分钟；长任务请后台跑再轮询",
@@ -373,27 +392,12 @@ pub fn validate_command_for_workspace(
     policy: &PolicySettings,
     workspace: Option<&Workspace>,
 ) -> Result<(), PolicyError> {
-    let command = arguments
-        .get("cmd")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            PolicyError::new(
-                PolicyReason::MissingCommand,
-                "exec_command requires a non-empty cmd",
-            )
-        })?;
-    if command.trim().is_empty() {
-        return Err(PolicyError::new(
-            PolicyReason::MissingCommand,
-            "exec_command requires a non-empty cmd",
-        ));
-    }
-    if command.len() > 4_000 {
-        return Err(PolicyError::new(
-            PolicyReason::CommandTooLong,
-            "Command is too long",
-        ));
-    }
+    let spec = CommandSpec::from_args(arguments)?;
+    // 下面这些检查都看这一行文本。`argv` 形式的它是 `shell_words::join` 合成
+    // 的——**只用来匹配，不拿回去执行**：join 会把带特殊字符的参数引起来，所以
+    // `argv: ["rg", "a|b"]` 在这里长得像 `rg 'a|b'`，管道符落在引号里，而
+    // `python -c "shutil.rmtree('.git')"` 该被拦的照样被拦。
+    let command = spec.display.as_str();
     let filesystem_scope = arguments
         .get("filesystem_scope")
         .and_then(Value::as_str)
@@ -415,7 +419,10 @@ pub fn validate_command_for_workspace(
             }
         }
     }
-    if has_forbidden_shell_syntax(command) {
+    // `argv` 形式不做这项检查：它的参数一格一格地交给内核，`|` 和换行不会被
+    // 任何人解释成操作符。`cmd` 形式仍然拒——那个形式长得像 shell，而它不是，
+    // 放行等于让调用方以为 `a | b` 真的接上了管道（审查 C04、方案 B）。
+    if spec.needs_shell_syntax_check() && has_forbidden_shell_syntax(command) {
         return Err(PolicyError::new(
             PolicyReason::ShellSyntaxRejected,
             "Shell chaining, redirection and expansion are not allowed",
@@ -457,14 +464,7 @@ pub fn validate_command_for_workspace(
         ));
     }
 
-    let parts = shell_words::split(command)
-        .map_err(|_| PolicyError::new(PolicyReason::InvalidSyntax, "Invalid command syntax"))?;
-    if parts.is_empty() {
-        return Err(PolicyError::new(
-            PolicyReason::MissingCommand,
-            "Empty command",
-        ));
-    }
+    let parts = spec.resolved_parts()?;
 
     let executable = parts[0].trim_start_matches("./");
     let base_name = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
@@ -483,10 +483,27 @@ pub fn validate_command_for_workspace(
     if !(policy.allowed_commands.contains(stem)
         || (policy.workspace_local_entries && workspace_entry_candidate))
     {
+        // 远端 shell 单独说一句。笼统的"不在白名单"会让模型去试 scp、试
+        // `python -c paramiko`，而正确答案是根本不从这里出去：远端机器上的事
+        // 走已登记的 hub / ccnm 成员（方案 B 的 SSH 一行）。
+        if is_remote_shell(stem) {
+            return Err(PolicyError::new(
+                PolicyReason::RemoteShellNotAllowed,
+                format!("{stem} 不从这里直连远端机器"),
+            ));
+        }
         return Err(PolicyError::new(
             PolicyReason::CommandNotAllowlisted,
             format!("Command is not allowlisted: {stem}"),
         ));
+    }
+
+    // `gh` 进了白名单只等于开了**只读诊断**。写操作不跟着一起开：一个字段名
+    // 就能把 `gh run view` 变成 `gh run rerun`，而"首个单词是 gh"看不出区别
+    // （方案 B 的 GitHub 两行、审查 A05）。名单是允许制——没列进去的子命令
+    // 一律拒，gh 以后加了什么新命令也默认不放行。
+    if stem == "gh" {
+        check_github_cli(&parts)?;
     }
 
     if arguments.get("env").is_some() {
@@ -506,6 +523,79 @@ pub fn validate_command_for_workspace(
     }
 
     Ok(())
+}
+
+/// 从这台机器直接连出去的那几个。
+fn is_remote_shell(stem: &str) -> bool {
+    matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "ssh" | "scp" | "sftp" | "rsync" | "telnet"
+    )
+}
+
+/// `gh` 的只读诊断子命令。
+///
+/// 只收**读**：列表、详情、日志、状态。判断依据是"这条命令会不会改 GitHub 上
+/// 的东西或本机凭据"，不是"它常不常用"。名单外一律拒，包括 `gh api`——它
+/// 一个 `-X POST` 就是任意写接口，从子命令名上分不出来。
+const GH_READ_ONLY: &[(&str, &str)] = &[
+    ("run", "list"),
+    ("run", "view"),
+    ("workflow", "list"),
+    ("workflow", "view"),
+    ("pr", "list"),
+    ("pr", "view"),
+    ("pr", "diff"),
+    ("pr", "checks"),
+    ("pr", "status"),
+    ("issue", "list"),
+    ("issue", "view"),
+    ("issue", "status"),
+    ("release", "list"),
+    ("release", "view"),
+    ("repo", "view"),
+    ("cache", "list"),
+    ("label", "list"),
+    ("auth", "status"),
+];
+
+/// 不带子命令也只读的那几个。
+const GH_READ_ONLY_TOPLEVEL: &[&str] = &["version", "status"];
+
+fn check_github_cli(parts: &[String]) -> Result<(), PolicyError> {
+    // flag 跳过就行：gh 要求子命令在最前，`gh run list --limit 5` 里第一个
+    // 非 flag 的两个词就是 run 和 list。认不出来就拒——猜错的代价是放行一次
+    // 写操作。
+    let words: Vec<&str> = parts[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !word.starts_with('-'))
+        .collect();
+    let denied = |detail: &str| {
+        Err(PolicyError::new(
+            PolicyReason::GithubCommandNotReadOnly,
+            format!("gh {detail}：只放行只读诊断子命令"),
+        ))
+    };
+    match words.as_slice() {
+        [] => denied("需要一个子命令"),
+        [single] => {
+            if GH_READ_ONLY_TOPLEVEL.contains(single) {
+                Ok(())
+            } else {
+                denied(single)
+            }
+        }
+        [group, action, ..] => {
+            if GH_READ_ONLY.iter().any(|(allowed_group, allowed_action)| {
+                allowed_group == group && allowed_action == action
+            }) {
+                Ok(())
+            } else {
+                denied(&format!("{group} {action}"))
+            }
+        }
+    }
 }
 
 fn workspace_local_entry_exists(
@@ -617,7 +707,7 @@ fn has_forbidden_shell_syntax(command: &str) -> bool {
 fn network_command_pattern() -> &'static regex::Regex {
     NETWORK_COMMAND_PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)(https?://|urllib\.request|requests\.|http\.client|\bcurl\b|\bwget\b|\bssh\b|\bscp\b|\bftp\b)",
+            r"(?i)(https?://|urllib\.request|requests\.|http\.client|\bcurl\b|\bwget\b|\bssh\b|\bscp\b|\bftp\b|\bgh\b)",
         )
         .expect("valid regex")
     })

@@ -783,6 +783,285 @@ fn check_command_does_not_run_anything() {
     assert!(marker.exists(), "探针脚本本身没工作，上面那句断言不算数");
 }
 
+/// `argv` 形式：参数一格一格地到达进程，中间没人解释。
+///
+/// 这是 C04 的核心——以前只有 `cmd` 一个入口，接口长得像 shell、执行却不是，
+/// 参数里带 `|` 或空格就得自己琢磨引号。这条测试证明的不是"没报错"，而是
+/// **进程真的收到了原样的那个字符串**：脚本把 argv[1] 原样打回来。
+#[test]
+fn argv_passes_arguments_through_untouched() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let tricky = "a b|c;d\ne";
+
+    let executed = invoke(
+        &ctx,
+        "exec_command",
+        json!({
+            "argv": [TEST_PYTHON, "-c", "import sys; sys.stdout.write(sys.argv[1])", tricky]
+        }),
+    );
+    assert_eq!(executed["ok"], json!(true), "{executed}");
+    assert_eq!(executed["stdout"], tricky, "参数被谁动过：{executed}");
+}
+
+/// 同一个参数，写成 `cmd` 会被 shell 语法检测拒掉，写成 `argv` 放行。
+///
+/// 两边都不经过 shell；区别在于 `cmd` 那一行**看起来**像 shell，放行等于让
+/// 调用方以为 `|` 真的接上了管道。
+#[test]
+fn a_pipe_character_is_data_in_argv_and_an_operator_in_cmd() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    let as_line = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": format!("{TEST_PYTHON} -c print(1|2)") }),
+    );
+    assert_eq!(as_line["decision"], "deny", "{as_line}");
+    assert_eq!(as_line["rule"], "shell_syntax_rejected");
+
+    let as_argv = invoke(
+        &ctx,
+        "check_command",
+        json!({ "argv": [TEST_PYTHON, "-c", "print(1|2)"] }),
+    );
+    assert_eq!(as_argv["decision"], "allow", "{as_argv}");
+}
+
+/// 结构化形式不是权限后门：白名单、危险命令、受保护路径照样管着它。
+#[test]
+fn argv_goes_through_exactly_the_same_gates_as_cmd() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    // 白名单：rg 不在默认名单里，两种形式都拒。
+    let not_allowed = invoke(
+        &ctx,
+        "check_command",
+        json!({ "argv": ["rg", "--version"] }),
+    );
+    assert_eq!(not_allowed["decision"], "deny", "{not_allowed}");
+    assert_eq!(not_allowed["rule"], "command_not_allowlisted");
+    // 预检和真跑给同一个答案——A01 对 argv 这条新入口的复核，不是只测预检。
+    let executed = invoke(&ctx, "exec_command", json!({ "argv": ["rg", "--version"] }));
+    assert_eq!(executed["error"]["code"], "POLICY_REJECTED", "{executed}");
+    assert_eq!(
+        executed["error"]["details"]["reason"], not_allowed["rule"],
+        "预检和执行的原因得一致：{executed}"
+    );
+
+    // 受保护资产：解释器删 .git，拆成 argv 也一样拦。
+    let deletes_git = invoke(
+        &ctx,
+        "check_command",
+        json!({
+            "argv": [TEST_PYTHON, "-c", "import shutil; shutil.rmtree('.git')"],
+            "confirm": true
+        }),
+    );
+    assert_eq!(deletes_git["decision"], "deny", "{deletes_git}");
+    assert_eq!(deletes_git["rule"], "protected_repository_asset");
+
+    // 危险命令：需要确认这件事不因为换了形式就消失。
+    let destructive = invoke(
+        &ctx,
+        "check_command",
+        json!({ "argv": ["rm", "-rf", "build"] }),
+    );
+    assert_eq!(destructive["decision"], "needs_approval", "{destructive}");
+}
+
+/// 白名单批准的是系统命令名，跑的就得是系统那个。
+///
+/// 工作区里放一个同名文件曾经能把它顶替掉：`python --version` 跑的是
+/// `<工作区>/python`。批的和跑的不是同一个东西（方案 B、审查 A04）。现在裸名
+/// 先查 PATH；工作区里的脚本要么写 `./名字`，要么是 PATH 上根本没有的名字。
+#[test]
+fn a_bare_command_name_resolves_on_path_not_in_the_workspace() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let impostor = fx.root.join(TEST_PYTHON);
+    fs::write(&impostor, "#!/bin/sh\necho impostor\n").expect("写同名文件");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&impostor, fs::Permissions::from_mode(0o755)).expect("加可执行位");
+    }
+
+    let checked = invoke(
+        &ctx,
+        "check_command",
+        json!({ "argv": [TEST_PYTHON, "--version"] }),
+    );
+    assert_eq!(checked["decision"], "allow", "{checked}");
+    assert_eq!(
+        checked["program"]["source"], "path",
+        "白名单批的是系统 python，解析结果却指向工作区：{checked}"
+    );
+
+    let executed = invoke(
+        &ctx,
+        "exec_command",
+        json!({ "argv": [TEST_PYTHON, "--version"] }),
+    );
+    assert_eq!(executed["ok"], json!(true), "{executed}");
+    let stdout = executed["stdout"].as_str().unwrap_or_default();
+    assert!(
+        !stdout.contains("impostor"),
+        "跑的是工作区里那个冒名文件：{executed}"
+    );
+
+    // 明确指路的形式仍然跑工作区里的东西——这条能力没被收掉。
+    let explicit = invoke(
+        &ctx,
+        "check_command",
+        json!({ "argv": [format!("./{TEST_PYTHON}")] }),
+    );
+    assert_eq!(
+        explicit["program"]["source"], "workspace_entry",
+        "{explicit}"
+    );
+}
+
+/// 两个都给不猜哪个算数，也不维护两套权限逻辑。
+#[test]
+fn giving_cmd_and_argv_together_is_rejected() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let checked = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": "pwd", "argv": ["pwd"] }),
+    );
+    assert_eq!(checked["decision"], "deny", "{checked}");
+    assert_eq!(checked["rule"], "conflicting_command_forms");
+
+    let executed = invoke(
+        &ctx,
+        "exec_command",
+        json!({ "cmd": "pwd", "argv": ["pwd"] }),
+    );
+    assert_eq!(executed["error"]["code"], "POLICY_REJECTED", "{executed}");
+    assert_eq!(
+        executed["error"]["details"]["reason"],
+        "conflicting_command_forms"
+    );
+}
+
+/// 内建的 `ls` 不冒充系统 ls：带 flag 直接说清它是什么。
+///
+/// 以前 `ls -la` 会把 `-la` 当成目录名，报"路径不存在"——看着像目录没了
+/// （方案 B 的原生 ls 一条）。
+#[test]
+fn the_builtin_ls_says_it_is_not_the_system_ls() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let out = invoke(&ctx, "exec_command", json!({ "cmd": "ls -la" }));
+    let message = out["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("list_dir"),
+        "要指向真能给这些信息的工具：{out}"
+    );
+}
+
+/// 内建 `ls` 的相对参数按 `workdir` 解析，不是工作区根。
+#[test]
+fn the_builtin_ls_resolves_relative_paths_against_workdir() {
+    let fx = tiny_js_fixture();
+    fs::create_dir_all(fx.root.join("pkg/inner")).expect("建子目录");
+    fs::write(fx.root.join("pkg/inner/only-here.txt"), "x\n").expect("写文件");
+    let ctx = ctx_for(&fx.root);
+
+    let out = invoke(
+        &ctx,
+        "exec_command",
+        json!({ "cmd": "ls inner", "workdir": "pkg" }),
+    );
+    assert_eq!(out["ok"], json!(true), "{out}");
+    assert!(
+        out["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only-here.txt"),
+        "从工作区根解析的话这里会是另一个目录：{out}"
+    );
+}
+
+/// `gh` 进白名单只等于开了只读诊断。
+///
+/// 一个字段名就能把 `gh run view` 变成 `gh run rerun`，而"首个单词是 gh"看不出
+/// 区别（方案 B 的 GitHub 两行、审查 A05）。名单是允许制，没列的一律拒。
+#[test]
+fn enabling_gh_opens_read_only_diagnostics_only() {
+    let fx = tiny_js_fixture();
+    let ctx = common::ctx_with_allowed_commands(&fx.root, "gh");
+
+    for allowed in [
+        "gh run list",
+        "gh run view 42 --log",
+        "gh workflow view ci.yml",
+        "gh pr checks",
+        "gh version",
+    ] {
+        let checked = invoke(&ctx, "check_command", json!({ "cmd": allowed }));
+        assert_eq!(checked["decision"], "allow", "{allowed}: {checked}");
+    }
+
+    for denied in [
+        "gh run rerun 42",
+        "gh run cancel 42",
+        "gh pr merge 7",
+        "gh release create v1",
+        "gh secret set TOKEN",
+        "gh workflow run deploy.yml",
+        "gh auth token",
+        "gh api /repos/o/r/actions/runs",
+        "gh repo clone o/r",
+    ] {
+        let checked = invoke(&ctx, "check_command", json!({ "cmd": denied }));
+        assert_eq!(checked["decision"], "deny", "{denied}: {checked}");
+        assert_eq!(
+            checked["rule"], "github_command_not_read_only",
+            "{denied}: {checked}"
+        );
+    }
+}
+
+/// 没把 gh 加进白名单时，它就是一条普通的未获准命令——不会因为有只读规则
+/// 就自己开着。
+#[test]
+fn gh_is_not_enabled_by_default() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let checked = invoke(&ctx, "check_command", json!({ "cmd": "gh run list" }));
+    assert_eq!(checked["decision"], "deny", "{checked}");
+    assert_eq!(checked["rule"], "command_not_allowlisted");
+    assert_eq!(checked["needs_user_authorization"], json!(true));
+}
+
+/// 直连远端的命令有自己的说法，不跟"不在白名单"混成一句。
+#[test]
+fn ssh_points_at_the_hub_instead_of_a_generic_denial() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    for cmd in [
+        "ssh host uptime",
+        "scp a.txt host:/tmp/",
+        "rsync -a . host:/tmp/",
+    ] {
+        let checked = invoke(&ctx, "check_command", json!({ "cmd": cmd }));
+        assert_eq!(checked["decision"], "deny", "{cmd}: {checked}");
+        assert_eq!(
+            checked["rule"], "remote_shell_not_allowed",
+            "{cmd}: {checked}"
+        );
+        let suggestion = checked["suggestion"].as_str().unwrap_or_default();
+        assert!(suggestion.contains("hub"), "{cmd}: {checked}");
+    }
+}
+
 /// 被拒之后给的是**已经获准**的替代工具，不是"换个解释器再试"这种绕过办法。
 #[test]
 fn a_denied_command_points_at_an_allowed_tool() {

@@ -23,7 +23,7 @@ gld doctor                 # 配置自洽性；认证缺密钥这类会报 ✗
 
 | 能力 | 范围 | 说明 |
 | --- | --- | --- |
-| 执行命令 | 工作区目录内 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码** |
+| 执行命令 | 工作区目录内 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码**。命令可以写成一行 `cmd`，也可以写成 `argv` 逐格给（参数里带 `\|`、引号、换行时用它）；两种形式**权限完全一样**，只是 `argv` 不必猜引号 |
 | 读文件 | 工作区内 | 0.3.0 起默认收紧，见下 |
 | 写文件 | 工作区内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
 | 读 Git 历史 | 工作区内 | status / diff / log / show / blame |
@@ -149,7 +149,42 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 
 基础诊断命令（`pwd` `ls` `cat` `grep` `find` `echo` 等）两种写法下都保留：
 没有它们连"这个工作区长什么样"都问不出来，而它们本身改不了东西。
-`only:` 后面写空等于没配，退回默认白名单。
+
+`only:` 后面**写空就是"一个都不加"**（只剩基础诊断命令），不是退回默认白名单——
+写 `only:` 的人是想收紧，把它理解成"没配"等于把一个收权的配置放到最大。
+（0.4.x 及更早确实会退回默认全集，那是个 bug——手上还是那几个版本的话，`only:` 写空等于没收紧。）
+
+**`rg`、`gh` 这类不在默认白名单里的命令，加进去就能用**，写法就是上面的追加形式
+（`allowed-commands=rg`）。加之前先想想有没有现成工具：搜索用 `search_text`
+（带上下文、分页、类型过滤），列文件用 `list_files`——它们不需要放开任何命令。
+
+### `gh` 加进白名单 = 只读诊断，不是整个 gh
+
+把 `gh` 加进白名单之后，能跑的只有查询类子命令：
+
+```text
+放行  gh run list / run view（含 --log）、workflow list|view、pr list|view|diff|checks|status、
+      issue list|view|status、release list|view、repo view、cache list、label list、
+      auth status、gh version、gh status
+拒绝  其余全部，包括 run rerun|cancel、pr create|merge、release create、secret set、
+      workflow run、auth token|login、repo clone，以及 gh api（一个 -X POST 就是任意写接口）
+```
+
+名单是**允许制**：没列进去的一律拒，gh 以后新增的子命令默认也不放行，错误码
+`POLICY_REJECTED`、原因 `github_command_not_read_only`。这么做是因为
+`gh run view` 和 `gh run rerun` 只差一个词，按"首个单词是 gh"根本分不出来。
+
+真要做写操作（合并 PR、重跑 workflow、发 release），请自己在终端里做——
+那是需要你本人判断的一步，不该由模型代劳。
+
+### `ssh` / `scp` 默认不放行
+
+远端机器上的事走已登记的 **hub / ccnm 远端成员**：那条路上有身份、有工作区边界、
+有写锁。直接 `ssh host <任意命令>` 没有任何这些东西。
+
+拒绝的原因码是 `remote_shell_not_allowed`（不是笼统的"不在白名单"），提示里
+直接指向 hub。**要是你确实把 `ssh` 加进了白名单**，那就是放开了任意远端 shell：
+gld 不限制目标主机、不限制远端执行什么，也挡不住端口转发。这一点没有中间档。
 
 ### 4. 认证别用 noauth
 

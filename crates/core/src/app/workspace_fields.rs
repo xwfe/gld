@@ -157,7 +157,7 @@ const FIELDS: &[Field] = &[
     field!(
         "mcp.allowed-commands",
         "逗号分隔",
-        "在默认白名单之外追加的命令；写成 only:cargo,git 则表示只允许这些",
+        "在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md",
         |p, v| {
             p.runtime.allowed_commands = v.trim().into();
             Ok(())
