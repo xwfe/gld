@@ -582,7 +582,12 @@ History 档案（`docs/history-session/`）计入指纹，但 history 工具写�
 
 `tty: true` 是 `stdin_mode=interactive` 的老名字，它**不给命令一个终端**：底下
 是管道，认 TTY 才肯工作的程序（`less`、要密码的 `ssh`、带颜色的 REPL）不会因为
-它变得可用。结果里的 `pty` 永远是 `false`。真 PTY 是另一件事，现在没有。
+它变得可用。结果里的 `pty` 永远是 `false`。
+
+**真 PTY 不做**（2026-09-21 定）。要它就得引入平台相关的伪终端实现或第三方
+依赖，而换来的能力很窄：需要终端才肯工作的程序大多有非交互开关（`--yes`、
+`--no-color`、从环境变量读密码）。所以这里只保证一件事——`pty` 恒为 `false`，
+**不会有哪个版本偷偷把它变成 `true`**，你可以照着这个前提写代码。
 
 `write_stdin` 最多等 **5 秒**。管道缓冲是有限的（Linux 64 KiB，macOS 更小），
 对面不读的话写满就卡住；到点报 `STDIN_WRITE_TIMEOUT`，并**说清写进去了多少

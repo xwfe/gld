@@ -701,5 +701,49 @@ U0–U5 六个阶段之后，方案 D 还留着两句没落实。这一批补完
 仓库里的搜索结果本来就是用来缩小的，不是用来翻到底的。排序这一步已经把游标
 的前提（稳定顺序）准备好了，将来要加不用返工。
 
-**真 PTY 也没做**：要引入平台相关的伪终端实现或第三方依赖，超出"不加无直接
-收益的依赖"这条线，需要单独确认再排期。
+**真 PTY 不做，用户 2026-09-21 定了。**要它就得引入平台相关的伪终端实现或第三方
+依赖，超出"不加无直接收益的依赖"这条线；换来的能力也窄——需要终端才肯工作的
+程序大多有非交互开关。方案 E 给的是二选一（"改为准确的 interactive-pipe 命名并
+说明迁移，**或**真做平台实现并验收"），U4 走的是前一支，这条到此闭合，不再挂在
+待办上。契约固定为 `pty` 恒 `false`。
+
+## 11. 验收矩阵 A01–A20：逐条对账（2026-09-21）
+
+U0–U5 做完之后把第 5 节那 20 条逐条对回去，**看的是有没有测试钉着，不是印象**。
+对账时发现四条只有实现没有测试，当场补上；其中一条（A07 的 hunk 计数）连实现
+都没有，一并做了。
+
+| 编号 | 状态 | 钉着它的测试 |
+| --- | --- | --- |
+| A01 预检与执行判定一致 | 通过 | `check_command_and_exec_command_agree`、`check_command_does_not_run_anything`、`argv_goes_through_exactly_the_same_gates_as_cmd`、`the_environment_tool_and_the_preflight_report_the_same_policy` |
+| A02 空 `only:` 不扩大权限 | 通过 | `an_empty_only_list_keeps_only_the_basics`、`no_configuration_at_all_still_means_the_defaults`、`the_only_prefix_actually_restricts` |
+| A03 参数里的空格/引号/操作符 | 通过 | `argv_passes_arguments_through_untouched`、`a_pipe_character_is_data_in_argv_and_an_operator_in_cmd`、`quoted_python_code_is_not_treated_as_shell_chaining`、`exec_command_rejects_shell_chaining` |
+| A04 同名程序解析 | 通过（平台见备注） | `a_bare_command_name_resolves_on_path_not_in_the_workspace`、`configured_path_resolution_uses_declared_order`、`resolves_an_arbitrarily_named_workspace_local_entry`、`windows_workspace_scripts_and_python_unicode_execute_successfully`、`unix_workspace_scripts_preserve_space_paths_and_arguments` |
+| A05 GitHub 只读、SSH 不连 | 通过 | `enabling_gh_opens_read_only_diagnostics_only`、`gh_is_not_enabled_by_default`、`ssh_points_at_the_hub_instead_of_a_generic_denial` |
+| A06 `.github` / `.git` 分类 | 通过 | `creating_a_workflow_asks_for_confirmation_then_goes_through`、`ordinary_github_config_edits_do_not_need_confirmation`、`deleting_github_config_still_requires_confirmation`、`patch_check_rejects_every_write_into_git_internals`，外加 `write_class.rs` 的 8 条单测 |
+| A07 补丁写法错误要报清楚 | 通过（**这次补了 hunk 计数**） | `adding_a_file_that_already_exists_is_refused`、`two_updates_to_the_same_file_apply_one_after_another`、`a_codex_patch_without_its_end_marker_is_refused`、`an_unsupported_codex_directive_is_refused_instead_of_skipped`、`an_ambiguous_change_names_the_candidates_instead_of_guessing`、**`a_hunk_header_that_miscounts_its_own_body_is_refused`** |
+| A08 部分失败时全不变 | 通过 | `validation_failure_in_later_file_keeps_all_files_unchanged`、`every_file_that_fails_gets_its_own_diagnostic_and_nothing_is_written`、`a_failed_write_rolls_the_earlier_files_back` |
+| A09 预检后文件变了 | 通过 | `a_patch_built_on_a_stale_read_is_refused`、`a_file_changed_between_planning_and_writing_is_not_overwritten`、`a_new_file_that_appeared_in_the_meantime_is_not_clobbered`、`a_delete_of_a_file_that_changed_in_the_meantime_is_refused` |
+| A10 故障注入 | 通过 | `patch.rs` 的 `faults` 注入：`a_file_whose_backup_cannot_be_read_is_left_alone`、`a_failed_write_rolls_the_earlier_files_back`、`a_rollback_that_fails_says_which_files_are_in_doubt` |
+| A11 CRLF / 末尾换行 / 权限位 / Delete→Add | 通过（**这次补了末尾换行**） | `preserves_crlf_when_inserting_multiple_lines`、`patching_a_script_keeps_it_executable`、`a_newly_added_file_gets_the_default_mode`、`delete_then_add_same_path_replaces_instead_of_concatenating_old_content`、**`a_file_without_a_trailing_newline_does_not_grow_one`** |
+| A12 路径 round-trip | 通过 | `paths_from_list_dir_can_be_fed_straight_back_in`，外加 A20 回放的第一步 |
+| A13 零结果分得出种类 | 通过 | `an_empty_search_result_says_which_kind_of_empty_it_is`、`search_text_skips_binary_and_oversized_files`、`a_line_past_the_keep_limit_is_only_searched_up_to_it` |
+| A14 剪枝与隐藏搜索 | 通过 | `ignored_directories_are_pruned_before_their_files_are_touched`、`searching_by_type_and_inside_dot_directories`、`a_search_that_never_entered_a_dot_directory_says_so`、`the_gld_data_home_is_not_readable_even_when_confinement_is_off` |
+| A15 输出游标 | 通过（**这次补了 UTF-8 跨页和"还在跑"**） | `paging_output_bigger_than_the_retained_buffer_terminates`、`an_offset_the_buffer_has_dropped_is_reported_as_a_gap`、`output_refs_of_a_command_that_finished_inline_can_be_read`、**`paging_output_never_splits_a_character_and_says_whether_the_stream_ended`**、**`a_still_running_command_with_nothing_new_is_not_the_same_as_finished`** |
+| A16 过期与配额 | 通过 | `an_expired_handle_is_not_the_same_as_an_unknown_one`、`a_running_session_is_never_swept`、`finished_sessions_are_capped_and_the_oldest_goes_first`、`read_output_says_how_long_the_output_still_lives`（保留期设 0，不靠 sleep） |
+| A17 stdin 五种情况 | 通过 | `stdin_has_three_states_and_none_of_them_loses_the_input`、`writing_to_a_command_that_never_reads_stdin_gives_up_and_says_how_far_it_got`、`retained_session_timeout_stops_the_process_after_deadline` |
+| A18 错误提示与记账 | 通过（**这次补了体量上限**） | `a_failed_patch_is_not_told_to_check_stderr`、`a_denied_command_points_at_an_allowed_tool`、`nonzero_command_exit_keeps_transport_ok_but_sets_command_ok_false`、`killed_session_reports_command_failure_even_when_transport_succeeds`、`a_rejected_call_is_recorded_in_the_operation_log`、**`a_failure_response_stays_bounded_when_everything_fails`** |
+| A19 schema / 运行时 / 文档一致 | 通过 | `every_argument_the_code_reads_is_declared_in_some_schema`、`every_bounded_integer_in_a_schema_matches_the_code`、`a_misspelled_argument_is_refused_instead_of_silently_dropped`、`patch_check_takes_the_same_arguments_apply_patch_does` |
+| A20 端到端回放 | 通过（远端是合成的） | `a_repository_maintenance_round_trip_holds_together_end_to_end` |
+
+**备注（别读成比实际更强的保证）：**
+
+- **A04 的平台**：Windows 有专门的用例；macOS 和 Linux 走的是同一条 unix 代码
+  路径，没有各写一份，靠 CI 两边都跑覆盖。
+- **A20 的远端**：`gh` 是 fixture 里的假脚本，**没有真实 GitHub 请求**；整条
+  回放只在 unix 上跑。
+- **A07 新加的 hunk 计数检查会拒掉以前能过的补丁**：`@@ -a,b` 的 `b` 和正文对
+  不上就拒，哪怕照正文办能得出对的结果。理由是数字对不上意味着写补丁的人对
+  这个文件的认识和文件本身不一样，而我们照正文办还回 ok，他不会知道；`git
+  apply` 在这种补丁上也报 corrupt。数不准就写裸 `@@`，一直支持，报错里也这么
+  说。改之前全仓 723 条用例里没有一条踩到，说明手写补丁的计数本来都是对的。
