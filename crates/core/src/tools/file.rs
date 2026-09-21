@@ -67,11 +67,16 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .metadata()
         .ok()
         .map(|meta| crate::tools::workspace::file_version(&meta));
+    if let Some(start_byte) = args.get("start_byte").and_then(Value::as_u64) {
+        return read_byte_window(file, &resolved.display, version, start_byte, max_bytes);
+    }
     let TextSelection {
         content,
         truncated,
         total_lines,
         total_bytes,
+        content_start_byte,
+        cut_line_end,
     } = read_text_selection(file, READ_CHUNK_BYTES, start_line, end_line, max_bytes)?;
     let truncated_by = truncated.then_some("bytes");
     let end = end_line.unwrap_or(total_lines).min(total_lines);
@@ -87,6 +92,12 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
     // 截断落在一行中间时这一行只给了半截，下一页得从它重新读，否则后半截就被跳过了
     // （以前给的是下一行，AI 照着翻完一遍会以为读全了）。只有这一页连一整行都装不下时
     // 才往下跳，不然翻页会停在原地；跳过的部分用 warning 说清楚。
+    //
+    // "这一页连一整行都装不下"就是**按行翻页会丢字节**的唯一情况。那时同时给出
+    // `next_start_byte`：照它再调一次就能无损接上（方案 D：需要无损读取时支持
+    // 有界字节续读，不把"翻页结束"当成"全文已读"）。
+    let mut next_start_byte = None;
+    let mut skipped_bytes = 0u64;
     let next_start_line = if !truncated {
         None
     } else if content.ends_with('\n') {
@@ -94,8 +105,11 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
     } else if content.contains('\n') {
         Some(actual_end)
     } else {
+        let resume = content_start_byte + content.len() as u64;
+        skipped_bytes = cut_line_end.unwrap_or(resume).saturating_sub(resume);
+        next_start_byte = Some(resume);
         warnings.push(format!(
-            "line {start_line} is longer than max_bytes ({max_bytes}); the rest of it is skipped, raise max_bytes to read it whole"
+            "line {start_line} is longer than max_bytes ({max_bytes}): next_start_line skips the remaining {skipped_bytes} byte(s) of it. Read them with start_byte={resume}, or raise max_bytes."
         ));
         Some(start_line + 1)
     };
@@ -104,15 +118,116 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         "version": version,
         "content": content,
         "encoding": "utf-8",
+        "read_mode": "lines",
         "start_line": start_line,
         "end_line": actual_end,
         "next_start_line": next_start_line,
+        // 按行翻页会跳过的字节数，以及从哪个字节接着读才不丢。两个都只在
+        // "一行比 max_bytes 还长"时才有值，其余情况按行翻页本来就是无损的。
+        "skipped_bytes": skipped_bytes,
+        "next_start_byte": next_start_byte,
         "total_lines": total_lines,
         "total_bytes": total_bytes,
         "bytes_read": content.len(),
         "truncated": truncated,
         "truncated_by": truncated_by,
         "warnings": warnings
+    })))
+}
+
+/// 按**绝对字节偏移**读一段，不数行、不扫全文。
+///
+/// 只有一个用途：某一行比 `max_bytes` 还长时，把按行翻页跳过的那一段捞回来。
+/// 所以它不回 `total_lines`——要知道第几行就得从文件头再数一遍，而这个入口存在
+/// 的理由正是"不要为了读中间一段去扫整个文件"。
+fn read_byte_window(
+    mut file: File,
+    display: &str,
+    version: Option<String>,
+    start_byte: u64,
+    max_bytes: usize,
+) -> Result<Value, WorkspaceError> {
+    use std::io::{Seek, SeekFrom};
+
+    let total_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    if start_byte > total_bytes {
+        return Err(WorkspaceError::invalid_argument(format!(
+            "start_byte {start_byte} is past the end of the file ({total_bytes} bytes)"
+        )));
+    }
+    file.seek(SeekFrom::Start(start_byte))
+        .map_err(|_| WorkspaceError::not_found("File not found"))?;
+    let mut raw = vec![0u8; max_bytes];
+    let mut filled = 0usize;
+    while filled < max_bytes {
+        match file.read(&mut raw[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(WorkspaceError::not_found("File not found")),
+        }
+    }
+    raw.truncate(filled);
+    if raw.contains(&0) {
+        return Err(WorkspaceError::Tool {
+            code: "BINARY_FILE",
+            message: "Binary file read blocked for text tool.".into(),
+            category: "validation",
+            retryable: false,
+        });
+    }
+    // 0b10xxxxxx 是 UTF-8 的续字节：落在这儿说明偏移切在一个字符中间。
+    // 拿上一次返回的 next_start_byte 就不会这样，自己算的偏移会。
+    if raw.first().is_some_and(|byte| byte & 0xC0 == 0x80) {
+        return Err(WorkspaceError::invalid_argument(format!(
+            "start_byte {start_byte} falls inside a utf-8 character; use the next_start_byte a previous read returned"
+        )));
+    }
+    let valid_up_to = match std::str::from_utf8(&raw) {
+        Ok(_) => raw.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => {
+            return Err(WorkspaceError::Tool {
+                code: "UNSUPPORTED_ENCODING",
+                message: "File is not valid utf-8.".into(),
+                category: "validation",
+                retryable: false,
+            })
+        }
+    };
+    raw.truncate(valid_up_to);
+    let end_byte = start_byte + raw.len() as u64;
+    let truncated = end_byte < total_bytes;
+    let content = String::from_utf8(raw).map_err(|_| WorkspaceError::Tool {
+        code: "UNSUPPORTED_ENCODING",
+        message: "File is not valid utf-8.".into(),
+        category: "validation",
+        retryable: false,
+    })?;
+    Ok(tool_ok(json!({
+        "path": display,
+        "version": version,
+        "content": content,
+        "encoding": "utf-8",
+        "read_mode": "bytes",
+        "start_byte": start_byte,
+        "end_byte": end_byte,
+        "next_start_byte": truncated.then_some(end_byte),
+        // 这一路不数行，所以行号一概是 null——不是"第 0 行"，是"没算"。
+        "start_line": Value::Null,
+        "end_line": Value::Null,
+        "next_start_line": Value::Null,
+        "total_lines": Value::Null,
+        "skipped_bytes": 0,
+        "total_bytes": total_bytes,
+        "bytes_read": content.len(),
+        "truncated": truncated,
+        "truncated_by": truncated.then_some("bytes"),
+        "warnings": if truncated {
+            vec!["content truncated".to_string()]
+        } else {
+            Vec::new()
+        }
     })))
 }
 
@@ -1023,6 +1138,12 @@ struct TextSelection {
     truncated: bool,
     total_lines: usize,
     total_bytes: u64,
+    /// `content` 第一个字节在文件里的绝对偏移。按行翻页丢字节时，
+    /// 加上 `content.len()` 就是"接着读"的起点。
+    content_start_byte: u64,
+    /// 截断落在一行中间时，那一行结束（含换行符）的绝对偏移。
+    /// 用来算出按行翻页会跳过多少字节。
+    cut_line_end: Option<u64>,
 }
 
 /// 流式读一个 UTF-8 文本，只留下第 `start_line..=end_line` 行里的前 `max_bytes` 字节。
@@ -1050,8 +1171,16 @@ fn read_text_selection(
     // 上一块末尾没读完整的半个字符。
     let mut utf8_tail: Vec<u8> = Vec::new();
     let mut invalid_utf8 = false;
+    // 绝对字节偏移：`content` 从哪儿开始、被截断的那一行到哪儿结束。
+    // 只为了在"一行比 max_bytes 还长"时能说出接着从哪个字节读。
+    let mut content_start_byte = 0u64;
+    let mut content_started = false;
+    let mut cut_line_end: Option<u64> = None;
+    // 截断发生在块尾那半行上，那一行的结尾要到后面的块里去找。
+    let mut seeking_line_end = false;
 
     loop {
+        let chunk_start = total_bytes;
         let read = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(read) => read,
@@ -1084,22 +1213,43 @@ fn read_text_selection(
         // 内容已经截满、或者已经过了 end_line，后面只剩数行。常见的"读大文件开头一段"
         // 几乎全部时间都在这里，逐行切分会慢一倍。
         if truncated || end_line.is_some_and(|end| total_lines >= end) {
+            if seeking_line_end {
+                if let Some(at) = chunk.iter().position(|byte| *byte == b'\n') {
+                    cut_line_end = Some(chunk_start + at as u64 + 1);
+                    seeking_line_end = false;
+                }
+            }
             total_lines += chunk.iter().filter(|byte| **byte == b'\n').count();
             line_open = chunk.last() != Some(&b'\n');
             continue;
         }
         // 合法 UTF-8 的多字节字符里不会出现 b'\n'，所以按字节切行不会把字符切坏。
+        let mut piece_start = chunk_start;
         for piece in chunk.split_inclusive(|byte| *byte == b'\n') {
             let line = total_lines + 1;
             if line >= start_line && end_line.is_none_or(|end| line <= end) {
                 let room = max_bytes.saturating_sub(kept.len());
+                if !content_started {
+                    content_start_byte = piece_start;
+                    content_started = true;
+                }
                 if piece.len() > room {
                     kept.extend_from_slice(&piece[..room]);
                     truncated = true;
+                    // 截在这一行中间：它到哪儿结束决定了按行翻页会跳过多少。
+                    // 这一块的最后一段没有换行符时，行还没完，往后面的块里找。
+                    if room > 0 {
+                        if piece.ends_with(b"\n") {
+                            cut_line_end = Some(piece_start + piece.len() as u64);
+                        } else {
+                            seeking_line_end = true;
+                        }
+                    }
                 } else {
                     kept.extend_from_slice(piece);
                 }
             }
+            piece_start += piece.len() as u64;
             line_open = !piece.ends_with(b"\n");
             if !line_open {
                 total_lines += 1;
@@ -1123,11 +1273,17 @@ fn read_text_selection(
     if let Err(error) = std::str::from_utf8(&kept) {
         kept.truncate(error.valid_up_to());
     }
+    // 文件末尾没有换行符时，被截的那一行就结束在文件末尾。
+    if seeking_line_end {
+        cut_line_end = Some(total_bytes);
+    }
     Ok(TextSelection {
         content: String::from_utf8(kept).map_err(|_| unsupported_encoding())?,
         truncated,
         total_lines,
         total_bytes,
+        content_start_byte,
+        cut_line_end,
     })
 }
 

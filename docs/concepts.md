@@ -623,6 +623,47 @@ exec_command cmd="cargo build" timeout=600000
 
 ---
 
+## 读文件：一行比 `max_bytes` 还长的时候
+
+`read_file` 按行翻页：拿返回的 `next_start_line` 再调一次，直到它变成 `null`。
+**只有一种情况这样翻会丢字节**——某一行本身就比 `max_bytes` 长。这时这一页只
+给了这行的前半截，`next_start_line` 指向下一行，中间那段谁都没读到。
+
+压缩过的 JS、一行导出的 JSON 就长这样。以前只有一句 warning 说"剩下的跳过
+了"，没有任何办法把它捞回来；翻到文件末尾 `next_start_line` 变成 `null`，
+看着就像全读完了。
+
+现在这一页会多给两个字段：
+
+```text
+read_file path=bundle.js max_bytes=32768
+→ next_start_line  = 2          ← 按行翻页会跳到下一行
+  skipped_bytes    = 199901     ← 跳过这么多字节
+  next_start_byte  = 32768      ← 想读它们，从这个字节接着读
+```
+
+```text
+read_file path=bundle.js start_byte=32768
+→ read_mode = "bytes"
+  content   = …（接上的那一段）
+  next_start_byte = 65536       ← null 表示读到文件尾了
+```
+
+给了 `start_byte` 就是**按字节读**：不数行，所以 `start_line`、`total_lines`
+这些一律是 `null`——不是 0，是"没算"。要数行就得从文件头再扫一遍，而这个入口
+存在的理由正是不去扫。
+
+两个常见报错：
+
+- `start_byte 落在一个字符中间`：UTF-8 里一个汉字 3 个字节，自己算的偏移容易
+  切在中间。用上一次返回的 `next_start_byte`，它一定在边界上。
+- `start_byte 超过文件末尾`：文件在这期间被改短了，重新读一次头。
+
+平常读代码用不上这个参数：`skipped_bytes` 是 0、`next_start_byte` 是 `null`
+就说明按行翻页没丢东西。
+
+---
+
 ## 文件版本：别让补丁盖掉别人的改动
 
 `read_file` 和 `patch_check` 会回一个 `version`，`apply_patch` 收

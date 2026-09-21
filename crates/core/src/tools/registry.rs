@@ -1194,7 +1194,12 @@ pub fn input_schema(name: &str) -> Value {
                 "path": { "type": "string", "minLength": 1 },
                 "start_line": { "type": "integer", "minimum": 1, "default": 1 },
                 "end_line": { "type": "integer", "minimum": 1 },
-                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 32768 }
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 32768 },
+                "start_byte": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Read from this absolute byte offset instead of by line. Only needed when a single line is longer than max_bytes: paging by line then skips the rest of that line, and the result says so with skipped_bytes plus the next_start_byte to resume from. Line numbers come back null in this mode — counting them would mean rescanning the file from the start."
+                }
             },
             "required": ["path"],
             "additionalProperties": false

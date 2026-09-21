@@ -2125,3 +2125,142 @@ fn a_search_that_never_entered_a_dot_directory_says_so() {
         "{payload}"
     );
 }
+
+/// 一行比 max_bytes 还长时，按行翻页会跳过这一行的后半截——那就得说出跳了
+/// 多少、从哪个字节能接着读（方案 D 的"有界字节续读"，U5）。
+///
+/// 以前只有一句 warning 说"the rest of it is skipped"，没有任何办法把那段
+/// 字节捞回来：翻到文件末尾 `next_start_line` 变成 null，看起来就像全读完了。
+#[test]
+fn the_tail_of_an_over_long_line_can_be_read_back_byte_by_byte() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let long_line = "y".repeat(50);
+    fs::write(
+        dir.path().join("long.txt"),
+        format!("short\n{long_line}\nend\n"),
+    )
+    .expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let first = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "long.txt", "start_line": 2, "max_bytes": 12}),
+    );
+    let page = assert_ok(&first);
+    assert_eq!(page["read_mode"], "lines");
+    assert_eq!(page["content"], "y".repeat(12));
+    assert_eq!(page["next_start_line"], 3, "按行翻页照旧往下走");
+    // "short\n" 是 6 字节，所以第 2 行从第 6 个字节开始，读了 12 个。
+    assert_eq!(page["next_start_byte"], 18, "{page:#}");
+    // 剩下 38 个 y 加一个换行符。
+    assert_eq!(page["skipped_bytes"], 39, "{page:#}");
+    assert!(
+        page["warnings"]
+            .to_string()
+            .contains("line 2 is longer than max_bytes"),
+        "{page:#}"
+    );
+
+    // 照着 next_start_byte 接着读，正好是被跳过的那一段。
+    let rest = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "long.txt", "start_byte": 18}),
+    );
+    let tail = assert_ok(&rest);
+    assert_eq!(tail["read_mode"], "bytes");
+    assert_eq!(tail["start_byte"], 18);
+    assert_eq!(tail["content"], format!("{}\nend\n", "y".repeat(38)));
+    assert_eq!(tail["next_start_byte"], Value::Null, "读到头了");
+    // 这一路不数行，行号是 null——不是 0，是"没算"。
+    assert_eq!(tail["total_lines"], Value::Null, "{tail:#}");
+    assert_eq!(tail["next_start_line"], Value::Null, "{tail:#}");
+}
+
+/// 正常的按行翻页本来就是无损的，不该平白多出这两个字段的值。
+#[test]
+fn ordinary_line_paging_reports_nothing_skipped() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").expect("write");
+    let ctx = ctx_for(dir.path());
+    let out = invoke(&ctx, "read_file", json!({"path": "a.txt", "max_bytes": 8}));
+    let page = assert_ok(&out);
+    assert_eq!(page["content"], "one\ntwo\n");
+    assert_eq!(page["skipped_bytes"], 0, "{page:#}");
+    assert_eq!(page["next_start_byte"], Value::Null, "{page:#}");
+}
+
+/// 超长行跨过好几个读取块时，"这一行到哪儿结束"要到后面的块里去找。
+#[test]
+fn an_over_long_line_spanning_several_read_chunks_still_reports_its_tail() {
+    let dir = tempfile::tempdir().expect("workspace");
+    // READ_CHUNK_BYTES 是 64 KiB，这一行跨三块多。
+    let huge = "z".repeat(200_000);
+    fs::write(dir.path().join("huge.txt"), format!("{huge}\ntail\n")).expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let first = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "huge.txt", "max_bytes": 100}),
+    );
+    let page = assert_ok(&first);
+    assert_eq!(page["next_start_byte"], 100, "{page:#}");
+    // 这一行剩下 199_900 个字节，加上那个换行符。
+    assert_eq!(page["skipped_bytes"], 199_901, "{page:#}");
+
+    let rest = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "huge.txt", "start_byte": 100, "max_bytes": 1_048_576}),
+    );
+    let tail = assert_ok(&rest);
+    assert_eq!(
+        tail["bytes_read"].as_u64().unwrap_or(0),
+        200_006 - 100,
+        "{tail:#}"
+    );
+}
+
+/// 自己瞎算的字节偏移可能落在一个字符中间。那时要说清楚，而不是回一段乱码
+/// 或者报"文件不是 utf-8"——文件没问题，是偏移不对。
+#[test]
+fn a_byte_offset_inside_a_character_says_which_offset_to_use_instead() {
+    let dir = tempfile::tempdir().expect("workspace");
+    // "中" 是 3 个字节。
+    fs::write(dir.path().join("cn.txt"), "中文测试").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let broken = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "cn.txt", "start_byte": 1}),
+    );
+    let error = assert_err(&broken);
+    assert_eq!(error["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("next_start_byte"),
+        "{error}"
+    );
+
+    let past_end = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "cn.txt", "start_byte": 999}),
+    );
+    assert_eq!(assert_err(&past_end)["error"]["code"], "INVALID_ARGUMENT");
+
+    // 边界对齐时正常读，而且末尾切在字符中间会退回到边界。
+    let cut = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "cn.txt", "start_byte": 3, "max_bytes": 4}),
+    );
+    let page = assert_ok(&cut);
+    assert_eq!(page["content"], "文", "只给完整的字符：{page:#}");
+    assert_eq!(page["next_start_byte"], 6, "{page:#}");
+}
