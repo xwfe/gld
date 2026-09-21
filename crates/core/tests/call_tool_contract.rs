@@ -2264,3 +2264,57 @@ fn a_byte_offset_inside_a_character_says_which_offset_to_use_instead() {
     assert_eq!(page["content"], "文", "只给完整的字符：{page:#}");
     assert_eq!(page["next_start_byte"], 6, "{page:#}");
 }
+
+/// 截断之后 `total_matches` 不能再冒充"全项目一共这么多"，而且同一个查询
+/// 两次跑要给出同一批（方案 D，U5）。
+#[test]
+fn a_cut_short_search_says_it_does_not_know_the_total_and_stays_reproducible() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    let ask = |limit: u64| {
+        invoke(
+            &ctx,
+            "search_text",
+            json!({"query": "common-token", "max_results": limit}),
+        )
+    };
+
+    // fixture 里有 12 个文件各一条。一次要得下时，"这一页"就是"总数"。
+    let whole = ask(100);
+    let payload = assert_ok(&whole);
+    assert_eq!(payload["truncated"], json!(false), "{payload}");
+    assert_eq!(payload["returned_matches"], json!(12), "{payload}");
+    assert_eq!(payload["total_matches"], json!(12), "{payload}");
+
+    // 截断之后总数是**不知道**，不是 5。以前这里回 5，读起来就像全项目只有 5 条。
+    let cut = ask(5);
+    let payload = assert_ok(&cut);
+    assert_eq!(payload["truncated"], json!(true), "{payload}");
+    assert_eq!(payload["returned_matches"], json!(5), "{payload}");
+    assert_eq!(payload["total_matches"], Value::Null, "{payload}");
+
+    // 同一个查询再跑一次，给的必须是同一批——否则"缩小范围再搜一次"没法照做。
+    let again = ask(5);
+    let paths = |value: &Value| {
+        value["matches"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paths(&cut), paths(&again), "两次跑给了不同的 5 条");
+    assert_eq!(
+        paths(&cut),
+        vec![
+            "search/bulk_00.txt",
+            "search/bulk_01.txt",
+            "search/bulk_02.txt",
+            "search/bulk_03.txt",
+            "search/bulk_04.txt",
+        ],
+        "遍历顺序应当按文件名排过序"
+    );
+}

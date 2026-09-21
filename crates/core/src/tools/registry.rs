@@ -1275,6 +1275,7 @@ pub fn input_schema(name: &str) -> Value {
                     "description": "Also search files .gitignore excludes, such as build output. gld's own data directory is never searched."
                 }
             },
+            "description": "returned_matches is what this call gives back; total_matches is the project-wide total and is null once truncated is true, because the scan stopped early. Directories are walked in file-name order, so the same query twice returns the same cut-short batch — narrow the query or raise max_results to see more.",
             "required": ["query"],
             "additionalProperties": false
         }),

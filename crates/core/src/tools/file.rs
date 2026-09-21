@@ -302,6 +302,8 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
     let mut hidden_skips = HiddenSkips::default();
     for entry in WalkDir::new(&resolved.path)
         .follow_links(false)
+        // 截断时给出的那一批要稳定，理由同 search_text。
+        .sort_by_file_name()
         .into_iter()
         // 被忽略的目录整棵不进，不是进去之后再逐个文件丢（审查 F03、验收 A14）。
         .filter_entry(|entry| {
@@ -547,6 +549,10 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     } else {
         for entry in WalkDir::new(&resolved.path)
             .follow_links(false)
+            // 目录项按文件名排序再走。结果被 max_results 截断时，同一个查询
+            // 两次跑必须给出同一批——否则"缩小范围再搜一次"这句建议没法照做
+            // （readdir 的顺序是文件系统说了算的，macOS 和 Linux 就不一样）。
+            .sort_by_file_name()
             .into_iter()
             .filter_entry(|entry| {
                 let keep = keep_walking_into(ws, &resolved.path, entry, include_hidden);
@@ -592,8 +598,8 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         ));
     }
 
-    // `total_matches` 一直是"这次返回了几条"，不是全项目的总数；三种模式下
-    // 它数的东西跟着 `max_results` 走（审查 F03 要求把这件事说清楚）。
+    // 这次返回了几条。三种模式下它数的东西不一样（匹配行 / 文件 / 文件），
+    // 跟着 `max_results` 走。
     let total = match output_mode {
         OutputMode::Content => matches.len(),
         OutputMode::FilesWithMatches => files.len(),
@@ -633,7 +639,11 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         "matches": matches,
         "files": files,
         "counts": counts,
-        "total_matches": total,
+        // 这一页返回了几条，和"整个项目一共有几条"是两码事。截断之后后者
+        // **不知道**，所以给 null——以前这里回的是这一页的条数，读起来就像
+        // "全项目就这么多"（方案 D：全局计数必须和提前终止的预览分开）。
+        "returned_matches": total,
+        "total_matches": if truncated { Value::Null } else { Value::from(total) },
         "truncated": truncated,
         "max_file_bytes": max_file_bytes,
         "skipped_large_files": skipped_large,
