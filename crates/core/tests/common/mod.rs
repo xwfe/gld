@@ -25,6 +25,12 @@ pub fn malicious_fixture() -> FixtureWorkspace {
     prepare_fixture("malicious-project", true)
 }
 
+/// A20 回放用的仓库：README、`.github/` 下的 workflow 和普通配置、一个会吐
+/// 长日志的构建脚本，外加一个**假的 `gh`**（`tools/gh`，不联网）。
+pub fn repo_maintenance_fixture() -> FixtureWorkspace {
+    prepare_fixture("repo-maintenance", false)
+}
+
 fn prepare_fixture(name: &str, symlink_escape: bool) -> FixtureWorkspace {
     let temp = tempfile::tempdir().expect("tempdir");
     let parent = temp.path();
@@ -183,6 +189,22 @@ pub fn ctx_with_allowed_commands(root: &Path, configured: &str) -> ToolContext {
         "full".into(),
         "trusted".into(),
     )
+}
+
+/// 白名单之外再把一个目录放到 PATH 前面。
+///
+/// A20 要"查看 CI 状态"，而这套测试没有 GitHub 授权、也不该联网。于是把假的
+/// `gh` 放进工作区的 `tools/`，用 `executable_paths` 让它排在系统 PATH 前面：
+/// 这样**不用改进程自己的环境变量**（`set_var` 是全进程的，会波及并行跑的
+/// 别的测试），本机装没装真 `gh` 也不影响结论。
+pub fn ctx_with_allowed_commands_and_path(
+    root: &Path,
+    configured: &str,
+    extra_path: &Path,
+) -> ToolContext {
+    let mut ctx = ctx_with_allowed_commands(root, configured);
+    ctx.executable_paths = vec![extra_path.to_path_buf()];
+    ctx
 }
 
 /// 关掉"读只许在 Workspace 内"的上下文。

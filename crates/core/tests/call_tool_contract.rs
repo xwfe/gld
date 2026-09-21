@@ -2059,3 +2059,69 @@ fn the_servers_own_internal_keys_are_not_mistaken_for_client_mistakes() {
     );
     assert_ok(&out);
 }
+
+/// 零结果的第四种："这下面确实没有，但有一棵目录我压根没进去"（U5，验收 A14）。
+///
+/// `.github` 是点开头的，默认不搜。以前这种情况报的是"searched N file(s),
+/// none contained the query"——话没错，但它和"这个仓库真的没有 workflow"
+/// 长得一模一样，而下一步完全不同：一个是换关键词，一个是加 include_hidden。
+#[test]
+fn a_search_that_never_entered_a_dot_directory_says_so() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::create_dir_all(dir.path().join(".github/workflows")).expect("mkdir");
+    fs::write(
+        dir.path().join(".github/workflows/ci.yml"),
+        "runs-on: ubuntu-latest\n",
+    )
+    .expect("workflow");
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").expect("src");
+    // 这一棵是 include_ignored 管的，不该被算成"隐藏目录"。
+    fs::create_dir_all(dir.path().join("node_modules/x")).expect("mkdir");
+    fs::write(dir.path().join("node_modules/x/i.js"), "runs-on\n").expect("dep");
+    let ctx = ctx_for(dir.path());
+
+    let blind = invoke(&ctx, "search_text", json!({"query": "runs-on"}));
+    let payload = assert_ok(&blind);
+    assert_eq!(payload["total_matches"], json!(0), "{payload}");
+    assert_eq!(payload["skipped_hidden_dirs"], json!(1), "{payload}");
+    let warnings = payload["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        warnings.iter().any(|w| {
+            let text = w.as_str().unwrap_or_default();
+            text.contains(".github") && text.contains("include_hidden=true")
+        }),
+        "没说清 .github 整棵没搜：{payload}"
+    );
+    // 两句话都要在：搜过的那些里没有，另外还有一棵没进去。
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("none contained")),
+        "{payload}"
+    );
+
+    // 加上开关就找得到，而且不再提这句。
+    let seeing = invoke(
+        &ctx,
+        "search_text",
+        json!({"query": "runs-on", "include_hidden": true}),
+    );
+    let payload = assert_ok(&seeing);
+    assert_eq!(payload["total_matches"], json!(1), "{payload}");
+    assert_eq!(payload["skipped_hidden_dirs"], json!(0), "{payload}");
+
+    // list_files 是同一件事：`**/*.yml` 空手而归时也得说为什么。
+    let listed = invoke(&ctx, "list_files", json!({"patterns": ["**/*.yml"]}));
+    let payload = assert_ok(&listed);
+    assert!(payload["files"].as_array().is_some_and(|f| f.is_empty()));
+    assert!(
+        payload["warnings"]
+            .as_array()
+            .map(|w| w.iter().any(|item| item
+                .as_str()
+                .unwrap_or_default()
+                .contains("include_hidden=true")))
+            .unwrap_or(false),
+        "{payload}"
+    );
+}

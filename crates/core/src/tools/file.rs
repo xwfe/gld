@@ -184,12 +184,18 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
     // 有多少文件是被 patterns 挡在外面的。零结果时用它区分"这下面根本没文件"
     // 和"有文件但 glob 没对上"（审查 F02）。
     let mut rejected_by_pattern = 0usize;
+    let mut hidden_skips = HiddenSkips::default();
     for entry in WalkDir::new(&resolved.path)
         .follow_links(false)
         .into_iter()
         // 被忽略的目录整棵不进，不是进去之后再逐个文件丢（审查 F03、验收 A14）。
         .filter_entry(|entry| {
-            keep_walking_into(ws, &resolved.path, entry, include_hidden || include_ignored)
+            let hidden_allowed = include_hidden || include_ignored;
+            let keep = keep_walking_into(ws, &resolved.path, entry, hidden_allowed);
+            if !keep && !hidden_allowed {
+                hidden_skips.note(ws, entry);
+            }
+            keep
         })
         .filter_map(Result::ok)
     {
@@ -233,10 +239,15 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
         warnings.push(format!(
             "result limit reached ({max_results}); give a deeper path or a narrower pattern"
         ));
-    } else if files.is_empty() && rejected_by_pattern > 0 {
-        warnings.push(format!(
-            "{rejected_by_pattern} file(s) were rejected by patterns. Patterns match the path relative to the WORKSPACE ROOT, not to `path` — under path=\"crates\" the pattern \"exec.rs\" matches nothing; write \"**/exec.rs\"."
-        ));
+    } else if files.is_empty() {
+        if rejected_by_pattern > 0 {
+            warnings.push(format!(
+                "{rejected_by_pattern} file(s) were rejected by patterns. Patterns match the path relative to the WORKSPACE ROOT, not to `path` — under path=\"crates\" the pattern \"exec.rs\" matches nothing; write \"**/exec.rs\"."
+            ));
+        }
+        if let Some(note) = hidden_skips.warning("listed") {
+            warnings.push(note);
+        }
     }
     Ok(tool_ok(json!({
         "path": resolved.display,
@@ -244,6 +255,7 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
         "truncated": truncated,
         "glob_base": "workspace",
         "rejected_by_pattern": rejected_by_pattern,
+        "skipped_hidden_dirs": hidden_skips.count,
         "warnings": warnings
     })))
 }
@@ -414,13 +426,20 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         true
     };
 
+    let mut hidden_skips = HiddenSkips::default();
     if resolved.path.is_file() {
         let _ = consider_file(&resolved.path);
     } else {
         for entry in WalkDir::new(&resolved.path)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|entry| keep_walking_into(ws, &resolved.path, entry, include_hidden))
+            .filter_entry(|entry| {
+                let keep = keep_walking_into(ws, &resolved.path, entry, include_hidden);
+                if !keep && !include_hidden {
+                    hidden_skips.note(ws, entry);
+                }
+                keep
+            })
             .filter_map(Result::ok)
         {
             if !entry.file_type().is_file() {
@@ -484,6 +503,11 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
                 "searched {scanned} file(s), none contained the query"
             ));
         }
+        // 上面那句说的是"搜过的那些里没有"。搜没搜到整棵 `.github` 是另一回事，
+        // 两句话要同时在。
+        if let Some(note) = hidden_skips.warning("searched") {
+            warnings.push(note);
+        }
     }
     Ok(tool_ok(json!({
         "query": query,
@@ -509,6 +533,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         "lines_truncated_for_search": long_lines,
         "rejected_by_glob": rejected_by_glob,
         "rejected_by_type": rejected_by_type,
+        "skipped_hidden_dirs": hidden_skips.count,
         "warnings": warnings
     })))
 }
@@ -1152,6 +1177,46 @@ fn keep_walking_into(
         return true;
     }
     !ws.is_ignored_path(entry.path(), include_hidden, false)
+}
+
+/// 剪掉的目录里，有几棵是**因为点开头**才没进去的。
+///
+/// `.github` 默认不进，于是"这个仓库没有 workflow"和"workflow 在一棵没进去的
+/// 目录里"长得一模一样——零结果的时候必须分得出来（验收 A14；U5 回放仓库维护
+/// 流程时撞到的）。
+///
+/// 只在剪枝那一刻数：目录整棵不进，里面的文件根本不会出现在任何计数里。
+#[derive(Default)]
+struct HiddenSkips {
+    count: usize,
+    examples: Vec<String>,
+}
+
+impl HiddenSkips {
+    /// `entry` 刚被剪掉。判据是"改成 include_hidden=true 就会进去"——
+    /// `node_modules`、`target` 那一类另有开关（`include_ignored`），
+    /// `.git` 两个开关都不开，都不算在这里。
+    fn note(&mut self, ws: &Workspace, entry: &walkdir::DirEntry) {
+        if !entry.file_type().is_dir() || ws.is_ignored_path(entry.path(), true, false) {
+            return;
+        }
+        self.count += 1;
+        if self.examples.len() < 3 {
+            self.examples
+                .push(relative_display(ws.root(), entry.path()));
+        }
+    }
+
+    fn warning(&self, verb: &str) -> Option<String> {
+        if self.count == 0 {
+            return None;
+        }
+        Some(format!(
+            "{} hidden directory(ies) were not {verb} ({}); dot-directories such as .github are skipped unless include_hidden=true",
+            self.count,
+            self.examples.join(", ")
+        ))
+    }
 }
 
 fn string_list_arg(args: &Value, key: &str) -> Vec<String> {

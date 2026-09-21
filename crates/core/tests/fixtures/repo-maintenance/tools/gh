@@ -1,0 +1,14 @@
+#!/bin/sh
+# 假的 gh。只为把"查看 CI 状态"这一步接上：不联网、不认证、不读任何凭据。
+# 真 gh 连只读命令也要 token，而这套测试没有 GitHub 授权，所以这一步的证据
+# 算**合成远端**，不能当成真机验过。
+case "$1 $2" in
+  "run list")
+    printf 'completed\tsuccess\tci\tmain\tpush\t17042\t1m20s\n'
+    printf 'completed\tfailure\tci\tmain\tpush\t17041\t0m58s\n'
+    ;;
+  *)
+    echo "fake gh: unsupported: $*" >&2
+    exit 2
+    ;;
+esac
