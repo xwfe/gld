@@ -18,20 +18,20 @@
 //! 也就是说，"gld 能看 CI 状态"这句话在这里只被验到**策略和执行这一段**：
 //! 只读子命令放行、写操作被拒、输出拿得回来。真 `gh` 认证之后还会不会有别的
 //! 问题，这条测试证明不了。
+//!
+//! **整个文件只在 unix 上编译**：假 `gh` 是带 shebang 的 sh 脚本，Windows 上
+//! 跑不起来。只给那条用例加 `#[cfg(unix)]` 是不够的——剩下的 `use` 和两个辅助
+//! 函数就成了没人用的东西，Windows 上 `-D warnings` 直接编译失败。
+
+#![cfg(unix)]
 
 mod common;
 
 use common::*;
 use serde_json::{json, Value};
 
-#[cfg(windows)]
-const TEST_PYTHON: &str = "python";
-#[cfg(not(windows))]
 const TEST_PYTHON: &str = "python3";
 
-/// 假 `gh` 是带 shebang 的 sh 脚本，Windows 上跑不起来；整条流程因此只在
-/// unix 上回放。Windows 那边只有编译和其余用例在 CI 里跑过。
-#[cfg(unix)]
 #[test]
 fn a_repository_maintenance_round_trip_holds_together_end_to_end() {
     let fx = repo_maintenance_fixture();
