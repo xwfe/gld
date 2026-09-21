@@ -98,6 +98,13 @@ fn tool_call_parses_the_three_argument_forms() {
 ///
 /// 这是 `gld tool` 的行为契约，也是 `App` 缓存 ToolContext 的唯一理由。
 /// 需要一个能长时间运行且在命令白名单里的程序，用 node；没有就跳过。
+///
+/// **不要拿 `yield_time_ms` 窗口里的 stdout 当判据。**那个窗口从进程起来之前
+/// 开始算，里面装着 fork/exec 加 node 的冷启动；机器一忙就装不下，于是这条
+/// 测试在 CI 上偶发挂在 `left: Some("")`。本机用 `taskpolicy -b` 把优先级压到
+/// 后台，6 轮能复现 3 轮——node 自己 `console.log("ok")` 在那个条件下就要
+/// 0.15–0.54 秒。所以"命令真的跑了"这件事改由守护进程那一段轮询 `read_output`
+/// 来证，直连那一段只证它该证的：换个进程就看不见这个会话。
 #[test]
 fn exec_sessions_survive_between_calls_only_through_the_daemon() {
     if Command::new("node").arg("--version").output().is_err() {
@@ -121,7 +128,6 @@ fn exec_sessions_survive_between_calls_only_through_the_daemon() {
         .as_str()
         .expect("session id")
         .to_string();
-    assert_eq!(started["stdout"].as_str(), Some("ok\n"));
     let orphan = env.gld(&[
         "--json",
         "tool",
@@ -147,15 +153,24 @@ fn exec_sessions_survive_between_calls_only_through_the_daemon() {
         .as_str()
         .expect("session id")
         .to_string();
-    let read = env.json(&[
-        "--json",
-        "tool",
-        "call",
-        "read_output",
-        &format!("output_ref=session:{session}:stdout"),
-    ]);
-    assert_eq!(read["ok"], true, "{read:#}");
-    assert_eq!(read["content"].as_str(), Some("ok\n"));
+    // 会话活着，输出留在守护进程里——所以可以一直问，直到 node 真的打出来。
+    // 这既证明了会话跨调用还在，也证明了命令确实跑了，而且不跟冷启动赛跑。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let read = loop {
+        let read = env.json(&[
+            "--json",
+            "tool",
+            "call",
+            "read_output",
+            &format!("output_ref=session:{session}:stdout"),
+        ]);
+        assert_eq!(read["ok"], true, "{read:#}");
+        if read["content"].as_str() == Some("ok\n") || std::time::Instant::now() >= deadline {
+            break read;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    assert_eq!(read["content"].as_str(), Some("ok\n"), "{read:#}");
 
     let _ = env.gld(&[
         "tool",
