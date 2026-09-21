@@ -562,6 +562,9 @@ struct Hunk {
     /// Codex `@@ <line>` header: the old lines are looked for after the
     /// first line equal to this one.
     anchor: Option<String>,
+    /// `@@ -a,b` 里的 `b`：这个 hunk **声称**动了多少行旧内容。
+    /// 裸 `@@` 没有这个数，是 `None`。
+    declared_old_count: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -618,6 +621,7 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
             }
             current_hunk = Some(Hunk {
                 old_start: unified_old_start(line),
+                declared_old_count: unified_old_count(line),
                 ..Hunk::default()
             });
         } else if let Some(ref mut hunk) = current_hunk {
@@ -640,7 +644,48 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
     if let Some(f) = current.take() {
         files.push(f);
     }
+    for file in &files {
+        for hunk in &file.hunks {
+            check_declared_old_count(&file.path, hunk)?;
+        }
+    }
     Ok(files)
+}
+
+/// `@@ -a,b` 说动了 b 行旧内容，正文里却不是 b 行：当场拒，别按正文办。
+///
+/// 为什么不"按正文办就完了"——正文确实是真正的指令，但数字对不上意味着**写补丁
+/// 的人对这个文件的认识和文件本身不一样**。`@@ -10,5 @@` 只给了 3 行删除，作者
+/// 以为自己换掉了 5 行；我们照 3 行办、还回一个 ok，他不会知道（审查 A07）。
+/// `git apply` 在这种补丁上也是报 "corrupt patch"。
+///
+/// 数不准就别写数字：裸 `@@` 一直支持，报错里也是这么说的。
+fn check_declared_old_count(path: &str, hunk: &Hunk) -> Result<(), WorkspaceError> {
+    let Some(declared) = hunk.declared_old_count else {
+        return Ok(());
+    };
+    let actual = hunk
+        .lines
+        .iter()
+        .filter(|line| matches!(line, HunkLine::Remove(_) | HunkLine::Context(_)))
+        .count();
+    if declared == actual {
+        return Ok(());
+    }
+    Err(WorkspaceError::ToolDetails {
+        code: "PATCH_FAILED",
+        message: format!(
+            "{path}: the hunk header says {declared} old line(s) but the hunk body has {actual} (removed plus context). Fix the count, or write a bare @@ header and let the context decide."
+        ),
+        category: "validation",
+        retryable: false,
+        details: json!({
+            "path": path,
+            "declared_old_lines": declared,
+            "actual_old_lines": actual,
+            "files_changed": false
+        }),
+    })
 }
 
 fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
@@ -1047,6 +1092,17 @@ fn find_hunk_position(
     match expected {
         Some(expected) => matches.min_by_key(|&i| i.abs_diff(expected)),
         None => matches.next(),
+    }
+}
+
+/// `@@ -a,b +c,d @@` 里的 `b`：这个 hunk 声称动了多少行旧内容。
+///
+/// 裸 `@@` 和写不出数字的头都是 `None`——那种写法本来就没声称什么，不该因此被拒。
+fn unified_old_count(header: &str) -> Option<usize> {
+    let old = header.strip_prefix("@@ -")?.split_whitespace().next()?;
+    match old.split_once(',') {
+        Some((_, count)) => count.parse::<usize>().ok(),
+        None => Some(1),
     }
 }
 

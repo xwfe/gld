@@ -2318,3 +2318,239 @@ fn a_cut_short_search_says_it_does_not_know_the_total_and_stays_reproducible() {
         "遍历顺序应当按文件名排过序"
     );
 }
+
+/// `@@ -a,b` 说动了 b 行旧内容，正文里却不是 b 行（验收 A07）。
+///
+/// 正文确实是真正的指令，照着办还能得出"对"的结果——但数字对不上意味着写补丁
+/// 的人对这个文件的认识和文件本身不一样。`@@ -2,3 @@` 只给两行删除，作者以为
+/// 自己动了三行，我们照两行办、还回一个 ok，他永远不会知道。
+#[test]
+fn a_hunk_header_that_miscounts_its_own_body_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("h.txt"), "a\nb\nc\nd\n").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    let out = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": "--- a/h.txt\n+++ b/h.txt\n@@ -2,3 +2,3 @@\n-b\n-c\n+B\n+C\n"}),
+    );
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "PATCH_FAILED", "{error}");
+    assert_eq!(error["error"]["details"]["declared_old_lines"], json!(3));
+    assert_eq!(error["error"]["details"]["actual_old_lines"], json!(2));
+    assert_eq!(error["error"]["details"]["files_changed"], json!(false));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("h.txt")).expect("read"),
+        "a\nb\nc\nd\n",
+        "被拒的补丁不能落盘"
+    );
+
+    // 数不准就别写数字：裸 @@ 一直支持，报错里也是这么说的。
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bare @@"),
+        "{error}"
+    );
+    let bare = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": "--- a/h.txt\n+++ b/h.txt\n@@\n-b\n-c\n+B\n+C\n"}),
+    );
+    assert_ok(&bare);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("h.txt")).expect("read"),
+        "a\nB\nC\nd\n"
+    );
+
+    // 数对了当然照走；纯插入的 `-a,0` 也不能被这条规则误伤。
+    let counted = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": "--- a/h.txt\n+++ b/h.txt\n@@ -1,0 +1,1 @@\n+zero\n"}),
+    );
+    assert_ok(&counted);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("h.txt")).expect("read"),
+        "a\nzero\nB\nC\nd\n"
+    );
+}
+
+/// 文件末尾没有换行符的，改完还是不能有（验收 A11）。
+///
+/// 多一个换行符在 diff 里是一整行改动，`.gitignore`、`VERSION`、证书这类文件
+/// 尤其常见。工具悄悄补一个，人看 git diff 才发现。
+#[test]
+fn a_file_without_a_trailing_newline_does_not_grow_one() {
+    let dir = tempfile::tempdir().expect("workspace");
+    fs::write(dir.path().join("n.txt"), "one\ntwo").expect("write");
+    let ctx = ctx_for(dir.path());
+
+    assert_ok(&invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": "--- a/n.txt\n+++ b/n.txt\n@@\n-one\n+ONE\n"}),
+    ));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("n.txt")).expect("read"),
+        "ONE\ntwo",
+        "末尾不能被补上换行符"
+    );
+
+    // 反过来：本来有末尾换行的，改完也不能丢。
+    fs::write(dir.path().join("y.txt"), "one\ntwo\n").expect("write");
+    assert_ok(&invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": "--- a/y.txt\n+++ b/y.txt\n@@\n-two\n+TWO\n"}),
+    ));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("y.txt")).expect("read"),
+        "one\nTWO\n"
+    );
+}
+
+/// 一次补丁里几十个文件全失败时，返回值不能跟着涨（验收 A18）。
+///
+/// 每个失败都带上下文和建议重读范围，30 个就是一大段；模型的上下文是有限的，
+/// 而它需要的只是"前几个长什么样、一共多少个"。
+#[test]
+fn a_failure_response_stays_bounded_when_everything_fails() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let ctx = ctx_for(dir.path());
+    let mut patch = String::new();
+    for index in 0..30 {
+        fs::write(dir.path().join(format!("f{index:02}.txt")), "real\n").expect("write");
+        patch.push_str(&format!(
+            "--- a/f{index:02}.txt\n+++ b/f{index:02}.txt\n@@\n-nothing like this\n+x\n"
+        ));
+    }
+
+    let out = invoke(&ctx, "apply_patch", json!({"patch": patch}));
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "PATCH_FAILED", "{error}");
+    let details = &error["error"]["details"];
+    assert_eq!(details["problem_count"], json!(30), "总数要说全");
+    assert_eq!(
+        details["diagnostics"].as_array().map(Vec::len),
+        Some(20),
+        "列出来的要封顶"
+    );
+    assert_eq!(details["diagnostics_truncated"], json!(true));
+    assert_eq!(details["files_changed"], json!(false));
+    for index in 0..30 {
+        assert_eq!(
+            fs::read_to_string(dir.path().join(format!("f{index:02}.txt"))).expect("read"),
+            "real\n"
+        );
+    }
+}
+
+/// 分页的接缝不能劈开一个多字节字符，而"还在跑"和"读完了"要分得开（验收 A15）。
+///
+/// 劈开的后果是每一页接缝上都多出一个 U+FFFD 替换字符——那不是命令输出的内容，
+/// 而模型会当成真的。
+#[test]
+fn paging_output_never_splits_a_character_and_says_whether_the_stream_ended() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_with_allowed_commands(&fx.root, TEST_PYTHON);
+    let started = invoke(
+        &ctx,
+        "exec_command",
+        json!({
+            // 一个汉字 3 字节，和下面 limit=10 的分页边界必然对不齐。
+            // 用 argv：引号在这里是数据，走 cmd 的话会被 shell 词法吃掉。
+            "argv": [TEST_PYTHON, "-c", "print('中'*300)"],
+            "timeout_ms": 30_000,
+            "yield_time_ms": 30_000,
+            "max_output_bytes": 16
+        }),
+    );
+    let payload = assert_ok(&started);
+    assert_eq!(payload["command_ok"], json!(true), "{payload}");
+    let stdout_ref = payload["output_refs"]["stdout"]
+        .as_str()
+        .expect("stdout ref")
+        .to_string();
+
+    let mut offset = 0u64;
+    let mut text = String::new();
+    let mut pages = 0;
+    let last = loop {
+        let page = invoke(
+            &ctx,
+            "read_output",
+            json!({"output_ref": &stdout_ref, "offset": offset, "limit": 10}),
+        );
+        let page = assert_ok(&page).clone();
+        let content = page["content"].as_str().unwrap_or_default();
+        assert!(
+            !content.contains('\u{FFFD}'),
+            "第 {pages} 页接缝上劈出了替换字符：{page}"
+        );
+        text.push_str(content);
+        pages += 1;
+        assert!(pages < 200, "分页没走到头：{page}");
+        match page["next_offset"].as_u64() {
+            Some(next) => {
+                assert!(next > offset, "next_offset 没有前进：{page}");
+                offset = next;
+            }
+            None => break page,
+        }
+    };
+    assert_eq!(text, format!("{}\n", "中".repeat(300)));
+    // 进程已经退了、也读到了尾：complete=true，running=false。
+    assert_eq!(last["complete"], json!(true), "{last}");
+    assert_eq!(last["running"], json!(false), "{last}");
+}
+
+/// 命令还在跑、此刻没有新字节：`next_offset` 是空，但那**不是"读完了"**
+/// （验收 A15，复现 E08 的另一半）。
+///
+/// 两者长得一样，下一步却相反：一个是接着等，一个是可以收工。所以
+/// `complete` 和 `running` 才是判据，`next_offset=null` 只表示"现在没有更多"。
+#[test]
+fn a_still_running_command_with_nothing_new_is_not_the_same_as_finished() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_with_allowed_commands(&fx.root, TEST_PYTHON);
+    let started = invoke(
+        &ctx,
+        "exec_command",
+        json!({
+            "argv": [TEST_PYTHON, "-u", "-c", "import time; print('first'); time.sleep(30)"],
+            "timeout_ms": 45_000,
+            "yield_time_ms": 1_500
+        }),
+    );
+    let payload = assert_ok(&started).clone();
+    let session = payload["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    let stdout_ref = payload["output_refs"]["stdout"]
+        .as_str()
+        .expect("stdout ref")
+        .to_string();
+
+    let page = invoke(
+        &ctx,
+        "read_output",
+        json!({"output_ref": &stdout_ref, "offset": 0, "limit": 4_096}),
+    );
+    let page = assert_ok(&page).clone();
+    assert_eq!(page["content"], "first\n", "{page}");
+    // 已经读到当前的尾了，所以没有下一页……
+    assert_eq!(page["next_offset"], Value::Null, "{page}");
+    // ……但流还没结束，别把"现在没有更多"当成"读完了"。
+    assert_eq!(page["complete"], json!(false), "{page}");
+    assert_eq!(page["running"], json!(true), "{page}");
+
+    assert_ok(&invoke(
+        &ctx,
+        "kill_session",
+        json!({"session_id": session}),
+    ));
+}
