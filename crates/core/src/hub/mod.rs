@@ -1016,12 +1016,19 @@ fn remote_failure(tool: &str, member: &CcnmMember, error: PeerError) -> Value {
         // 「断在半路」是两回事：那边什么都没做，重试也没用，要升级 ccnm。
         PeerError::Unsupported { .. } => ("REMOTE_TOOL_UNSUPPORTED", "validation", false),
     };
+    // 拒绝是照着对面哪一份能力做的，说出来才判断得了"我升过 ccnm 了吗"、
+    // "是不是连错机器了"（跨仓评审 X10：能力代次不用另造，握手的 serverInfo
+    // 加 tools/list 就是）。只有这一种错有这份依据——别的错发生在核对之前。
+    let mut details = json!({ "workspace": remote_ref(member) });
+    if let PeerError::Unsupported { remote, .. } = &error {
+        details["remote_capabilities"] = remote.to_value();
+    }
     tool_err(WorkspaceError::ToolDetails {
         code,
         message: format!("{tool} on remote workspace {}: {error}", member.name),
         category,
         retryable,
-        details: json!({ "workspace": remote_ref(member) }),
+        details,
     })
 }
 
@@ -1107,9 +1114,19 @@ fn coding_failure(tool_name: &str, member: &CcnmMember, error: CodingError) -> V
         // （RFC-0002 5.4 / 验收项 H07）。
         // 远端没这个工具 / 不收这个参数：调用根本没发出去，远端什么都没做。
         // 绝不能报成 outcome unknown——那会让人去远端翻有没有半截的改动。
-        CodingError::Peer(PeerError::Unsupported { tool, argument }) => {
-            remote_failure(tool_name, member, PeerError::Unsupported { tool, argument })
-        }
+        CodingError::Peer(PeerError::Unsupported {
+            tool,
+            argument,
+            remote,
+        }) => remote_failure(
+            tool_name,
+            member,
+            PeerError::Unsupported {
+                tool,
+                argument,
+                remote,
+            },
+        ),
         CodingError::Peer(peer) => {
             let unknown = matches!(
                 peer,

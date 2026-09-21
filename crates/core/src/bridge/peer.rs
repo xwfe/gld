@@ -72,6 +72,16 @@ pub enum PeerError {
         tool: String,
         /// 工具本身没有时是 `None`。
         argument: Option<String>,
+        /// 判这次拒绝时，对面报的是哪一份能力（`serverInfo` + 工具表）。
+        ///
+        /// 拒绝的话一直是"升级那台机器上的 ccnm"，却从没说过对面**现在**是
+        /// 哪一版——于是没法判断"我升过了吗"，也没法判断"是不是连错机器了"
+        /// （跨仓评审 X10）。
+        ///
+        /// 装箱：`PeerError` 是所有远端调用的 `Err` 类型，这一份能力表有
+        /// 一百多字节，直接摊进枚举会把每一次成功调用的返回值也撑大
+        /// （clippy 的 `result_large_err`）。错误路径是冷的，多一次分配无所谓。
+        remote: Box<super::session::RemoteGeneration>,
     },
 }
 
@@ -111,16 +121,22 @@ impl std::fmt::Display for PeerError {
             PeerError::Unsupported {
                 tool,
                 argument: None,
+                remote,
             } => write!(
                 f,
-                "the ccnm on that machine has no {tool} tool, so the call was not sent: that runtime's ccnm is older than the remote tools listed here. Upgrade ccnm on that machine"
+                "the ccnm on that machine has no {tool} tool, so the call was not sent: that runtime's ccnm is older than the remote tools listed here. It reports itself as {} with {} tool(s). Upgrade ccnm on that machine",
+                remote.label(),
+                remote.tool_count
             ),
             PeerError::Unsupported {
                 tool,
                 argument: Some(argument),
+                remote,
             } => write!(
                 f,
-                "the ccnm on that machine does not take {argument} on {tool}, so the call was not sent: that runtime's ccnm is older than the remote tools listed here and would have ignored it, doing something else instead. Upgrade ccnm on that machine, or call {tool} without {argument}"
+                "the ccnm on that machine does not take {argument} on {tool}, so the call was not sent: that runtime's ccnm is older than the remote tools listed here and would have ignored it, doing something else instead. It reports itself as {} with {} tool(s). Upgrade ccnm on that machine, or call {tool} without {argument}",
+                remote.label(),
+                remote.tool_count
             ),
         }
     }

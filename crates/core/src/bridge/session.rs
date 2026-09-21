@@ -55,7 +55,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::member::{CcnmMember, Mode};
 use super::peer::{ChildTransport, Peer, PeerError, Transport};
@@ -166,13 +166,58 @@ struct Live {
 pub struct Offered {
     /// 工具名 → 它的 `inputSchema.properties` 里的键。
     tools: HashMap<String, HashSet<String>>,
+    /// 这份工具表是谁给的、长什么样。见 [`RemoteGeneration`]。
+    generation: RemoteGeneration,
+}
+
+/// 判断依据的出处：这次拒绝是照着**对面哪一份能力**做的。
+///
+/// 拒绝的话一直是"那台机器上的 ccnm 太老了，升级它"，但从没说过对面到底是
+/// 哪一版——于是没法判断"我升过了吗"，也没法判断"是不是连错机器了"
+/// （跨仓评审 X10：源码、构建、部署与客户端可见能力要有一条可核对的链）。
+///
+/// 不另造版本号：**握手报的 `serverInfo` 加 `tools/list` 就是能力代次**。
+/// `digest` 把工具名和各自的参数名排序后哈希，两份不同的工具表数不一样；
+/// 对面什么都没报时是 `None`——说不知道，不编。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteGeneration {
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub tool_count: usize,
+    pub digest: String,
+}
+
+impl RemoteGeneration {
+    /// 给人看的一行："ccnm 0.8.0"。对面没报就是 "unknown"。
+    pub fn label(&self) -> String {
+        match (&self.server_name, &self.server_version) {
+            (Some(name), Some(version)) => format!("{name} {version}"),
+            (Some(name), None) => name.clone(),
+            (None, Some(version)) => format!("unknown {version}"),
+            (None, None) => "unknown".to_string(),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        json!({
+            "server_name": self.server_name,
+            "server_version": self.server_version,
+            "tool_count": self.tool_count,
+            "tools_digest": self.digest
+        })
+    }
 }
 
 impl Offered {
     /// 从 `tools/list` 的结果里读。看不懂的条目跳过：这里宁可少记一个工具
     /// （调用时报"远端没有"），也不要凭空假设它有。
     pub fn from_tools(tools: &[Value]) -> Offered {
-        let mut map = HashMap::new();
+        Offered::from_handshake(tools, None)
+    }
+
+    /// 同上，外加握手时那份 `serverInfo`。
+    pub fn from_handshake(tools: &[Value], server_info: Option<&Value>) -> Offered {
+        let mut map: HashMap<String, HashSet<String>> = HashMap::new();
         for tool in tools {
             let Some(name) = tool.get("name").and_then(Value::as_str) else {
                 continue;
@@ -185,7 +230,27 @@ impl Offered {
                 .unwrap_or_default();
             map.insert(name.to_string(), arguments);
         }
-        Offered { tools: map }
+        let digest = tools_digest(&map);
+        let generation = RemoteGeneration {
+            server_name: server_info
+                .and_then(|info| info.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            server_version: server_info
+                .and_then(|info| info.get("version"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            tool_count: map.len(),
+            digest,
+        };
+        Offered {
+            tools: map,
+            generation,
+        }
+    }
+
+    pub fn generation(&self) -> &RemoteGeneration {
+        &self.generation
     }
 
     /// 这次调用能不能发出去。
@@ -194,6 +259,7 @@ impl Offered {
             return Err(PeerError::Unsupported {
                 tool: tool.to_string(),
                 argument: None,
+                remote: Box::new(self.generation.clone()),
             });
         };
         let Some(given) = arguments.as_object() else {
@@ -210,10 +276,32 @@ impl Offered {
             Some(argument) => Err(PeerError::Unsupported {
                 tool: tool.to_string(),
                 argument: Some((*argument).clone()),
+                remote: Box::new(self.generation.clone()),
             }),
             None => Ok(()),
         }
     }
+}
+
+/// 把工具表压成一个短摘要。
+///
+/// 排序之后再哈希：`HashMap` / `HashSet` 的遍历顺序每次进程都不一样，不排序
+/// 的话同一份工具表每次算出的数都不同，那这个摘要就什么也证明不了。
+fn tools_digest(tools: &HashMap<String, HashSet<String>>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut lines: Vec<String> = tools
+        .iter()
+        .map(|(name, arguments)| {
+            let mut arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+            arguments.sort_unstable();
+            format!("{name}({})", arguments.join(","))
+        })
+        .collect();
+    lines.sort();
+    let mut hasher = DefaultHasher::new();
+    lines.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// 丢掉一条连接就等于关掉它：先让对面读到 EOF，再等它退出。
@@ -787,12 +875,17 @@ impl Connections {
             .initialize(CLIENT_NAME, self.handshake_timeout)
             .and_then(|_| peer.list_tools(self.handshake_timeout));
         match opened {
-            Ok(tools) => Ok(Live {
-                peer,
-                last_used: Instant::now(),
-                offered: Offered::from_tools(&tools),
-                background: 0,
-            }),
+            Ok(tools) => {
+                // 能力代次就是"握手报的 serverInfo + 这份工具表"，两样都在这儿，
+                // 一起存进 `Offered`：拒绝的时候要说清是照着谁判的（跨仓 X10）。
+                let offered = Offered::from_handshake(&tools, peer.server_info());
+                Ok(Live {
+                    peer,
+                    last_used: Instant::now(),
+                    offered,
+                    background: 0,
+                })
+            }
             Err(error) => {
                 peer.shutdown(CLOSE_GRACE);
                 Err(error)
@@ -902,7 +995,7 @@ mod tests {
             let result = match method {
                 "initialize" => json!({
                     "protocolVersion": super::super::peer::PROTOCOL_VERSION,
-                    "serverInfo": { "name": "ccnm" }
+                    "serverInfo": { "name": "ccnm", "version": "0.7.1" }
                 }),
                 // 握手之后 gld 会问一次远端有哪些工具（`Offered`）。
                 "tools/list" => json!({ "tools": self.offers.clone() }),
@@ -1579,7 +1672,7 @@ mod tests {
             )
             .expect_err("老版本远端没有这个工具");
         assert!(
-            matches!(&error, PeerError::Unsupported { tool, argument: None } if tool == "stop_command"),
+            matches!(&error, PeerError::Unsupported { tool, argument: None, .. } if tool == "stop_command"),
             "{error}"
         );
         assert!(error.to_string().contains("Upgrade ccnm"), "{error}");
@@ -1600,6 +1693,45 @@ mod tests {
     /// 这条比上一条更要紧：ccnm 的参数结构体不拒绝不认识的字段，所以老版本
     /// 收到 `run_in_background` 会**悄悄忽略**它，前台跑满 timeout，而模型
     /// 以为自己起了一个后台命令。
+    /// 工具表摘要要稳定，不然它什么也证明不了。
+    ///
+    /// `HashMap` / `HashSet` 的遍历顺序每个进程都不一样，不排序就哈希的话，
+    /// 同一份工具表每次算出的数都不同——读的人会以为对面换了版本。
+    #[test]
+    fn the_tool_digest_is_stable_for_the_same_table_and_moves_for_a_different_one() {
+        let tools = |extra: &[&str]| {
+            let mut properties = serde_json::Map::new();
+            for name in extra {
+                properties.insert((*name).to_string(), json!({ "type": "string" }));
+            }
+            vec![
+                json!({ "name": "read_file", "inputSchema": { "properties": { "path": {} } } }),
+                json!({ "name": "exec_command", "inputSchema": { "properties": properties } }),
+            ]
+        };
+        let info = json!({ "name": "ccnm", "version": "0.8.0" });
+
+        let a = Offered::from_handshake(&tools(&["cmd"]), Some(&info));
+        let b = Offered::from_handshake(&tools(&["cmd"]), Some(&info));
+        assert_eq!(
+            a.generation().digest,
+            b.generation().digest,
+            "同一份工具表两次算出的摘要必须一样"
+        );
+
+        // 多一个参数就是另一份能力表。
+        let c = Offered::from_handshake(&tools(&["cmd", "run_in_background"]), Some(&info));
+        assert_ne!(a.generation().digest, c.generation().digest);
+        assert_eq!(c.generation().label(), "ccnm 0.8.0");
+
+        // 对面什么都没报时说不知道，不编一个版本号出来。
+        let quiet = Offered::from_handshake(&tools(&["cmd"]), None);
+        assert_eq!(quiet.generation().label(), "unknown");
+        assert_eq!(quiet.generation().server_version, None);
+        // 但工具表还是那一份，摘要照样对得上。
+        assert_eq!(quiet.generation().digest, a.generation().digest);
+    }
+
     #[test]
     fn an_argument_the_remote_would_silently_ignore_is_refused() {
         let recorder = Recording::new();
@@ -1618,7 +1750,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                PeerError::Unsupported { tool, argument: Some(argument) }
+                PeerError::Unsupported { tool, argument: Some(argument), .. }
                     if tool == "exec_command" && argument == "run_in_background"
             ),
             "{error}"
@@ -1627,6 +1759,20 @@ mod tests {
             error.to_string().contains("would have ignored it"),
             "{error}"
         );
+        // 拒绝的话一直是"升级那台机器上的 ccnm"。**对面现在是哪一版**也得说，
+        // 否则没法判断"我升过了吗"，也没法判断"是不是连错机器了"（跨仓 X10）。
+        assert!(
+            error.to_string().contains("ccnm 0.7.1"),
+            "拒绝要说清是照着对面哪一版判的：{error}"
+        );
+        let PeerError::Unsupported { remote, .. } = &error else {
+            unreachable!()
+        };
+        assert_eq!(remote.server_name.as_deref(), Some("ccnm"));
+        assert_eq!(remote.server_version.as_deref(), Some("0.7.1"));
+        // 工具数跟着这条连接握手时读到的那份表走，不写死——夹具改了它也该跟着变。
+        assert!(remote.tool_count > 0, "{remote:?}");
+        assert_eq!(remote.digest.len(), 16, "摘要要有值：{remote:?}");
         assert_eq!(recorder.tool_calls(), 0);
 
         // 不带那个参数的同一个工具照常。
