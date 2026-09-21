@@ -575,3 +575,81 @@ E03 里那次失败给的全部信息是：`PATCH_FAILED` + `Hunk context did no
 **跨平台**：stdin 三态那条集成测试标了 `#[cfg(unix)]`（要 `cat` 和真实管道行为），Windows 上只有编译和其余测试在 CI 里跑，**没有手工验过**。`StdinPlan` 本身没有平台分支，关管道走的是 tokio 同一套。
 
 **U4 里没做的**：搜索结果的稳定续查游标——现在给的是"缩小范围怎么做"的建议加上明确的 `truncated`，方案 D 允许这两者取其一，游标要先定义稳定排序，单独排期更安全；真 PTY；`read_file` 的有界字节续读（现有的是按行续读加长行 warning）。
+
+### U5 第一批：参数名对不上就当场说（A19）
+
+**多给的参数以前会被悄悄扔掉。**每个工具的 schema 都写了
+`additionalProperties: false`，但那只是**给客户端看的声明**——真正决定行为的
+是代码读了哪几个 key。于是 `exec_command cmd=… timeout=600000`（真名是
+`timeout_ms`）会**成功**，用默认的 30 秒跑完，返回值里一个字都没提那个参数被
+忽略了。看着像"这条命令莫名其妙超时"，实际是参数根本没生效。这类错误最难查，
+因为它长得像成功。
+
+现在 `tools::args::reject_unknown` 按 schema 判：允许的名字直接从
+`registry::input_schema` 取（不另写一份表，两份迟早对不上，而客户端读的是
+schema 那份），多给就报 `INVALID_ARGUMENT`，`details` 里有
+`unknown_arguments`、`accepted_arguments` 和 `executed=false`。
+
+放在**策略判定之后**：`env` 被策略单独拒，理由是"服务端不让调用方设环境
+变量"，比"没有这个参数"有用；两道门都过不去时先报更能指导下一步的那个。
+下划线开头的键（`_host_session_key`，MCP server 自己注入）本来就不在 schema
+里，不拒。
+
+**这道门把三处已有漂移照了出来，一并修掉：**
+
+| 漂移 | 症状 | 修法 |
+| --- | --- | --- |
+| `search_text` 读 `include_ignored`，schema 里没写 | 客户端发现不了这个能力；加了门之后连发都发不了 | schema 补上，措辞和 `list_files` 一致 |
+| `cwd` 被当作 `workdir` 的别名读，schema 里没写 | 同上 | `exec_command` / `check_command` 都补上，注明"两个都给时 workdir 优先" |
+| `patch_check` 只收 `patch`，转手却调 `apply_patch` | 带 `confirm` 的 workflow 改动、notebook 编辑**没法先预检那一次真实调用**，预检回答的是另一个问题 | 收同一组参数，只差 `dry_run`——那是它自己定死的 `true`，收进来只会让人以为能关掉 |
+
+**测试**：单元测试扫工具源码里的 `args.get("x")`，每个名字都得有某个 schema
+声明它（否则那段代码在新门下是死的）；`env` 是唯一的例外，写了理由。外加三条
+契约测试：拼错名字被拒且报得出真名、`patch_check` 和 `apply_patch` 收同一组
+参数、服务端自己注入的内部键不被误伤。
+
+### U5 第二批：把仓库维护流程整个回放一遍（A20）
+
+`crates/core/tests/repo_maintenance_replay.rs` 一条用例串完
+**读仓库 → 查隐藏的 workflow → 改 README 和 workflow → 构建 → 读长日志 → 看 CI 状态**。
+故意不拆：接缝才是要验的东西——前一步返回什么、下一步能不能原样拿去用，拆成
+十条互不相干的小测试反而全看不到。
+
+**证据分三类**：
+
+| 类别 | 有没有 | 说明 |
+| --- | --- | --- |
+| 本地 | 有 | 读、搜、补丁、执行、分页，全部真跑 |
+| 合成远端 | 有 | `gh` 是 fixture 里的假脚本（`tools/gh`），不联网、不认证 |
+| 真实授权远端 | **没有** | 没有 GitHub 授权，一次真实请求都没发过 |
+
+也就是说，"gld 能看 CI 状态"这句话只被验到**策略和执行这一段**：只读子命令
+放行、`gh run rerun` 被拒、输出拿得回来。真 `gh` 认证之后还会不会有别的问题，
+这条测试证明不了。
+
+假 `gh` 是用 `ToolContext::executable_paths` 排到系统 PATH 前面的，**不动进程
+自己的环境变量**（`set_var` 是全进程的，会波及并行跑的别的测试）。顺带验到了
+U3 那条"裸名先查 PATH"：这台机器上装着真 `gh`（`/opt/homebrew/bin/gh`），
+而跑起来的是假的那个。
+
+**回放时撞出来一个新问题（A14）。**第一次搜 `runs-on` 是零结果——话没错，
+但报的是"searched N file(s), none contained the query"，这和"这个仓库真的没有
+workflow"长得一模一样，而下一步完全不同：一个是换关键词，一个是加
+`include_hidden`。现在 `search_text` 和 `list_files` 都在**剪枝那一刻**数有几棵
+点开头的目录没进去，零结果时多报一句，并回一个 `skipped_hidden_dirs`。
+判据是"改成 `include_hidden=true` 就会进去"，所以 `node_modules`（那是
+`include_ignored` 管的）和 `.git`（两个开关都不开）都不算在里面。
+
+**跨平台**：假 `gh` 是带 shebang 的 sh 脚本，整条回放只在 unix 上跑
+（`#[cfg(unix)]`）。Windows 那边只有编译和其余用例在 CI 里跑过，**没有手工
+验过**。
+
+**U5 里没做的**：真实 GitHub 请求（需要授权，没有）；`reject_unknown` 只看
+顶层参数名，嵌套对象里多给的键仍然由各自的解析代码处理；`dry_run` 在
+`patch_check` 上是拒绝而不是接受成 `true`。
+
+**一处已知不稳**：`crates/cli/tests/start_and_upgrade.rs` 在整仓跑时偶发失败
+（16 轮里 3 轮，每次挂的用例都不一样，单独跑这个二进制一直是绿的）。这批改动
+之前的基线跑了 9 轮没挂过，所以**不能说和这批无关**；三次都发生在刚重新编译
+完那几轮，符合这套守护进程/端口测试一贯的 CPU 抢占型超时。没有定位到具体机
+制，先如实记在这里。
