@@ -771,5 +771,19 @@ U0–U5 做完之后把第 5 节那 20 条逐条对回去，**看的是有没有
 测试改成"要么是 12 位十六进制、要么是 null"，并且钉住"不能是版本号"。不写死
 成非空：CI 里从 tarball 编译时它本来就该是 null。
 
-跨仓 X10 还剩的部分：所链接共享 crate 的 revision、配置/profile revision、
-远端能力代次，这次没做。
+**共享 crate 锁到了哪一份，也一起报了。**`server.shared_crates` 列出
+`toexec-fs` / `toexec-skill` / `toexec-text` 各自的版本和**提交号**。只报版本号
+不够：`Cargo.toml` 锁的是 **git tag**，而 tag 是可以移动的——两次构建都说自己
+用的 "0.2.1"，里面的代码可以不一样。`Cargo.lock` 里那个 `#<sha>` 才是实际链进
+来的那一份。`build.rs` 按行扫 `Cargo.lock` 取，不为读三行字段引一个 TOML 解析器
+（构建脚本的依赖会进每个下游的构建）。
+
+**顺带修了一个在说谎的指纹。**`policy.runtime_fingerprint` 的用途是"我改完配置
+生效了没有"，但它只哈希了白名单、`permission_mode` 和 `workspace_local_entries`
+三项。把 `confine_reads`（读能不能出工作区）改掉，指纹纹丝不动——读起来就是
+"配置没生效"，而它其实生效了。现在 `PolicySettings` 的每个字段都进哈希
+（另外三个漏的是 `workspace_script_extensions`、`max_patch_bytes`、
+`allowlist_mode`），测试用"只差一个字段"的两份配置对照，改之前是红的。
+
+跨仓 X10 还剩**一样**：远端能力代次（把远端的 `serverInfo.version` 加工具表摘要
+报出来）。它在 hub 那一侧，要连上远端才有，和上面三样不是一处代码，单独做。

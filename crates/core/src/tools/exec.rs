@@ -508,13 +508,30 @@ pub(crate) fn policy_snapshot(ctx: &ToolContext) -> Value {
     // 指纹是给"我改完配置生效了没有"用的：改之前改之后各查一次，数不一样就是
     // 生效了。它是**运行时快照**的指纹，不是磁盘上配置文件的版本号——gld 现在
     // 没有配置版本号，不能编一个出来。
+    //
+    // `PolicySettings` 的每一个字段都要进来。漏一个的后果是"改了配置、指纹没
+    // 变"，而这恰恰会被读成"配置没生效"——以前就漏了 `confine_reads`（读能不能
+    // 出工作区）、`workspace_script_extensions`、`max_patch_bytes` 和
+    // `allowlist_mode` 四个。加字段时这里也要加，否则指纹就是在说谎。
     let fingerprint = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        let mut extensions = ctx
+            .policy
+            .workspace_script_extensions
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        // HashSet 的遍历顺序不稳定，先排序，否则同一份配置每次算出的数不一样。
+        extensions.sort();
         let mut hasher = DefaultHasher::new();
         commands.hash(&mut hasher);
         ctx.policy.permission_mode.hash(&mut hasher);
         ctx.policy.workspace_local_entries.hash(&mut hasher);
+        extensions.hash(&mut hasher);
+        ctx.policy.max_patch_bytes.hash(&mut hasher);
+        ctx.policy.confine_reads.hash(&mut hasher);
+        ctx.policy.allowlist_mode.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     };
     json!({
@@ -525,7 +542,7 @@ pub(crate) fn policy_snapshot(ctx: &ToolContext) -> Value {
         "workspace_local_entries": ctx.policy.workspace_local_entries,
         "config_source": ctx.policy.config_source,
         "runtime_fingerprint": fingerprint,
-        "fingerprint_note": "运行时生效的策略快照指纹；改配置后重查，数变了才算生效",
+        "fingerprint_note": "运行时生效的策略快照指纹，覆盖 PolicySettings 的全部字段；改配置后重查，数变了才算生效。它不含 tool-profile（那个看 server_info）",
         // 白名单不是沙箱：放行的命令自己能干什么，这里管不着。
         "sandbox_enforced": false,
         "execution_boundary": "policy_only"
@@ -545,8 +562,35 @@ fn server_snapshot() -> Value {
         // **说不知道，不拿版本号顶替**。
         "build_commit": option_env!("GLD_BUILD_COMMIT")
             .map(Value::from)
-            .unwrap_or(Value::Null)
+            .unwrap_or(Value::Null),
+        // 和 ccnm 共用的那几个 crate 实际链进来的是哪一份。
+        //
+        // 为什么不只报版本号：`Cargo.toml` 里锁的是 **git tag**，而 tag 能被
+        // 移动——两次构建都说自己用的 "0.2.1"，里面的代码可以不一样。
+        // `Cargo.lock` 里的 `#<sha>` 才是实际链进来的那一份（跨仓评审 X10）。
+        "shared_crates": shared_crates()
     })
+}
+
+/// `build.rs` 从 `Cargo.lock` 里抄出来的 `name version revision`，逗号分隔。
+///
+/// 拿不到就是空表——**说不知道，不编一个**。
+fn shared_crates() -> Value {
+    let Some(raw) = option_env!("GLD_SHARED_CRATES") else {
+        return Value::Array(Vec::new());
+    };
+    let entries = raw
+        .split(',')
+        .filter_map(|entry| {
+            let mut parts = entry.split(' ');
+            Some(json!({
+                "name": parts.next()?,
+                "version": parts.next()?,
+                "revision": parts.next()?
+            }))
+        })
+        .collect::<Vec<_>>();
+    Value::Array(entries)
 }
 
 fn validate_child_process_scope(_ctx: &ToolContext, args: &Value) -> Result<(), WorkspaceError> {

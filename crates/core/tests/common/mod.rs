@@ -207,6 +207,25 @@ pub fn ctx_with_allowed_commands_and_path(
     ctx
 }
 
+/// 直接指定一份 `PolicySettings` 的上下文。
+///
+/// 用来做"只差一个字段"的对照：别的都一样，才能说明观察到的差异是那个字段
+/// 造成的。
+pub fn ctx_with_policy(root: &Path, policy: PolicySettings) -> ToolContext {
+    isolate_data_home();
+    let workspace = gld_core::tools::Workspace::new(root.to_path_buf()).expect("workspace");
+    ToolContext::from_workspace(
+        workspace,
+        gld_core::workspace::AuthConfig {
+            auth_type: "noauth".into(),
+            ..gld_core::workspace::AuthConfig::default()
+        },
+        policy,
+        "full".into(),
+        "trusted".into(),
+    )
+}
+
 /// 关掉"读只许在 Workspace 内"的上下文。
 ///
 /// 默认是开着的（0.3.0 起）。专门测越界读行为的用例得显式关掉，

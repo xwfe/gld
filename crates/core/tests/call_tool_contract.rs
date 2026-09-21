@@ -1098,6 +1098,29 @@ fn a_denied_command_points_at_an_allowed_tool() {
             "拿不到提交号就得是 null，不能是空串或者别的占位值：{checked}"
         ),
     }
+
+    // 和 ccnm 共用的 crate 锁到了哪一个提交。只报版本号不够：Cargo.toml 锁的是
+    // git tag，而 tag 能被移动——两次构建都说 "0.2.1"，代码可以不一样。
+    let shared = checked["server"]["shared_crates"]
+        .as_array()
+        .expect("shared_crates 要是个数组，没有就给空表");
+    if !shared.is_empty() {
+        let names: Vec<&str> = shared
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            names.contains(&"toexec-fs") && names.contains(&"toexec-text"),
+            "共用的 crate 一个都不该漏：{names:?}"
+        );
+        for entry in shared {
+            let revision = entry["revision"].as_str().unwrap_or_default();
+            assert!(
+                revision.len() == 12 && revision.chars().all(|c| c.is_ascii_hexdigit()),
+                "revision 要是锁文件里那个提交号，不是 tag：{entry}"
+            );
+        }
+    }
 }
 
 /// 补丁失败不该提示"检查 stderr、exit_code"——那次没有 stderr，也没有
@@ -2569,4 +2592,51 @@ fn a_still_running_command_with_nothing_new_is_not_the_same_as_finished() {
         "kill_session",
         json!({"session_id": session}),
     ));
+}
+
+/// 指纹漏字段 = 它在说谎（跨仓 X10）。
+///
+/// `runtime_fingerprint` 的用途是"我改完配置生效了没有"：改之前改之后各查一次，
+/// 数不一样才算生效。所以**策略里任何一个会改变行为的字段变了，指纹就得变**。
+/// 以前它只哈希白名单、permission_mode 和 workspace_local_entries——把
+/// `confine_reads`（读能不能出工作区）改掉，指纹纹丝不动，读起来就是"没生效"。
+#[test]
+fn the_policy_fingerprint_moves_when_any_policy_field_moves() {
+    let fx = tiny_js_fixture();
+    let fingerprint = |ctx: &gld_core::tools::ToolContext| {
+        invoke(ctx, "check_exec_environment", json!({}))["policy"]["runtime_fingerprint"]
+            .as_str()
+            .expect("fingerprint")
+            .to_string()
+    };
+
+    let base = fingerprint(&ctx_for(&fx.root));
+    // 同一份配置算两次必须一样，否则"变了"说明不了任何事。
+    assert_eq!(
+        base,
+        fingerprint(&ctx_for(&fx.root)),
+        "同一份配置指纹要稳定"
+    );
+
+    // 读能不能出工作区——以前改它指纹不动。两个上下文**只差这一个字段**，
+    // 否则"指纹变了"可能是别的原因变的，证明不了什么。
+    let confined = ctx_with_policy(&fx.root, gld_core::tools::policy::PolicySettings::default());
+    let unconfined = ctx_with_policy(
+        &fx.root,
+        gld_core::tools::policy::PolicySettings {
+            confine_reads: false,
+            ..Default::default()
+        },
+    );
+    assert_ne!(
+        fingerprint(&confined),
+        fingerprint(&unconfined),
+        "confine_reads 变了，指纹必须跟着变"
+    );
+    // 白名单和权限模式这两条本来就覆盖着，一起钉住。
+    assert_ne!(
+        base,
+        fingerprint(&ctx_with_allowed_commands(&fx.root, "only:pwd"))
+    );
+    assert_ne!(base, fingerprint(&ctx_for_dangerous_mode(&fx.root)));
 }
