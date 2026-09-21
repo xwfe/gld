@@ -537,8 +537,15 @@ fn server_snapshot() -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_version": "2025-06-18",
         "tool_api": crate::tools::registry::tool_api_descriptor(),
-        // 构建里没有嵌提交号，就说不知道，不能拿版本号顶替。
-        "build_commit": Value::Null
+        // 构建那一刻 HEAD 指着哪个提交（`build.rs` 嵌进来的）。诊断时拿它
+        // 和你正在读的源码对一下——同一个版本号能对应几十个提交，光看版本号
+        // 判断不出"跑的是不是我改的那份"（跨仓评审 X10）。
+        //
+        // 从 tarball 编译、`.git` 不在、机器上没装 git，这里就是 null：
+        // **说不知道，不拿版本号顶替**。
+        "build_commit": option_env!("GLD_BUILD_COMMIT")
+            .map(Value::from)
+            .unwrap_or(Value::Null)
     })
 }
 

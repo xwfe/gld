@@ -1081,7 +1081,23 @@ fn a_denied_command_points_at_an_allowed_tool() {
     );
     // 白名单不是沙箱，这句话得说出来，别让人以为放行的命令被关着。
     assert_eq!(checked["policy"]["sandbox_enforced"], json!(false));
-    assert_eq!(checked["server"]["build_commit"], json!(null));
+    // 跑的是不是我改的那份源码——版本号答不了这个问题，同一个 `0.5.0` 能对应
+    // 几十个提交（跨仓评审 X10）。从 git 检出编译时这里是构建那一刻的 HEAD；
+    // 从 tarball 编译（没有 `.git`）是 null：**说不知道，不拿版本号顶替**。
+    match checked["server"]["build_commit"].as_str() {
+        Some(commit) => {
+            assert!(
+                commit.len() == 12 && commit.chars().all(|c| c.is_ascii_hexdigit()),
+                "build_commit 不像一个短提交号：{commit}"
+            );
+            assert_ne!(commit, env!("CARGO_PKG_VERSION"), "别拿版本号顶替提交号");
+        }
+        None => assert_eq!(
+            checked["server"]["build_commit"],
+            json!(null),
+            "拿不到提交号就得是 null，不能是空串或者别的占位值：{checked}"
+        ),
+    }
 }
 
 /// 补丁失败不该提示"检查 stderr、exit_code"——那次没有 stderr，也没有
