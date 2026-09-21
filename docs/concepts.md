@@ -171,6 +171,26 @@ systemd / launchd，ccnm 只负责起它。
 参数是**默默忽略**，那样 `run_in_background` 会变成前台跑，模型却以为起了后台命令。
 遇到这个错就去那台机器升级 ccnm。
 
+**这个错会告诉你对面现在是哪一版**，否则"升级 ccnm"这句话没法执行——你不知道
+自己升过没有，也不知道是不是连错了机器：
+
+```text
+remote_exec_command on remote workspace prod: the ccnm on that machine does not
+take run_in_background on exec_command … It reports itself as ccnm 0.7.1 with
+11 tool(s). Upgrade ccnm on that machine, or call exec_command without
+run_in_background
+
+details.remote_capabilities = {
+  server_name: "ccnm", server_version: "0.7.1",
+  tool_count: 11, tools_digest: "3f9a2c1d8b7e4056"
+}
+```
+
+`tools_digest` 是那份工具表（工具名加各自的参数名）的摘要：版本号一样而摘要不一样，
+说明对面装的是同一版号的不同构建。对面没报 `serverInfo` 就写 `unknown`——**说不知道，
+不编一个版本号出来**。只有这一种错带这份信息，别的错发生在核对之前，那时还没有
+依据可言。
+
 为什么不直接复用本地那几个同名工具：因为**不是同一个契约**。gld 本机也有
 `search_text` 和 `list_files`，但两边的分页、参数和错误码都不一样。混用的话，
 AI 以为自己在读 A，实际读的是 B。所以用错了直接报错：
