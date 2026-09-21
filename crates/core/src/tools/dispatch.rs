@@ -416,6 +416,19 @@ fn dispatch_tool(
             .map(|state| attach_planning_context(output.clone(), state))
             .unwrap_or(output);
     }
+    // 名字对不上的参数不能悄悄丢掉（审查 A19）。
+    //
+    // 放在策略之后：策略对某几个名字有**自己的说法**，比"没有这个参数"有用
+    // 得多——`env` 不是拼错了，是服务端不让调用方设环境变量。两道门都过不去
+    // 的调用，先报更能指导下一步的那个。
+    if let Err(e) = crate::tools::args::reject_unknown(name, &effective_args) {
+        let output = tool_err(e);
+        record_rejection(ctx, operation_id, name, &effective_args, &output);
+        return planning_state
+            .as_ref()
+            .map(|state| attach_planning_context(output.clone(), state))
+            .unwrap_or(output);
+    }
 
     if crate::harness::tools::TOOL_NAMES.contains(&name) {
         let output = match crate::harness::tools::call(ctx, name, args) {

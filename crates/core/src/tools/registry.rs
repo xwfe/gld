@@ -878,6 +878,40 @@ static EXPECTED_VERSIONS_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLoc
     })
 });
 
+/// `apply_patch` / `patch_check` 的 notebook 单元格编辑。
+///
+/// 预检必须能预检**同一次调用**：`patch_check` 以前只收 `patch`，于是带
+/// notebook 编辑或需要 `confirm` 的那次 `apply_patch` 根本没法先试一遍，
+/// 预检结果和真跑结果对不上（审查 A19、A01 的补丁那一半）。
+static NOTEBOOK_EDITS_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "cells": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "cell_id": { "type": "string", "minLength": 1 },
+                            "new_source": { "type": "string" },
+                            "cell_type": { "type": "string", "enum": ["code", "markdown"] },
+                            "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"], "default": "replace" }
+                        },
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["path", "cells"],
+            "additionalProperties": false
+        },
+        "description": "Cell edits for Jupyter notebooks, applied in the same transaction as patch. cell_id is what read_notebook shows; replace and delete need it, insert puts the new cell after it (or first without one). Replacing a code cell clears its outputs. Either patch or notebook_edits is required."
+    })
+});
+
 /// `exec_command` / `check_command` 的结构化命令入口。
 ///
 /// 和 `cmd` 二选一。给 `argv` 的时候参数原样送进内核，不经过任何 shell，所以
@@ -898,6 +932,11 @@ static ARGV_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
 const GLOB_BASE_DESCRIPTION: &str = "Glob patterns match the path relative to the WORKSPACE ROOT, not to `path`. Under path=\"crates\", the pattern \"exec.rs\" matches nothing — write \"**/exec.rs\" or the full \"crates/**/exec.rs\". The result echoes glob_base and search_root.";
 
 const COMMAND_CMD_DESCRIPTION: &str = "One command line, split with shell word rules but NOT run through a shell: unquoted ;, &&, |, > and $() are rejected. Use argv when an argument itself contains those characters.";
+
+/// `cwd` 一直被当成 `workdir` 的别名读，但 schema 里没写过，客户端发现不了。
+/// 现在参数名对不上会被拒（`tools::args::reject_unknown`），所以这个别名要么
+/// 写进 schema，要么就是一段没人能走到的死代码。
+const WORKDIR_ALIAS_DESCRIPTION: &str = "Alias for workdir. If both are given, workdir wins.";
 
 pub fn input_schema(name: &str) -> Value {
     match name {
@@ -1224,6 +1263,11 @@ pub fn input_schema(name: &str) -> Value {
                     "type": "boolean",
                     "default": false,
                     "description": "Also search dotfiles and dot-directories such as .github. gld's own data directory is never searched."
+                },
+                "include_ignored": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Also search files .gitignore excludes, such as build output. gld's own data directory is never searched."
                 }
             },
             "required": ["query"],
@@ -1244,32 +1288,7 @@ pub fn input_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "patch": { "type": "string", "minLength": 1 },
-                "notebook_edits": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "minLength": 1 },
-                            "cells": {
-                                "type": "array",
-                                "minItems": 1,
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "cell_id": { "type": "string", "minLength": 1 },
-                                        "new_source": { "type": "string" },
-                                        "cell_type": { "type": "string", "enum": ["code", "markdown"] },
-                                        "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"], "default": "replace" }
-                                    },
-                                    "additionalProperties": false
-                                }
-                            }
-                        },
-                        "required": ["path", "cells"],
-                        "additionalProperties": false
-                    },
-                    "description": "Cell edits for Jupyter notebooks, applied in the same transaction as patch. cell_id is what read_notebook shows; replace and delete need it, insert puts the new cell after it (or first without one). Replacing a code cell clears its outputs. Either patch or notebook_edits is required."
-                },
+                "notebook_edits": NOTEBOOK_EDITS_SCHEMA.clone(),
                 "dry_run": { "type": "boolean", "default": false },
                 "confirm": { "type": "boolean", "default": false },
                 "expected_versions": EXPECTED_VERSIONS_SCHEMA.clone(),
@@ -1277,13 +1296,17 @@ pub fn input_schema(name: &str) -> Value {
             },
             "additionalProperties": false
         }),
+        // 和 apply_patch 同一组参数，除了 `dry_run`——那一条是这个工具自己
+        // 定死的 true，收进来只会让人以为可以关掉。
         "patch_check" => json!({
             "type": "object",
             "properties": {
                 "patch": { "type": "string", "minLength": 1 },
+                "notebook_edits": NOTEBOOK_EDITS_SCHEMA.clone(),
+                "confirm": { "type": "boolean", "default": false },
                 "expected_versions": EXPECTED_VERSIONS_SCHEMA.clone()
             },
-            "required": ["patch"],
+            "description": "Runs apply_patch without writing. Pass the arguments you intend to apply — including confirm — or the preflight answers a different question than the real call. Either patch or notebook_edits is required.",
             "additionalProperties": false
         }),
         // 和 exec_command 同一组参数：预检要判的就是"这一组参数会不会被放行"，
@@ -1294,6 +1317,7 @@ pub fn input_schema(name: &str) -> Value {
                 "cmd": { "type": "string", "minLength": 1, "description": COMMAND_CMD_DESCRIPTION },
                 "argv": ARGV_SCHEMA.clone(),
                 "workdir": { "type": "string", "default": "." },
+                "cwd": { "type": "string", "description": WORKDIR_ALIAS_DESCRIPTION },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
                 "confirm": { "type": "boolean", "default": false },
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" }
@@ -1307,6 +1331,7 @@ pub fn input_schema(name: &str) -> Value {
                 "cmd": { "type": "string", "minLength": 1, "description": COMMAND_CMD_DESCRIPTION },
                 "argv": ARGV_SCHEMA.clone(),
                 "workdir": { "type": "string", "default": "." },
+                "cwd": { "type": "string", "description": WORKDIR_ALIAS_DESCRIPTION },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 32768 },
                 "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },

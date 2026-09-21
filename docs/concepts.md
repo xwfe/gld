@@ -589,6 +589,40 @@ History 档案（`docs/history-session/`）计入指纹，但 history 工具写�
 字节**（`details.bytes_written`）——"写了一半"和"一个字节都没写"，接下来该做的
 事不一样。
 
+## 参数名写错了会被拒，不会按默认值跑
+
+工具只收自己 schema 里写了的参数。多给一个，这次调用直接报
+`INVALID_ARGUMENT`，**什么都不做**：
+
+```text
+exec_command cmd="cargo build" timeout=600000
+→ INVALID_ARGUMENT
+  exec_command does not take timeout. It takes: argv, cmd, confirm, cwd,
+  filesystem_scope, max_output_bytes, reason, stdin, stdin_mode,
+  timeout_ms, tty, workdir, yield_time_ms
+  details.unknown_arguments = ["timeout"]
+  details.executed = false
+```
+
+超时参数叫 `timeout_ms`。以前写成 `timeout` 这条调用会**成功**，用默认的
+30 秒跑——你以为给了 10 分钟，命令在第 30 秒被杀掉，返回值里没有一个字提过
+那个 `timeout` 被扔了。看着像"这条命令莫名其妙超时"，实际是参数根本没生效。
+这类错误最难查，因为它长得像成功。
+
+两个例外：
+
+- **`env` 另有说法。**报的是"服务端不让调用方设环境变量"，而不是"没有这个
+  参数"——它不是拼错了，是被策略挡的，这两句话的下一步不一样。
+- **下划线开头的键**（`_host_session_key`）是服务端自己往参数里塞的，本来就不
+  在 schema 里，不拒。
+
+预检收的参数和真跑的一样。`patch_check` 现在也收 `confirm` 和
+`notebook_edits`：想先试一遍那次带确认的 workflow 改动，就得能把 `confirm`
+一起传进去，否则预检回答的是另一个问题。只有 `dry_run` 不收——那是
+`patch_check` 自己定死的 `true`，收进来只会让人以为能关掉。
+
+---
+
 ## 文件版本：别让补丁盖掉别人的改动
 
 `read_file` 和 `patch_check` 会回一个 `version`，`apply_patch` 收

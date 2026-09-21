@@ -1956,3 +1956,106 @@ fn a_precondition_of_absent_still_passes_when_the_path_really_is_empty() {
         "mine\n"
     );
 }
+
+/// 参数名写错了要当场说，不能按默认值跑一遍（审查 A19，U5）。
+///
+/// `timeout` 不是 `exec_command` 的参数，`timeout_ms` 才是。以前这条调用会
+/// **成功**，用默认的 30 秒跑——调用方以为自己给了 10 分钟，命令在第 30 秒被
+/// 杀掉，返回值里没有任何地方说过那个 `timeout` 被扔了。看着像"这条命令莫名
+/// 其妙超时"，实际是参数根本没生效。
+#[test]
+fn a_misspelled_argument_is_refused_instead_of_silently_dropped() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_with_allowed_commands(&fx.root, TEST_PYTHON);
+    let out = invoke(
+        &ctx,
+        "exec_command",
+        json!({"cmd": format!("{TEST_PYTHON} -c pass"), "timeout": 600_000}),
+    );
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "INVALID_ARGUMENT", "{error}");
+    // 报错要能直接改：多了哪个、真名叫什么，都在里面。
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("timeout_ms"), "{message}");
+    assert_eq!(
+        error["error"]["details"]["unknown_arguments"],
+        json!(["timeout"])
+    );
+    // 被拒的调用没启动任何进程，也就没有需要善后的东西。
+    assert_eq!(error["error"]["details"]["executed"], json!(false));
+
+    // 名字写对就照常跑。
+    let ok = invoke(
+        &ctx,
+        "exec_command",
+        json!({"cmd": format!("{TEST_PYTHON} -c pass"), "timeout_ms": 60_000}),
+    );
+    assert_ok(&ok);
+}
+
+/// 预检要能预检**那一次**调用：`apply_patch` 收的参数，`patch_check` 也得收。
+///
+/// `.github/workflows/` 下的改动要 `confirm`。`patch_check` 以前不收 `confirm`，
+/// 于是想先试一遍的人只能拿到"需要确认"，没法知道确认之后还会不会有别的问题；
+/// 现在多给的参数会被拒，这个缺口更是直接变成"预检根本发不出去"。
+#[test]
+fn patch_check_takes_the_same_arguments_apply_patch_does() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let patch =
+        "*** Begin Patch\n*** Add File: .github/workflows/ci.yml\n+name: ci\n*** End Patch\n";
+
+    let unconfirmed = invoke(&ctx, "patch_check", json!({"patch": patch}));
+    assert_eq!(
+        assert_err(&unconfirmed)["error"]["code"],
+        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION",
+        "{unconfirmed}"
+    );
+
+    let confirmed = invoke(
+        &ctx,
+        "patch_check",
+        json!({"patch": patch, "confirm": true}),
+    );
+    let preflight = assert_ok(&confirmed);
+    assert_eq!(preflight["preflight"], json!(true));
+    assert!(
+        !fx.root.join(".github/workflows/ci.yml").exists(),
+        "预检不能落盘"
+    );
+
+    // 同一组参数真跑一遍，结论要一致。
+    let applied = invoke(
+        &ctx,
+        "apply_patch",
+        json!({"patch": patch, "confirm": true}),
+    );
+    assert_ok(&applied);
+    assert!(fx.root.join(".github/workflows/ci.yml").exists());
+
+    // `dry_run` 是 patch_check 自己定死的，收进来只会让人以为能关掉。
+    let confusing = invoke(
+        &ctx,
+        "patch_check",
+        json!({"patch": patch, "dry_run": false}),
+    );
+    assert_eq!(
+        assert_err(&confusing)["error"]["code"],
+        "INVALID_ARGUMENT",
+        "{confusing}"
+    );
+}
+
+/// 服务端自己往参数里塞的键（MCP server 的 `_host_session_key`）不能被当成
+/// 未知参数拒掉——它本来就不在 schema 里。
+#[test]
+fn the_servers_own_internal_keys_are_not_mistaken_for_client_mistakes() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let out = invoke(
+        &ctx,
+        "list_dir",
+        json!({"path": ".", "_host_session_key": "chatgpt-session"}),
+    );
+    assert_ok(&out);
+}
