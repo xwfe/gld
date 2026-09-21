@@ -545,7 +545,7 @@ E03 里那次失败给的全部信息是：`PATCH_FAILED` + `Hunk context did no
 
 **内建的 `ls` 不再冒充系统 ls。**它是服务端自己答的极简实现，以前 `ls -la` 会把 `-la` 当成目录名、报"路径不存在"——看着像目录没了。现在带 flag 直接说清它是什么、该用 `list_dir` 还是 `list_files`，结果里那句 warning 也从 "native diagnostic without child process" 换成了说得出所以然的一句。同时修了它的相对参数解析：`ls inner` 以前从**工作区根**解析，现在按 `workdir` 解析，和在真实 shell 里输入它的结果一致（方案 B 的原生 ls 一条）。
 
-**U3 里没做的**：`build_commit` 仍然是 `null`（诊断里报运行构建 SHA 属于 G-B / 跨仓 X10，要改构建脚本）；"未授权 SSH 不建立连接"只有"策略在 spawn 之前拒"这一层证据（代码路径如此，也有 `check_command` 的 `side_effects=none` 钉着），没有抓包那种证据；A04 的 Windows 分支没在本机跑过，靠 CI 的 Windows 格。
+**U3 里没做的**：`build_commit` 仍然是 `null`（诊断里报运行构建 SHA 属于 G-B / 跨仓 X10，要改构建脚本）——**2026-09-21 补上了，见第 12 节**；"未授权 SSH 不建立连接"只有"策略在 spawn 之前拒"这一层证据（代码路径如此，也有 `check_command` 的 `side_effects=none` 钉着），没有抓包那种证据；A04 的 Windows 分支没在本机跑过，靠 CI 的 Windows 格。
 
 ### U4 第一批：读的那一面，返回值要能用（F01、F02、F03）
 
@@ -753,3 +753,23 @@ U0–U5 做完之后把第 5 节那 20 条逐条对回去，**看的是有没有
   这个文件的认识和文件本身不一样，而我们照正文办还回 ok，他不会知道；`git
   apply` 在这种补丁上也报 corrupt。数不准就写裸 `@@`，一直支持，报错里也这么
   说。改之前全仓 723 条用例里没有一条踩到，说明手写补丁的计数本来都是对的。
+
+## 12. 补记：诊断里现在报得出运行构建的提交号（跨仓 X10）
+
+`check_exec_environment` 的 `server.build_commit` 一直是写死的 `null`。排错时
+"我读的源码"和"正在跑的服务"是两件事，而它们经常对不上——装好的二进制是三天前
+编的，源码已经改过好几轮。只报版本号没用：同一个 `0.5.0` 能对应几十个提交。
+
+`crates/core/build.rs` 现在把构建那一刻 HEAD 指的提交号嵌进去，
+`option_env!("GLD_BUILD_COMMIT")` 读它。
+
+**拿不到就还是 `null`，不拿版本号顶替**：从 tarball 解出来编译、`.git` 不在、
+机器上没装 git，都属于这种情况，而且构建脚本在任何一种情况下都不让编译失败。
+`.git/HEAD` 和它指向的 ref 都挂了 `rerun-if-changed`——换提交、切分支都会重新
+跑一遍，否则 cargo 会一直用缓存里那个旧提交号，**报一个过期的 SHA 比不报更糟**。
+
+测试改成"要么是 12 位十六进制、要么是 null"，并且钉住"不能是版本号"。不写死
+成非空：CI 里从 tarball 编译时它本来就该是 null。
+
+跨仓 X10 还剩的部分：所链接共享 crate 的 revision、配置/profile revision、
+远端能力代次，这次没做。
