@@ -23,6 +23,11 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld remote](#gld-remote)
 - [gld remote add](#gld-remote-add)
 - [gld remote remove](#gld-remote-remove)
+- [gld mcp](#gld-mcp)
+- [gld mcp list](#gld-mcp-list)
+- [gld mcp on](#gld-mcp-on)
+- [gld mcp off](#gld-mcp-off)
+- [gld mcp test](#gld-mcp-test)
 - [gld logs](#gld-logs)
 - [gld health](#gld-health)
 - [gld doctor](#gld-doctor)
@@ -92,6 +97,7 @@ Commands:
   share        给服务拿一个公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
   upgrade      改服务配置（端口 / 认证 / 工具集 / 公网入口），改完自动重启；也能改项目的目录和名称
   remote       远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
+  mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
   logs         查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
   health       逐项检查本地 / 公网端点与 OAuth 元数据是否可达
   doctor       体检：检查配置是否自洽，并给出每个问题的修复命令
@@ -799,6 +805,139 @@ Options:
 删掉一个远端项目（按名字、id 或 id 前缀；gld rm 也能删）
 
 Usage: gld remote remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld mcp
+
+```text
+本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
+
+  gld mcp ls                     ~/.claude.json 和 ~/.codex/config.toml 里装了哪些、开了哪些
+  gld mcp on context7 deepwiki   开：连上服务的 AI 用 list_mcp_tools / call_mcp_tool 调它们
+  gld mcp off context7           关（--all 全关）
+  gld mcp test context7          在守护进程里起一次：起不起得来、有哪些工具
+
+默认一个都不开。AI 经服务调它们，和你在本机 Claude Code 里调一样：Filesystem、
+desktop-commander 这类能读写整个主目录。服务挂了公网入口时尤其想清楚再开。
+
+Usage: gld mcp [OPTIONS] <COMMAND>
+
+Commands:
+  list  装了哪些、开了哪些（读 ~/.claude.json 的 mcpServers 和 ~/.codex/config.toml 的 mcp_servers） [alias: ls]
+  on    开：经服务转给 AI，下一次调用就生效，不用重启服务
+  off   关：正开着的连接在下一次调用时收掉
+  test  在守护进程里起一次、握手、列工具（用的是服务起它时的 PATH 和环境变量）
+
+Options:
+  -w, --workspace <WS>
+          目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld mcp list
+
+```text
+装了哪些、开了哪些（读 ~/.claude.json 的 mcpServers 和 ~/.codex/config.toml 的 mcp_servers）
+
+Usage: gld mcp list [OPTIONS]
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld mcp on
+
+```text
+开：经服务转给 AI，下一次调用就生效，不用重启服务
+
+Usage: gld mcp on [OPTIONS] <NAME>...
+
+Arguments:
+  <NAME>...  gld mcp ls 里的名字，区分大小写，可以一次给多个
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld mcp off
+
+```text
+关：正开着的连接在下一次调用时收掉
+
+Usage: gld mcp off [OPTIONS] [NAME]...
+
+Arguments:
+  [NAME]...  要关的名字，可以一次给多个
+
+Options:
+      --all             全关
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld mcp test
+
+```text
+在守护进程里起一次、握手、列工具（用的是服务起它时的 PATH 和环境变量）
+
+Usage: gld mcp test [OPTIONS] <NAME>
 
 Arguments:
   <NAME>  

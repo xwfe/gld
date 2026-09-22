@@ -24,6 +24,7 @@ COMMANDS=(
   ""
   "start" "stop" "restart" "status" "list" "add" "remove" "set" "fields" "share" "upgrade"
   "remote" "remote add" "remote remove"
+  "mcp" "mcp list" "mcp on" "mcp off" "mcp test"
   "logs" "health" "doctor"
   "tool" "tool list" "tool schema" "tool call"
   "secret" "secret list" "secret set" "secret regenerate" "secret keys"

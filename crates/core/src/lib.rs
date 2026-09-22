@@ -28,6 +28,7 @@ pub mod home;
 pub mod hub;
 pub mod local_network;
 pub mod logs;
+pub mod machine_mcp;
 pub mod mcp;
 pub mod planning;
 pub mod platform;

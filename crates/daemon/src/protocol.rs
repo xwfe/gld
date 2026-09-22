@@ -28,6 +28,8 @@ use serde_json::Value;
 ///    `hub_join_all`、`hub_health`、`hub_usage`、`hub_logs`。旧守护进程不认这几个，
 ///    不递增的话升级二进制后第一条 `gld start` 报的是"看不懂的请求"，而不是
 ///    "请 gld daemon restart"。
+///    同一版（还没发布过）里又加了 `mcp_servers`、`switch_mcp_servers`、
+///    `test_mcp_server`（RFC-0006），没再递增。
 pub const PROTOCOL_VERSION: u32 = 3;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
@@ -214,6 +216,21 @@ pub enum Request {
     SetRuntimeSettings {
         runtime: GlobalRuntimeSettingsDto,
     },
+
+    // ---- 本机装好的 MCP server（RFC-0006）----
+    /// 装了哪些、开了哪些。
+    McpServers,
+    /// 开 / 关一组；`all` 只在关的时候有意义：全关。
+    SwitchMcpServers {
+        names: Vec<String>,
+        on: bool,
+        #[serde(default)]
+        all: bool,
+    },
+    /// 在守护进程里起一次、握手、列工具，看它起不起得来。
+    TestMcpServer {
+        name: String,
+    },
     ListFrpProfiles,
     SaveFrpProfile {
         profile: FrpProfile,
@@ -345,6 +362,9 @@ impl Request {
                 | Request::HubStart
                 | Request::HubEnsureStarted
                 | Request::HubStop
+                // 要的是服务起 server 时的那个环境（PATH、环境变量），不是这个
+                // 终端的：两边不一样正是最常见的起不来的原因。
+                | Request::TestMcpServer { .. }
         )
     }
 
@@ -371,6 +391,8 @@ impl Request {
                 | Request::GatewayHealth
                 // 工具调用可能跑测试或构建，几分钟都算正常。
                 | Request::CallTool { .. }
+                // `npx -y` 第一次要下载包，握手最多等 30 秒。
+                | Request::TestMcpServer { .. }
         )
     }
 

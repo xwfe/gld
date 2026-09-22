@@ -5,9 +5,10 @@
 //!
 //! 隔离靠下面三条，改代码时哪条都别松：
 //!
-//! 1. **服务端不记"当前工作区"。** 除 `list_workspaces` 外，每次 `tools/call` 都必须带
-//!    `workspace`。hub 被所有对话、所有客户端共用，服务端一旦记住"刚切到了 api"，
-//!    另一个对话里没带参数的调用就会落到 api 上——单工作区里 `set_default_cwd`
+//! 1. **服务端不记"当前工作区"。** 除 `list_workspaces` 和转发本机 MCP server 的
+//!    三个工具（它们不属于任何工作区，见 [`crate::machine_mcp`]）外，每次
+//!    `tools/call` 都必须带 `workspace`。hub 被所有对话、所有客户端共用，服务端
+//!    一旦记住"刚切到了 api"，另一个对话里没带参数的调用就会落到 api 上——单工作区里 `set_default_cwd`
 //!    已经这么坑过人。所以 hub 连 `set_default_cwd` / `get_default_cwd` 都不暴露。
 //! 2. **每个成员一份独立的 [`ToolContext`]**，和成员自己的监听器走同一个
 //!    [`build_tool_context`]：根目录边界、命令白名单、读限制、Planning 闸门、
@@ -56,6 +57,7 @@ use crate::bridge::session::Open;
 use crate::bridge::session::{CodingError, Connections};
 use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
+use crate::machine_mcp::{self, installed::Installed, relay::Relay};
 use crate::planning::PlanningService;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{
@@ -215,6 +217,11 @@ pub struct Hub {
     contexts: Mutex<HashMap<String, CachedContext>>,
     /// 远端成员的 bridge 连接。本地成员一条都用不到。
     connections: Connections,
+    /// 转发本机装好的 MCP server（`gld mcp on` 开了才有东西）。
+    relay: Relay,
+    /// 测试用：不读这台机器的 `~/.claude.json`，用给定的一份。
+    #[cfg(test)]
+    installed: Option<Installed>,
 }
 
 impl Hub {
@@ -252,7 +259,81 @@ impl Hub {
             usage: Arc::new(ServiceUsage::default()),
             contexts: Mutex::new(HashMap::new()),
             connections,
+            relay: Relay::new(),
+            #[cfg(test)]
+            installed: None,
         }
+    }
+
+    /// 测试用：换成内存里的 MCP server，装了哪些也由测试给。
+    #[cfg(test)]
+    fn with_relay(mut self, relay: Relay, installed: Installed) -> Self {
+        self.relay = relay;
+        self.installed = Some(installed);
+        self
+    }
+
+    fn installed_mcp(&self) -> Installed {
+        #[cfg(test)]
+        if let Some(installed) = &self.installed {
+            return installed.clone();
+        }
+        machine_mcp::read_installed()
+    }
+
+    /// 开着而且装着的 MCP server 转给 AI 的那三个工具；一个都没有、或者服务是
+    /// read-only 时不列（转过去的工具能做什么由 server 决定，只读管不住它）。
+    fn relay_definitions(&self, settings: &AppSettings) -> Vec<Value> {
+        if self.tool_profile == "read-only" || settings.relayed_mcp_servers.is_empty() {
+            return Vec::new();
+        }
+        let installed = self.installed_mcp();
+        let offered = machine_mcp::relay::offered(&settings.relayed_mcp_servers, &installed);
+        if offered.is_empty() {
+            return Vec::new();
+        }
+        let mut tools = Relay::definitions(&offered);
+        // 这个工具集的全部意义就是把标注改成只读（见 docs/concepts.md），这里
+        // 跟着改，不然它就漏了三个。
+        if self.tool_profile == "compat-readonly-all" {
+            for tool in &mut tools {
+                tool["annotations"]["readOnlyHint"] = json!(true);
+                tool["annotations"]["destructiveHint"] = json!(false);
+                tool["annotations"]["openWorldHint"] = json!(false);
+            }
+        }
+        tools
+    }
+
+    fn call_relay(
+        &self,
+        auth: &AuthContext,
+        tool: &str,
+        args: &Value,
+        settings: &AppSettings,
+    ) -> Value {
+        if self.tool_profile == "read-only" {
+            return plain_result(tool_err(WorkspaceError::Tool {
+                code: "TOOL_NOT_ALLOWED",
+                message: format!(
+                    "{tool} is not available: this service's tool profile is read-only, and a relayed MCP tool can do whatever its server does."
+                ),
+                category: "permission",
+                retryable: false,
+            }));
+        }
+        let installed = self.installed_mcp();
+        let caller = auth.tag();
+        self.relay.call(
+            tool,
+            args,
+            &machine_mcp::Scope {
+                on: &settings.relayed_mcp_servers,
+                installed: &installed,
+                launch: machine_mcp::launch(settings),
+                caller: &caller,
+            },
+        )
     }
 
     pub fn usage(&self) -> Arc<ServiceUsage> {
@@ -282,6 +363,7 @@ impl Hub {
         // 远端 bridge 必须走正常关闭：直接留着进程不管，远端 Runtime 的写锁
         // 会留下 held 标记要人工恢复。
         self.connections.close_all();
+        self.relay.close_all();
     }
 
     /// 处理一条 JSON-RPC 请求。会同步跑工具，必须在 `spawn_blocking` 里调。
@@ -340,6 +422,14 @@ impl Hub {
             }
             Err(error) => format!("The workspace list is unavailable right now: {error}"),
         };
+        let relayed = match self.snapshot() {
+            Ok((_, settings)) if !self.relay_definitions(&settings).is_empty() => format!(
+                "\n\nMCP servers installed on this machine are relayed too, outside any workspace: {} lists them and their tools, {} calls one.",
+                machine_mcp::relay::LIST,
+                machine_mcp::relay::CALL
+            ),
+            _ => String::new(),
+        };
         json!({
             "protocolVersion": "2025-06-18",
             "capabilities": {
@@ -351,7 +441,7 @@ impl Hub {
                 "title": "hub · gld",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": format!("{INSTRUCTIONS}\n\n{catalog}")
+            "instructions": format!("{INSTRUCTIONS}\n\n{catalog}{relayed}")
         })
     }
 
@@ -377,7 +467,8 @@ impl Hub {
         // coding 那几个同理，再窄一层：要有成员的上限真的到 coding 才列。
         // 全是只读成员时列出 `remote_coding_begin`，模型只会得到一个必然
         // 失败的调用。
-        if let Ok((members, _)) = self.snapshot() {
+        if let Ok((members, settings)) = self.snapshot() {
+            tools.extend(self.relay_definitions(&settings));
             let remotes: Vec<&CcnmMember> = members
                 .iter()
                 .filter_map(|m| match m {
@@ -396,6 +487,7 @@ impl Hub {
     fn exposes(&self, name: &str) -> bool {
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
+            || machine_mcp::is_tool(name)
             || remote_tools::find(name).is_some()
             || remote_tools::is_session_tool(name)
             || (!HIDDEN_TOOLS.contains(&name)
@@ -433,8 +525,13 @@ impl Hub {
             }
         };
         self.forget_departed(&members);
+        self.relay.retain(&settings.relayed_mcp_servers);
         if canonical == LIST_WORKSPACES {
             return Ok(plain_result(list_workspaces(&members)));
+        }
+        if machine_mcp::is_tool(canonical) {
+            let args = crate::mcp::tool_arguments(name, params);
+            return Ok(self.call_relay(auth, canonical, &args, &settings));
         }
 
         let mut args = crate::mcp::tool_arguments(name, params);
@@ -3122,5 +3219,185 @@ mod tests {
             json!({ "workspace": fixture.web.id, "path": "only-web.txt" }),
         );
         assert_eq!(by_id["ok"], true, "{by_id}");
+    }
+
+    // ---- 本机装好的 MCP server（RFC-0006）----
+
+    use crate::machine_mcp::pool::{Launch, Pool};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 每开一条连接记一次数，连上的是内存里的 server（两个工具，调用回显参数）。
+    struct Counting(Arc<AtomicUsize>);
+
+    impl crate::machine_mcp::pool::Open for Counting {
+        fn open(
+            &self,
+            _server: &crate::machine_mcp::installed::Server,
+            _launch: &Launch,
+        ) -> Result<
+            Box<dyn crate::machine_mcp::transport::Transport>,
+            crate::machine_mcp::client::Error,
+        > {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(crate::machine_mcp::client::tests::plain_server(
+                "2025-06-18",
+            )))
+        }
+    }
+
+    /// 装了 context7 和 desktop-commander，开了 `on` 里那几个。
+    fn relay_hub(on: &[&str], profile: &str) -> (Hub, Arc<AtomicUsize>, tempfile::TempDir) {
+        crate::home::isolate_for_tests();
+        let (dir, api) = workspace("api", &[]);
+        let mut settings = AppSettings::default();
+        settings.hub.members = vec![api.id.clone()];
+        settings.hub.tool_profile = profile.into();
+        settings.relayed_mcp_servers = on.iter().map(|name| name.to_string()).collect();
+        let opened = Arc::new(AtomicUsize::new(0));
+        let installed = Installed {
+            servers: vec![
+                crate::machine_mcp::pool::tests::server("context7", "npx"),
+                crate::machine_mcp::pool::tests::server("desktop-commander", "npx"),
+            ],
+            ..Installed::default()
+        };
+        let hub = Hub::fixed(
+            &settings.hub.clone(),
+            Fixed {
+                profiles: vec![api],
+                remotes: Vec::new(),
+                settings,
+            },
+        )
+        .with_relay(
+            Relay::with_pool(Pool::with_opener(Box::new(Counting(opened.clone())))),
+            installed,
+        );
+        (hub, opened, dir)
+    }
+
+    fn relay_call(hub: &Hub, auth: &AuthContext, tool: &str, arguments: Value) -> Value {
+        let (response, _) = hub.handle_request(
+            auth,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments }
+            }),
+        );
+        response["result"].clone()
+    }
+
+    fn listed(hub: &Hub) -> Vec<Value> {
+        hub.list_tools()
+    }
+
+    fn named<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
+        tools.iter().find(|tool| tool["name"] == json!(name))
+    }
+
+    #[test]
+    fn the_relay_tools_show_up_only_when_a_server_is_turned_on() {
+        let (hub, _, _dir) = relay_hub(&[], "compact");
+        assert!(
+            named(&listed(&hub), "list_mcp_tools").is_none(),
+            "一个都没开就不列"
+        );
+
+        let (hub, opened, _dir) = relay_hub(&["context7"], "compact");
+        let tools = listed(&hub);
+        for name in ["list_mcp_tools", "call_mcp_tool", "read_mcp_result"] {
+            let tool = named(&tools, name).unwrap_or_else(|| panic!("{name} 该列出来"));
+            let required = tool["inputSchema"]["required"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !required.contains(&json!("workspace")),
+                "{name} 不属于任何工作区"
+            );
+        }
+        let description = named(&tools, "list_mcp_tools").unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            description.contains("context7 (local process)"),
+            "{description}"
+        );
+        assert!(!description.contains("desktop-commander"), "没开的不能出现");
+        let (init, _) = hub.handle_request(
+            &caller(),
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+        );
+        assert!(init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("list_mcp_tools"));
+        assert_eq!(opened.load(Ordering::SeqCst), 0, "列工具不起 server");
+    }
+
+    #[test]
+    fn a_read_only_service_relays_nothing() {
+        let (hub, opened, _dir) = relay_hub(&["context7"], "read-only");
+        assert!(named(&listed(&hub), "call_mcp_tool").is_none());
+        let refused = relay_call(
+            &hub,
+            &caller(),
+            "call_mcp_tool",
+            json!({ "server": "context7", "tool": "echo" }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"],
+            json!("TOOL_NOT_ALLOWED")
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 0);
+
+        let (hub, _, _dir) = relay_hub(&["context7"], "compat-readonly-all");
+        let call = named(&listed(&hub), "call_mcp_tool").cloned().unwrap();
+        assert_eq!(
+            call["annotations"]["readOnlyHint"],
+            json!(true),
+            "这个工具集只改标注"
+        );
+    }
+
+    #[test]
+    fn a_relayed_call_needs_no_workspace_and_each_client_gets_its_own_server() {
+        let (hub, opened, _dir) = relay_hub(&["context7"], "compact");
+        let args = json!({ "server": "context7", "tool": "echo", "arguments": { "q": 1 } });
+        let result = relay_call(&hub, &caller(), "call_mcp_tool", args.clone());
+        assert_eq!(result["isError"], json!(false), "{result}");
+        assert_eq!(result["content"][0]["text"], json!("{\"q\":1}"));
+        relay_call(&hub, &caller(), "call_mcp_tool", args.clone());
+        assert_eq!(opened.load(Ordering::SeqCst), 1, "同一个调用方复用一条");
+        relay_call(&hub, &oauth_client("other"), "call_mcp_tool", args.clone());
+        assert_eq!(opened.load(Ordering::SeqCst), 2, "另一个客户端另起一个");
+
+        let off = relay_call(
+            &hub,
+            &caller(),
+            "call_mcp_tool",
+            json!({ "server": "desktop-commander", "tool": "start_process" }),
+        );
+        assert_eq!(
+            off["structuredContent"]["error"]["code"],
+            json!("MCP_SERVER_UNKNOWN"),
+            "装了但没开的，和没装的一样"
+        );
+
+        update_fixed(&hub, |_, settings| settings.relayed_mcp_servers.clear());
+        assert!(hub.relay.has_connection("context7", &caller().tag()));
+        // 随便调一个别的工具，被关掉的 server 就跟着收了。
+        call(&hub, LIST_WORKSPACES, json!({}));
+        assert!(!hub.relay.has_connection("context7", &caller().tag()));
+        let gone = relay_call(&hub, &caller(), "call_mcp_tool", args);
+        assert_eq!(
+            gone["structuredContent"]["error"]["code"],
+            json!("MCP_SERVER_UNKNOWN"),
+            "关掉之后下一次调用就不给了"
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 2);
     }
 }

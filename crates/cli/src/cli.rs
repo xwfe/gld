@@ -201,6 +201,18 @@ pub enum Command {
     #[command(subcommand)]
     Remote(RemoteCmd),
 
+    /// 本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
+    ///
+    ///   gld mcp ls                     ~/.claude.json 和 ~/.codex/config.toml 里装了哪些、开了哪些
+    ///   gld mcp on context7 deepwiki   开：连上服务的 AI 用 list_mcp_tools / call_mcp_tool 调它们
+    ///   gld mcp off context7           关（--all 全关）
+    ///   gld mcp test context7          在守护进程里起一次：起不起得来、有哪些工具
+    ///
+    /// 默认一个都不开。AI 经服务调它们，和你在本机 Claude Code 里调一样：Filesystem、
+    /// desktop-commander 这类能读写整个主目录。服务挂了公网入口时尤其想清楚再开。
+    #[command(subcommand, verbatim_doc_comment)]
+    Mcp(McpCmd),
+
     /// 查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
     // 隐藏别名：git 是 log、docker 是 logs，两边习惯的人都不该被一句
     // "unrecognized subcommand" 拦住。不用 visible_alias 是因为它只防手滑，
@@ -790,6 +802,35 @@ pub struct GatewaySetArgs {
     /// 隧道是否套用全局代理
     #[arg(long, value_name = "true|false")]
     pub use_proxy: Option<bool>,
+}
+
+// ------------------------------------------------------------------- mcp
+
+#[derive(Debug, Subcommand)]
+pub enum McpCmd {
+    /// 装了哪些、开了哪些（读 ~/.claude.json 的 mcpServers 和 ~/.codex/config.toml 的 mcp_servers）
+    #[command(visible_alias = "ls")]
+    List,
+    /// 开：经服务转给 AI，下一次调用就生效，不用重启服务
+    On {
+        /// gld mcp ls 里的名字，区分大小写，可以一次给多个
+        #[arg(value_name = "NAME", required = true)]
+        names: Vec<String>,
+    },
+    /// 关：正开着的连接在下一次调用时收掉
+    Off {
+        /// 要关的名字，可以一次给多个
+        #[arg(value_name = "NAME", required_unless_present = "all")]
+        names: Vec<String>,
+        /// 全关
+        #[arg(long, conflicts_with = "names")]
+        all: bool,
+    },
+    /// 在守护进程里起一次、握手、列工具（用的是服务起它时的 PATH 和环境变量）
+    Test {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
 }
 
 // ------------------------------------------------------------------- hub

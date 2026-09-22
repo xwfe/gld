@@ -179,6 +179,10 @@ pub struct AppSettings {
     /// Skills installed on this machine that are never offered, by name.
     #[serde(default)]
     pub global_hidden_skills: Vec<String>,
+    /// 这台机器上装好的 MCP server 里，经服务转给 AI 的那几个（按名字，
+    /// `gld mcp on`）。默认空：一个都不转，见 `machine_mcp`。
+    #[serde(default)]
+    pub relayed_mcp_servers: Vec<String>,
     /// Allow MCP, Actions and Global Gateway listeners to bind to all LAN interfaces.
     /// Defaults to false so services remain loopback-only unless explicitly enabled.
     #[serde(default)]
@@ -253,6 +257,7 @@ impl AppSettings {
             global_custom_instruction_paths: data.global_custom_instruction_paths.clone(),
             global_custom_skill_paths: data.global_custom_skill_paths.clone(),
             global_hidden_skills: data.global_hidden_skills.clone(),
+            relayed_mcp_servers: data.relayed_mcp_servers.clone(),
             allow_lan_access: data.allow_lan_access,
             restore_runtime_state_on_launch: data.restore_runtime_state_on_launch,
             restore_mcp_workspace_ids: data.restore_mcp_workspace_ids.clone(),
@@ -276,6 +281,7 @@ impl AppSettings {
         data.global_custom_instruction_paths = self.global_custom_instruction_paths.clone();
         data.global_custom_skill_paths = self.global_custom_skill_paths.clone();
         data.global_hidden_skills = self.global_hidden_skills.clone();
+        data.relayed_mcp_servers = self.relayed_mcp_servers.clone();
         data.allow_lan_access = self.allow_lan_access;
         data.restore_runtime_state_on_launch = self.restore_runtime_state_on_launch;
         data.restore_mcp_workspace_ids = self.restore_mcp_workspace_ids.clone();

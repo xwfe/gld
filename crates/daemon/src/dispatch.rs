@@ -177,6 +177,19 @@ pub async fn dispatch(
             app.set_global_runtime_settings(runtime)?;
             ok(&app.global_runtime_settings()?)
         }
+        R::McpServers => ok(&app.mcp_servers()?),
+        R::SwitchMcpServers { names, on, all } => ok(&app.switch_mcp_servers(names, on, all)?),
+        R::TestMcpServer { name } => {
+            // 要起进程、等握手（HTTP 的还要 block_on），不能占异步 worker。
+            let app = app.clone();
+            let tested = tokio::task::spawn_blocking(move || app.test_mcp_server(&name))
+                .await
+                .map_err(|error| {
+                    RpcError::internal(format!("试起 MCP server 的任务失败：{error}"))
+                })?
+                .map_err(RpcError::from)?;
+            ok(&tested)
+        }
         R::ListFrpProfiles => ok(&app.list_frp_profiles()?),
         R::SaveFrpProfile { profile, token } => ok(&app.save_frp_profile(profile, token)?),
         R::DeleteFrpProfile { id, force } => {

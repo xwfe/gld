@@ -26,6 +26,7 @@ mod gateway;
 mod hub;
 mod inspect;
 mod logs;
+mod mcp;
 mod planning;
 mod runtime;
 mod secrets;
@@ -42,6 +43,7 @@ pub use doctor::{
 };
 pub use hub::{CcnmMemberSpec, HubMemberDto, HubMembershipChange, HubStatusDto};
 pub use logs::LogChunk;
+pub use mcp::{McpServerDto, McpServersDto, McpTestDto};
 pub use planning::PlanStepUpdate;
 pub use runtime::{RunningService, ServiceOverview};
 pub use secrets::{reads_from_shared_pool, SHARED_SECRET_KEYS, WORKSPACE_SECRET_KEYS};
