@@ -1161,9 +1161,23 @@ fn remote_failure(tool: &str, member: &CcnmMember, error: PeerError) -> Value {
     if let PeerError::Unsupported { remote, .. } = &error {
         details["remote_capabilities"] = remote.to_value();
     }
+    // 远端的 ccnm 只在有 server 可转时才列 call_mcp_tool（P49），所以"没有这个
+    // 工具"多半不是版本旧，而是那边没东西可转：说"升级 ccnm"会把人支错方向。
+    let message = match &error {
+        PeerError::Unsupported {
+            argument: None,
+            remote,
+            ..
+        } if tool == "remote_call_mcp_tool" => format!(
+            "{tool} on remote workspace {}: the ccnm on that machine offers no MCP server to relay -- none is declared in the project's .mcp.json or installed for the account the runtime uses, [runtime_mcp] is off in its config, or it predates relaying MCP servers. It reports itself as {}; the call was not sent.",
+            member.name,
+            remote.label()
+        ),
+        _ => format!("{tool} on remote workspace {}: {error}", member.name),
+    };
     tool_err(WorkspaceError::ToolDetails {
         code,
-        message: format!("{tool} on remote workspace {}: {error}", member.name),
+        message,
         category,
         retryable,
         details,
@@ -3230,6 +3244,60 @@ mod tests {
             json!({ "workspace": fixture.web.id, "path": "only-web.txt" }),
         );
         assert_eq!(by_id["ok"], true, "{by_id}");
+    }
+
+    /// 远端那台机器上的 MCP server（ccnm P49）：跟 exec 一样要 coding 句柄，
+    /// 参数原样转，`arguments` 是对象、不会被拍平。
+    #[test]
+    fn a_remote_mcp_call_goes_through_the_coding_session() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let without = raw_call(
+            &fixture.hub,
+            "remote_call_mcp_tool",
+            json!({ "workspace": "prod", "server": "db" }),
+        );
+        assert_eq!(
+            without["structuredContent"]["error"]["code"],
+            json!("MISSING_ARGUMENT"),
+            "没有句柄就不起远端的 server：{without}"
+        );
+        let handle = begin(&fixture);
+        let out = raw_call(
+            &fixture.hub,
+            "remote_call_mcp_tool",
+            json!({
+                "workspace": "prod", "coding_handle": handle,
+                "server": "db", "tool": "query", "arguments": { "sql": "select 1" }
+            }),
+        );
+        assert_eq!(out["isError"], json!(false), "{out}");
+        let calls = fixture.spy.calls();
+        assert_eq!(calls[0]["name"], json!("call_mcp_tool"));
+        assert_eq!(
+            calls[0]["arguments"],
+            json!({ "server": "db", "tool": "query", "arguments": { "sql": "select 1" } })
+        );
+    }
+
+    /// 远端只在有 server 可转时才列这个工具。没列的时候，要说的是"那边没东西
+    /// 可转"，不是"去升级 ccnm"。
+    #[test]
+    fn a_remote_with_nothing_to_relay_is_not_blamed_on_its_version() {
+        let fixture = coding_fixture(RemoteSpy::new().without_tools(&["call_mcp_tool"]));
+        let handle = begin(&fixture);
+        let refused = raw_call(
+            &fixture.hub,
+            "remote_call_mcp_tool",
+            json!({ "workspace": "prod", "coding_handle": handle }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"],
+            json!("REMOTE_TOOL_UNSUPPORTED")
+        );
+        let text = refused["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("offers no MCP server to relay"), "{text}");
+        assert!(!text.contains("Upgrade ccnm"), "{text}");
+        assert!(fixture.spy.calls().is_empty());
     }
 
     // ---- 本机装好的 MCP server（RFC-0006）----

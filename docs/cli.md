@@ -779,7 +779,8 @@ Options:
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
       --mode <MODE>
-          访问上限：read（默认）| coding。coding 的成员多五个工具（改文件、跑命令、读输出、停后台命令），用之前先 remote_coding_begin 拿句柄
+          访问上限：read（默认）| coding。coding 的成员多六个工具（改文件、跑命令、读输出、停后台命令、用那台机器上的 MCP server），用之前先
+          remote_coding_begin 拿句柄
 
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）

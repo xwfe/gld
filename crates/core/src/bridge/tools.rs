@@ -115,6 +115,8 @@ pub enum Type {
     ObjectArray,
     /// 固定取值。
     OneOf(&'static [&'static str]),
+    /// 一个对象，形状由远端（再往下是远端转发的 MCP server）校验。
+    Object,
 }
 
 impl Type {
@@ -126,6 +128,7 @@ impl Type {
             Type::StringArray => json!({ "type": "array", "items": { "type": "string" } }),
             Type::ObjectArray => json!({ "type": "array", "items": { "type": "object" } }),
             Type::OneOf(values) => json!({ "type": "string", "enum": values }),
+            Type::Object => json!({ "type": "object" }),
         }
     }
 }
@@ -257,7 +260,7 @@ pub const READ_TOOLS: &[RemoteTool] = &[
     },
 ];
 
-/// coding 模式多出来的三个。**只有拿到 coding 会话句柄才调得到。**
+/// coding 模式多出来的这几个。**只有拿到 coding 会话句柄才调得到。**
 ///
 /// 参数名照 ccnm 的 `*Args` 结构体，不照 fixture——见模块头那段。
 pub const CODING_TOOLS: &[RemoteTool] = &[
@@ -328,6 +331,22 @@ pub const CODING_TOOLS: &[RemoteTool] = &[
         // `stop_command` 的那一行一样：非只读、destructive、不是 open-world
         // ——它只停得到这个会话自己起的命令。
         effect: Effect::Write,
+    },
+    // ccnm P49：那台机器上的 MCP server（项目的 .mcp.json、执行账号装的）。
+    // 起 server 就是以执行账号跑程序，所以它和 exec_command 同级：只在 coding
+    // 会话里，annotations 按 destructive + open-world。远端只在有 server 可转
+    // 时才列这个工具，没有时这边报的是"那边没有可转的"，不是"升级 ccnm"
+    // （见 hub 的 remote_failure）。
+    RemoteTool {
+        name: "remote_call_mcp_tool",
+        remote_name: "call_mcp_tool",
+        description: "Use an MCP server on a remote workspace's machine: one the project's .mcp.json declares, or one the account there installed for Claude Code or Codex. Without server: the servers and their state. With server: its tools, their input schemas and its instructions (this starts it). With server, tool and arguments: call that tool. A server runs as the account the remote runtime uses, like remote_exec_command. A long result continues with remote_read_output. A call that runs past about 50 seconds ends the coding session, because this hub cuts a remote call off at 60.",
+        arguments: &[
+            arg("server", Type::String, "A server on that machine. Without it: the list."),
+            arg("tool", Type::String, "One of that server's tools. Without it: its tools and their input schemas."),
+            arg("arguments", Type::Object, "The tool's own arguments, as its input schema says."),
+        ],
+        effect: Effect::Exec,
     },
 ];
 

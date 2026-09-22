@@ -11,6 +11,9 @@
 //! CCNM_BIN=../ccnm/target/debug/ccnm cargo test -p gld-core --test ccnm_background_lifecycle
 //! ```
 //!
+//! 同一根管子上还有一条：ccnm P49 把项目 `.mcp.json` 里的 server 转给会话，
+//! gld hub 的 `remote_call_mcp_tool` 就走这里（文件末尾）。
+//!
 //! 为什么不经过 `ccnm mcp bridge`：那条命令一定会 SSH 到另一台机器（它要求
 //! node 有 ssh 别名且不是本机），本机测试没有那一跳。所以 `ccnm_bin` 指向一个
 //! 包装脚本，把 bridge 的 argv 换成 SSH 那头真正跑的东西——同一个 `mcp-serve`、
@@ -279,5 +282,62 @@ fn a_foreground_call_inside_the_budget_leaves_the_background_alone() {
     assert!(
         gone_within(pid, Duration::from_secs(10)),
         "会话关了，后台命令该跟着停——pid {pid} 还在"
+    );
+}
+
+/// 一个用 sh 写的 stdio MCP server：握手、列一个工具、调用时报出自己的 pid。
+const FAKE_MCP_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"fake"}}}\n' "$id" ;;
+    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"pid","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}]}}\n' "$id" "$$" ;;
+  esac
+done
+"#;
+
+/// ccnm P49 经真实的管子：项目 `.mcp.json` 里声明的 server 在 coding 会话里调得到，
+/// 会话一结束（gld 这边关连接）它就被收掉——它能写工作树，得在写锁放掉之前走。
+#[test]
+fn a_projects_mcp_server_answers_through_the_real_pipe_and_goes_with_the_session() {
+    let Some(ccnm) = ccnm_binary() else {
+        eprintln!("跳过：没找到 ccnm 二进制（设 CCNM_BIN，或先在 ccnm 仓 cargo build）");
+        return;
+    };
+    let remote = remote(&ccnm);
+    let script = remote.root.join("fake-mcp.sh");
+    std::fs::write(&script, FAKE_MCP_SERVER).expect("写 server");
+    std::fs::set_permissions(
+        &script,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .expect("给执行位");
+    std::fs::write(
+        remote.root.join(".mcp.json"),
+        r#"{ "mcpServers": { "fake": { "command": "./fake-mcp.sh" } } }"#,
+    )
+    .expect("写 .mcp.json");
+
+    let pool = Connections::with_opener(Box::new(Spawn));
+    let handle = pool.begin_coding(ANYONE, &remote.member).expect("开会话");
+    let answered = pool
+        .call_coding(
+            ANYONE,
+            &remote.member,
+            &handle,
+            "call_mcp_tool",
+            json!({ "server": "fake", "tool": "pid" }),
+        )
+        .expect("调得通");
+    let pid: i32 = text_of(&answered).trim().parse().expect("回的是 pid");
+    assert!(alive(pid), "server 该在跑");
+
+    pool.end_coding(ANYONE, &remote.member, &handle);
+    assert!(
+        gone_within(pid, Duration::from_secs(25)),
+        "会话结束，server 该跟着走——pid {pid} 还在，ppid {}",
+        ppid(pid)
     );
 }
