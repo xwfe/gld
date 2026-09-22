@@ -366,7 +366,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "list_skills",
         "List skills",
-        "List skills discovered from the enabled IDE and coding-agent providers. Skill bodies are loaded separately on demand. Files that look like skills but could not be taken in are listed under skipped, with the reason.",
+        "List skills discovered from the enabled IDE and coding-agent providers. Skill bodies are loaded separately on demand. Files that look like skills but could not be taken in are listed under skipped, with the reason. Skills with disableModelInvocation are for the user to start: use one only when the user asks for it by name.",
         true,
         false,
         false,

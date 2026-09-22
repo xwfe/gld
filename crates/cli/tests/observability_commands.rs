@@ -237,6 +237,11 @@ fn context_marks_what_is_actually_injected() {
         ".claude/skills/broken-skill/SKILL.md",
         "---\nname: broken-skill\ndescription: \"never closed\n---\nBody.\n",
     );
+    // 人点名才用的：扫得到，但不进给 AI 的目录。
+    env.write(
+        ".claude/skills/deploy-skill/SKILL.md",
+        "---\nname: deploy-skill\ndescription: DEPLOY-MARKER-3b4a ships to prod.\ndisable-model-invocation: true\n---\nBody.\n",
+    );
     let port = free_port();
     env.ok(&[
         "ws",
@@ -298,6 +303,11 @@ fn context_marks_what_is_actually_injected() {
         human.contains("没收进来") && human.contains("broken-skill"),
         "人看的输出也要列出来：{human}"
     );
+    let deploy_line = human
+        .lines()
+        .find(|line| line.contains("deploy-skill"))
+        .unwrap_or_else(|| panic!("点名才用的 skill 也要列出来：{human}"));
+    assert!(deploy_line.contains("只在用户点名时用"), "{deploy_line}");
 
     let text = mcp_instructions(port);
     assert!(
@@ -311,6 +321,10 @@ fn context_marks_what_is_actually_injected() {
     assert!(
         text.contains("marker-skill") && text.contains("SKILL-MARKER-7c6d"),
         "compact 下 skill 目录应当进说明，多行 description 也要读对：{text}"
+    );
+    assert!(
+        !text.contains("DEPLOY-MARKER-3b4a") && text.contains("marked disable-model-invocation"),
+        "点名才用的 skill 不进目录，只报个数：{text}"
     );
 
     // 换成 advanced，两份都该进去，报告也要跟着变。

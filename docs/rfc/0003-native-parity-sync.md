@@ -1,6 +1,6 @@
 # RFC-0003：跟上 ccnm 的新工具，补回 compact 档的 skills
 
-日期：2026-09-18。状态：**G1、G2、G3 全部完成**（2026-09-19）；**G2 的后续 G2.4–G2.7 完成**（2026-09-22，跨仓评审 X08 在 gld 这一半）。过程写在第 4 节。
+日期：2026-09-18。状态：**G1、G2、G3 全部完成**（2026-09-19）；**G2 的后续 G2.4–G2.7 完成**（2026-09-22，跨仓评审 X08 在 gld 这一半），同日 `disable-model-invocation` 生效。过程写在第 4 节。
 
 这是跨仓方案 v3（toexec 仓库 `docs/plan/implementation-plan-v3-native-parity.md`）第 5 节第 5 步在 gld 这一侧的落地记录。v3 要的是：经 gld / ccnm 用 AI，能力不低于在项目机器上直接跑官方 CLI。ccnm 那边的执行面已经补了一批（ccnm P36–P41），gld 要跟上。为什么这样分三块、原生 CLI 实际怎么做，都在 v3 方案和 ccnm 的研究记录里，这里只写 gld 要改什么、怎么算做完。
 
@@ -244,6 +244,20 @@ ccnm 那半边的权威语义在它的协议第 6 节（四个时钟、session-b
 - 点开头的文件不读也不列：skill 目录里的 `.env` 多半是脚本的密钥。gld 自己的数据目录照旧是另一道独立的门。
 - **工作区外的 skill，默认的 auto 扫描扫到的不给读**，要来源是明确配置的（`gld settings runtime --skill-sources claude`）或者已经 `confine-reads=false`。原因：默认就是 auto，要是扫到就给读，一个挂在公网上的服务会因为这次改动默认多读出一批主目录里的文件。正文照旧给（G2 起就是这样），读不了文件时 `filesUnavailable` 写明怎么打开。
 
-**没做的**：`disable-model-invocation` 在 gld 里仍不生效——gld 没有斜杠命令，藏起来就等于用户也用不了，要不要藏是产品取舍，留给用户定。skill 的参数替换和 `` !`命令` `` 列举（ccnm 的 `load_skill` 有）gld 的 `get_skill` 没有。
+**没做的**：`disable-model-invocation` 当时没生效（同日后来做了，见下一节）。skill 的参数替换和 `` !`命令` `` 列举（ccnm 的 `load_skill` 有）gld 的 `get_skill` 没有。
 
 验证：`cargo test --workspace` 733 passed / 0 failed（新增：工具层 7 条——附件读取、越界与符号链接、点文件、根上的 SKILL.md、auto 来源要显式开启、`skipped` 原因、`notes`；发现逻辑 1 条截断；`context_marks_what_is_actually_injected` 加了一个写坏的 skill，用真实二进制核对 JSON 和人看的输出都报出原因）；fmt、clippy、`cargo +1.89 check --locked` 干净。Windows 编译检查本机没有 mingw，交给 CI。
+
+### 2026-09-22：`disable-model-invocation` 生效（用户定：按最合理的方式）
+
+原生 Claude Code 里这种 skill 模型看不见，只能由人敲 `/名字` 启动。gld 没有斜杠命令，ChatGPT、Codex 也没有，照搬就是谁都用不了。所以取中间：
+
+- **不进给 AI 的目录**：模型不会自己想起它，也不占 compact 的 1200 字符预算。目录末尾只报个数，并说"用户点名才加载"。
+- **`list_skills` 照列**，带 `disableModelInvocation: true`（默认值不写出来）；**`get_skill` 照给正文**，`notes` 第一条写明"用户点名才照做，自己挑的先问用户"。用户在对话里点名，是 gld 里唯一的"人来启动"。
+- 读法照宿主：`yes` / `on` / `1` 也算，写两遍后一个算。frontmatter 只能宽松读出时原生会整段丢弃、开关跟着失效，这里照样认——对"别让模型自己跑 deploy"是更保守的一侧，和 ccnm P45 同一取舍。
+- `user-invocable` 管的是斜杠菜单，gld 没有这个菜单，仍然不起作用。
+- `gld context` 里这种 skill 打 `◦`，"目录里列了 N"不算它们。
+
+和 ccnm 的差别：ccnm 有 MCP prompts 这条"人来启动"的通道，所以它的 `load_skill` 直接拒；gld 没有，只能靠说明。这是提示不是强制——模型硬要加载，服务端分不清是不是用户点的名。
+
+验证：新增 3 条（发现与目录 1 条、工具层 1 条、`context_marks_what_is_actually_injected` 用真实二进制核对 MCP 握手说明里没有它的描述、人看的输出标出来）。

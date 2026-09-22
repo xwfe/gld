@@ -215,16 +215,25 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
         snapshot.skills.len(),
         listed
     )));
-    for (index, skill) in snapshot.skills.iter().enumerate() {
+    // 目录按顺序列前 `listed` 条，但标了 disable-model-invocation 的不进目录，
+    // 所以数的是"能进目录的"第几条，不是整张表的下标。
+    let mut offered = 0;
+    let mut user_only = 0;
+    for skill in &snapshot.skills {
         // 打 ✓ 的进了给 AI 的目录。打 · 的不是失效了——`list_skills` 照样
         // 拿得到——只是说明里看不见，模型自己想起它的机会小。
-        let mark = if index < listed {
-            ctx.out.green("✓")
+        let (mark, tail) = if skill.disable_model_invocation {
+            user_only += 1;
+            (ctx.out.dim("◦"), ctx.out.dim("  只在用户点名时用"))
+        } else if offered < listed {
+            offered += 1;
+            (ctx.out.green("✓"), String::new())
         } else {
-            ctx.out.dim("·")
+            offered += 1;
+            (ctx.out.dim("·"), String::new())
         };
         ctx.out.line(format!(
-            "  {mark} [{}/{}] {}  {}",
+            "  {mark} [{}/{}] {}  {}{tail}",
             skill.provider, skill.scope, skill.name, skill.path
         ));
     }
@@ -246,6 +255,12 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
             "打 ✗ 的 SKILL.md 没收进来，原因写在后面。改好之后 list_skills 马上看得到；进说明里的目录要等 AI 下次连上。",
         ));
     }
+    if user_only > 0 {
+        ctx.out.line("");
+        ctx.out.line(ctx.out.dim(
+            "打 ◦ 的写了 disable-model-invocation：不进目录，AI 不会自己用；你在对话里点它的名字，AI 才去加载。",
+        ));
+    }
     if snapshot.instructions.is_empty()
         && snapshot.skills.is_empty()
         && snapshot.skills_skipped.is_empty()
@@ -256,7 +271,7 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
             ));
         return Ok(());
     }
-    let skills_cut = snapshot.skills.len() > listed;
+    let skills_cut = snapshot.skills.len() - user_only > listed;
     if skipped > 0 || skills_cut {
         ctx.out.line("");
         if skipped > 0 {

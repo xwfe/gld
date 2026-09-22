@@ -43,6 +43,16 @@ pub struct SkillDescriptor {
     /// 要的"内容版本"）。
     #[serde(default)]
     pub content_sha256: String,
+    /// frontmatter 写了 `disable-model-invocation: true`：作者要的是"人点名才用"
+    /// （deploy、发版这类有副作用的流程）。
+    ///
+    /// 原生 Claude Code 里这种 skill 模型看不见，只能由人敲 `/名字` 启动。gld
+    /// 没有斜杠命令——ChatGPT、Codex 也都没有——整个藏起来等于谁都用不了，所以
+    /// 折中成：**不进给 AI 的目录**（模型不会自己想起它，也不占 compact 的预算），
+    /// `list_skills` 照列、`get_skill` 照给，但正文前面写明"用户点名才照做"。
+    /// 用户在对话里点名，是 gld 里唯一的"人来启动"。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_model_invocation: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -643,6 +653,7 @@ pub fn scan_skills(workspace_root: &Path, sources: &[String], custom_paths: &str
                 path,
                 scope: candidate.scope.into(),
                 content_sha256,
+                disable_model_invocation: parsed.disable_model_invocation,
             },
             body: parsed.body,
             dir: skill_dir(&canonical, &candidate.root),
@@ -718,7 +729,12 @@ pub struct SkillCatalog {
 }
 
 pub fn render_skill_catalog_for_profile(skills: &[SkillEntry], tool_profile: &str) -> SkillCatalog {
-    if skills.is_empty() {
+    // 标了 disable-model-invocation 的不进目录，只报个数，理由见
+    // `SkillDescriptor::disable_model_invocation`。
+    let (skills, user_only): (Vec<&SkillEntry>, Vec<&SkillEntry>) = skills
+        .iter()
+        .partition(|skill| !skill.descriptor.disable_model_invocation);
+    if skills.is_empty() && user_only.is_empty() {
         return SkillCatalog {
             text: String::new(),
             listed: 0,
@@ -759,6 +775,12 @@ pub fn render_skill_catalog_for_profile(skills: &[SkillEntry], tool_profile: &st
             "({} more not listed here; call list_skills to see all {}.)\n",
             skills.len() - listed,
             skills.len()
+        ));
+    }
+    if !user_only.is_empty() {
+        out.push_str(&format!(
+            "({} skill(s) marked disable-model-invocation are left out: they are for the user to start. Do not pick one yourself; load it with get_skill only when the user asks for it by name.)\n",
+            user_only.len()
         ));
     }
     SkillCatalog {
@@ -820,6 +842,10 @@ fn parse_skill(raw: &str, path: &Path) -> Result<ParsedSkill, String> {
         description: description.to_string(),
         body: body.trim().to_string(),
         notes,
+        // 照宿主的读法：yes / on / 1 也算，写两遍后一个算（toexec-skill 0.2.0）。
+        // frontmatter 只能宽松读出时原生会整段丢弃、开关跟着失效；这里照样认，
+        // 对"别让模型自己跑 deploy"是更保守的一侧（和 ccnm P45 同一取舍）。
+        disable_model_invocation: parsed.flag("disable-model-invocation") == Some(true),
     })
 }
 
@@ -828,6 +854,7 @@ struct ParsedSkill {
     description: String,
     body: String,
     notes: Vec<String>,
+    disable_model_invocation: bool,
 }
 
 fn cursor_rule_is_always_apply(path: &Path) -> bool {
@@ -1288,6 +1315,76 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].descriptor.name, "release");
         assert_eq!(skills[0].body, "# Steps\nRun tests.");
+    }
+
+    /// `disable-model-invocation` 照宿主的读法认（yes 也算、写两遍后一个算），
+    /// 认出来的不进给 AI 的目录，只报个数；没写或写 false 的照常列。
+    #[test]
+    fn a_skill_for_the_user_to_start_stays_out_of_the_catalog() {
+        let root = tempfile::tempdir().expect("root");
+        for (name, switch) in [
+            ("deploy", "disable-model-invocation: yes\n"),
+            (
+                "twice",
+                "disable-model-invocation: false\ndisable-model-invocation: true\n",
+            ),
+            ("review", "disable-model-invocation: false\n"),
+            ("plain", ""),
+        ] {
+            let dir = root.path().join(".agents/skills").join(name);
+            fs::create_dir_all(&dir).expect("skill dir");
+            fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: The {name} flow\n{switch}---\nSteps.\n"),
+            )
+            .expect("skill");
+        }
+        let skills = discover_skills(root.path(), &["custom".into()], ".agents/skills");
+        let user_only = |name: &str| {
+            skills
+                .iter()
+                .find(|skill| skill.descriptor.name == name)
+                .expect(name)
+                .descriptor
+                .disable_model_invocation
+        };
+        assert!(user_only("deploy") && user_only("twice"));
+        assert!(!user_only("review") && !user_only("plain"));
+
+        for profile in ["compact", "advanced"] {
+            let catalog = render_skill_catalog_for_profile(&skills, profile);
+            assert_eq!(catalog.listed, 2, "{profile}: {}", catalog.text);
+            assert!(catalog.text.contains("- review:"), "{}", catalog.text);
+            assert!(!catalog.text.contains("- deploy:"), "{}", catalog.text);
+            assert!(!catalog.text.contains("- twice:"), "{}", catalog.text);
+            assert!(
+                catalog
+                    .text
+                    .contains("2 skill(s) marked disable-model-invocation are left out"),
+                "{}",
+                catalog.text
+            );
+            // 不能混进"预算放不下"那一句：那句的意思是"去 list_skills 挑"。
+            assert!(
+                !catalog.text.contains("more not listed here"),
+                "{}",
+                catalog.text
+            );
+        }
+
+        // 只剩这种 skill 时目录也不能是空的：否则模型不知道有东西可以点名。
+        let only: Vec<SkillEntry> = skills
+            .iter()
+            .filter(|skill| skill.descriptor.disable_model_invocation)
+            .cloned()
+            .collect();
+        let catalog = render_skill_catalog_for_profile(&only, "compact");
+        assert_eq!(catalog.listed, 0);
+        assert!(
+            catalog.text.contains("2 skill(s) marked"),
+            "{}",
+            catalog.text
+        );
     }
 
     /// 超过上限的 SKILL.md 以前被悄悄截断，模型拿到半份流程还以为是全部。

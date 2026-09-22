@@ -15,6 +15,8 @@ const MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
 const MAX_LISTED_FILES: usize = 100;
 const MAX_LISTED_DEPTH: usize = 4;
 
+const USER_ONLY_NOTE: &str = "this skill is marked disable-model-invocation: its author wants a person to start it. Follow it only if the user asked for this skill by name; if you picked it yourself, stop and ask the user first";
+
 pub fn list_skills(ctx: &ToolContext, _args: &Value) -> Result<Value, WorkspaceError> {
     let scan = ctx.current_skill_scan();
     Ok(tool_ok(json!({
@@ -81,8 +83,15 @@ pub fn get_skill(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErro
         "skill": skill.descriptor,
         "content": skill.body,
     });
-    if !skill.notes.is_empty() {
-        result["notes"] = json!(skill.notes);
+    let mut notes = Vec::new();
+    if skill.descriptor.disable_model_invocation {
+        // 不拒：gld 没有斜杠命令，用户在对话里点名是唯一的启动方式，拒了就
+        // 谁都用不了。能做的是把作者的意思原样交给模型。
+        notes.push(USER_ONLY_NOTE.to_string());
+    }
+    notes.extend(skill.notes.iter().cloned());
+    if !notes.is_empty() {
+        result["notes"] = json!(notes);
     }
     match readable {
         Ok(dir) => {
@@ -564,5 +573,44 @@ mod tests {
             notes.contains("\\\"name\\\" more than once (lines 3, 4)"),
             "{notes}"
         );
+    }
+
+    /// 标了 disable-model-invocation 的 skill：list_skills 照列并带上标记，
+    /// get_skill 照给正文，但第一条说明就是"用户点名才照做"。拒掉的话，没有
+    /// 斜杠命令的客户端（ChatGPT、Codex）里谁都用不了它。
+    #[test]
+    fn a_skill_for_the_user_to_start_is_listed_and_loaded_with_a_warning() {
+        let o = outside_skill_root();
+        write(
+            &o.root.join("deploy/SKILL.md"),
+            "---\nname: deploy\ndescription: Ship it\ndisable-model-invocation: true\n---\nPush to prod.\n",
+        );
+        write(
+            &o.root.join("review/SKILL.md"),
+            "---\nname: review\ndescription: Review it\n---\nRead the diff.\n",
+        );
+        let listed = list_skills(&o.ctx, &json!({})).expect("list");
+        let flag = |name: &str| {
+            listed["skills"]
+                .as_array()
+                .expect("skills")
+                .iter()
+                .find(|skill| skill["name"] == name)
+                .expect(name)
+                .get("disableModelInvocation")
+                .cloned()
+        };
+        assert_eq!(flag("deploy"), Some(json!(true)));
+        // 默认值不写出来：每条 skill 多一个 false 只是噪音。
+        assert_eq!(flag("review"), None);
+
+        let loaded = get_skill(&o.ctx, &json!({"name": "deploy"})).expect("skill");
+        assert_eq!(loaded["content"], "Push to prod.");
+        let first = loaded["notes"][0].as_str().expect("note");
+        assert!(first.contains("disable-model-invocation"), "{first}");
+        assert!(first.contains("asked for this skill by name"), "{first}");
+
+        let plain = get_skill(&o.ctx, &json!({"name": "review"})).expect("skill");
+        assert!(plain.get("notes").is_none(), "{plain}");
     }
 }

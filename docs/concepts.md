@@ -438,6 +438,10 @@ Skill（扫到 14，目录里列了 9）
 
 写坏了的 SKILL.md（引号没闭合、没写描述、描述超过 1024 字符）不进目录，但也不会悄悄消失：`gld context` 打 `✗` 并写出原因，AI 调 `list_skills` 也在 `skipped` 里看得到。
 
+frontmatter 写了 `disable-model-invocation: true`（`yes`、`on`、`1` 也算）的 skill，**不进目录，AI 不会自己用它**；你在对话里点它的名字（"用 deploy 那个 skill"），AI 才去 `get_skill` 加载，正文前面还带一句"用户点名才照做"。`gld context` 里打 `◦`。
+
+为什么不像原生 Claude Code 那样整个藏起来：原生是靠你敲 `/deploy` 启动的，gld 没有斜杠命令（ChatGPT、Codex 也没有），藏起来就谁都用不了了。`user-invocable` 管的正是那个斜杠菜单，gld 里没有这个菜单，所以它不起作用。
+
 skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读——只限这个 skill 自己的目录。主目录里的用户级 skill 默认只给正文不给文件，来源明确配置之后才给，边界见[安全](security.md)那一节。
 
 要让它们全部进去：`gld ws set tool-profile=advanced`。
