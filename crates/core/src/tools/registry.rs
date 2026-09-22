@@ -366,7 +366,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "list_skills",
         "List skills",
-        "List skills discovered from the enabled IDE and coding-agent providers. Skill bodies are loaded separately on demand.",
+        "List skills discovered from the enabled IDE and coding-agent providers. Skill bodies are loaded separately on demand. Files that look like skills but could not be taken in are listed under skipped, with the reason.",
         true,
         false,
         false,
@@ -374,7 +374,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "get_skill",
         "Get skill",
-        "Load one discovered SKILL.md by id or unique name, including its full workflow body.",
+        "Load one discovered SKILL.md by id or unique name, including its full workflow body and the files in its directory. With file, read one of those files instead (scripts, references), including for skills installed outside the workspace.",
         true,
         false,
         false,
@@ -952,7 +952,12 @@ pub fn input_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "id": { "type": "string", "minLength": 1 },
-                "name": { "type": "string", "minLength": 1 }
+                "name": { "type": "string", "minLength": 1 },
+                "file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "A path relative to the skill's directory, as listed in files (e.g. scripts/run.sh). Only files inside that directory can be read."
+                }
             },
             "description": "Provide either id or name to load a skill. If both are provided, id takes priority.",
             "additionalProperties": false

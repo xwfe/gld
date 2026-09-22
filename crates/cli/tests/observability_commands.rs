@@ -232,6 +232,11 @@ fn context_marks_what_is_actually_injected() {
         ".claude/skills/marker-skill/SKILL.md",
         "---\nname: marker-skill\ndescription: >\n  SKILL-MARKER-7c6d handles releases.\n---\nBody.\n",
     );
+    // 引号没闭合：读不了。以前静默跳过，现在 context 要说出是哪个文件、为什么。
+    env.write(
+        ".claude/skills/broken-skill/SKILL.md",
+        "---\nname: broken-skill\ndescription: \"never closed\n---\nBody.\n",
+    );
     let port = free_port();
     env.ok(&[
         "ws",
@@ -271,6 +276,27 @@ fn context_marks_what_is_actually_injected() {
     assert!(
         snapshot["skillsListed"].as_u64().unwrap_or(0) >= 1,
         "至少项目里这一个要进目录：{snapshot}"
+    );
+    let broken = snapshot["skillsSkipped"]
+        .as_array()
+        .expect("skillsSkipped 数组")
+        .iter()
+        .find(|skipped| {
+            skipped["path"]
+                .as_str()
+                .is_some_and(|path| path.contains("broken-skill"))
+        })
+        .unwrap_or_else(|| panic!("读不了的 skill 没有列出来：{snapshot}"));
+    assert!(
+        broken["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("frontmatter line 2")),
+        "要说出原因：{broken}"
+    );
+    let human = env.ok(&["context"]);
+    assert!(
+        human.contains("没收进来") && human.contains("broken-skill"),
+        "人看的输出也要列出来：{human}"
     );
 
     let text = mcp_instructions(port);

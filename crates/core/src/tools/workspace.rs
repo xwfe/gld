@@ -307,7 +307,7 @@ impl Workspace {
     ///
     /// 注意这**不是**沙箱：trusted 模式下 exec_command 仍能 `cat` 这个文件。
     /// 这里堵的是默认就在、且模型最容易走的那条路。
-    fn reject_data_home_read(&self, resolved: &Path) -> WorkspaceResult<()> {
+    pub(crate) fn reject_data_home_read(&self, resolved: &Path) -> WorkspaceResult<()> {
         if !self.is_gld_data_home_path(resolved) {
             return Ok(());
         }

@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use sha2::Digest;
 
 use crate::agent_context::{
-    discover_instructions, discover_skills, render_instruction_documents,
-    AgentContextRuntimeConfig, SkillEntry,
+    discover_instructions, render_instruction_documents, scan_skills, AgentContextRuntimeConfig,
+    SkillEntry, SkillScan,
 };
 use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
@@ -214,10 +214,18 @@ impl ToolContext {
     }
 
     pub fn current_skills(&self) -> Vec<SkillEntry> {
+        self.current_skill_scan().skills
+    }
+
+    /// 和 [`Self::current_skills`] 一样现扫，外加扫到但没收进来的那些。
+    pub fn current_skill_scan(&self) -> SkillScan {
         let Some(config) = &self.agent_context else {
-            return self.skills.clone();
+            return SkillScan {
+                skills: self.skills.clone(),
+                skipped: Vec::new(),
+            };
         };
-        discover_skills(
+        scan_skills(
             self.workspace.root(),
             &config.skill_sources,
             &config.custom_skill_paths,

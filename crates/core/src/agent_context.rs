@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ pub struct InstructionDocument {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDescriptor {
     pub id: String,
@@ -38,12 +38,47 @@ pub struct SkillDescriptor {
     pub provider: String,
     pub path: String,
     pub scope: String,
+    /// SKILL.md 整个文件的 sha256。`id` 只由路径决定，同一个路径下内容换了
+    /// id 不变——拿这个才分得清"模型读到的是不是现在这一版"（跨仓评审 X08
+    /// 要的"内容版本"）。
+    #[serde(default)]
+    pub content_sha256: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SkillEntry {
     pub descriptor: SkillDescriptor,
     pub body: String,
+    /// skill 自己的目录（规范化过的绝对路径），`get_skill` 读附件只许在它下面。
+    ///
+    /// `None`：SKILL.md 直接放在扫描根上（或者经符号链接指到了根外面）——它的
+    /// "目录"就是整个根，放开等于放开整个根，所以不给。
+    pub dir: Option<PathBuf>,
+    /// 读这份文件时模型该知道的事：被截断了、原生客户端会整段丢弃这份
+    /// frontmatter、有键写了几遍。
+    pub notes: Vec<String>,
+    /// 来源是用户明确配置的（`--skill-sources claude`、自定义路径），不是
+    /// auto 默认扫到的。工作区外的附件只在这时（或关掉 confine-reads 时）才读。
+    pub explicit_source: bool,
+}
+
+/// 看起来是 skill、但没进目录的文件，和原因。
+///
+/// 以前这些是静默跳过的：作者写了 skill、AI 看不见、也没有任何地方说为什么。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedSkill {
+    pub provider: String,
+    pub path: String,
+    pub scope: String,
+    pub reason: String,
+}
+
+/// 一次扫描的结果：收进来的，和没收进来的。
+#[derive(Debug, Clone, Default)]
+pub struct SkillScan {
+    pub skills: Vec<SkillEntry>,
+    pub skipped: Vec<SkippedSkill>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -67,6 +102,9 @@ pub struct AgentContextSnapshot {
     /// 主动想起它们的机会就小。`gld context` 照这个数打勾。
     #[serde(default)]
     pub skills_listed: usize,
+    /// 扫到了但没收进来的 skill，各带原因。
+    #[serde(default)]
+    pub skills_skipped: Vec<SkippedSkill>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -166,7 +204,10 @@ pub fn discover(
         instruction_sources,
         custom_instruction_paths,
     );
-    let skill_entries = discover_skills(workspace_root, skill_sources, custom_skill_paths);
+    let SkillScan {
+        skills: skill_entries,
+        skipped: skills_skipped,
+    } = scan_skills(workspace_root, skill_sources, custom_skill_paths);
     let skills = skill_entries
         .iter()
         .map(|entry| entry.descriptor.clone())
@@ -186,6 +227,7 @@ pub fn discover(
         injected_instruction_paths,
         skills_injected: skills_are_injected(tool_profile),
         skills_listed,
+        skills_skipped,
     }
 }
 
@@ -412,6 +454,15 @@ pub fn discover_skills(
     sources: &[String],
     custom_paths: &str,
 ) -> Vec<SkillEntry> {
+    scan_skills(workspace_root, sources, custom_paths).skills
+}
+
+/// SKILL.md 超过这么多字符，正文只留这么多（整份文件 `get_skill` 的附件读法
+/// 还拿得到，上限更大）。
+const MAX_SKILL_CHARS: usize = 100 * 1024;
+
+/// 扫描 skill，收不进来的也记下原因。
+pub fn scan_skills(workspace_root: &Path, sources: &[String], custom_paths: &str) -> SkillScan {
     let (sources, auto_enabled) = effective_sources(sources);
     let mut roots = Vec::<(String, PathBuf, &'static str)>::new();
     for raw_source in &sources {
@@ -518,7 +569,7 @@ pub fn discover_skills(
         }
     }
 
-    let mut candidates = Vec::<(String, PathBuf, &'static str)>::new();
+    let mut candidates = Vec::<Candidate>::new();
     for (provider, root, scope) in roots {
         collect_skill_candidates(&mut candidates, &provider, &root, scope, 4);
     }
@@ -527,37 +578,76 @@ pub fn discover_skills(
     }
 
     let mut seen_paths = HashSet::new();
-    let mut seen_content = HashSet::new();
+    // 内容哈希 → 已经收进来的那一份的路径。
+    let mut seen_content = HashMap::<String, String>::new();
     let mut result = Vec::new();
-    for (provider, path, scope) in candidates {
-        let canonical = path.canonicalize().unwrap_or(path);
+    let mut skipped = Vec::new();
+    for candidate in candidates {
+        let canonical = candidate
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.path.clone());
         let path_key = canonical.to_string_lossy().to_string();
+        // 同一个文件从两个来源各扫到一次（`.agents/skills` 同时属于好几家），
+        // 那是同一个 skill，不是被跳过的第二个。
         if !seen_paths.insert(path_key.clone()) {
             continue;
         }
-        let Ok(mut raw) = fs::read_to_string(&canonical) else {
-            continue;
+        let path = display_path(workspace_root, &canonical);
+        let mut skip = |reason: String| {
+            skipped.push(SkippedSkill {
+                provider: candidate.provider.clone(),
+                path: path.clone(),
+                scope: candidate.scope.into(),
+                reason,
+            })
         };
-        if raw.len() > 100 * 1024 {
-            raw = raw.chars().take(100 * 1024).collect();
-        }
-        let Some((name, description, body)) = parse_skill(&raw, &canonical) else {
-            continue;
+        let raw = match fs::read_to_string(&canonical) {
+            Ok(raw) => raw,
+            Err(error) => {
+                skip(format!("cannot read it: {error}"));
+                continue;
+            }
         };
-        if !seen_content.insert(hex_hash(raw.as_bytes())) {
+        let content_sha256 = hex_hash(raw.as_bytes());
+        let mut notes = Vec::new();
+        let served = if raw.chars().count() > MAX_SKILL_CHARS {
+            notes.push(format!(
+                "SKILL.md is {} bytes; only its first {MAX_SKILL_CHARS} characters are in this content",
+                raw.len()
+            ));
+            raw.chars().take(MAX_SKILL_CHARS).collect()
+        } else {
+            raw
+        };
+        let parsed = match parse_skill(&served, &canonical) {
+            Ok(parsed) => parsed,
+            Err(reason) => {
+                skip(reason);
+                continue;
+            }
+        };
+        if let Some(first) = seen_content.get(&content_sha256) {
+            skip(format!("same content as {first}, which is listed"));
             continue;
         }
+        seen_content.insert(content_sha256.clone(), path.clone());
+        notes.extend(parsed.notes);
         let id = hex_hash(path_key.as_bytes())[..16].to_string();
         result.push(SkillEntry {
             descriptor: SkillDescriptor {
                 id,
-                name,
-                description,
-                provider,
-                path: display_path(workspace_root, &canonical),
-                scope: scope.into(),
+                name: parsed.name,
+                description: parsed.description,
+                provider: candidate.provider,
+                path,
+                scope: candidate.scope.into(),
+                content_sha256,
             },
-            body,
+            body: parsed.body,
+            dir: skill_dir(&canonical, &candidate.root),
+            notes,
+            explicit_source: !auto_enabled,
         });
     }
     // 项目自己的 skill 排前面。发现顺序是按来源来的，主目录那批（`global`）
@@ -565,7 +655,31 @@ pub fn discover_skills(
     // 这个项目专有的 skill 会被机器上装的通用 skill 挤掉。稳定排序，同一档
     // 内部的顺序不变。
     result.sort_by_key(|entry| u8::from(entry.descriptor.scope == "global"));
-    result
+    SkillScan {
+        skills: result,
+        skipped,
+    }
+}
+
+/// 一个待读的 SKILL.md，以及它是从哪个根下面找到的。
+struct Candidate {
+    provider: String,
+    path: PathBuf,
+    scope: &'static str,
+    root: PathBuf,
+}
+
+/// 附件能读的目录：SKILL.md 所在的目录，但必须在发现它的根**里面**、且不是
+/// 根本身。
+///
+/// 为什么不直接用 SKILL.md 的上一级：`~/.claude/skills/SKILL.md` 的上一级是整个
+/// skills 根，自定义根配成主目录时就是整个主目录；一个指向别处的符号链接
+/// SKILL.md 的上一级可以是任何地方。跨仓评审 X08：附件只授权已发现的 skill
+/// 目录，不能为了让用户级附件可读就放开整个 HOME。
+fn skill_dir(skill_md: &Path, root: &Path) -> Option<PathBuf> {
+    let dir = skill_md.parent()?;
+    let root = root.canonicalize().ok()?;
+    (dir != root && dir.starts_with(&root)).then(|| dir.to_path_buf())
 }
 
 pub fn render_instruction_documents(documents: &[InstructionDocument]) -> String {
@@ -666,24 +780,54 @@ pub fn render_skill_catalog_for_profile(skills: &[SkillEntry], tool_profile: &st
 /// 读出来的描述就是一个 `>`——模型看到的目录里，这条 skill 等于没有描述，
 /// 也就永远不会被选中（v3 方案 3.3 节点名的缺陷）。
 ///
-/// frontmatter 读不下去（tab 缩进、引号没闭合……）时**整条跳过**：没有描述的
-/// skill 放进目录也没有用，而且我们不猜作者想写什么。
-fn parse_skill(raw: &str, path: &Path) -> Option<(String, String, String)> {
+/// frontmatter 读不下去（引号没闭合、缩进里有 tab……）时**整条不收**：没有
+/// 描述的 skill 放进目录也没有用，而且我们不猜作者想写什么。不收的原因交给
+/// 调用方记进 `skipped`，不再静默。
+fn parse_skill(raw: &str, path: &Path) -> Result<ParsedSkill, String> {
     let (frontmatter, body) = toexec_skill::frontmatter::split(raw);
-    let parsed = toexec_skill::frontmatter::parse(frontmatter.unwrap_or_default()).ok()?;
+    let parsed = toexec_skill::frontmatter::parse(frontmatter.unwrap_or_default())
+        .map_err(|error| error.to_string())?;
     let name = parsed
         .text("name")
         .map(str::to_string)
-        .or_else(|| path.parent()?.file_name()?.to_str().map(str::to_string))?;
-    let description = parsed.text("description")?;
-    if name.trim().is_empty() || description.chars().count() > 1024 {
-        return None;
+        .or_else(|| path.parent()?.file_name()?.to_str().map(str::to_string))
+        .filter(|name| !name.trim().is_empty())
+        .ok_or("no name in the frontmatter and no directory to take one from")?;
+    let description = parsed
+        .text("description")
+        .ok_or("no description in the frontmatter")?;
+    // Agent Skills 规范的上限（agentskills.io/specification），Codex 超了也不收。
+    let chars = description.chars().count();
+    if chars > 1024 {
+        return Err(format!(
+            "description is {chars} characters; the limit is 1024"
+        ));
     }
-    Some((
-        name.trim().to_string(),
-        description.to_string(),
-        body.trim().to_string(),
-    ))
+    let mut notes = Vec::new();
+    if parsed.reading() == toexec_skill::Reading::Lenient {
+        notes.push("this frontmatter is not valid YAML: native Claude Code ignores all of it (name, description, switches); it was read leniently here".into());
+    }
+    for group in parsed.duplicates() {
+        let lines: Vec<String> = group.iter().map(|(_, line)| line.to_string()).collect();
+        notes.push(format!(
+            "the frontmatter sets \"{}\" more than once (lines {}); the last one counts",
+            group[group.len() - 1].0,
+            lines.join(", ")
+        ));
+    }
+    Ok(ParsedSkill {
+        name: name.trim().to_string(),
+        description: description.to_string(),
+        body: body.trim().to_string(),
+        notes,
+    })
+}
+
+struct ParsedSkill {
+    name: String,
+    description: String,
+    body: String,
+    notes: Vec<String>,
 }
 
 fn cursor_rule_is_always_apply(path: &Path) -> bool {
@@ -740,7 +884,7 @@ fn add_auto_instruction_candidates(
 }
 
 fn collect_skill_candidates(
-    candidates: &mut Vec<(String, PathBuf, &'static str)>,
+    candidates: &mut Vec<Candidate>,
     provider: &str,
     root: &Path,
     scope: &'static str,
@@ -757,15 +901,17 @@ fn collect_skill_candidates(
     {
         let path = entry.path();
         if path.is_file() && path.file_name().and_then(|value| value.to_str()) == Some("SKILL.md") {
-            candidates.push((provider.to_string(), path.to_path_buf(), scope));
+            candidates.push(Candidate {
+                provider: provider.to_string(),
+                path: path.to_path_buf(),
+                scope,
+                root: root.to_path_buf(),
+            });
         }
     }
 }
 
-fn collect_auto_workspace_skills(
-    candidates: &mut Vec<(String, PathBuf, &'static str)>,
-    workspace_root: &Path,
-) {
+fn collect_auto_workspace_skills(candidates: &mut Vec<Candidate>, workspace_root: &Path) {
     let walker = WalkDir::new(workspace_root)
         .min_depth(1)
         .max_depth(8)
@@ -774,11 +920,12 @@ fn collect_auto_workspace_skills(
     for entry in walker.filter_map(Result::ok) {
         let path = entry.path();
         if path.is_file() && path.file_name().and_then(|value| value.to_str()) == Some("SKILL.md") {
-            candidates.push((
-                infer_skill_provider(workspace_root, path),
-                path.to_path_buf(),
-                "workspace",
-            ));
+            candidates.push(Candidate {
+                provider: infer_skill_provider(workspace_root, path),
+                path: path.to_path_buf(),
+                scope: "workspace",
+                root: workspace_root.to_path_buf(),
+            });
         }
     }
 }
@@ -1143,6 +1290,32 @@ mod tests {
         assert_eq!(skills[0].body, "# Steps\nRun tests.");
     }
 
+    /// 超过上限的 SKILL.md 以前被悄悄截断，模型拿到半份流程还以为是全部。
+    #[test]
+    fn a_skill_md_that_is_cut_says_so() {
+        let root = tempfile::tempdir().expect("root");
+        let dir = root.path().join(".agents/skills/huge");
+        fs::create_dir_all(&dir).expect("skill dir");
+        let text = format!(
+            "---\ndescription: Huge\n---\n{}",
+            "line of steps\n".repeat(10_000)
+        );
+        fs::write(dir.join("SKILL.md"), &text).expect("skill");
+        let scan = scan_skills(root.path(), &["custom".into()], ".agents/skills");
+        let skill = &scan.skills[0];
+        assert!(skill.body.chars().count() < text.chars().count());
+        assert!(
+            skill
+                .notes
+                .iter()
+                .any(|note| note.contains(&format!("{} bytes", text.len()))),
+            "{:?}",
+            skill.notes
+        );
+        assert_eq!(skill.descriptor.content_sha256, hex_hash(text.as_bytes()));
+        assert!(skill.dir.as_ref().is_some_and(|dir| dir.ends_with("huge")));
+    }
+
     #[test]
     fn global_scan_detects_user_level_instruction_and_skill_sources() {
         let home = tempfile::tempdir().expect("home");
@@ -1291,8 +1464,9 @@ mod tests {
                     provider: "claude".into(),
                     path: format!(".claude/skills/skill-{index:02}/SKILL.md"),
                     scope: "workspace".into(),
+                    ..Default::default()
                 },
-                body: String::new(),
+                ..Default::default()
             })
             .collect::<Vec<_>>();
 

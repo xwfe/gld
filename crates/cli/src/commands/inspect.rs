@@ -205,8 +205,13 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
     } else {
         0
     };
+    let not_taken = if snapshot.skills_skipped.is_empty() {
+        String::new()
+    } else {
+        format!("，没收进来 {}", snapshot.skills_skipped.len())
+    };
     ctx.out.line(ctx.out.bold(&format!(
-        "Skill（扫到 {}，目录里列了 {}）",
+        "Skill（扫到 {}，目录里列了 {}{not_taken}）",
         snapshot.skills.len(),
         listed
     )));
@@ -223,8 +228,28 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
             skill.provider, skill.scope, skill.name, skill.path
         ));
     }
+    // 扫到了却没收进来的：以前静默跳过，作者只看到 AI 不用他的 skill。
+    for skipped in &snapshot.skills_skipped {
+        ctx.out.line(format!(
+            "  {} [{}/{}] {}  {}",
+            ctx.out.red("✗"),
+            skipped.provider,
+            skipped.scope,
+            skipped.path,
+            ctx.out.dim(&skipped.reason)
+        ));
+    }
 
-    if snapshot.instructions.is_empty() && snapshot.skills.is_empty() {
+    if !snapshot.skills_skipped.is_empty() {
+        ctx.out.line("");
+        ctx.out.line(ctx.out.yellow(
+            "打 ✗ 的 SKILL.md 没收进来，原因写在后面。改好之后 list_skills 马上看得到；进说明里的目录要等 AI 下次连上。",
+        ));
+    }
+    if snapshot.instructions.is_empty()
+        && snapshot.skills.is_empty()
+        && snapshot.skills_skipped.is_empty()
+    {
         ctx.out
             .line(ctx.out.dim(
                 "没有发现可注入的内容。gld context --global 看看主目录下有哪些来源可以启用。",
