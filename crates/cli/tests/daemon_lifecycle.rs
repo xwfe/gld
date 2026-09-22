@@ -99,7 +99,6 @@ fn project_resolution_by_name_prefix_and_cwd() {
     let output = Command::new(env!("CARGO_BIN_EXE_gld"))
         .args(["--json", "ws", "show"])
         .env("GLD_HOME", env.home.path())
-        .env("HOME", env.user_home())
         .env_remove("GLD_WORKSPACE")
         .current_dir(&sub)
         .output()

@@ -301,12 +301,7 @@ impl Hub {
         let result = match method {
             "initialize" => Ok(self.initialize_result()),
             "ping" => Ok(json!({})),
-            // ~/.agents/mcp.json 写坏时列表是空的（一个都不给），这里把原因
-            // 作为错误报给客户端，免得看起来像 gld 什么工具都没有。
-            "tools/list" => match crate::exposure::current() {
-                Ok(_) => Ok(json!({ "tools": self.list_tools() })),
-                Err(reason) => Err(json!({ "code": -32603, "message": reason })),
-            },
+            "tools/list" => Ok(json!({ "tools": self.list_tools() })),
             "tools/call" => self.call(auth, &params, &mut routed),
             _ => Err(json!({
                 "code": -32601,
@@ -361,18 +356,6 @@ impl Hub {
     }
 
     pub fn list_tools(&self) -> Vec<Value> {
-        let mut tools = self.list_tools_unfiltered();
-        // hub 自己的几个工具和 remote_* 不经 exposed_tool_names，在这里一起过
-        // ~/.agents/mcp.json。
-        tools.retain(|tool| {
-            tool.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| crate::exposure::gate(name).is_ok())
-        });
-        tools
-    }
-
-    fn list_tools_unfiltered(&self) -> Vec<Value> {
         let mut tools = vec![list_workspaces_definition(), workspace_context_definition()];
         tools.extend(
             list_tools_for_profile(&self.tool_profile)
@@ -430,19 +413,6 @@ impl Hub {
             .and_then(Value::as_str)
             .ok_or_else(|| json!({ "code": -32602, "message": "Missing tool name" }))?;
         let canonical = canonical_tool_name(name);
-        // 先于"认不认识"：被 ~/.agents/mcp.json 关掉的工具要说清是被谁关的，
-        // 不能报成 Unknown tool 让人去查拼写。文件写坏时这里就是报原因的地方。
-        if let Err(reason) = crate::exposure::gate(canonical) {
-            return match crate::exposure::current() {
-                Err(_) => Err(json!({ "code": -32603, "message": reason })),
-                Ok(_) => Ok(plain_result(tool_err(WorkspaceError::Tool {
-                    code: "TOOL_TURNED_OFF",
-                    message: reason,
-                    category: "policy",
-                    retryable: false,
-                }))),
-            };
-        }
         if !self.exposes(canonical) {
             return Err(json!({
                 "code": -32602,

@@ -200,13 +200,11 @@ fn concurrent_starts_converge_on_a_single_running_service() {
     let handles: Vec<_> = (0..4)
         .map(|_| {
             let home = env.home.path().to_path_buf();
-            let user_home = env.user_home();
             let project = env.project.path().to_path_buf();
             std::thread::spawn(move || {
                 Command::new(env!("CARGO_BIN_EXE_gld"))
                     .args(["start"])
                     .env("GLD_HOME", &home)
-                    .env("HOME", &user_home)
                     .env("NO_COLOR", "1")
                     .env_remove("GLD_WORKSPACE")
                     .current_dir(&project)

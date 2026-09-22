@@ -131,8 +131,6 @@ gld upgrade --tool-profile read-only       # 整个服务：项目的工具集�
 代价：模型不能改代码、不能跑测试。适合"只让它看、不让它动"的场景。
 `read_file` 仍在表里，但它的范围由 `confine-reads` 管（默认只读项目目录内）。
 
-只想关掉某一两个工具、不想整档换成 read-only 的话，在 `~/.agents/mcp.json` 里按名字关（写法见 [concepts.md](concepts.md#按名字再关掉工具和-skillagentsmcpjson)），同样是服务端强制，硬调拿到 `TOOL_TURNED_OFF`。它和 `tool-profile` 取交集，只能再关、不能放开。**注意**：这个文件在跑 gld 的账号的 HOME 下，开着 `exec_command` 的项目里 AI 能改它；它管的是"给多少"，不是一道拦 AI 的门。
-
 ### 3. 收窄命令白名单——注意要加 `only:`
 
 ```bash

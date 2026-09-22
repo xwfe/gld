@@ -797,14 +797,10 @@ pub fn exposed_tool_names(tool_profile: &str) -> Vec<&'static str> {
         _ => CORE_TOOLS.to_vec(),
     };
 
-    // 最后按 ~/.agents/mcp.json 再收窄一次（crate::exposure）：列工具、调工具、
-    // workspace_context、`gld tool list`、Actions 都从这里取名单，所以一处就够。
-    crate::exposure::exposed(
-        names
-            .into_iter()
-            .filter(|name| !CLIENT_HIDDEN_TOOLS.contains(name))
-            .collect(),
-    )
+    names
+        .into_iter()
+        .filter(|name| !CLIENT_HIDDEN_TOOLS.contains(name))
+        .collect()
 }
 
 /// Legacy compatibility tools that remain callable by name but must not be advertised to

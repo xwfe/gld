@@ -19,15 +19,11 @@ pub fn handle_request(state: &SharedState, caller: &Caller, body: &Value) -> Val
     let result = match method {
         "initialize" => Ok(initialize_result(state)),
         "ping" => Ok(serde_json::json!({})),
-        "tools/list" => match crate::exposure::current() {
-            Ok(_) => {
-                let tools = list_tools_for_profile(&state.tool_profile);
-                state.record_context_block("tool_definitions", &json!(tools));
-                Ok(json!({ "tools": tools }))
-            }
-            // 写坏的 ~/.agents/mcp.json：列表会是空的，原因在这里说。
-            Err(reason) => Err(json!({ "code": -32603, "message": reason })),
-        },
+        "tools/list" => {
+            let tools = list_tools_for_profile(&state.tool_profile);
+            state.record_context_block("tool_definitions", &json!(tools));
+            Ok(json!({ "tools": tools }))
+        }
         "tools/call" => handle_tools_call(state, caller, &params),
         _ => Err(serde_json::json!({
             "code": -32601,
@@ -117,13 +113,6 @@ fn handle_tools_call(state: &SharedState, caller: &Caller, params: &Value) -> Re
     let args = tool_arguments(name, params);
 
     let canonical_name = crate::tools::registry::canonical_tool_name(name);
-    if let Err(reason) = crate::exposure::gate(canonical_name) {
-        return Err(serde_json::json!({
-            "code": -32602,
-            "message": reason,
-            "data": { "reason": "turned_off" }
-        }));
-    }
     let known = crate::tools::registry::exposed_tool_names(&state.tool_profile);
     if !known.iter().any(|n| n == &canonical_name) {
         return Err(serde_json::json!({

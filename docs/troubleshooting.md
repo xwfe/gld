@@ -98,11 +98,8 @@ gld tool call exec_command cmd='cargo test'
 | --- | --- | --- |
 | Agent 报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION` | 删除 / 覆盖等危险操作要求 `confirm=true` | 让 Agent 带 `confirm=true` 重试同一工具；命令行复现加 `confirm=true` |
 | Agent 说某个工具不存在 | 这个项目的工具集没暴露它；或者服务的工具集更窄（两边取交集） | `gld tool list -w <项目>` 看实际暴露了什么；`gld set <项目> tool-profile=advanced` 换更全的，服务那边 `gld upgrade --tool-profile advanced` |
-| 工具调用报 `TOOL_TURNED_OFF`，或 Agent 说某个工具不存在而工具集明明有它 | 被 `~/.agents/mcp.json` 按名字关了（`mcpServers.gld.disabledTools`，或写了 `enabledTools` 而它不在里面） | `gld doctor` 的"暴露规则"一行列出关掉了哪些；改那个文件，下一次请求就生效 |
-| 客户端说服务一个工具都没有，或列工具报错、提到 `.agents/mcp.json` | `~/.agents/mcp.json` 写坏了：写坏时 gld 一个工具都不给，免得把你想关的又打开 | 照错误里的位置改好（`gld doctor` 的"暴露规则"也会写）；急着用就先把文件挪走 |
-| 在 `~/.agents/mcp.json` 里关了某个工具，它还在 | 名字写错了 | `gld doctor` 的"暴露规则"会报"写了 gld 没有的工具"；照 `gld tool list` 的名字改 |
 | 写在 `.cursorrules` / `CLAUDE.md` 里的规则 AI 不理 | 默认工具集 compact 只注入项目里的 `AGENTS.md` 一份 | `gld context` 看谁打 `✓`（真注入）谁打 `·`（只是扫到）；要全部生效 `gld set <项目> tool-profile=advanced` |
-| AI 说没有 Skill 可用 | 0.4.0 起 compact 下 Skill 目录有字符上限（约 1200 字符），排在后面的没进说明；写了 `disable-model-invocation` 的本来就不进目录（打 `◦`）；`~/.agents/mcp.json` 里给了 `off` 的哪里都不出现 | `gld context` 看谁打 `✓`；让 AI 调一次 `list_skills` 就能拿到全部；要全部进说明用 `gld set <项目> tool-profile=advanced` |
+| AI 说没有 Skill 可用 | 0.4.0 起 compact 下 Skill 目录有字符上限（约 1200 字符），排在后面的没进说明；写了 `disable-model-invocation` 的本来就不进目录（打 `◦`） | `gld context` 看谁打 `✓`；让 AI 调一次 `list_skills` 就能拿到全部；要全部进说明用 `gld set <项目> tool-profile=advanced` |
 | 自己写的 Skill 在 `gld context` 里打 `✗` | SKILL.md 没收进来：frontmatter 写坏了（报第几行）、没写 `description`、描述超过 1024 字符，或者和另一份内容一模一样 | 照 `✗` 后面的原因改文件；`list_skills` 马上看得到，进说明里的目录要等 AI 下次连上 |
 | AI 说读不到 Skill 里的脚本（`filesUnavailable`） | 这个 skill 在主目录里、是默认的 auto 扫描扫到的：默认只给正文不给文件 | `gld cfg runtime --skill-sources claude`（换成它实际的来源）明确启用；或者 `gld set <项目> confine-reads=false` 放开读取范围 |
 | Plan 模式下写文件被拒 | 设计如此：Plan 模式只读 | `gld planning mode direct` 或 `goal` |

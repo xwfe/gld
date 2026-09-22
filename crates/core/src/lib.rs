@@ -21,7 +21,6 @@ pub mod auth;
 pub mod bridge;
 pub mod data;
 pub mod error;
-pub mod exposure;
 pub mod global_gateway;
 pub mod harness;
 pub mod health;

@@ -218,23 +218,18 @@ impl ToolContext {
     }
 
     /// 和 [`Self::current_skills`] 一样现扫，外加扫到但没收进来的那些。
-    ///
-    /// 出口处按 `~/.agents/mcp.json` 收档（crate::exposure::narrow_skills）：目录、
-    /// `list_skills`、`get_skill` 都从这里取，所以一处就够。
     pub fn current_skill_scan(&self) -> SkillScan {
-        let mut scan = match &self.agent_context {
-            None => SkillScan {
+        let Some(config) = &self.agent_context else {
+            return SkillScan {
                 skills: self.skills.clone(),
                 skipped: Vec::new(),
-            },
-            Some(config) => scan_skills(
-                self.workspace.root(),
-                &config.skill_sources,
-                &config.custom_skill_paths,
-            ),
+            };
         };
-        crate::exposure::narrow_skills(&mut scan);
-        scan
+        scan_skills(
+            self.workspace.root(),
+            &config.skill_sources,
+            &config.custom_skill_paths,
+        )
     }
 
     pub fn executable_path_env(&self) -> Option<OsString> {
