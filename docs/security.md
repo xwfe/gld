@@ -29,6 +29,12 @@ gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
 | 写文件 | 项目目录内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
 | 读 Git 历史 | 项目目录内 | status / diff / log / show / blame |
 
+**开了本机 MCP server 的（`gld mcp on`），拿到 token 的人还能调它们**，范围由 server
+自己决定，不受任何项目的读写限制：开了 Filesystem 就是它配的那些目录，开了
+desktop-commander 就是以你的身份跑任意命令。默认一个都不开；只放 context7、deepwiki
+这种只查资料的就够用。工具集是 `read-only` 的服务一个都不转。详见
+[concepts.md](concepts.md#本机装好的-mcp-server)。
+
 **服务的凭据管的是它的全部项目。** 上表对服务里的**每一个项目**都成立——每个项目
 自己的工具集、白名单、读限制照样生效，但能进哪几个项目只看项目表。按客户端分范围
 （给某个客户端只开某几个项目）还没做，所以挂公网的服务里别放不想一起暴露的项目，
@@ -302,6 +308,9 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
   结果，由调用方决定。
 - **锁管不到不参与的写者**：编辑器、`git checkout`、别的 AI 工具。文件锁是劝告
   锁，不参与的人照写不误。那一侧靠补丁的版本前置条件挡，它不是强 CAS。
+- **转出去的 MCP server 说什么，模型就读到什么。** 它的工具描述、说明和结果都是
+  别人写的文字，和项目里的 README 一样可能带着"顺便做点别的"。gld 只管转、分段、
+  限大小，不审内容。
 - **命令会话按"目录 + 是谁在调"分开，而"是谁"只认得出凭据分得开的那些人。**
   `exec_command` 起的命令、它返回的 `session_id` 和 `output_ref`，只有起它的
   那个主体读得到、停得掉；别人拿去用，报的是 `SESSION_NOT_FOUND`，和"这个 id

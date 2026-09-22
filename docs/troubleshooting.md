@@ -142,6 +142,23 @@ gld tool call exec_command cmd='cargo test'
 | `gld status` 里服务的状态是 `error` | 监听器跑着跑着退了 | 状态后面写着日志位置（数据目录下 `logs/hub/stderr.log`）；修好后 `gld start` |
 | 旧命令（`gld ws …`、`gld hub …`、`gld destroy`）还能敲，但帮助里找不到 | 2026-09-22 起命令收成了顶层的 add / ls / set / rm（[RFC-0004](rfc/0004-one-service-many-projects.md)）；旧写法保留兼容，不进帮助 | 照 RFC-0004 第 2 节那张表换成新写法 |
 
+## 本机 MCP server
+
+`gld mcp on` 开的那些（见 [concepts.md](concepts.md#本机装好的-mcp-server)）。先跑一次
+`gld mcp test <名字>`：它在守护进程里真起一次，用的就是服务起它时的 `PATH` 和环境变量。
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `gld mcp test` 报 ``cannot find `npx` … not on the PATH``，终端里 `npx` 明明能跑 | 守护进程的 `PATH` 和你的终端不一样：由 launchd / systemd 拉起时常常只有 `/usr/bin:/bin`，mise / nvm 装的 `npx`、`uvx` 不在里面。报错里写了它找的是哪几个目录 | `gld cfg runtime --executable-paths ~/.local/share/mise/shims`（换成 `which npx` 的那个目录），或者在 `~/.claude.json` 里把 `command` 写成绝对路径 |
+| `gld mcp ls` 说"配置里用了环境变量 X，gld 的守护进程里没有" | `~/.claude.json` 里写了 `${X}`，而守护进程起的时候那个 shell 没 export 它（`.zshrc` 里的变量，launchd 起的进程看不到） | 在一个 export 了它的终端里 `gld daemon restart`；或者把值直接写进配置的 `env` |
+| AI 报 `MCP_SERVER_NEEDS_LOGIN`（HTTP 401） | 这个远端 server 要 OAuth 登录，令牌存在 Claude Code 自己那里，gld 拿不到；或者配置里的 key 错了 | 换用它给 key 的写法（请求头或 URL 参数）；要 OAuth 的 gld 用不了 |
+| AI 报 `MCP_SERVER_UNUSABLE`，说是老的 HTTP+SSE 传输 | 配置里是 `"type": "sse"`，gld 只支持 streamable HTTP | 看那个 server 的文档，多半有一个以 `/mcp` 结尾的新地址，改成 `"type": "http"` |
+| AI 说有个 server，调的时候报 `MCP_SERVER_UNKNOWN` | 名字要一字不差（区分大小写：本机常见 `Context7` 和 `context7` 两个都装着）；或者刚被 `gld mcp off` 关了 | `gld mcp ls` 看开着的名字；报错里也列了 |
+| 开了 server，ChatGPT 里看不到 `list_mcp_tools` | 它只在连上时读一次工具表，而这三个工具开了第一个才出现 | 在 ChatGPT 的连接器设置里刷新一下 |
+| 开了但 AI 看不到、`gld mcp ls` 也说开着 | 服务的工具集是 `read-only`，一个都不转 | `gld upgrade --tool-profile compact` |
+| AI 报 `MCP_OUTCOME_UNKNOWN` | 调用发出去之后连接断了或超时（默认 60 秒，Codex 配置里的 `tool_timeout_sec` 会改它），server 做没做不知道 | 查一下它该做的事做没做，再决定重不重来；下一次调用会重起这个 server |
+| 用完很久，`node` / `python` 进程还在 | server 闲 5 分钟才收，每分钟看一次 | 正常；`gld stop` 立刻全收 |
+
 ## 数据目录与环境
 
 | 现象 | 原因 | 处理 |

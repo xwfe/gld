@@ -35,6 +35,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | --- | --- |
 | `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。两个唯一入口：`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文——MCP 监听器和 `gld tool call` 都走它，所以命令行里试出来的行为就是 AI 看到的行为 |
 | `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务 hub 和单个工作区（`Endpoint` 二选一；后者是 RFC-0004 之前单项目服务的路径，命令行已经起不了它），认证、OAuth 路由、请求日志只有一份 |
+| `machine_mcp/` | 本机装好的 MCP server 经服务转给 AI（RFC-0006）：读 `~/.claude.json` / `~/.codex/config.toml`、stdio 和 HTTP 两种客户端、连接池、`list_mcp_tools` 等三个工具。自成一块，hub 只在列工具、分发、关服务三处调它 |
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |
 | `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
 | `runtime/` | 进程内 MCP / Actions 监听器的启停、端口检测与释放等待 |

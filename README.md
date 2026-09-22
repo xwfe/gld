@@ -19,6 +19,9 @@ inspect Git, and keep task progress inside each project. Docs are in Chinese.*
 - **手上好几个项目**：客户端里只配一条连接，项目加进来就能用，不用每个项目配一次。
 - **项目在另一台机器上**，由 [ccnm](https://github.com/xwfe/ccnm) 管着：把它作为
   远端项目加进同一个服务。
+- **想让 ChatGPT 也用上本机 Claude Code / Codex 里装好的 MCP server**（context7、
+  deepwiki……）：`gld mcp on context7` 点名开，经同一条连接转过去，见
+  [concepts.md](docs/concepts.md#本机装好的-mcp-server)。
 
 ## 装
 

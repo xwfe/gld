@@ -226,6 +226,61 @@ remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
 
 ---
 
+## 本机装好的 MCP server
+
+在 Claude Code、Codex 里装好的 MCP server（context7、deepwiki、exa……），gld 可以经服务
+转给连上来的 AI——ChatGPT 这类只能连一个公网地址的客户端，这是它用上它们的唯一办法。
+本机的 Claude Code、Codex 自己就连得上，用不着这个。
+
+```bash
+gld mcp ls                        # 装了哪些、开了哪些
+gld mcp test context7             # 在守护进程里起一次：起不起得来、有哪些工具
+gld mcp on context7 deepwiki      # 开（名字区分大小写，照 ls 里的抄）
+gld mcp off context7              # 关；--all 全关
+```
+
+**装了哪些**直接读 `~/.claude.json` 的 `mcpServers` 和 `~/.codex/config.toml` 的
+`[mcp_servers.*]`，不用在 gld 里再配一遍。两边同名时用 `~/.claude.json` 那份。
+项目级的（项目里的 `.mcp.json`）不算。
+
+**默认一个都不开**，要你点名。原因是服务可能挂在公网上，而 Filesystem、
+desktop-commander 这类能读写整个主目录；gld 也分不出谁"只走网络"——context7 在很多
+机器上就是 `npx` 起的本机进程，配置里和 Filesystem 长得一样。
+
+**AI 那边看到三个工具**，开了至少一个才出现，都不带 `workspace`：
+
+```text
+list_mcp_tools                              开着的 server 和状态
+list_mcp_tools  server=context7             它的工具、参数表、它自己给 AI 的说明
+call_mcp_tool   server=context7  tool=query-docs  arguments={...}
+read_mcp_result ref=r1a2…  offset=65520     读一个大结果的后面部分
+```
+
+不把每个 server 的工具直接列进工具表，是因为那样每次列工具都得把它们全起起来，工具表
+也会胀（playwright 一家就 25 个工具、21 KB），ChatGPT 每开一个新的还得重建连接。
+
+**大结果分段给，不静默截断。** 一次最多交 64 KiB 文字，多的留在服务里 10 分钟，末尾
+写明从哪接着读。实测 deepwiki 一次回 407 KB，AI 分三次读全。有文字时不再附一份内容相同
+的 `structuredContent`（deepwiki 那次正是这样翻了一倍）。单张图片超过 5 MiB 的换成一句
+说明。
+
+**什么时候生效。** 开关不用重启服务，下一次调用就按新名单来；但 ChatGPT 只在连上时读
+一次工具表，**开第一个的时候要在它的连接器设置里刷新一下**，才看得见这三个工具。
+
+**server 怎么起、活多久。** 用到才起，按"server + 哪个客户端"各起一份（有状态的
+playwright 不会两个客户端共用一个浏览器），闲 5 分钟收掉，`gld stop` 全收，连它下面起的
+进程一起。起的时候 `PATH` 是 `gld cfg runtime --executable-paths` 加上守护进程自己的，
+工作目录是主目录。
+
+**哪些用不了**：要 OAuth 登录的远端 server（令牌在 Claude Code 自己那里，gld 拿不到）、
+老的 HTTP+SSE 传输（`type: "sse"`）、配置里用了守护进程环境里没有的变量的——`gld mcp ls`
+会逐个写出原因。起不来怎么查见 [troubleshooting.md](troubleshooting.md#本机-mcp-server)。
+
+服务的工具集是 `read-only` 时一个都不转：转过去的工具能做什么由 server 决定，只读管不住。
+设计取舍和实测数字见 [RFC-0006](rfc/0006-machine-mcp.md)。
+
+---
+
 ## 父目录当一个项目
 
 能，但它就只是**一个项目**：把 `~/code` 加进来，AI 在里面看到的是整棵树，写
