@@ -892,6 +892,7 @@ fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> Str
         &settings.global_skill_sources,
         &settings.global_custom_instruction_paths,
         &settings.global_custom_skill_paths,
+        &settings.global_hidden_skills,
     ))
     .unwrap_or_default()
 }

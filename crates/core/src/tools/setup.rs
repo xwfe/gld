@@ -46,6 +46,7 @@ pub fn build_tool_context(
             &settings.global_custom_skill_paths,
             &runtime.custom_skill_paths,
         ),
+        hidden_skills: settings.global_hidden_skills.clone(),
     };
 
     Ok(ToolContext::from_workspace(

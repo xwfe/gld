@@ -1,19 +1,15 @@
-use std::fs;
-use std::path::{Component, Path};
+use std::path::Path;
 
 use serde_json::{json, Value};
-use walkdir::WalkDir;
+use toexec_skill::dir;
 
 use crate::agent_context::SkillEntry;
 use crate::tools::context::ToolContext;
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
 /// 附件一次最多读多少字节。skill 的脚本和参考文件是给模型读的文本，比这大的
-/// 多半不是给模型读的。
+/// 多半不是给模型读的。`files` 最多列多少个、往下看几层，在 `toexec_skill::dir`。
 const MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
-/// `files` 最多列多少个、往下看几层。
-const MAX_LISTED_FILES: usize = 100;
-const MAX_LISTED_DEPTH: usize = 4;
 
 const USER_ONLY_NOTE: &str = "this skill is marked disable-model-invocation: its author wants a person to start it. Follow it only if the user asked for this skill by name; if you picked it yourself, stop and ask the user first";
 
@@ -95,9 +91,9 @@ pub fn get_skill(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErro
     }
     match readable {
         Ok(dir) => {
-            let (files, more) = list_files(dir);
-            result["files"] = json!(files);
-            if more {
+            let listing = dir::list(dir);
+            result["files"] = json!(listing.files);
+            if listing.more {
                 result["moreFiles"] = json!(true);
             }
         }
@@ -134,64 +130,46 @@ fn files_readable<'a>(ctx: &ToolContext, skill: &'a SkillEntry) -> Result<&'a Pa
 }
 
 /// skill 目录里的一个文件。只许在这个 skill 自己的目录下面：`..`、绝对路径、
-/// 指到目录外面的符号链接都拒绝。
+/// 指到目录外面的符号链接、点开头的都拒绝（规则在 `toexec_skill::dir`，ccnm
+/// 的 `load_skill` 用的是同一份）。
 ///
 /// 为什么要有：用户级 skill 在主目录里，它的正文常写"跑 scripts/fill.py"、
 /// "参考 reference.md"，而 read_file 默认只读工作区，模型就只能看着正文干瞪眼。
 /// 反过来，为了这个把 read_file 放开到整个主目录又太宽（跨仓评审 X08）。
 fn read_attachment(ctx: &ToolContext, dir: &Path, file: &str) -> Result<String, WorkspaceError> {
-    let relative = Path::new(file);
-    let inside = relative
-        .components()
-        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
-    if !inside {
-        return Err(outside(format!(
-            "file must be a relative path inside the skill's directory, like scripts/run.sh; got {file}"
-        )));
-    }
-    let resolved = dir.join(relative).canonicalize().map_err(|_| {
-        WorkspaceError::not_found(format!(
-            "{file} does not exist in this skill's directory; get_skill without file lists what is there"
-        ))
-    })?;
-    if !resolved.starts_with(dir) {
-        return Err(outside(format!(
-            "{file} leads outside the skill's directory (through a symlink); it is not read"
-        )));
-    }
-    // 点开头的不读：skill 目录里的 `.env` 多半是给脚本用的密钥，不是给模型看的。
-    // `files` 也不列它们。
-    let hidden = resolved
-        .strip_prefix(dir)
-        .map(|rest| {
-            rest.components()
-                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
-        })
-        .unwrap_or(true);
-    if hidden {
-        return Err(outside(format!(
-            "{file} is a hidden file; get_skill does not read those (they often hold a script's secrets)"
-        )));
-    }
+    let resolved = dir::resolve(dir, file).map_err(|error| refused(file, error))?;
     ctx.workspace.reject_data_home_read(&resolved)?;
-    let meta = fs::metadata(&resolved).map_err(io_error)?;
-    if !meta.is_file() {
-        return Err(WorkspaceError::invalid_argument(format!(
+    dir::read_text(&resolved, MAX_ATTACHMENT_BYTES).map_err(|error| refused(file, error))
+}
+
+/// 共享库只说是哪一种，错误码和措辞是 gld 自己的对外契约。
+fn refused(file: &str, error: dir::ReadError) -> WorkspaceError {
+    match error {
+        dir::ReadError::NotRelative => outside(format!(
+            "file must be a relative path inside the skill's directory, like scripts/run.sh; got {file}"
+        )),
+        dir::ReadError::Outside => outside(format!(
+            "{file} leads outside the skill's directory (through a symlink); it is not read"
+        )),
+        // 点开头的不读：skill 目录里的 `.env` 多半是给脚本用的密钥，不是给模型
+        // 看的。`files` 也不列它们。
+        dir::ReadError::Hidden => outside(format!(
+            "{file} is a hidden file; get_skill does not read those (they often hold a script's secrets)"
+        )),
+        dir::ReadError::NotFound => WorkspaceError::not_found(format!(
+            "{file} does not exist in this skill's directory; get_skill without file lists what is there"
+        )),
+        dir::ReadError::NotAFile => WorkspaceError::invalid_argument(format!(
             "{file} is not a file; get_skill without file lists what is there"
-        )));
-    }
-    if meta.len() > MAX_ATTACHMENT_BYTES {
-        return Err(WorkspaceError::invalid_argument(format!(
-            "{file} is {} bytes; get_skill returns files up to {MAX_ATTACHMENT_BYTES} bytes",
-            meta.len()
-        )));
-    }
-    let bytes = fs::read(&resolved).map_err(io_error)?;
-    String::from_utf8(bytes).map_err(|_| {
-        WorkspaceError::invalid_argument(format!(
+        )),
+        dir::ReadError::TooLarge { size, max } => WorkspaceError::invalid_argument(format!(
+            "{file} is {size} bytes; get_skill returns files up to {max} bytes"
+        )),
+        dir::ReadError::NotText => WorkspaceError::invalid_argument(format!(
             "{file} is not text (not UTF-8); get_skill only returns text"
-        ))
-    })
+        )),
+        dir::ReadError::Io(error) => io_error(error),
+    }
 }
 
 fn outside(message: String) -> WorkspaceError {
@@ -210,37 +188,6 @@ fn io_error(error: std::io::Error) -> WorkspaceError {
         category: "runtime",
         retryable: false,
     }
-}
-
-/// skill 目录里有哪些文件（相对路径，不含 SKILL.md 本身和点开头的），最多
-/// [`MAX_LISTED_FILES`] 个。第二项：还有没列出来的。
-fn list_files(dir: &Path) -> (Vec<String>, bool) {
-    let mut files = Vec::new();
-    let mut more = false;
-    let walker = WalkDir::new(dir)
-        .min_depth(1)
-        .max_depth(MAX_LISTED_DEPTH)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_entry(|entry| !entry.file_name().to_string_lossy().starts_with('.'));
-    for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let Ok(relative) = entry.path().strip_prefix(dir) else {
-            continue;
-        };
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        if relative == "SKILL.md" {
-            continue;
-        }
-        if files.len() == MAX_LISTED_FILES {
-            more = true;
-            break;
-        }
-        files.push(relative);
-    }
-    (files, more)
 }
 
 #[cfg(test)]
@@ -285,6 +232,7 @@ mod tests {
                     skill_sources: vec!["custom".into()],
                     custom_instruction_paths: String::new(),
                     custom_skill_paths: ".agents/skills".into(),
+                    hidden_skills: Vec::new(),
                 });
 
         let empty = list_skills(&ctx, &json!({})).expect("empty skills");
@@ -327,6 +275,7 @@ mod tests {
                     skill_sources: vec!["custom".into()],
                     custom_instruction_paths: String::new(),
                     custom_skill_paths: root.to_string_lossy().into_owned(),
+                    hidden_skills: Vec::new(),
                 });
         Outside {
             _dirs: [workspace, harness, skills],
@@ -612,5 +561,34 @@ mod tests {
 
         let plain = get_skill(&o.ctx, &json!({"name": "review"})).expect("skill");
         assert!(plain.get("notes").is_none(), "{plain}");
+    }
+
+    /// 按名字藏掉的本机 skill：列表里没有、点名也拿不到、skipped 里也不提——
+    /// 和没装一样。
+    #[test]
+    fn a_hidden_installed_skill_is_as_if_it_were_not_there() {
+        let mut o = outside_skill_root();
+        write(
+            &o.root.join("pdf/SKILL.md"),
+            "---\ndescription: Fill PDFs\n---\nbody\n",
+        );
+        write(
+            &o.root.join("noise/SKILL.md"),
+            "---\ndescription: Noise\n---\nbody\n",
+        );
+        let config = AgentContextRuntimeConfig {
+            instruction_sources: vec![],
+            skill_sources: vec!["custom".into()],
+            custom_instruction_paths: String::new(),
+            custom_skill_paths: o.root.to_string_lossy().into_owned(),
+            hidden_skills: vec!["NOISE".into()],
+        };
+        o.ctx = o.ctx.with_agent_context(config);
+        let listed = list_skills(&o.ctx, &json!({})).expect("list");
+        assert_eq!(listed["count"], 1, "{listed}");
+        assert_eq!(listed["skills"][0]["name"], "pdf");
+        assert!(!listed.to_string().contains("noise"), "{listed}");
+        let err = get_skill(&o.ctx, &json!({"name": "noise"})).expect_err("hidden");
+        assert_eq!(err.code(), "SKILL_NOT_FOUND");
     }
 }

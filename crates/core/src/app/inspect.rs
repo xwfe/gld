@@ -66,6 +66,7 @@ impl App {
             &skill_sources,
             &instruction_paths,
             &skill_paths,
+            &settings.global_hidden_skills,
             &profile.runtime.tool_profile,
         ))
     }

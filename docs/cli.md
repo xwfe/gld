@@ -1306,6 +1306,8 @@ Options:
           
       --custom-skill-paths <CUSTOM_SKILL_PATHS>
           
+      --hidden-skills <NAMES>
+          本机装的 Skill 里不交给 AI 的，按名字，逗号分隔；传 "" 清空。项目自己的不受影响
   -h, --help
           Print help
   -V, --version

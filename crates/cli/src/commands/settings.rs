@@ -91,6 +91,7 @@ pub async fn run(ctx: &mut Ctx, command: SettingsCmd) -> CliResult {
                         ("Skill 来源", or_dash(&runtime.skill_sources.join(","))),
                         ("自定义说明路径", or_dash(&runtime.custom_instruction_paths)),
                         ("自定义 Skill 路径", or_dash(&runtime.custom_skill_paths)),
+                        ("隐藏的 Skill", or_dash(&runtime.hidden_skills.join(","))),
                     ]);
                 }
                 return Ok(());
@@ -145,6 +146,10 @@ fn apply_runtime(runtime: &mut GlobalRuntimeSettingsDto, args: RuntimeSetArgs) -
     }
     if let Some(value) = args.custom_skill_paths {
         runtime.custom_skill_paths = value;
+        changed = true;
+    }
+    if let Some(value) = args.hidden_skills {
+        runtime.hidden_skills = split_list(&value);
         changed = true;
     }
     changed

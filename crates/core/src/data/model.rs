@@ -28,6 +28,8 @@ pub struct AppData {
     #[serde(default)]
     pub global_custom_skill_paths: String,
     #[serde(default)]
+    pub global_hidden_skills: Vec<String>,
+    #[serde(default)]
     pub allow_lan_access: bool,
     #[serde(default)]
     pub restore_runtime_state_on_launch: bool,

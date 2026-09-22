@@ -1024,6 +1024,9 @@ pub struct RuntimeSetArgs {
     pub custom_instruction_paths: Option<String>,
     #[arg(long)]
     pub custom_skill_paths: Option<String>,
+    /// 本机装的 Skill 里不交给 AI 的，按名字，逗号分隔；传 "" 清空。项目自己的不受影响
+    #[arg(long, value_name = "NAMES")]
+    pub hidden_skills: Option<String>,
 }
 
 // -------------------------------------------------------------- planning

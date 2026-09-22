@@ -18,6 +18,10 @@ pub struct AgentContextRuntimeConfig {
     pub skill_sources: Vec<String>,
     pub custom_instruction_paths: String,
     pub custom_skill_paths: String,
+    /// 本机装的 skill 里不交给 AI 的，按名字（不分大小写）。只管工作区以外的：
+    /// 项目自己的 skill 由项目决定。被藏的 `list_skills` 不列、`get_skill`
+    /// 拿不到、目录里也没有——和没装一样。
+    pub hidden_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -207,6 +211,7 @@ pub fn discover(
     skill_sources: &[String],
     custom_instruction_paths: &str,
     custom_skill_paths: &str,
+    hidden_skills: &[String],
     tool_profile: &str,
 ) -> AgentContextSnapshot {
     let instructions = discover_instructions(
@@ -217,7 +222,12 @@ pub fn discover(
     let SkillScan {
         skills: skill_entries,
         skipped: skills_skipped,
-    } = scan_skills(workspace_root, skill_sources, custom_skill_paths);
+    } = scan_skills_hiding(
+        workspace_root,
+        skill_sources,
+        custom_skill_paths,
+        hidden_skills,
+    );
     let skills = skill_entries
         .iter()
         .map(|entry| entry.descriptor.clone())
@@ -473,6 +483,16 @@ const MAX_SKILL_CHARS: usize = 100 * 1024;
 
 /// 扫描 skill，收不进来的也记下原因。
 pub fn scan_skills(workspace_root: &Path, sources: &[String], custom_paths: &str) -> SkillScan {
+    scan_skills_hiding(workspace_root, sources, custom_paths, &[])
+}
+
+/// 同 [`scan_skills`]，再按名字藏掉本机装的一些（`gld cfg runtime --hidden-skills`）。
+pub fn scan_skills_hiding(
+    workspace_root: &Path,
+    sources: &[String],
+    custom_paths: &str,
+    hidden: &[String],
+) -> SkillScan {
     let (sources, auto_enabled) = effective_sources(sources);
     let mut roots = Vec::<(String, PathBuf, &'static str)>::new();
     for raw_source in &sources {
@@ -637,6 +657,15 @@ pub fn scan_skills(workspace_root: &Path, sources: &[String], custom_paths: &str
                 continue;
             }
         };
+        // 藏掉的和没装一样：不进 skipped——那一栏是给模型看的，写进去等于
+        // 又把名字告诉了它。
+        if candidate.scope != "workspace"
+            && hidden
+                .iter()
+                .any(|name| name.trim().eq_ignore_ascii_case(&parsed.name))
+        {
+            continue;
+        }
         if let Some(first) = seen_content.get(&content_sha256) {
             skip(format!("same content as {first}, which is listed"));
             continue;
@@ -656,7 +685,7 @@ pub fn scan_skills(workspace_root: &Path, sources: &[String], custom_paths: &str
                 disable_model_invocation: parsed.disable_model_invocation,
             },
             body: parsed.body,
-            dir: skill_dir(&canonical, &candidate.root),
+            dir: skill_dir(&candidate.path, &candidate.root),
             notes,
             explicit_source: !auto_enabled,
         });
@@ -684,13 +713,22 @@ struct Candidate {
 /// 根本身。
 ///
 /// 为什么不直接用 SKILL.md 的上一级：`~/.claude/skills/SKILL.md` 的上一级是整个
-/// skills 根，自定义根配成主目录时就是整个主目录；一个指向别处的符号链接
-/// SKILL.md 的上一级可以是任何地方。跨仓评审 X08：附件只授权已发现的 skill
-/// 目录，不能为了让用户级附件可读就放开整个 HOME。
+/// skills 根，自定义根配成主目录时就是整个主目录。跨仓评审 X08：附件只授权已
+/// 发现的 skill 目录，不能为了让用户级附件可读就放开整个 HOME。
+///
+/// "在根里面"看的是发现它时的路径，不是解析后的：`~/.claude/skills/x` 是指向
+/// 别处的链接时，x 仍是在这个根下发现的一个 skill，读的是链接指向的真实目录。
+/// 只是那个真实目录不能是文件系统根、也不能是主目录或它的上级——那样"这个
+/// skill 的文件"就成了整个主目录。
 fn skill_dir(skill_md: &Path, root: &Path) -> Option<PathBuf> {
     let dir = skill_md.parent()?;
-    let root = root.canonicalize().ok()?;
-    (dir != root && dir.starts_with(&root)).then(|| dir.to_path_buf())
+    if dir == root || !dir.starts_with(root) {
+        return None;
+    }
+    let real = dir.canonicalize().ok()?;
+    let home = home_dir().and_then(|home| home.canonicalize().ok());
+    let too_wide = real.parent().is_none() || home.is_some_and(|home| home.starts_with(&real));
+    (!too_wide).then_some(real)
 }
 
 pub fn render_instruction_documents(documents: &[InstructionDocument]) -> String {
@@ -920,7 +958,14 @@ fn collect_skill_candidates(
     if !root.is_dir() {
         return;
     }
+    // 主目录和自定义根里的 skill 常常是符号链接：skills CLI 把每个都从
+    // `~/.agents/skills` 链进 `~/.claude/skills`，自己写的也常链到一个 git
+    // 仓库（`~/.claude/skills/x -> ~/code/skills/x`）。不跟链接的话后一种
+    // 整个看不见，而原生客户端看得见。工作区里的不跟：仓库里一个指到外面的
+    // 链接不该让 gld 替它读工作区外的文件。
+    let follow = scope != "workspace";
     for entry in WalkDir::new(root)
+        .follow_links(follow)
         .min_depth(1)
         .max_depth(max_depth)
         .into_iter()
@@ -1624,5 +1669,78 @@ mod tests {
             .map(|skill| skill.descriptor.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["project-only", "machine-wide"], "{names:?}");
+    }
+
+    /// 主目录里链到别处的 skill：原生客户端看得见，gld 以前看不见（扫描不跟
+    /// 链接），`~/.claude/skills/x -> ~/code/skills/x` 这种自己写的 skill 就
+    /// 整个不在目录里。现在找得到，附件读的是链接指向的真实目录。
+    #[cfg(unix)]
+    #[test]
+    fn a_skill_linked_into_the_home_from_elsewhere_is_found_with_its_directory() {
+        let home = tempfile::tempdir().expect("home");
+        let code = tempfile::tempdir().expect("elsewhere");
+        let real = code.path().join("mine");
+        fs::create_dir_all(&real).expect("real dir");
+        fs::write(
+            real.join("SKILL.md"),
+            "---\nname: mine\ndescription: My own skill\n---\nBody.\n",
+        )
+        .expect("skill");
+        fs::create_dir_all(home.path().join(".claude/skills")).expect("root");
+        std::os::unix::fs::symlink(&real, home.path().join(".claude/skills/mine")).expect("link");
+        // 链到主目录本身的"skill"：它的文件就是整个主目录，不给目录。
+        fs::write(
+            home.path().join("SKILL.md"),
+            "---\nname: everything\ndescription: The whole home\n---\nBody.\n",
+        )
+        .expect("home skill");
+        std::os::unix::fs::symlink(home.path(), home.path().join(".claude/skills/everything"))
+            .expect("home link");
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.path().to_path_buf()));
+        let skills = discover_skills(workspace.path(), &["claude".into()], "");
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+
+        let by = |name: &str| {
+            skills
+                .iter()
+                .find(|skill| skill.descriptor.name == name)
+                .unwrap_or_else(|| panic!("{name} not found"))
+        };
+        assert_eq!(
+            by("mine").dir.as_deref(),
+            Some(real.canonicalize().expect("canonical").as_path())
+        );
+        assert_eq!(by("everything").dir, None);
+    }
+
+    /// 工作区里的链接不跟：仓库里一个指到外面的 skill 目录，不该让 gld 替它
+    /// 读工作区外的文件。
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_workspace_is_not_followed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(
+            outside.path().join("SKILL.md"),
+            "---\nname: outside\ndescription: Outside\n---\nSecret body.\n",
+        )
+        .expect("skill");
+        fs::create_dir_all(workspace.path().join(".claude/skills")).expect("root");
+        std::os::unix::fs::symlink(
+            outside.path(),
+            workspace.path().join(".claude/skills/outside"),
+        )
+        .expect("link");
+        let skills = with_empty_home(|| discover_skills(workspace.path(), &["claude".into()], ""));
+        assert!(
+            skills.is_empty(),
+            "{:?}",
+            skills
+                .iter()
+                .map(|s| &s.descriptor.name)
+                .collect::<Vec<_>>()
+        );
     }
 }

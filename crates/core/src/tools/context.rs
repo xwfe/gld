@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use sha2::Digest;
 
 use crate::agent_context::{
-    discover_instructions, render_instruction_documents, scan_skills, AgentContextRuntimeConfig,
-    SkillEntry, SkillScan,
+    discover_instructions, render_instruction_documents, scan_skills_hiding,
+    AgentContextRuntimeConfig, SkillEntry, SkillScan,
 };
 use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
@@ -225,10 +225,11 @@ impl ToolContext {
                 skipped: Vec::new(),
             };
         };
-        scan_skills(
+        scan_skills_hiding(
             self.workspace.root(),
             &config.skill_sources,
             &config.custom_skill_paths,
+            &config.hidden_skills,
         )
     }
 

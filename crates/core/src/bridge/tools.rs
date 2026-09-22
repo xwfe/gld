@@ -225,10 +225,12 @@ pub const READ_TOOLS: &[RemoteTool] = &[
     RemoteTool {
         name: "remote_load_skill",
         remote_name: "load_skill",
-        description: "Load one of a remote workspace's own skills: the .claude/skills, .agents/skills and .claude/commands files in that project, which say how that project wants a kind of task done. Call it without a name first to see which skills the workspace has and what each is for, then again with the name. A skill's scripts and attachments are ordinary files in that workspace: read them with remote_read_file, run them with remote_exec_command.",
+        description: "Load a skill of a remote workspace: the project's own (.claude/skills, .agents/skills, .claude/commands), or one installed on that machine (~/.claude/skills and the like), which say how a kind of task is done there. Call it without a name first to see which skills there are and what each is for, then again with the name. A loaded skill lists its other files: read one with file (a project's also with remote_read_file), run a script with remote_exec_command.",
         arguments: &[
             arg("name", Type::String, "The skill to load. Leave it out to list them all."),
             arg("arguments", Type::String, "What to pass to the skill, as one string."),
+            arg("file", Type::String, "A file of the skill to read instead, as the loaded skill lists them."),
+            arg("line", Type::Integer, "With file: the line to start at, from 1."),
         ],
         effect: Effect::Read,
     },
@@ -631,7 +633,10 @@ mod tests {
                 .map(|a| a.name)
                 .collect()
         };
-        assert_eq!(names("remote_load_skill"), vec!["name", "arguments"]);
+        assert_eq!(
+            names("remote_load_skill"),
+            vec!["name", "arguments", "file", "line"]
+        );
         assert_eq!(names("remote_view_image"), vec!["path"]);
         assert_eq!(names("remote_read_notebook"), vec!["path", "start_cell"]);
         assert_eq!(names("remote_stop_command"), vec!["output_ref"]);

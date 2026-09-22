@@ -33,6 +33,8 @@ pub struct GlobalRuntimeSettingsDto {
     #[serde(default)]
     pub custom_skill_paths: String,
     #[serde(default)]
+    pub hidden_skills: Vec<String>,
+    #[serde(default)]
     pub allow_lan_access: bool,
     #[serde(default)]
     pub restore_runtime_state_on_launch: bool,
@@ -166,6 +168,7 @@ impl App {
             skill_sources: settings.global_skill_sources,
             custom_instruction_paths: settings.global_custom_instruction_paths,
             custom_skill_paths: settings.global_custom_skill_paths,
+            hidden_skills: settings.global_hidden_skills,
             allow_lan_access: settings.allow_lan_access,
             restore_runtime_state_on_launch: settings.restore_runtime_state_on_launch,
         })
@@ -194,6 +197,7 @@ impl App {
             settings.global_custom_instruction_paths =
                 runtime.custom_instruction_paths.trim().to_string();
             settings.global_custom_skill_paths = runtime.custom_skill_paths.trim().to_string();
+            settings.global_hidden_skills = runtime.hidden_skills;
             settings.allow_lan_access = runtime.allow_lan_access;
             settings.restore_runtime_state_on_launch = runtime.restore_runtime_state_on_launch;
             if let Some((mcp_ids, actions_ids)) = running_snapshot {
