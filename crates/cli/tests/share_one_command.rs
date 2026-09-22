@@ -67,6 +67,9 @@ fn share_takes_a_fresh_project_all_the_way_to_a_public_url() {
 }
 
 /// 一个假的 frpc：问版本就答一个够新的版本，否则打出"代理起来了"那行然后挂着。
+/// 只有下面那条 unix 测试用它；不跟着挡掉，Windows 上就是一条"没用到"的警告，
+/// CI 的 `-D warnings` 会把它变成编译失败。
+#[cfg(unix)]
 const FAKE_FRPC: &str = "#!/bin/sh
 if [ \"$1\" = \"--version\" ]; then echo 0.61.2; exit 0; fi
 echo '[hub-mcp] start proxy success'
