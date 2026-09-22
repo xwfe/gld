@@ -81,6 +81,7 @@ gld stop                                    # 停服务；项目、配置和凭�
 | 我想…… | 看这里 |
 | --- | --- |
 | 搞清楚服务和项目、工具集、Planning 模式这些名词是什么 | [concepts.md](docs/concepts.md) |
+| 按名字关掉某个工具、只让 AI 看到有用的 skill（`~/.agents/mcp.json`） | [concepts.md](docs/concepts.md#按名字再关掉工具和-skillagentsmcpjson) |
 | 为什么项目之间不会串，代价是什么 | [concepts.md 为什么不会串](docs/concepts.md#为什么不会串) |
 | 接到 ChatGPT / Claude Code / Cursor / 自定义 GPT | [connect-clients.md](docs/connect-clients.md) |
 | 知道 AI 到底能碰什么，以及怎么收紧 | [security.md](docs/security.md) |

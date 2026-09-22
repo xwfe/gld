@@ -99,6 +99,8 @@ gld stop && gld daemon stop
 测试进程里的监听 socket 会被并发 spawn 的 `gld` 继承，隔壁测试的端口就被一个无关的
 守护进程占住了。原委写在 `crates/cli/tests/common/env.rs` 的注释里。
 
+集成测试的 `Env` 给 gld 设了一个临时 HOME（`<数据目录>/user-home`），直接起 `gld` 进程的测试也要带上 `.env("HOME", env.user_home())`：守护进程按 HOME 读 `~/.agents/mcp.json` 和全局 skills，不隔离的话你自己关掉的工具会让不相干的测试红。要测这个文件用 `Env::agents_file`。单元测试里 `crate::exposure` 默认当作没有这个文件，要测的地方用 `exposure::tests::with_home`。
+
 `--noproxy '*'` 是因为很多开发环境设了 `HTTP_PROXY`，不加的话 curl 会把 127.0.0.1 也发给代理。
 
 ## 目录

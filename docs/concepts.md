@@ -381,6 +381,8 @@ frontmatter 写了 `disable-model-invocation: true`（`yes`、`on`、`1` 也算�
 
 skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读——只限这个 skill 自己的目录。主目录里的用户级 skill 默认只给正文不给文件，来源明确配置之后才给，边界见[安全](security.md)那一节。
 
+只想藏掉某几个、或者只给名字不给描述：用 [`~/.agents/mcp.json`](#按名字再关掉工具和-skillagentsmcpjson) 按名字给档。
+
 要让它们全部进去：`gld set <项目> tool-profile=advanced`。
 代价是工具从 28 个涨到 53 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。
@@ -394,6 +396,38 @@ skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读—�
 MCP 客户端可以拿这两个标注决定要不要弹确认框、要不要限制并发。所以这个档位的
 作用是"让客户端别把这些工具当危险操作对待"——**服务端一侧一个能力都没减**。
 想真正只读请用 `read-only`。
+
+## 按名字再关掉工具和 skill：`~/.agents/mcp.json`
+
+工具集是按档位整批给的。只想关掉其中一两个工具，或者主目录里装了几十个 skill、只想让 AI 看到有用的那些，在**跑 gld 的这个账号**的 `~/.agents/mcp.json` 里写：
+
+```json
+{
+  "mcpServers": {
+    "gld": { "disabledTools": ["exec_command"] }
+  },
+  "skillOverrides": {
+    "cheat-pass": "off",
+    "microsoft-foundry": "off",
+    "vue-best-practices": "name-only",
+    "deploy": "user-invocable-only"
+  }
+}
+```
+
+- `mcpServers.gld.disabledTools`：这几个工具不给；`enabledTools`：只给这几个。两个都写时先按白名单取、再去掉黑名单。工具名照 `gld tool list` 的写，`list_workspaces`、`workspace_context`、`remote_*` 也能关。
+- `skillOverrides`：按 skill 名字给一档。`on` 是默认；`name-only` 目录里只放名字不放描述，省上下文；`user-invocable-only` 等于 frontmatter 写了 `disable-model-invocation`（不进目录，你点名时照样能加载，见上面那节）；`off` 哪里都没有，`list_skills` 也不列。写在顶层的对 ccnm 也生效（它读同一个文件）；写在 `mcpServers.gld` 里的只管 gld，并且盖过顶层。
+
+**只收窄**：工具集没给的，写进 `enabledTools` 也不会给；skill 作者写了 `disable-model-invocation` 的，写 `"on"` 也放不开。
+
+**改完就生效**，不用重启：每次列工具、调工具都重读这个文件。已经连着的客户端可能缓存了旧的工具表，但被关的工具硬调会拿到 `TOOL_TURNED_OFF`，写明是哪条规则关的。
+
+**写错会怎样**：
+
+- JSON 写坏、字段类型不对、档位拼错：**服务一个工具都不给**，客户端列工具时收到一个错误，里面写着是哪一处（`~/.agents/mcp.json: mcpServers.gld.disabledTools: expected an array of tool names`）；`gld doctor` 的"暴露规则"一行 FAIL。不当成没有这个文件，那等于把你想关的又打开了。
+- 工具名写错（`exec_comand`）：服务照常，但想关的那个**还开着**。`gld doctor` 的"暴露规则"会把它当失败报出来。
+
+格式为什么这样定（工具开关照 Codex，四档照 Claude Code 的 `skillOverrides`）、ccnm 那边怎么用，见 toexec 的 [RFC-0001](https://github.com/xwfe/toexec/blob/main/docs/rfc/0001-agents-exposure-policy.md)。
 
 ---
 
