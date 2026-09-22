@@ -34,11 +34,11 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | 模块 | 职责 |
 | --- | --- |
 | `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。两个唯一入口：`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文——MCP 监听器和 `gld tool call` 都走它，所以命令行里试出来的行为就是 AI 看到的行为 |
-| `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务单个工作区和 hub（`Endpoint` 二选一），认证、OAuth 路由、请求日志只有一份 |
-| `hub/` | 聚合入口：一条 MCP 连接按每次调用的 `workspace` 参数分到多个工作区，每个成员一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停 |
+| `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务 hub 和单个工作区（`Endpoint` 二选一；后者是 RFC-0004 之前单项目服务的路径，命令行已经起不了它），认证、OAuth 路由、请求日志只有一份 |
+| `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |
 | `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
 | `runtime/` | 进程内 MCP / Actions 监听器的启停、端口检测与释放等待 |
-| `tunnel/`、`global_gateway.rs` | frpc / cloudflared 子进程监督，共享公网入口 |
+| `tunnel/`、`global_gateway.rs` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
 | `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的模型与读写 |
 | `platform/` | 端口占用查询、进程存活 / 终止、可执行文件查找，按 OS 分实现 |
@@ -49,11 +49,12 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 `app` 是 core 对外的唯一门面。桌面版里这一层是 Tauri command，
 这里改成普通的 `impl App` 方法，方便任何调用方（命令行、守护进程、测试）直接用。
 
-`app::workspace_fields` 是一张“可设置字段”表：命令行帮助、`gld ws fields` 输出和实际写入
-都从同一张表来，加字段只改一处。两个约定：
+`app::workspace_fields` 是一张“可设置字段”表：命令行帮助、`gld fields` 输出和实际写入
+都从同一张表来，加字段只改一处。三个约定：
 
-- 字段名不写前缀时补 `mcp.`，所以新增 MCP 侧字段一律叫 `mcp.<名字>`；
-  Actions 侧字段必须和 MCP 侧同名（只换前缀），有测试守着这条。
+- 字段名不写前缀时补 `mcp.`，所以新增项目字段一律叫 `mcp.<名字>`；GPT Actions 那条线路的叫 `actions.<名字>`。
+- 单项目 MCP 监听器那一半（端口、认证、隧道……）已经退役，列在 `RETIRED` 里：`gld set`
+  遇到它们报错并指向服务级命令。退役的不能再出现在字段表里，有测试守着。
 - 取值要查工作区之外的数据（比如 `frp-profile` 得确认那个 id 存在）时，
   用 `field!` 宏的三参数写法拿 `FieldContext`，别在 `apply` 里直接读全局状态——
   那样就没法只对着一个 `WorkspaceProfile` 做单测了。
@@ -136,7 +137,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 
 ## 加一个新命令要改哪里
 
-以“给工作区加一个只读的 `gld ws stats`”为例：
+以“给项目加一个只读的 stats 子命令”为例：
 
 1. `core/src/app/<模块>.rs`：`impl App { pub fn workspace_stats(&self, id) -> AppResult<StatsDto> }`，
    DTO 派生 `Serialize + Deserialize`。
@@ -144,12 +145,14 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
    若它必须由守护进程执行，加进 `needs_daemon()`；耗时长加进 `is_slow()`。
 3. `daemon/src/dispatch.rs`：新增一个 match 分支（漏了会编译失败）。
 4. `cli/src/cli.rs`：加子命令与帮助文本；`cli/src/commands/workspace.rs`：调用并渲染。
+   项目用位置参数或 `-w` 指定，没给就按当前目录推断（`service::resolve_current`）。
    子命令叫 `list` / `remove` 就得带上 `visible_alias`（`ls` / `rm`）——
    `crates/cli/tests/aliases_are_consistent.rs` 守着这条，忘了会红，
    同一层里两条命令抢同一个名字也会被它拦下来。
 5. `scripts/gen-cli-docs.sh` 的命令表加一行，重新生成 `docs/cli.md`。
 6. 测试：core 里给 `App` 方法写单元测试；命令行行为进 `crates/cli/tests/` 下按主题分的文件
-   （生命周期进 `daemon_lifecycle.rs`、工作区入口进 `start_and_upgrade.rs`……），
+   （生命周期进 `daemon_lifecycle.rs`、项目入口进 `start_and_upgrade.rs`……；要真服务就用
+   `tests/common/service.rs` 的 `env.serve(…)`），
    新命令名同时会被 `docs_commands_exist.rs` 和 `messages_name_real_commands.rs` 盯上。
 
 不要做的事：在 cli 里直接 `use gld_core::app::App` 绕过 `dispatch`——那会让直连和转发两条路径分叉。

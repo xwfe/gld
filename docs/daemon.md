@@ -11,9 +11,9 @@ gld daemon status
 ```text
 状态          运行中
 pid           9363
-版本          0.4.0（协议 2）
+版本          0.5.0（协议 3）
 运行时长      2h 13m
-运行中的服务  2
+运行中的服务  0
 数据目录      /Users/you/.config/gld
 socket        /Users/you/.config/gld/daemon.sock
 日志          /Users/you/.config/gld/logs/daemon.log
@@ -48,15 +48,13 @@ printf '{"op":"ping"}\n' | nc -U ~/.config/gld/daemon.sock
 
 | 需要（没跑就自动拉起） | 不需要（没跑时进程内直接执行） |
 | --- | --- |
-| `start` `stop` `restart` `share` | `workspace *` `settings *` `secret *` `frp *` |
-| `tunnel start/stop/restart/test` | `status` `ps` `logs` `health` `list` `destroy` |
-| `gateway start/stop` `hub start/stop` | `planning *` `history` `usage` `context` `hub show/add/rm/set` |
+| `start` `stop` `restart` `share` | `add` `rm` `set` `fields` `ls` `settings *` `secret *` `frp *` |
+| （旧的 `tunnel start/stop/restart/test`、`gateway start/stop`） | `status` `logs` `health` `planning *` `history` `usage` `context` `remote *` |
 
-`upgrade` 两边都沾：只改配置时不需要，改到公网入口且服务正在跑时会去重连隧道。
+`upgrade` 两边都沾：只改配置时不需要；服务正在跑时（那就说明守护进程在跑）它会按新配置重启服务。
 
-`destroy` 在"不需要"那列不是笔误：服务只活在守护进程里，它没跑就等于没有服务
-要停，剩下的删配置删密钥都是文件操作。守护进程在跑时它照样转发过去，
-先停服务再删。
+`rm` 在"不需要"那列不是笔误：服务只活在守护进程里，它没跑就等于没有经服务起的命令
+要停，剩下的删配置都是文件操作。守护进程在跑时它照样转发过去。
 
 守护进程在跑时，**所有**命令都转发给它——它是内存里运行状态和 `profiles.json` 的唯一写入者，
 这样不会出现命令行改了文件、守护进程用旧数据把它覆盖回去的情况。
@@ -77,15 +75,16 @@ printf '{"op":"ping"}\n' | nc -U ~/.config/gld/daemon.sock
 | `logs/daemon.log` | stdout / stderr 重定向到这里 | 超过 4 MiB 会在下次 `daemon start` 时轮转为 `daemon.log.1`；只保留一代 |
 
 “是否在运行”只信 socket：能连上并回应 `daemon_info` 才算活着。
-pid 文件只用于展示和补充判断。
+pid 文件只用于展示和补充判断。"运行中的服务"数的是项目自己的线路（GPT Actions，以及
+旧版本起的单项目服务），MCP 服务本身在 `gld status` 里看。
 
 ## 日志有多大
 
-每个日志文件（守护进程的、以及每个工作区的 `mcp-requests.log` / `stdout.log` /
+每个日志文件（守护进程的、服务的 `logs/hub/`、以及每个项目的 `mcp-requests.log` / `stdout.log` /
 `stderr.log` / 隧道日志）超过 **4 MiB** 就轮转成 `<名字>.1`，只保留一代。
 所以单个名字最多占 8 MiB，不会把磁盘写满，也不需要配 logrotate。
 
-工作区日志在写入时检查大小；守护进程自己的日志是启动时重定向的文件描述符，
+服务和项目的日志在写入时检查大小；守护进程自己的日志是启动时重定向的文件描述符，
 进程内插不了手，只能在每次 `daemon start` 前检查一次——所以一个连续跑几周
 不重启的守护进程，它的 `daemon.log` 可能超过 4 MiB。真的很大时停掉它、
 删掉文件、再启动即可。
@@ -99,25 +98,25 @@ pid 文件只用于展示和补充判断。
 3. 读取 `data/profiles.json`。文件损坏会在这一步失败，错误写进 `daemon.log`，
    命令行侧表现为“守护进程在 15 秒内没有就绪”。
 4. 写 `daemon.json`。
-5. 聚合入口上次 `gld hub start` 过、且没有 `gld hub stop` 的，把它拉起来。**不看**下一步那个开关：
-   hub 是客户端里配死的一条连接，守护进程一重启就没了的话，用户只会看到连接器报错。
-6. 如果 `gld settings runtime --restore-on-launch true` 打开了，恢复上次退出前正在跑的
-   MCP / Actions（清单在 `profiles.json` 的 `restore_*_workspace_ids`）。
+5. MCP 服务上次 `gld start` 过、且没有 `gld stop` 的，把它（连同它的隧道）拉起来。**不看**下一步那个开关：
+   服务是客户端里配死的一条连接，守护进程一重启就没了的话，用户只会看到连接器报错。
+6. 如果 `gld cfg runtime --restore-on-launch true` 打开了，恢复上次退出前正在跑的
+   项目 GPT Actions（清单在 `profiles.json` 的 `restore_*_workspace_ids`）。
 7. 进入接受连接的循环，每个连接一个任务，互不阻塞。
 
 ## 退出时发生什么
 
 收到 `shutdown` 请求（`gld daemon stop`）或 SIGTERM / SIGINT / SIGHUP 后：
 
-1. 停止所有 MCP / Actions 监听器，等端口真正释放（最多 3 秒，超时强制 abort）；
-2. 停掉每个工作区的 frpc / cloudflared 子进程；
-3. 停掉聚合入口和全局入口；
+1. 停止各项目的 GPT Actions 监听器，等端口真正释放（最多 3 秒，超时强制 abort）；
+2. 停掉它们的 frpc / cloudflared 子进程；
+3. 停掉 MCP 服务（连同它的隧道）和全局入口；
 4. 删除 `daemon.sock` 与 `daemon.json`，释放锁，进程退出。
 
-“下次恢复”清单不会被清空：下一次守护进程启动、且开了 restore-on-launch，服务会回来。
-hub 的恢复标记也不动，只有 `gld hub stop` 会清掉它。
+“下次恢复”清单不会被清空：下一次守护进程启动、且开了 restore-on-launch，GPT Actions 会回来。
+MCP 服务的恢复标记也不动，只有 `gld stop` 会清掉它。
 `kill -9` 跳过以上全部步骤，frpc / cloudflared 可能变成孤儿进程，
-下次启动同一工作区时 supervisor 会按 pid 文件回收它们。
+下次起同一条线路时 supervisor 会按 pid 文件回收项目那几条；服务那条要自己找出来 kill。
 
 ## 后台进程和终端的关系
 
@@ -127,7 +126,7 @@ stdin 关闭，stdout / stderr 追加到 `logs/daemon.log`，工作目录切到�
 
 环境变量只显式传递 `GLD_HOME`；`PATH` 等继承自拉起它的那个 shell。
 如果你的 frpc 装在只有某个 shell 才有的 PATH 里（比如只在 `.zshrc` 里加过），
-用 `gld settings runtime --executable-paths` 补上那个目录，让路径不依赖是谁拉起的守护进程。
+用 `gld cfg runtime --executable-paths` 补上那个目录，让路径不依赖是谁拉起的守护进程。
 
 ## 开机自启
 
@@ -163,8 +162,8 @@ AI 跑命令会报 `Program not found on PATH: node`——而你在终端里 `gl
 
 ```bash
 which node cargo python3        # 先在终端里看它们在哪个目录
-gld settings runtime --executable-paths "/opt/homebrew/bin;$HOME/.cargo/bin"
-gld restart                      # 已经在跑的服务要重启才用上，每个工作区各一次
+gld cfg runtime --executable-paths "/opt/homebrew/bin;$HOME/.cargo/bin"
+gld restart                      # 已经在跑的服务要重启才用上
 ```
 
 Linux systemd 用户单元（`~/.config/systemd/user/gld.service`）：
@@ -193,15 +192,20 @@ systemctl --user enable --now gld
 守护进程加载的是旧二进制的代码。升级 `gld` 后：
 
 ```bash
-gld list                         # 先记下哪些工作区的服务在跑
 gld daemon restart
-gld start -w <工作区>             # 对原来在跑的每个工作区各执行一次
+gld status                       # MCP 服务应该已经自己回来了
 ```
 
-**重启会停掉所有服务，而且不会自己恢复。** 输出里那句“所有服务已停止”是真的：重启完
-`gld daemon status` 显示运行中的服务 0，公网入口（隧道）也跟着停了，ChatGPT 连接器这时
-连不上，直到你 `gld start` 回来。0.3.0 升 0.4.0 时实测：`gld start -w xdo` 重新拉起 MCP 和
-cloudflare 隧道，工作区配置、OAuth 设置不用重配。
+**MCP 服务会自己回来**：守护进程启动时把上次 `gld start` 过、没 `gld stop` 的服务连同
+隧道一起拉起（上面"启动时发生什么"第 5 条）。用的是 Cloudflare 临时地址的话，地址会换，
+ChatGPT 里要跟着改；固定域名、FRP、自建反代不受影响，OAuth 授权也不用重来。
+
+项目的 GPT Actions 默认**不会**自己回来（除非开了 restore-on-launch），要在项目目录里
+`gld start -s actions` 各起一次。
+
+**从 0.5.0 升到只剩一个服务的版本（守护进程协议 3）时**：旧命令起的单项目服务会随
+`gld daemon restart` 一起停掉、不再回来；在任意项目目录里 `gld start` 一次，服务起来，
+登记过的项目都会加进去（输出里逐个点名）。客户端要改连服务的地址（`gld ls` 里那一行）。
 
 没重启时执行任何命令都会提示“守护进程版本 x 与命令行版本 y 不一致”（退出码 4），
 `daemon status` / `daemon stop` 不受影响。

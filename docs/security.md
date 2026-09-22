@@ -1,7 +1,7 @@
 # 你到底暴露了什么
 
 `gld start` + 一条隧道，等于把一个**能在你电脑上跑命令、能读你电脑上文件**的
-接口挂到了公网。这篇把边界一条条说清楚：哪些是真的挡住了，哪些只是看起来像挡住了。
+接口挂到了公网——而且是**服务里的全部项目**一起挂上去。这篇把边界一条条说清楚：哪些是真的挡住了，哪些只是看起来像挡住了。
 
 先记住一句话：**gld 的权限模型是一层静态策略，不是操作系统沙箱。**
 它能挡住"模型手滑"，挡不住"有人拿到 token 后存心搞你"。
@@ -9,57 +9,58 @@
 ## 一分钟自查
 
 ```bash
-gld status                 # 哪些服务在跑、有没有公网地址
-gld list                   # 客户端要用的地址、认证方式与隧道（--reveal 才显示密钥）
-gld doctor                 # 配置自洽性；认证缺密钥这类会报 ✗
+gld status                 # 服务在不在跑、有没有公网地址；各项目的 GPT Actions
+gld ls                     # 客户端要用的地址、认证方式、公网入口和项目表（--reveal 才显示凭据）
+gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
 ```
 
-`gld status` 里 **MCP 公网 / Actions 公网** 那两列一旦非空，下面的内容就跟你有关。
+`gld ls` 里 **公网地址** 那一行一旦不是 `-`（或者某个项目的 GPT Actions 配了公网），
+下面的内容就跟你有关。
 
 ## 拿到 token 的人能做什么
 
-以默认配置（`mcp.tool-profile=compact`、`mcp.permission-mode=trusted`、
+以默认配置（工具集 `compact`、`permission-mode=trusted`、
 `gld planning mode direct`）为准：
 
 | 能力 | 范围 | 说明 |
 | --- | --- | --- |
-| 执行命令 | 工作区目录内 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码**。命令可以写成一行 `cmd`，也可以写成 `argv` 逐格给（参数里带 `\|`、引号、换行时用它）；两种形式**权限完全一样**，只是 `argv` 不必猜引号 |
-| 读文件 | 工作区内 | 0.3.0 起默认收紧，见下 |
-| 写文件 | 工作区内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
-| 读 Git 历史 | 工作区内 | status / diff / log / show / blame |
+| 执行命令 | 每个项目自己的目录内 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码**。命令可以写成一行 `cmd`，也可以写成 `argv` 逐格给（参数里带 `\|`、引号、换行时用它）；两种形式**权限完全一样**，只是 `argv` 不必猜引号 |
+| 读文件 | 项目目录内 | 0.3.0 起默认收紧，见下 |
+| 写文件 | 项目目录内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
+| 读 Git 历史 | 项目目录内 | status / diff / log / show / blame |
 
-**聚合入口（hub）的凭据管的是它的全部成员。** 把上表的"工作区"换成"hub 里的每一个
-成员"——每个成员自己的工具集、白名单、读限制照样生效，但能进哪几个项目只看成员表。
-挂公网的 hub 里别放不想一起暴露的项目，详见
-[concepts.md 聚合入口](concepts.md#聚合入口hub)。
+**服务的凭据管的是它的全部项目。** 上表对服务里的**每一个项目**都成立——每个项目
+自己的工具集、白名单、读限制照样生效，但能进哪几个项目只看项目表。按客户端分范围
+（给某个客户端只开某几个项目）还没做，所以挂公网的服务里别放不想一起暴露的项目，
+详见 [concepts.md](concepts.md#代价一把钥匙开所有项目的门)。
 
 ### 读文件的范围：0.3.0 改了默认值
 
 桌面版和 0.3.0 之前的 gld，`read_file` / `list_dir` / `list_files` /
-`search_text` **都允许指向工作区外面**——给个绝对路径就能读 `~/.ssh/id_rsa`、
+`search_text` **都允许指向项目目录外面**——给个绝对路径就能读 `~/.ssh/id_rsa`、
 `~/.aws/credentials`。本机自用时这只是方便（读隔壁仓库、读系统头文件），
 但这个服务可以挂到公网给 ChatGPT 用，那时候"能读整台机器"是实打实的风险。
 
-**现在默认只读工作区内**，越界会返回 `READS_CONFINED_TO_WORKSPACE`，
+**现在默认只读项目目录内**，越界会返回 `READS_CONFINED_TO_WORKSPACE`，
 报错里带着关掉的命令。升级上来的老配置也一样收紧（配置文件里没这个字段时
 按 `true` 算）。
 
 确实需要读外部路径就自己打开：
 
 ```bash
-gld ws set confine-reads=false      # Actions 侧写全 actions.confine-reads
+gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actions.confine-reads
 ```
 
-比较的是 `canonicalize` 之后的真实路径，所以工作区里放一个指向外面的软链
+比较的是 `canonicalize` 之后的真实路径，所以项目里放一个指向外面的软链
 也绕不过去。
 
 **gld 自己的数据目录是另一道独立的门**（`~/.config/gld`，或 `GLD_HOME` 指的地方），
 **关掉上面那个开关也读不到**，返回 `GLD_DATA_HOME_DENIED`。
-因为 `~/.config/gld/data/profiles.json` 里明文存着**每个**工作区的 `bearer_token`、
-`oauth_password`、`actions_api_key`——不挡的话，读到一个工作区的文件就等于
+因为 `~/.config/gld/data/profiles.json` 里明文存着服务的 `bearer_token`、
+`oauth_password` 和每个项目的 `actions_api_key`——不挡的话，读到一个文件就等于
 拿到了你全部连接器的钥匙。
 
-**一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。工作区外的 skill，**只有来源是你明确配置的**（`gld settings runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。不想让任何主目录里的 skill 被读到（连正文）：`gld settings runtime --skill-sources disabled`。
+**一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
 
 这几道门都只对文件类工具生效。`exec_command` 里 `cat ~/.config/gld/data/profiles.json`
 照样能读到——它本来就是"以你的身份执行任意代码"，没有再挡一层的意义。
@@ -88,7 +89,7 @@ gld ws set confine-reads=false      # Actions 侧写全 actions.confine-reads
 但别让它悄悄过去。
 
 **`confirm=true` 不等于用户点了头**：它只表示这次调用带了确认意图。真正的授权
-来自谁能连上这个服务（token、profile、hub 成员表），模型自己就能填这个字段。
+来自谁能连上这个服务（凭据、工具集、项目表），模型自己就能填这个字段。
 所以 `.github` 的这道门挡的是"顺手改了没人注意到"，不是"恶意调用方"。
 
 子进程那一层更保守：命令文本里出现删除或递归清空 `.git` / `.github` 一律拒，
@@ -113,13 +114,14 @@ gld ws set confine-reads=false      # Actions 侧写全 actions.confine-reads
 gld share --off
 ```
 
-本机客户端（Claude Code、Cursor、Codex）走 `http://127.0.0.1:<port>/mcp` 就够，
+本机客户端（Claude Code、Cursor、Codex）走 `http://127.0.0.1:28764/mcp` 就够，
 默认只监听回环地址，同一局域网的其他机器也连不上。
 
 ### 2. 只读接入用 read-only 工具集
 
 ```bash
-gld ws set tool-profile=read-only
+gld set <项目> tool-profile=read-only       # 只收一个项目
+gld upgrade --tool-profile read-only       # 整个服务：项目的工具集再宽也放不开它（取交集）
 ```
 
 `exec_command`、`apply_patch`、`write_stdin`、`kill_session` 会从工具表里消失，
@@ -127,12 +129,12 @@ gld ws set tool-profile=read-only
 `Unknown tool: exec_command`，不是靠客户端自觉。
 
 代价：模型不能改代码、不能跑测试。适合"只让它看、不让它动"的场景。
-`read_file` 仍在表里，但它的范围由 `mcp.confine-reads` 管（默认只读工作区内）。
+`read_file` 仍在表里，但它的范围由 `confine-reads` 管（默认只读项目目录内）。
 
 ### 3. 收窄命令白名单——注意要加 `only:`
 
 ```bash
-gld ws set allowed-commands=only:cargo,git
+gld set <项目> allowed-commands=only:cargo,git
 ```
 
 **不带 `only:` 的写法是"追加"，减不掉任何东西。**
@@ -150,7 +152,7 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 留着任何一个，"命令白名单"这层就形同虚设。
 
 基础诊断命令（`pwd` `ls` `cat` `grep` `find` `echo` 等）两种写法下都保留：
-没有它们连"这个工作区长什么样"都问不出来，而它们本身改不了东西。
+没有它们连"这个项目长什么样"都问不出来，而它们本身改不了东西。
 
 `only:` 后面**写空就是"一个都不加"**（只剩基础诊断命令），不是退回默认白名单——
 写 `only:` 的人是想收紧，把它理解成"没配"等于把一个收权的配置放到最大。
@@ -181,29 +183,28 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 
 ### `ssh` / `scp` 默认不放行
 
-远端机器上的事走已登记的 **hub / ccnm 远端成员**：那条路上有身份、有工作区边界、
+远端机器上的事走已登记的 **ccnm 远端项目**（`gld remote add`）：那条路上有身份、有项目边界、
 有写锁。直接 `ssh host <任意命令>` 没有任何这些东西。
 
 拒绝的原因码是 `remote_shell_not_allowed`（不是笼统的"不在白名单"），提示里
-直接指向 hub。**要是你确实把 `ssh` 加进了白名单**，那就是放开了任意远端 shell：
+直接指向远端项目那条路。**要是你确实把 `ssh` 加进了白名单**，那就是放开了任意远端 shell：
 gld 不限制目标主机、不限制远端执行什么，也挡不住端口转发。这一点没有中间档。
 
 ### 4. 认证别用 noauth
 
 ```bash
-gld ws set auth=bearer         # 或 oauth
+gld upgrade --auth bearer      # 或 oauth（默认）
 gld secret regen bearer_token  # 换一把新钥匙，旧的立即失效
 ```
 
-`mcp.auth=noauth` 只适合"纯本机、且你信任本机上跑的所有程序"。
+`noauth` 只适合"纯本机、且你信任本机上跑的所有程序"。
 
 **开了隧道还用 noauth，绑 127.0.0.1 一点用都没有**——隧道进程就是从
-127.0.0.1 把端口转出去的。`gld doctor` 从 0.3.0 起会把这个组合报成 ✗
-（以前只报一句"仅监听 127.0.0.1，本机自用可以"，而实际是全互联网无认证可达）。
+127.0.0.1 把端口转出去的。服务挂了任何一种公网入口时，gld 直接拒绝改成 `noauth`；
+开了局域网访问还用 noauth，`gld doctor` 报 ✗。
 
-`gld doctor` 还会检查"认证方式是 bearer 但没有 bearer_token"这类不自洽的组合。
-从 0.3.0 起这种状态下服务**会拒绝启动**——以前是照起不误、然后所有请求都 401，
-看起来像"服务好好的但客户端连不上"。
+bearer 认证下 token 丢了（手工编辑、旧备份缺字段），服务起来时会当场补一个新的，
+`gld secret ls bearer_token --reveal` 看得到——不会起一个谁都拿 401 的服务。
 
 ### 5. 定期换密钥
 
@@ -228,8 +229,9 @@ gld secret regen oauth_token_secret
 （ChatGPT 那边不用删连接器，它会自己弹出重新授权，输一次口令）。
 笔记本丢了、把公网地址发错了群、怀疑令牌外泄——用这一条，别去改口令。
 
-hub 的凭据是单独一套，换法一样，只是命令换成 `gld hub regen <名字>`（例如
-`gld hub regen oauth_token_secret`）。换工作区的密钥不影响 hub，反过来也一样。
+口令、token 也可以自己定：`gld secret set oauth_password <你记得住的口令>`。
+项目自己留着的那几把（GPT Actions 用的）加 `-w <项目>`：`gld secret regen actions_api_key -w api`，
+它们和服务的凭据互不影响。
 
 > 为什么不能靠"把注册的客户端删掉"来吊销：ChatGPT 这类连接器注册的是
 > **公共客户端**（OAuth 术语，指没有客户端密钥、只靠 PKCE 的客户端），
@@ -238,15 +240,16 @@ hub 的凭据是单独一套，换法一样，只是命令换成 `gld hub regen 
 ## 密钥存在哪、丢了会怎样
 
 全部在 `~/.config/gld/data/profiles.json`，明文，文件权限 600（创建时就设好了）。
-每个工作区 7 把 + 一个共享池 + 聚合入口一套（4 把，第一次用到 hub 时生成）。
+服务一套（4 把，第一次起服务时生成；用了 Cloudflare 固定域名再加一个 Tunnel Token）+
+每个项目 7 把（GPT Actions 用的，以前单项目服务也用它们）+ 一个共享池。
 
 这些值是随机生成的，**没有第二份副本**。文件丢了 = 每个 ChatGPT 连接器、
 每个自定义 GPT 都要重新配一遍。
 
-旁边还有一个 `data/oauth-clients/<工作区id>.json`，记的是各个客户端动态注册时
+旁边还有一个 `data/oauth-clients/hub.json`，记的是各个客户端动态注册时
 领走的 client_id 和回调地址（同样 600 权限）。它只影响"重启后要不要重新授权"，
 丢了不致命：已经发出去的令牌照常能刷新，只是下次重新授权时客户端要重新注册一次。
-聚合入口的是 `data/oauth-clients/hub.json`。
+（`data/oauth-clients/<项目id>.json` 是以前单项目服务的，删项目时一起删。）
 
 从 0.3.0 起，这个文件解析失败时 gld 会整体停机并保留原文件，而不是当成
 "还没配过"然后把空白配置写回去。（旧版会：截断一个字节，下一条命令就把所有
@@ -271,14 +274,13 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 - **静态策略 ≠ 沙箱。** `exec_command` 允许 `python`，`python` 能做的它都能做。
   `mcp.confine-reads` 只管文件类工具，管不住子进程。
 - **`.git` 保护只挡文件工具和明显的命令模式**（`rm -rf .git` 这类）。绕过方式存在。
-- **全局网关不做认证。** `/w/<id>` 的鉴权由各个工作区自己的服务负责，
-  网关只转发。所以别让任何一个接入网关的工作区用 `noauth`。`/hub` 同理由 hub 自己认证，
-  这一条 gld 替你挡了：挂公网的 hub 改不成 `noauth`。
-- **公网地址是靠请求头推断的**（没配 `mcp.public-url` 时）。这是给"你自己架
-  nginx / cloudflared 反代"用的。全局网关那条路已经不再透传公网来的
+- **老的全局入口不做认证。** 它只转发，`/hub` 由服务自己认证（挂公网的服务改不成
+  `noauth`），`/w/<id>/actions` 由那个项目的 GPT Actions 认证。
+- **公网地址是靠请求头推断的**（服务没配公网入口时）。这是给"你自己架
+  nginx / cloudflared 反代"用的。全局入口那条路已经不再透传公网来的
   `X-Forwarded-*`，直连仍然认——因为反代场景需要它。
 - **写同一个项目的互斥，边界是数据目录。** 改文件时 gld 会占一把锁：同一个
-  进程里不管从 hub、单项目还是 CLI 进来都排同一个队，跨进程靠数据目录下
+  进程里不管从服务、GPT Actions 还是 CLI 进来都排同一个队，跨进程靠数据目录下
   `write-locks/` 里的文件锁（进程死了内核自动放，不用人工清）。等锁最多等
   30 秒，超了报 `WORKSPACE_BUSY`，让你重试而不是挂死。
   **两个 gld 用不同的 `GLD_HOME` 写同一个目录，就是两个互相看不见的写者**——
@@ -295,7 +297,7 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 - **后台命令那段没有互斥，但两边都看得见。** 命令这边，会话结果里的
   `workspace_writes_since_start` 是"这条命令起来之后工作区落过几次盘"——不是 0
   就说明它测的可能是改之前的代码。写这边，`apply_patch` 的 `warnings` 会说这个
-  工作区还有几条命令在跑：自己起的给出 `session_id`（可以 `kill_session` 掉），
+  项目还有几条命令在跑：自己起的给出 `session_id`（可以 `kill_session` 掉），
   别人起的只给数量，不给命令文本。**这是可见性不是保护**，要不要停、认不认那条
   结果，由调用方决定。
 - **锁管不到不参与的写者**：编辑器、`git checkout`、别的 AI 工具。文件锁是劝告
@@ -305,8 +307,8 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
   那个主体读得到、停得掉；别人拿去用，报的是 `SESSION_NOT_FOUND`，和"这个 id
   根本不存在"长得一模一样。
 
-  分得开的：不同的 OAuth 客户端（每个注册客户端一个身份）；hub 和工作区自己
-  的监听器（两套凭据本来就不通）；命令行和任何网络连接。
+  分得开的：不同的 OAuth 客户端（每个注册客户端一个身份）；服务和项目的 GPT Actions
+  （两套凭据本来就不通）；命令行和任何网络连接。
 
   **分不开的**：`auth_type=noauth` 下连上来的所有人——匿名就是没身份，同一个
   端口上谁都是同一个主体；共用一条 bearer 令牌的多个客户端也一样。要让两个
@@ -314,7 +316,7 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 
 ## 相关文档
 
-- [concepts.md](concepts.md) — 名词解释：共享密钥池、工具集、权限模式各是什么
+- [concepts.md](concepts.md) — 名词解释：服务和项目、工具集、权限模式各是什么
 - [connect-clients.md](connect-clients.md) — 隧道与认证怎么配
 - [troubleshooting.md](troubleshooting.md) — 报错对照表
 - [cli.md](cli.md) — 全部命令与参数

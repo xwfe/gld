@@ -5,110 +5,67 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 
 各节都能单独看，按需跳：
 
-- [工作区](#工作区workspace) · [一个工作区能不能装多个项目](#一个工作区能不能装多个项目) · [聚合入口 hub](#聚合入口hub)（含[别的机器上的成员](#成员还可以在别的机器上)）
-- [MCP 和 Actions 是两条线路](#mcp-和-actions-是两条线路) · [共享密钥池](#共享密钥池shared-secrets)
-- [拿公网地址的三种方式](#拿公网地址的三种方式) · [工具集 tool-profile](#工具集tool-profile)
+- [服务和项目](#服务和项目) · [别的机器上的项目](#成员还可以在别的机器上) · [为什么不会串](#为什么不会串) · [一把钥匙开所有项目的门](#代价一把钥匙开所有项目的门)
+- [父目录当一个项目](#父目录当一个项目) · [GPT Actions 是另一条线路](#gpt-actions-是另一条线路)
+- [拿公网地址的方式](#拿公网地址的方式) · [工具集 tool-profile](#工具集tool-profile)
 - [权限模式 permission-mode](#权限模式permission-mode) · [Planning 三种模式](#planning-三种模式)
 - [历史会话档案](#历史会话档案与-history-context) · [Durable Task 的工作区基线](#durable-task-的工作区基线)
 
 ---
 
-## 工作区（workspace）
+## 服务和项目
 
-**一个工作区 = 一个本地项目目录 + 一套只属于它的配置。** `gld start ~/code/api`
-之后，这个目录就有了自己的端口、认证方式、密钥、隧道、工具集、命令白名单。
-
-AI 通过 MCP 连上来之后，**能读能写的范围就是这个目录**。换句话说，工作区既是
-"哪个项目"，也是"边界到哪儿"。
-
-**不用先登记再启动。** `gld start <目录>`（或在目录里直接 `gld start`）发现这个
-目录还没登记过，就当场登记，并在输出第一行写明"已登记工作区「x」"。
-登记错了：`gld destroy <名称>`，项目文件不会被动。
-想只登记不启动，仍然可以用 `gld workspace add`。
-
-**停和销毁是两回事。** `gld stop` 只是让服务不再跑（`--all` 停所有工作区的），
-配置密钥都留着，`gld start` 立刻还能用；`gld destroy` 把这个工作区在 gld 这边的
-一切删掉——端口、认证、密钥、隧道配置、历史与 Planning 记账。密钥没有备份，
-客户端里存的 token / 口令会跟着失效，所以它默认要确认一次（`-y` 跳过）。
-两者都不会碰项目文件。
-
-**端口是自动挑的。** MCP 从 28766 起、Actions 从 8787 起往上找空闲端口——
-既避开别的工作区，也避开机器上其他程序正在监听的端口。撞上了要自己指定：
-`gld start --port 30000`，或对已有工作区 `gld upgrade --port 30000`。
-
-**大多数命令不用写 `-w`：**
-
-1. 你显式给了 `-w <id | id 前缀(≥4位) | 名称 | 路径>` —— 用它；
-2. 没给，就看**当前目录**属于哪个工作区（嵌套时取最深的那个）；
-3. 还定不了，但你**总共只有一个**工作区 —— 就用它。
-
-所以单项目用户基本永远不用打 `-w`；多项目的话 `cd` 进去就行。
-
-> 第 3 条对 `start` / `share` 不适用：在一个还没登记的目录里启动，要的是这个
-> 目录，而不是碰巧唯一的那个别的项目——所以它们走"登记当前目录"，不走这条回退。
-
-> 名称重复时 `-w api` 会报"匹配到多个工作区"并列出来，改用 id 前缀即可。
-
-### 一个工作区能不能装多个项目
-
-能。把**父目录**登记成工作区，让 AI 用 `set_default_cwd` 切到某个子项目：
-
-```text
-你：先 set_default_cwd 到 proj-a，再看看 git 状态
-AI：（调 set_default_cwd path=proj-a，然后 git_status）
-```
-
-切过去之后相对路径会自动补前缀：`read_file path=README.md` 读到的是
-`proj-a/README.md`，`git_status` 返回的是 proj-a 那个仓库的分支和改动，
-`exec_command` 的工作目录变成 `<工作区>/proj-a`。子项目各自的 `.git` 照常识别。
-
-好处是**客户端里只配一条连接器**就够了。代价是下面五条：
-
-**1. 它是默认值，不是边界。** 路径以 `..` 开头或写成绝对路径就不加前缀——
-在 proj-b 里执行 `exec_command cmd='cat ../proj-a/README.md'` 照样读得到隔壁项目。
-真正的硬边界只有工作区根，也就是那个父目录。**没有"锁死在 proj-a"这回事**，
-指望 AI 不碰兄弟项目只能靠它自觉。
-
-**2. 整个服务共用一份，不是一个会话一份。** 在 ChatGPT 里切到 proj-a 的同时，
-连着同一个工作区的 Cursor 也跟着切过去了。单人单会话没问题；两个会话同时开着
-各改各的项目，会出现"我明明在 proj-a，读出来的却是 proj-b 的文件"。
-
-**3. 说明文件只读工作区根那一份。** `AGENTS.md` / `CLAUDE.md` 只在父目录里找，
-不往子目录递归，proj-a 自己的 `CLAUDE.md` 不会注入。
-
-**4. Planning 和 History 全混在一起。** `.gld/planning/state.json` 和
-`docs/history-session/` 都落在父目录根上，十个项目的 Goal 和会话档案堆成一堆。
-
-**5. [Durable Task](#durable-task-的工作区基线) 的指纹是整棵树扫。**
-子项目一多，每次写操作前都要重扫一遍父目录，明显变慢。项目多就别开它。
-
-怎么选：
-
-| 情况 | 建议 |
-| --- | --- |
-| 想一条连接器接好几个项目，边界也要清楚 | [聚合入口](#聚合入口hub)：每个项目还是独立工作区，客户端只配 hub 这一条，上面五条一条都不沾 |
-| 客户端里多配几条无所谓 | 一个项目一个工作区，公网入口用[全局入口](connect-clients.md#多个项目共用一个域名全局入口)共享——一条隧道，N 条连接器 |
-| 一堆自己的小脚本，不在乎上面五条 | 父目录做一个工作区，对话开头让 AI 先 `set_default_cwd` |
-
----
-
-## 聚合入口（hub）
-
-**客户端里只配一条连接，访问你挑出来的几个工作区；每个工作区照旧各管各的。**
+**gld 只有一个 MCP 服务，你的项目都挂在它下面。** 客户端里只配这一条连接；AI 每次调用
+带一个 `workspace` 参数（项目名或 id）选项目，项目之间互不串。
 
 ```bash
-gld hub add api web          # 把工作区加进来：名称、id 或路径，立即生效
-gld hub start                # 起在 http://127.0.0.1:28764/mcp
-gld hub show --reveal        # 客户端要填的地址和凭据
+gld start ~/code/api         # 起服务，并把这个目录加进来（服务起在 http://127.0.0.1:28764/mcp）
+gld add ~/code/web           # 再加一个；服务在跑就立即生效，不用重启
+gld ls                       # 客户端要填的地址和凭据，和项目表
+gld ls api                   # 某个项目的配置
+gld set web tool-profile=read-only   # 改某个项目（字段见 gld fields）
+gld rm web                   # 删掉一个项目（项目文件不动）
+gld stop                     # 停服务；项目、配置、凭据都留着
 ```
 
-具体怎么接 Claude Code / ChatGPT 见
-[connect-clients.md](connect-clients.md#一条连接接多个工作区聚合入口)。
+具体怎么接 Claude Code / ChatGPT 见 [connect-clients.md](connect-clients.md)。
+
+> 2026-09-22 之前（[RFC-0004](rfc/0004-one-service-many-projects.md)）gld 有两种用法：
+> 每个项目自己起一个 MCP 服务，或者用"聚合入口 hub"把几个项目聚到一条连接上。
+> 现在只剩后一种，而且它就是默认——命令行里不再出现 hub 这个词，内部名字没改
+> （MCP 回报的 `serverInfo.name` 仍是 `gld-hub`，日志目录是 `logs/hub/`）。
+
+**一个项目 = 一个本地目录 + 它自己的一套规矩**：工具集、命令白名单、读限制、Planning、
+历史档案。AI 在一个项目里**能读能写的范围就是这个目录**。
+
+**登记就是加入。** `gld add <目录>` 或 `gld start <目录>` 把目录登记进来，AI 立刻就能用。
+没有"登记了但 AI 看不见"这种状态——老版本留下的例外会在 `gld ls` 里标成"不在服务里"，
+`gld start` 会把它们加进来并逐个说出名字。
+
+**停和删是两回事。** `gld stop` 只是让服务不再跑，`gld start` 立刻还能用；`gld rm` 把
+这个项目在 gld 这边的一切删掉——配置、Planning 与历史的记账。两者都不会碰项目文件。
+删之前默认要确认一次（`-y` 跳过）。
+
+**`gld start` 不带目录时**：当前目录本来就是（或在）一个项目里，就用它；一个项目都还没有，
+就把当前目录加进来。其余情况**只起服务，不登记当前目录**——只剩一个服务之后，`gld start`
+也是"把服务拉起来"的那条命令，在主目录里随手敲一下，不该把整个主目录交给 AI。
+真想加就 `gld add .`。
+
+**大多数改项目的命令不用写项目名：**
+
+1. 你写了项目名（`gld set api …`、`gld ls api`）或 `-w <id | id 前缀(≥4位) | 名称 | 路径>` —— 用它；
+2. 没写，就看**当前目录**属于哪个项目（嵌套时取最深的那个）；
+3. 还定不了，但你**总共只有一个**项目 —— 就用它。
+
+> 名称重复时会报"匹配到多个项目"并列出来，改用 id 前缀即可。
+
+**服务的端口是固定的**（默认 28764），改用 `gld upgrade --port 30000`。项目登记时也会分到
+一个"MCP 端口"，那是以前单项目服务留下的字段，现在没有东西监听它，不用管。
 
 ### AI 那边看到什么
 
-- `list_workspaces`：列出 hub 里的成员（名称、id、路径、工具集）。
-- 其余每个工具都多一个**必填**参数 `workspace`，填成员的名称或 id：
+- `list_workspaces`：列出服务里的项目（名称、id、路径、工具集）。
+- 其余每个工具都多一个**必填**参数 `workspace`，填项目的名称或 id：
 
   ```text
   read_file  workspace=api  path=src/main.rs    读的是 api 项目的 src/main.rs
@@ -116,28 +73,28 @@ gld hub show --reveal        # 客户端要填的地址和凭据
   read_file  path=src/main.rs                   报 WORKSPACE_REQUIRED，报错里列出能填什么
   ```
 
-- `workspace_context`：取某个工作区自己的说明文件、Skill、历史摘要和 Planning 模式。
-  hub 会提示 AI 第一次进一个工作区前先调它。
+- `workspace_context`：取某个项目自己的说明文件、Skill、历史摘要和 Planning 模式。
+  服务会提示 AI 第一次进一个项目前先调它。
 
 名称重复时填名称会报 `WORKSPACE_AMBIGUOUS`，要求改填 id——不会挑一个猜。
 
 ### 成员还可以在别的机器上
 
 如果项目在另一台机器上、并且那台机器用 [ccnm](https://github.com/xwfe/ccnm) 管着，
-可以把它也加进 hub：
+可以把它也加进服务：
 
 ```bash
-gld hub remote add prod --node work --remote-workspace server
+gld remote add prod --node work --remote-workspace server
 ```
 
 `--node` 和 `--remote-workspace` 填的都是 **ccnm 配置里的名字**，不是 host 也不是
 路径——在那台机器上跑 `ccnm workspace list` 能看到有哪些。（叫 `--remote-workspace`
-是因为 `-w/--workspace` 是全局参数，那个说的是"本机哪个工作区"，两回事。）
+是因为 `-w/--workspace` 是全局参数，那个说的是"本机哪个项目"，两回事。）
 
 前提：本机装了 `ccnm`，并且它能连到那台机器。gld 起的是公开命令
 `ccnm mcp bridge`，SSH 连接、凭据和对面的目录全由 ccnm 自己管，gld 不碰。
 
-**远端成员的工具是另一套，名字带 `remote_` 前缀。**只读的七个，任何远端成员都有：
+**远端项目的工具是另一套，名字带 `remote_` 前缀。**只读的七个，任何远端项目都有：
 
 ```text
 remote_workspace_info  workspace=prod                     对面项目的名字、git 状态、平台
@@ -149,12 +106,12 @@ remote_view_image      workspace=prod  path=shots/a.png   看对面的图（PNG/
 remote_read_notebook   workspace=prod  path=a.ipynb       按 cell 读对面的 Jupyter notebook
 ```
 
-**能写的成员**（`--mode coding`）还多五个，都要先 `remote_coding_begin` 拿一个句柄：
+**能写的远端项目**（`--mode coding`）还多五个，都要先 `remote_coding_begin` 拿一个句柄：
 `remote_apply_patch`（改文件，含整文件覆盖和改 notebook 的 cell）、`remote_exec_command`
 （跑命令，`cmd` 是 argv、`shell` 是一行 bash）、`remote_read_output`（分页读输出）、
 `remote_stop_command`（停掉后台命令）、`remote_coding_end`（关会话、放写锁）。
 
-**长命令往后台放。**hub 对一次远端调用最多等 60 秒，超了这条连接会被丢掉、coding 会话
+**长命令往后台放。**服务对一次远端调用最多等 60 秒，超了这条连接会被丢掉、coding 会话
 跟着结束（对面还会把这个会话起的命令一起停掉）。所以前台命令在这边封顶 50 秒：不给
 `timeout_ms` 就替你填上，要更久会被拒——那不是小气，是**替你躲开一次连坐**：一条跑过
 头的前台命令会把同一个会话里所有后台任务一起带走。跑得久的给 `remote_exec_command` 加
@@ -202,37 +159,35 @@ remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
 
 两种情况都**不会退而求其次在另一边执行**。
 
-`list_workspaces` 里远端成员带 `kind: "remote"`，没有 `path`——那是对面机器上的
-目录，gld 不知道，编一个比不报更糟。`gld hub show` 里那一列显示的是
-`node:workspace`。
+`list_workspaces` 里远端项目带 `kind: "remote"`，没有 `path`——那是对面机器上的
+目录，gld 不知道，编一个比不报更糟。`gld ls` 里那一列显示的是 `node:workspace`。
 
-删掉用 `gld hub remote rm prod`。和本地成员不同，本地的"移出 hub"只是不再暴露、
-工作区本身还在；远端成员除了这份配置没有别的东西，所以是真删。
+删掉用 `gld rm prod`（`gld remote rm prod` 也行）。远端项目除了这份配置没有别的东西。
 
 连接是**用到才建**：第一次调用才起 `ccnm mcp bridge`，之后复用，闲 5 分钟收掉，
-`gld hub stop` 时正常关闭（让对面读到 EOF 而不是直接杀，否则远端的写锁会留下
+`gld stop` 时正常关闭（让对面读到 EOF 而不是直接杀，否则远端的写锁会留下
 标记要人工恢复）。
 
 ### 为什么不会串
 
-和上面[父目录那条路](#一个工作区能不能装多个项目)逐条对比：
+和[父目录当一个项目](#父目录当一个项目)那条路逐条对比：
 
-| | 父目录 + `set_default_cwd` | 聚合入口 |
+| | 父目录当一个项目 | 每个项目单独加进来 |
 | --- | --- | --- |
-| "当前在哪个项目" | 服务端记着，所有对话共用一份 | **服务端不记**，每次调用自己带；两个对话同时各干各的也不会串。所以 hub 里没有 `set_default_cwd` |
-| 边界 | 父目录，`../proj-a` 照样读得到 | 每个项目自己的根目录，`..` 和绝对路径的规则和单独连这个工作区一样 |
+| "当前在哪个项目" | 没有这回事：AI 写的路径就是相对父目录的，`proj-a/src/x.rs` | **服务端不记**，每次调用自己带 `workspace`；两个对话同时各干各的也不会串 |
+| 边界 | 父目录，兄弟项目互相读得到 | 每个项目自己的根目录，`..` 和绝对路径的规则和单独一个项目一样 |
 | 命令会话 | 共用一张表 | 按"项目 + 谁在调"分：api 里起的命令，拿它的 `session_id` 去 web 读报 `SESSION_NOT_FOUND`；**另一个客户端在 api 里读也一样报它**，见下面第四条 |
 | Planning / History / Durable Task | 全堆在父目录 | 在各自项目里（本来就存在每个项目的 `.gld/`、`docs/history-session/`） |
-| 说明文件、Skill | 只读父目录那份 | 按工作区单独取，api 的 `AGENTS.md` 不会拿去指导 web |
-| 工具集、命令白名单、读限制 | 父目录一套 | 用每个成员自己的。hub 只收紧不放宽：web 是 `read-only`，经 hub 也写不了（报 `TOOL_NOT_ALLOWED_IN_WORKSPACE`） |
+| 说明文件、Skill | 只读父目录那份 | 按项目单独取，api 的 `AGENTS.md` 不会拿去指导 web |
+| 工具集、命令白名单、读限制 | 父目录一套 | 用每个项目自己的。服务的工具集只收紧不放宽：web 是 `read-only`，经服务也写不了（报 `TOOL_NOT_ALLOWED_IN_WORKSPACE`） |
 
 另外四条：
 
-- **凭据不互通。** hub 有自己的一套 token / 口令，工作区的 token 打到 hub 上是 401，反过来也是。
-- **不在 hub 里的工作区，AI 看不见。** 填它的名字和填一个不存在的名字，报错一模一样，
+- **凭据只有一套，是服务的。** 项目自己留着的凭据（GPT Actions 那套、以前单项目服务那套）打到服务上是 401。
+- **不在服务里的项目，AI 看不见。** 填它的名字和填一个不存在的名字，报错一模一样，
   `list_workspaces` 里也没有它。
-- **日志各记各的。** 经 hub 对 api 的请求记在 api 自己的请求日志里（带 `[hub]` 前缀，
-  `gld logs -w api` 看得到），web 的日志里没有；hub 自己在数据目录的 `logs/hub/` 里记全部。
+- **日志各记各的。** 对 api 的请求记在 api 自己的请求日志里（带 `[hub]` 前缀，
+  `gld logs -w api` 看得到），web 的日志里没有；服务自己的日志（`gld logs`）记全部。
 - **命令会话还按"谁在调"再分一层。** 同一个 api 里，另一个 OAuth 客户端拿着你的
   `session_id` 去 `read_output` 或 `kill_session`，报的也是 `SESSION_NOT_FOUND`——
   它连"有这么一条命令在跑"都不该知道。**前提是它们身份分得开**：`noauth` 下谁都是
@@ -241,148 +196,127 @@ remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
 
 ### 改了什么要不要重启
 
-| 操作 | hub 要不要重启 |
+| 操作 | 服务要不要重启 |
 | --- | --- |
-| `gld hub add` / `gld hub rm`、成员自己 `gld ws set` | **不用**，下一次调用就生效。hub 每次请求都重新读成员表和成员配置 |
-| `gld hub set`、`gld hub regen` | hub 在跑就自动重启 |
-| 守护进程重启 | hub 自己回来（不看 `restore-on-launch` 开关）；`gld hub stop` 过的不回来 |
+| `gld add` / `gld rm`、`gld set`（改项目） | **不用**，下一次调用就生效。服务每次请求都重新读项目表和项目配置 |
+| `gld upgrade`（端口、认证、工具集、公网入口）、`gld secret set` / `regen` | 服务在跑就自动重启 |
+| 重复敲 `gld start` / `gld share` | 跑着就什么都不做——不掉连接，Cloudflare 临时地址也不换 |
+| 守护进程重启 | 服务自己回来（不看 `restore-on-launch` 开关）；`gld stop` 过的不回来 |
 
-被移出的成员，它**经 hub** 起的还在跑的命令，会在下一次有请求进 hub 时被结束——
-收回的是"经这个入口访问它"的权限，所以只停经 hub 起的那些，这个项目自己的服务
-和命令行起的命令照常跑。
+被删掉的项目，它**经服务**起的还在跑的命令，会在下一次有请求进服务时被结束。
+这个项目自己的 GPT Actions 和命令行（`gld tool call`）起的命令不受影响。
 
-**改了配置的成员不会被停命令。** hub 会按新配置重建它的上下文，但正在跑的命令和
+**改了配置的项目不会被停命令。** 服务会按新配置重建它的上下文，但正在跑的命令和
 它的 `session_id` 都还在——改一行 AI 说明就把跑着的 `npm run dev` 杀掉，那是以前的
-毛病。要停命令用 `gld hub stop`（停整个 hub 经手的），或者让 AI 调 `kill_session`。
+毛病。要停命令用 `gld stop`（停整个服务经手的），或者让 AI 调 `kill_session`。
 
-### 代价：一把钥匙开几扇门
+### 代价：一把钥匙开所有项目的门
 
-拿到 hub 凭据的人能进 **hub 里的全部成员**，而且连上来调一次 `list_workspaces` 就知道有哪几个。
+拿到服务凭据的人能进 **服务里的全部项目**，而且连上来调一次 `list_workspaces` 就知道有哪几个。
 
-- 只把愿意放在一起的项目加进来；要单独给出去的项目，让它自己连。
-- hub 挂公网（`--global-gateway true` 或 `--public-url`）时，gld 拒绝 `noauth`。
-- 和[共享密钥池](#共享密钥池shared-secrets)不是一回事：共享池是几条连接器共用一把钥匙，
-  地址还是各是各的；hub 是一个地址加一把钥匙。
+- 只把愿意放在一起的项目加进来；要单独给别人用的项目，现在没有办法单独给——别加进来。
+- 服务挂了公网（任何一种公网入口）时，gld 拒绝 `noauth`。
+- 按客户端分范围（给某个客户端只开某几个项目）还没做，见下面。
 
 ### 目前没有的
 
-- **按调用者分范围。** 所有拿着 hub 凭据的客户端看到同一组成员；要分开，就别都加进来。
-- **GPT Actions 版。** 聚合入口只有 MCP。
-- **用量统计。** 经 hub 的请求不计入 `gld usage`。
+- **按调用者分范围。** 所有拿着服务凭据的客户端看到同一组项目。这是跨仓评审 X07 要的
+  "项目级授权"，还没做（[RFC-0004](rfc/0004-one-service-many-projects.md) 第 4 节）。
+- **GPT Actions 版。** 服务只有 MCP；自定义 GPT 用的 Actions 还是一个项目一个，见下面。
 
 ---
 
-## MCP 和 Actions 是两条线路
+## 父目录当一个项目
 
-一个工作区同时提供两个 HTTP 服务，**各自独立的端口、认证、隧道、密钥**：
+能，但它就只是**一个项目**：把 `~/code` 加进来，AI 在里面看到的是整棵树，写
+`proj-a/src/main.rs` 这样的路径去读写子项目。好处是一条 `gld add` 就够。代价：
 
-| | MCP | GPT Actions |
+**1. 没有边界。** 子项目之间互相读得到、写得到，真正的边界只有父目录。
+
+**2. 说明文件只读父目录那一份。** `AGENTS.md` / `CLAUDE.md` 只在父目录里找，
+不往子目录递归，proj-a 自己的 `CLAUDE.md` 不会注入。
+
+**3. Planning 和 History 全混在一起。** `.gld/planning/state.json` 和
+`docs/history-session/` 都落在父目录根上，十个项目的 Goal 和会话档案堆成一堆。
+
+**4. [Durable Task](#durable-task-的工作区基线) 的指纹是整棵树扫。**
+子项目一多，每次写操作前都要重扫一遍父目录，明显变慢。
+
+以前单项目服务的年代还有一个 `set_default_cwd` 工具可以"切到子项目"，服务里不暴露它：
+它改的是所有对话共享的状态，两个对话同时开着就会互相把对方切走。
+
+**建议：每个项目单独 `gld add`。** 客户端里仍然只有一条连接（服务只有一个），
+上面四条一条都不沾。父目录那条路只留给"一堆自己的小脚本，不在乎上面四条"。
+
+---
+
+## GPT Actions 是另一条线路
+
+MCP 服务之外，gld 还能给**某个项目**起一个 OpenAPI 网关，给只能导入 OpenAPI 文档的
+自定义 GPT（GPT Actions）用。它和 MCP 服务是两回事：
+
+| | MCP 服务 | GPT Actions |
 | --- | --- | --- |
 | 协议 | MCP Streamable HTTP（JSON-RPC） | OpenAPI 3.1 + REST |
-| 给谁用 | ChatGPT 连接器、Claude Code、Cursor、Codex | 自定义 GPT（不支持 MCP 连接器的场景） |
-| 默认端口 | 28766 起 | 8787 起 |
+| 给谁用 | ChatGPT 连接器、Claude Code、Cursor、Codex | 自定义 GPT |
+| 几个 | **一个**，项目都挂在它下面 | **一个项目一个**（GPT 导入的是一个项目的文档） |
+| 默认端口 | 28764 | 8787 起，每个项目一个 |
 | 默认认证 | oauth | api_key |
-| 默认启动 | `gld start` 起它 | 要 `gld start -s actions` |
+| 怎么起 | `gld start` | 在项目目录里 `gld start -s actions` |
 
 **绝大多数人只用 MCP。** Actions 是给"只能导入 OpenAPI 文档"的自定义 GPT 准备的
-退路，不需要就一直让它停着——它不启动不占任何资源。
+退路，不需要就一直让它停着——它不启动不占任何资源，`gld ls <项目>` 里也不显示它。
 
-配置字段一一对应：MCP 侧的 `port`、`auth`、`tunnel`… 在 Actions 侧就是
-`actions.port`、`actions.auth`、`actions.tunnel`。**不写前缀就是改 MCP。**
+Actions 的字段都带 `actions.` 前缀：
 
 ```bash
-gld ws set port=30000            # 改 MCP 端口
-gld ws set actions.port=9000     # 改 Actions 端口
-gld ws fields                    # 看全部字段（--all 连 actions.* 一起列）
+gld set api actions.port=9000      # 改这个项目的 Actions 端口
+gld fields --all                   # 看全部字段（默认只列项目通用的那些）
 ```
+
+Actions 的凭据属于项目：`gld secret ls actions_api_key --reveal -w api`。多个项目的
+Actions 想共用一把 Key，可以勾 `actions.shared-secrets=true`，它们读的是同一个
+"共享密钥池"（`gld secret shared …`，不进帮助）——代价是一把 Key 泄露，勾了的项目一起沦陷。
 
 ---
 
-## 共享密钥池（shared-secrets）
-
-**共享的只有凭据，不是配置。**
-
-默认每个工作区有自己一套随机生成的 `bearer_token` / `oauth_password` /
-`actions_api_key`。勾上 `shared-secrets=true` 的工作区，改用**同一个池子**里的那一套：
-
-```bash
-gld ws set shared-secrets=true          # MCP 侧改用共享池
-gld secret shared show bearer_token --reveal   # 池子里那份
-```
-
-实际效果（两个工作区 proj-a / proj-b）：
-
-```text
-默认（各用各的）
-  proj-a 的 bearer_token   ee7eb47672944cff
-  proj-b 的 bearer_token   ad8ef74629b24a17     ← 不一样
-
-两边都 shared-secrets=true
-  共享池                   c93d70a059f34768
-  proj-a 实际用的          c93d70a059f34768
-  proj-b 实际用的          c93d70a059f34768     ← 同一把
-```
-
-**端口、隧道、子域名、工具集、命令白名单一概不共享**，仍然各管各的。
-勾了共享的工作区端口还是 28766 / 28767，互不影响。
-
-**开关是逐工作区、逐服务的**，不是全局一刀切：`shared-secrets` 管 MCP 那半，
-`actions.shared-secrets` 管 Actions 那半。你可以只让其中三个项目共享，
-剩下的独立；也可以只让 MCP 共享而 Actions 各用各的。
-
-### 什么时候开
-
-**要在客户端里少存几份凭据的时候。** 接了 5 个项目，不开共享就得在
-Claude Code / Cursor 里配 5 套 token；开了只配一份。
-
-### 代价：一把钥匙开所有门
-
-- 任何一个客户端泄露那份 token，**所有勾了共享的工作区一起沦陷**；
-- `gld secret shared regen bearer_token` 会把所有相关服务一起重启、
-  所有客户端一起失效——你得同时去改 5 个地方。
-
-**建议：本机自用的一堆小项目开共享省事；只要有一个工作区要挂公网，那个别开。**
-公网入口意味着这把钥匙的暴露面从"你的电脑"变成"整个互联网"，
-再让它同时开着另外四个项目的门就太亏了。
-
-> 密钥名逐条的用途见 `gld secret keys`。注意 `oauth_client_id` 只存在于共享池里，
-> 工作区级的等价物是配置字段 `oauth-client-id`，不是密钥。
-
----
-
-## 拿公网地址的三种方式
+## 拿公网地址的方式
 
 ChatGPT 跑在 OpenAI 的服务器上，只能连公网 HTTPS，`127.0.0.1` 填进去连不上。
-把本地服务变成公网可达有三条路，**互斥，同时只有一条生效**：
+公网入口属于**服务**，一条命令配好：
 
-| 方式 | 地址长什么样 | 谁在转发 | 什么时候选 |
+| `--tunnel` | 地址长什么样 | 谁在转发 | 什么时候选 |
 | --- | --- | --- | --- |
-| **独立隧道** | `https://xxx.trycloudflare.com/mcp` | 本机跑的 cloudflared / frpc 子进程 | 默认选它。一个工作区一条隧道 |
-| **全局入口** | `https://hub.example.com/w/<工作区id>/mcp` | 本机一个反向代理 + 一条隧道，按路径分流 | 项目多、不想每个都占一个子域名。**要固定地址只能走 frp 或自建反代，它的 cf 只有临时地址** |
-| **手动地址** | 你自己定 | 你自己的 Caddy / Nginx | 已经有公网机器和反代，不需要 gld 打洞 |
+| `cf` | `https://xxx.trycloudflare.com/mcp`，**服务每次重启都变** | 本机跑的 cloudflared 子进程 | 零配置，先试试 |
+| `cf:<域名>` | `https://<域名>/mcp`，固定 | 本机跑的 cloudflared（Named Tunnel，要 token） | 有 Cloudflare 账号和域名 |
+| `frp:<配置名>` | `https://<子域名>.<frps 域名>/mcp`，固定（子域名默认 gld） | 本机跑的 frpc | 自己有一台跑 frps 的公网机器 |
+| `https://…` | 你自己定 | 你自己的 Caddy / Nginx | 已经有公网机器和反代，不需要 gld 打洞 |
 
-前两种要装 `cloudflared` 或 `frpc`（gld 不代管，PATH 里有就自动认）。
+要装 `cloudflared` 或 `frpc` 的那几种，gld 不代管，PATH 里有就自动认。
 
 ```bash
-gld share                              # 独立隧道（Cloudflare 临时地址，等价 --tunnel cf）
-gld share --tunnel cf:mcp.example.com  # 独立隧道（Cloudflare 固定域名）
-gld share --tunnel frp:公司            # 独立隧道（FRP 固定域名）
-gld share --tunnel https://x.com/mcp   # 手动地址
-gld share --off                        # 都关掉
+gld share                              # 沿用已配好的入口；一个都没配过就是 cf
+gld share --tunnel cf:mcp.example.com  # Cloudflare 固定域名
+gld share --tunnel frp:公司            # FRP 固定域名
+gld share --tunnel https://x.com/mcp   # 已有的公网地址
+gld share --off                        # 关掉
 ```
 
 同样的 `--tunnel` 写法在 `gld start`（启动时一起配）和 `gld upgrade`（事后换）上通用。
+隧道起不来时服务照样在本地跑（本机客户端不受影响），`gld ls` 会写出原因，
+`gld share` 会以非零退出码报错。
 
-全局入口不走 `gld share`（它是全局的，不属于某个工作区），见
-[connect-clients.md](connect-clients.md#多个项目共用一个域名全局入口)。
-
-**cloudflare quick 和 named 的区别：** quick 零配置但**每次重启地址都会变**，
+**cloudflare quick 和 named 的区别：** quick 零配置但**服务每次重启地址都会变**，
 ChatGPT 里得跟着改，适合试用；named 要你在 Cloudflare 建一条隧道拿到 token，
 地址固定，用 `gld share --tunnel cf:<你的域名>` 一次把域名定下来——token
 没配过会当场问，脚本里用 `--token <token>` 直接给。
 
+以前还有一个"全局入口"（多个单项目服务共用一个域名，服务经它挂在 `/hub/mcp`），
+老配置照旧能用，不再出现在帮助里，见
+[connect-clients.md](connect-clients.md#老配置经全局入口挂公网)。
+
 **开公网入口前请读 [security.md](security.md)。** 那不是客套话——它等于把
-"以你的身份在你电脑上跑命令"这件事对外开放了。
+"以你的身份在你电脑上跑命令"这件事对外开放了，而且是**全部项目**。
 
 ---
 
@@ -392,9 +326,12 @@ ChatGPT 里得跟着改，适合试用；named 要你在 Cloudflare 建一条隧
 `tools/call` 也只会得到 `Unknown tool`，不靠客户端自觉。
 
 ```bash
-gld ws set tool-profile=read-only
-gld tool list                       # 看当前实际暴露了什么
+gld set api tool-profile=read-only
+gld tool list -w api                # 看这个项目实际暴露了什么
 ```
+
+服务自己也有一个工具集（`gld upgrade --tool-profile …`，默认 compact），和项目的取**交集**：
+服务写 advanced 也放不开一个 read-only 的项目。
 
 | 取值 | 工具数 | 说明 |
 | --- | --- | --- |
@@ -410,7 +347,7 @@ gld tool list                       # 看当前实际暴露了什么
 
 省 token 不只体现在工具条数上。`compact` 下：
 
-- **说明文件只注入工作区里的 `AGENTS.md`（或 `AGENTS.override.md`）一份**，
+- **说明文件只注入项目里的 `AGENTS.md`（或 `AGENTS.override.md`）一份**（经 `workspace_context` 给 AI），
   `.cursorrules`、`CLAUDE.md`、全局说明都不进去；
 - **Skill 目录有字符上限**（约 1200 字符，大概 8–12 条，每条描述截到 120 字符），
   放不下的在末尾写明"还有几个"。`list_skills` / `get_skill` 两个工具照常暴露，
@@ -444,7 +381,7 @@ frontmatter 写了 `disable-model-invocation: true`（`yes`、`on`、`1` 也算�
 
 skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读——只限这个 skill 自己的目录。主目录里的用户级 skill 默认只给正文不给文件，来源明确配置之后才给，边界见[安全](security.md)那一节。
 
-要让它们全部进去：`gld ws set tool-profile=advanced`。
+要让它们全部进去：`gld set <项目> tool-profile=advanced`。
 代价是工具从 28 个涨到 53 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。
 
@@ -501,7 +438,7 @@ MCP 客户端可以拿这两个标注决定要不要弹确认框、要不要限�
 
 ```bash
 gld planning mode plan      # 切换
-gld planning show           # 看当前模式、Goal、Plan、执行台账
+gld planning ls             # 看当前模式、Goal、Plan、执行台账
 ```
 
 | 模式 | AI 能做什么 | 什么时候用 |
@@ -540,8 +477,8 @@ gld history                  # 列出已有档案：编号、标题、更新时�
 初始化时**注入，得显式点名：
 
 ```bash
-gld ws set history-context=1,3     # 只注入 1 号和 3 号档案的有界摘要
-gld ws set history-context=        # 清空，恢复"什么都不注入"
+gld set history-context=1,3        # 只注入 1 号和 3 号档案的有界摘要（当前目录对应的项目）
+gld set history-context=           # 清空，恢复"什么都不注入"
 ```
 
 注入的是**有界摘要**（标题 + 片段），不是全文——档案可能很长，整段塞进去
@@ -581,7 +518,7 @@ History 档案（`docs/history-session/`）计入指纹，但 history 工具写�
 `read_output` 每次都回 `expires_in_ms`（还剩多久）和 `retention_ms`（总共多久）；
 还在跑的命令没有这个数，它的保留期还没开始算。
 
-同一个工作区最多留 **32 条已经结束**的会话，超了就把结束得最早的那条收掉
+同一个项目最多留 **32 条已经结束**的会话，超了就把结束得最早的那条收掉
 （还在跑的一条都不动）。每条会话的 stdout / stderr 各留最后 1 MiB。
 
 到期之后再拿那个 `session_id`，报的是 `SESSION_EXPIRED` 而不是
@@ -592,7 +529,7 @@ History 档案（`docs/history-session/`）计入指纹，但 history 工具写�
 | --- | --- |
 | `expired` | 保留期到了 |
 | `evicted_over_quota` | 结束的会话太多，它是最早那条 |
-| `terminated` | 被停掉了：`kill_session`、切到 plan 模式、工作区被移出 hub |
+| `terminated` | 被停掉了：`kill_session`、切到 plan 模式、项目被删掉、服务停了 |
 
 （**另一个客户端**拿你的 `session_id` 来读，报的仍然是 `SESSION_NOT_FOUND`——
 会话表按"项目 + 谁在调"分，它连"有过这么一条"都不该知道。）
@@ -762,7 +699,7 @@ apply_patch notebook_edits=[{path, cells:[{cell_id, new_source}]}]
 notebook。
 
 **输出里的图片不会发给 AI**，只标注"有一张 image/png，大约多少字节"。gld 的
-工具结果是单块的，发不了图文交错。经 hub 连远端 ccnm 项目时那边会发图片——
+工具结果是单块的，发不了图文交错。经服务连远端 ccnm 项目时那边会发图片——
 同一个模型在两种成员上看到的 notebook 因此略有不同，这是已知差异。
 
 ---
@@ -774,10 +711,9 @@ notebook。
 | 概念 | 去哪看 |
 | --- | --- |
 | 三种认证方式（oauth / bearer / noauth）怎么选 | [connect-clients.md](connect-clients.md#认证方式对照) |
-| `confine-reads` —— 读能不能出工作区 | [security.md](security.md) |
+| `confine-reads` —— 读能不能出项目目录 | [security.md](security.md) |
 | `allowed-commands` 和 `only:` 前缀 —— 命令白名单为什么"写了等于没写" | [security.md](security.md) |
 | 守护进程是怎么回事、文件放哪、开机自启 | [daemon.md](daemon.md) |
-| 全局入口怎么配 | [connect-clients.md](connect-clients.md#多个项目共用一个域名全局入口) |
-| 聚合入口怎么接客户端 | [connect-clients.md](connect-clients.md#一条连接接多个工作区聚合入口) |
-| 每个密钥名分别是干什么的 | `gld secret keys` |
-| 每个配置字段的取值 | `gld ws fields`（`--all` 含 Actions 侧） |
+| 各种客户端具体怎么接 | [connect-clients.md](connect-clients.md) |
+| 每个凭据名分别是干什么的 | `gld secret keys` |
+| 每个项目字段的取值 | `gld fields`（`--all` 含 Actions 那条线路） |

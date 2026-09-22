@@ -35,10 +35,11 @@ GLD_HOME=$(mktemp -d) cargo test --workspace
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |
 | 端到端 | `crates/cli/tests/daemon_lifecycle.rs` | 真实二进制：add → 自动拉起守护进程 → start → TCP 请求 → stop → daemon stop |
+| 服务与项目 | `crates/cli/tests/hub_one_connection.rs`、`service_lifecycle.rs` | 一条连接按 `workspace` 分到各项目且不串、凭据只有一套、重复 start 不重启、改配置即生效、并发 start |
 | 排障命令 | `crates/cli/tests/tool_and_doctor.rs` | `gld tool` 三种参数写法与失败退出码、`gld doctor` 的通过 / 失败判定 |
-| 一步到位的入口 | `crates/cli/tests/start_and_upgrade.rs` | `gld start <目录>` 的自动登记与归属判断、`gld list` 的详情 / 列表、`gld upgrade` 换目录换地址 |
-| 公网入口 | `crates/cli/tests/share_one_command.rs` | `gld share` 的四种 `--tunnel` 走法、缺隧道程序时的报错 |
-| 收摊 | `crates/cli/tests/destroy_and_stop_all.rs` | `gld stop --all` 不删东西、`gld destroy` 删干净且必须确认 |
+| 一步到位的入口 | `crates/cli/tests/start_and_upgrade.rs` | `gld start <目录>` 的自动登记与归属判断（非项目目录不登记）、`gld ls` 的服务 / 项目视图、`gld upgrade` 换目录换地址 |
+| 公网入口 | `crates/cli/tests/share_one_command.rs`、`named_tunnel_start.rs` | 服务的 `--tunnel` 各种走法（假 cloudflared / 假 frpc）、沿用已配好的入口、缺隧道程序时的报错、固定域名的公网探测 |
+| 收摊 | `crates/cli/tests/destroy_and_stop_all.rs` | `gld stop` 不删东西、`gld rm` 删干净且必须确认 |
 | 文档与提示 | `docs_commands_exist.rs`、`messages_name_real_commands.rs`、`doctor_fixes_are_real_commands.rs` | 文档示例、源码里的提示、doctor 的修复命令必须都是真命令 |
 
 只跑某一块：
@@ -85,12 +86,18 @@ dead_code 这类问题能等价地检出来。msvc 目标在 Mac 上编不了：
 ```bash
 export GLD_HOME=$(mktemp -d)                    # 隔离
 gld start /path/to/some/project --port 28766    # 目录没登记过会自动登记
-gld ws set auth=noauth                          # 省掉 curl 的鉴权头
-curl --noproxy '*' http://127.0.0.1:28766/mcp   # {"name":"coding-tools-mcp",...}
+gld upgrade --auth noauth                       # 省掉 curl 的鉴权头
+curl --noproxy '*' http://127.0.0.1:28766/mcp   # {"name":"gld-hub",...}
 curl --noproxy '*' -X POST http://127.0.0.1:28766/mcp -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"git_status","arguments":{}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"git_status","arguments":{"workspace":"project"}}}'
 gld stop && gld daemon stop
 ```
+
+`workspace` 填 `gld ls` 项目表里的名字（默认是目录名）。
+
+集成测试里的 `free_port()` 用"连一下"确认端口空闲，**别改回"bind 一下"**：macOS 上
+测试进程里的监听 socket 会被并发 spawn 的 `gld` 继承，隔壁测试的端口就被一个无关的
+守护进程占住了。原委写在 `crates/cli/tests/common/env.rs` 的注释里。
 
 `--noproxy '*'` 是因为很多开发环境设了 `HTTP_PROXY`，不加的话 curl 会把 127.0.0.1 也发给代理。
 

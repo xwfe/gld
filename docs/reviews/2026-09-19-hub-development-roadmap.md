@@ -1,7 +1,7 @@
 # gld：hub 收敛、完整开发闭环与社区借鉴路线
 
 日期：2026-09-19  
-状态：**提案，待其他模型实施；不代表下列能力已经交付**  
+状态：**提案，待其他模型实施；不代表下列能力已经交付**。2026-09-22 起默认路径已收敛到 hub（用户定，先于项目级授权），见 [RFC-0004](../rfc/0004-one-service-many-projects.md)；L1 的授权那一半仍未做。\
 前置审查：[工具问题与修复方案](2026-09-19-gld-tooling-review-and-plan.md)  
 现行架构：[RFC-0002](../rfc/0002-shared-kernel-and-ccnm-hub.md)；并行能力补齐：[RFC-0003](../rfc/0003-native-parity-sync.md)
 

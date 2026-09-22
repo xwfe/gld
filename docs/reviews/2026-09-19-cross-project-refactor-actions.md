@@ -80,6 +80,14 @@ ccnm 把资源键取到 common directory 的做法代价是相关 worktree 一�
 L1 剩下的大头是**单项目 scoped view 和 grant**（表里第二、三行）：那是授权模型，
 不是执行资源所有权，这次没碰。
 
+> **2026-09-22 补记：默认路径已经收敛到 hub，但顺序和上面写的不一样。** 用户明确要求
+> "gld 只需要多项目模式，默认 start 就是它，不显示 hub 命令"（[RFC-0004](../rfc/0004-one-service-many-projects.md)），
+> 所以没等 scoped view / grant 做完就把 README/CLI 默认路径收到了 hub：单项目 MCP 服务
+> 命令行已经起不了，旧命令保留兼容但不进帮助。**代价照实写进了文档**：一把服务凭据能进
+> 全部项目，只想单独给出去的项目现在没法单独给（concepts.md、security.md、connect-clients.md 都写了）。
+> 表里第二、三行（scoped view、audience 边界）仍然没做；"清理平行生命周期代码"也没做——
+> 单项目监听器的内部代码还在，GPT Actions 还用着工作区隧道那一套，删之前要先确认没有别的消费者。
+
 ## 4. 远端后台任务与能力协商，对应 L2/G1 后续；主评审 X04–X06
 
 **优先复现组合问题**：`bridge/session.rs` 的 coding idle 是 120 秒，`Slot::is_idle` 看在途调用与最后使用时间，不知道已返回的远端后台进程是否仍活跃；ccnm 连接结束会停掉命令。启动后台任务后超过两分钟不调用，可能被回收。本轮只做源码组合推导，未运行长时复现。
