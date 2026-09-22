@@ -757,10 +757,18 @@ pub fn render_skill_catalog_for_profile(skills: &[SkillEntry], tool_profile: &st
             .chars()
             .take(description_chars)
             .collect::<String>();
-        let line = format!(
-            "- {}: {} (provider: {}, id: {})\n",
-            skill.descriptor.name, description, skill.descriptor.provider, skill.descriptor.id
-        );
+        // 描述是空的：~/.agents/mcp.json 给它的是 name-only，只放名字。
+        let line = if description.is_empty() {
+            format!(
+                "- {} (provider: {}, id: {})\n",
+                skill.descriptor.name, skill.descriptor.provider, skill.descriptor.id
+            )
+        } else {
+            format!(
+                "- {}: {} (provider: {}, id: {})\n",
+                skill.descriptor.name, description, skill.descriptor.provider, skill.descriptor.id
+            )
+        };
         // 预算用完就停，但至少给一条：一条都不给等于没有目录。
         if let Some(budget) = budget {
             if listed > 0 && out.chars().count() + line.chars().count() > budget {

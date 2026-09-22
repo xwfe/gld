@@ -134,6 +134,7 @@ impl App {
             &settings,
             &service_secret_present,
         ));
+        checks.push(exposure_check());
         checks.extend(config_checks(&profiles, &settings, &secret_present));
         checks.extend(self.port_checks(&profiles, &settings).await?);
         Ok(Diagnosis { checks })
@@ -359,6 +360,54 @@ fn data_file_permission_check(_path: &Path) -> Option<DoctorCheck> {
 /// 服务（RFC-0004 之后唯一的那个 MCP 入口）自己的检查：认证、公网入口、项目。
 ///
 /// 纯函数：`token_present` 回答"服务凭据里这一项设过没有"。
+/// `~/.agents/mcp.json`（toexec RFC-0001）。写坏了整个服务一个工具都不给，
+/// 工具名写错在 `disabledTools` 里等于想关的那个还开着——两种都算失败。
+///
+/// 读的是守护进程那个账号的 HOME：doctor 本来就在守护进程里跑。
+pub fn exposure_check() -> DoctorCheck {
+    const LABEL: &str = "暴露规则";
+    let file = "~/.agents/mcp.json";
+    let policy = match crate::exposure::current() {
+        Ok(policy) => policy,
+        Err(reason) => {
+            return DoctorCheck::fail(
+                SERVICE_SCOPE,
+                LABEL,
+                format!("{file} 读不了，服务现在一个工具都不给：{reason}"),
+                format!("改好 {file}，或者先把它挪走（挪走后什么都不收窄）"),
+            )
+        }
+    };
+    let unknown = crate::exposure::unknown_tools(&policy);
+    if !unknown.is_empty() {
+        return DoctorCheck::fail(
+            SERVICE_SCOPE,
+            LABEL,
+            format!(
+                "{file} 里写了 gld 没有的工具：{}。写错在 disabledTools 里的话，想关的那个还开着",
+                unknown.join(", ")
+            ),
+            "照 gld tool list 列出的名字改（mcpServers.gld 的 enabledTools / disabledTools）",
+        );
+    }
+    let exists = crate::exposure::path().is_some_and(|path| path.exists());
+    if !exists {
+        return DoctorCheck::ok(SERVICE_SCOPE, LABEL, format!("没有 {file}，什么都不收窄"));
+    }
+    let off = crate::exposure::turned_off(&policy);
+    let skills = crate::exposure::skill_overrides(&policy);
+    let tools = if off.is_empty() {
+        "没关工具".to_string()
+    } else {
+        format!("关掉 {} 个工具（{}）", off.len(), off.join(", "))
+    };
+    DoctorCheck::ok(
+        SERVICE_SCOPE,
+        LABEL,
+        format!("{file}：{tools}；{skills} 条 skill 覆盖"),
+    )
+}
+
 pub fn service_checks(
     profiles: &[WorkspaceProfile],
     settings: &AppSettings,
@@ -839,6 +888,47 @@ fn actions_tunnel_checks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_exposure_check_fails_on_a_broken_file_and_on_names_gld_does_not_have() {
+        use crate::exposure::tests::{with_home, write_agents_file};
+        let home = tempfile::tempdir().unwrap();
+        let check = || with_home(home.path(), exposure_check);
+
+        let none = check();
+        assert_eq!(none.level, DoctorLevel::Ok);
+        assert!(none.detail.contains("什么都不收窄"), "{}", none.detail);
+
+        write_agents_file(
+            home.path(),
+            r#"{"mcpServers": {"gld": {"disabledTools": ["exec_command"]}}, "skillOverrides": {"x": "off"}}"#,
+        );
+        let good = check();
+        assert_eq!(good.level, DoctorLevel::Ok);
+        assert!(
+            good.detail
+                .contains("关掉 1 个工具（exec_command）；1 条 skill 覆盖"),
+            "{}",
+            good.detail
+        );
+
+        write_agents_file(
+            home.path(),
+            r#"{"mcpServers": {"gld": {"disabledTools": ["exec_comand"]}}}"#,
+        );
+        let typo = check();
+        assert_eq!(typo.level, DoctorLevel::Fail);
+        assert!(typo.detail.contains("exec_comand"), "{}", typo.detail);
+
+        write_agents_file(home.path(), "{");
+        let broken = check();
+        assert_eq!(broken.level, DoctorLevel::Fail);
+        assert!(
+            broken.detail.contains("一个工具都不给"),
+            "{}",
+            broken.detail
+        );
+    }
 
     fn profile(name: &str, path: &str) -> WorkspaceProfile {
         let mut profile = WorkspaceProfile::new(path.into(), Some(name.into()));
