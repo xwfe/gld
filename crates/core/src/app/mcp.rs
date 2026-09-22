@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::state::App;
 use crate::error::{AppError, AppResult};
-use crate::machine_mcp::{self, installed, pool};
+use crate::machine_mcp::{self, installed, open::Opener, pool};
 
 /// `gld mcp ls` 的一行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +138,7 @@ impl App {
             return Ok(result);
         }
         let started = std::time::Instant::now();
-        match pool::try_once(server, &machine_mcp::launch(&settings)) {
+        match pool::try_once(&Opener::new(machine_mcp::launch(&settings)), server) {
             Ok(live) => {
                 result.ok = true;
                 result.startup_ms = live.started_in.as_millis() as u64;

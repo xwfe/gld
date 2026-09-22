@@ -5,12 +5,11 @@
 //! 里装的 context7、deepwiki。gld 本来就是那个地址，这里让它顺带把这些 server
 //! 转过去。
 //!
-//! | 模块 | 管什么 |
+//! | 在哪 | 管什么 |
 //! | --- | --- |
-//! | [`installed`] | 读 `~/.claude.json` 和 `~/.codex/config.toml` 里装了哪些 |
-//! | [`transport`]、[`http`] | stdio 子进程和 streamable HTTP 两种通道 |
-//! | [`client`] | 握手、列工具、调工具 |
-//! | [`pool`] | 连接：用到才开、按 server + 调用方分、闲了收 |
+//! | 共享库 `toexec-mcp`（这里按原名转出来：[`installed`]、[`client`]、[`pool`]、[`shape`]、[`transport`]） | 读 `~/.claude.json` 和 `~/.codex/config.toml` 里装了哪些、握手调用、子进程通道、连接池、结果整理。ccnm 转它那台机器上的 server 也用这一份 |
+//! | [`open`] | gld 自己怎么起进程（`PATH`、工作目录、进程组）和怎么杀 |
+//! | [`http`] | streamable HTTP 通道（要 HTTP 客户端和异步运行时，共享库不背） |
 //! | [`relay`] | 模型看到的三个工具，和结果怎么交出去 |
 //!
 //! **默认一个都不开**，操作员按名字开（`gld mcp on context7`），名单存在
@@ -21,14 +20,13 @@
 //!
 //! 不要这个功能了：删掉这个目录，再删 `hub` 里 `machine_mcp` 那几处（列工具、
 //! 分发、关服务）、`relayed_mcp_servers` 这个设置、`gld mcp` 命令组和它的三个
-//! 守护进程请求。别的模块不依赖这里。
+//! 守护进程请求，以及对 `toexec-mcp` 的依赖。别的模块不依赖这里。
 
-pub mod client;
 pub mod http;
-pub mod installed;
-pub mod pool;
+pub mod open;
 pub mod relay;
-pub mod transport;
+
+pub use toexec_mcp::{client, installed, pool, shape, transport};
 
 use std::path::PathBuf;
 
@@ -47,7 +45,7 @@ pub fn read_installed() -> installed::Installed {
 /// 起 server 用的 `PATH` 和工作目录：`PATH` 是 gld 的全局可执行文件路径加上
 /// 这个进程自己的，和 `exec_command` 同一个口径；工作目录是主目录。连 HTTP
 /// server 照 gld 的全局出站代理。
-pub fn launch(settings: &crate::settings::AppSettings) -> pool::Launch {
+pub fn launch(settings: &crate::settings::AppSettings) -> open::Launch {
     let mut paths =
         crate::tools::context::merge_executable_paths("", &settings.global_executable_paths);
     if let Some(system) = std::env::var_os("PATH") {
@@ -57,7 +55,7 @@ pub fn launch(settings: &crate::settings::AppSettings) -> pool::Launch {
             }
         }
     }
-    pool::Launch {
+    open::Launch {
         path: std::env::join_paths(paths).ok(),
         cwd: dirs::home_dir().unwrap_or_else(std::env::temp_dir),
         proxy: http::Proxy::from_settings(&settings.proxy),

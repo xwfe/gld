@@ -23,8 +23,9 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
 
-use super::client::Error;
-use super::transport::{Recv, Transport, MAX_MESSAGE_BYTES};
+use toexec_mcp::installed::{display_url, is_loopback_url};
+use toexec_mcp::transport::{Recv, Transport, MAX_MESSAGE_BYTES};
+use toexec_mcp::Error;
 
 /// 连远端地址走不走代理，照 gld 的全局出站代理设置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +68,7 @@ impl Http {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err(Error::Start(format!(
                 "the url does not start with http:// or https://: {}",
-                super::installed::display_url(url)
+                display_url(url)
             )));
         }
         let mut map = HeaderMap::new();
@@ -86,7 +87,7 @@ impl Http {
             map.insert(name, value);
         }
         let mut builder = reqwest::Client::builder();
-        let loopback = super::installed::is_loopback_url(url);
+        let loopback = is_loopback_url(url);
         builder = match proxy {
             _ if loopback => builder.no_proxy(),
             Proxy::None => builder.no_proxy(),
@@ -378,13 +379,13 @@ fn answers(data: &str, id: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine_mcp::client::Client;
     use axum::http::{HeaderMap as Headers, StatusCode};
     use axum::response::{IntoResponse, Response};
     use axum::routing::post;
     use axum::Router;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+    use toexec_mcp::Client;
 
     /// 一次请求带了哪几个头：User-Agent、会话号、x-api-key。
     struct Heard {
@@ -469,7 +470,12 @@ mod tests {
         let (url, seen) = serve(false);
         let headers = BTreeMap::from([("x-api-key".to_string(), "k1".to_string())]);
         let transport = Http::new(&url, &headers, &Proxy::System).unwrap();
-        let mut client = Client::connect(Box::new(transport), Duration::from_secs(5)).unwrap();
+        let mut client = Client::connect(
+            Box::new(transport),
+            ("gld-test", "0"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert_eq!(client.server_name.as_deref(), Some("web"));
         let tools = client.list_tools(Duration::from_secs(5)).unwrap();
         assert_eq!(tools, [json!({ "name": "search" })]);
@@ -489,7 +495,11 @@ mod tests {
     fn a_login_wall_is_named_as_such() {
         let (url, _) = serve(true);
         let transport = Http::new(&url, &BTreeMap::new(), &Proxy::System).unwrap();
-        let Err(error) = Client::connect(Box::new(transport), Duration::from_secs(5)) else {
+        let Err(error) = Client::connect(
+            Box::new(transport),
+            ("gld-test", "0"),
+            Duration::from_secs(5),
+        ) else {
             panic!("should need login");
         };
         assert!(
@@ -503,7 +513,11 @@ mod tests {
         // 环境里开着 HTTP_PROXY 也不能把本机地址送进代理（那样回的是代理的 502）。
         let transport =
             Http::new("http://127.0.0.1:9/mcp", &BTreeMap::new(), &Proxy::System).unwrap();
-        let Err(error) = Client::connect(Box::new(transport), Duration::from_secs(5)) else {
+        let Err(error) = Client::connect(
+            Box::new(transport),
+            ("gld-test", "0"),
+            Duration::from_secs(5),
+        ) else {
             panic!("nothing listens on port 9");
         };
         assert!(matches!(error, Error::Start(_)), "{error}");

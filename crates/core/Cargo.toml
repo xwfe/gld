@@ -20,6 +20,7 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
 toexec-fs = { workspace = true }
+toexec-mcp = { workspace = true }
 toexec-skill = { workspace = true }
 toexec-text = { workspace = true }
 axum = { version = "0.8", features = ["form"] }
@@ -35,9 +36,6 @@ sha2 = "0.10"
 shlex = "1"
 shell-words = "1"
 which = "7"
-# 读 Codex 的 ~/.codex/config.toml（本机装了哪些 MCP server，RFC-0006）。
-# 和 ccnm 用同一个大版本，v4 第 3 步这块读配置的代码要搬进 toexec 共用。
-toml = "0.9"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -28,10 +28,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
+use toexec_mcp::installed::{Installed, Server, Transport as Config};
+use toexec_mcp::pool::{Pool, CALL_TIMEOUT};
+use toexec_mcp::shape::{self, ceil_boundary, cut_text, fit_listing, floor_boundary, part_end};
+use toexec_mcp::{Error, Open};
 
-use super::client::Error;
-use super::installed::{Installed, Server, Transport as Config};
-use super::pool::{Launch, Pool, CALL_TIMEOUT};
 use crate::tools::workspace::{tool_err, tool_ok, WorkspaceError};
 use crate::tools::wrap_mcp_tool_result;
 
@@ -66,7 +67,8 @@ pub struct Scope<'a> {
     /// 操作员开了的名字（`gld mcp on`）。
     pub on: &'a [String],
     pub installed: &'a Installed,
-    pub launch: Launch,
+    /// 怎么起（服务传 [`super::open::Opener`]，测试传内存里的 server）。
+    pub opener: &'a dyn Open,
     /// 调用方主体（`AuthContext::tag`）。连接和留着的结果都按它分。
     pub caller: &'a str,
 }
@@ -249,7 +251,7 @@ impl Relay {
         let wait = server.tool_timeout.unwrap_or(CALL_TIMEOUT);
         let seen = self
             .pool
-            .with(server, scope.caller, &scope.launch, wait, |live| {
+            .with(server, scope.caller, scope.opener, wait, |live| {
                 Ok((
                     live.tools.clone(),
                     live.client.instructions.clone(),
@@ -273,7 +275,7 @@ impl Relay {
             }))));
         }
 
-        let (listed, omitted) = fit_listing(&tools);
+        let (listed, omitted) = fit_listing(&tools, MAX_LISTING_BYTES);
         let mut out = json!({
             "server": server.name,
             "kind": server.kind().as_str(),
@@ -342,7 +344,7 @@ impl Relay {
         let timeout = server.tool_timeout.unwrap_or(CALL_TIMEOUT);
         let called = self
             .pool
-            .with(server, scope.caller, &scope.launch, timeout, |live| {
+            .with(server, scope.caller, scope.opener, timeout, |live| {
                 let offered = live.tools.iter().any(|t| t["name"] == json!(tool));
                 if !offered || !server.allows_tool(&tool) {
                     let visible: Vec<Value> = live
@@ -414,39 +416,21 @@ impl Relay {
 
     /// server 的结果交出去之前的整理，见模块说明"结果多大算大"。
     fn shape(&self, result: Value, server: &str, tool: &str, caller: &str) -> Value {
-        let is_error = result.get("isError") == Some(&Value::Bool(true));
-        let mut items: Vec<Value> = result
-            .get("content")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let has_text = items.iter().any(|item| text_of(item).is_some());
-        if !has_text {
-            if let Some(structured) = result.get("structuredContent") {
-                items.push(json!({ "type": "text", "text": structured.to_string() }));
-            }
-        }
-        let items: Vec<Value> = items.into_iter().map(limit_media).collect();
-        let text_bytes: usize = items.iter().filter_map(text_of).map(str::len).sum();
-
-        let content = if text_bytes <= INLINE_BYTES {
-            items
-        } else {
-            let whole = items
-                .iter()
-                .filter_map(text_of)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let others: Vec<Value> = items
-                .into_iter()
-                .filter(|item| text_of(item).is_none())
-                .collect();
-            self.split(whole, caller, others)
+        let shaped = shape::shape(
+            &result,
+            &shape::Limits {
+                inline_bytes: INLINE_BYTES,
+                max_media_bytes: MAX_MEDIA_BYTES,
+            },
+        );
+        let content = match shaped.long {
+            Some(whole) => self.split(whole, caller, shaped.items),
+            None => shaped.items,
         };
         let mut meta = Map::new();
         meta.insert("gld/mcp_server".into(), json!(server));
         meta.insert("gld/mcp_tool".into(), json!(tool));
-        json!({ "content": content, "isError": is_error, "_meta": meta })
+        json!({ "content": content, "isError": shaped.is_error, "_meta": meta })
     }
 
     /// 大文字：先交一段，全文留着，末尾写明怎么接着读。
@@ -528,143 +512,6 @@ impl Results {
             .filter(|item| item.caller == caller && item.at.elapsed() < KEEP_FOR)
             .map(|item| item.text.clone())
     }
-}
-
-/// 一个内容项里的文字：文字项，或者带文字的内嵌资源。
-fn text_of(item: &Value) -> Option<&str> {
-    match item.get("type").and_then(Value::as_str) {
-        Some("text") => item.get("text").and_then(Value::as_str),
-        Some("resource") => item
-            .get("resource")
-            .and_then(|resource| resource.get("text"))
-            .and_then(Value::as_str),
-        _ => None,
-    }
-}
-
-/// 太大的图片 / 音频 / 二进制资源换成一句说明。
-fn limit_media(item: Value) -> Value {
-    let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
-    let (data, mime) = match kind {
-        "image" | "audio" => (item.get("data"), item.get("mimeType")),
-        "resource" => {
-            let resource = item.get("resource");
-            (
-                resource.and_then(|r| r.get("blob")),
-                resource.and_then(|r| r.get("mimeType")),
-            )
-        }
-        _ => return item,
-    };
-    let size = data.and_then(Value::as_str).map_or(0, str::len);
-    if size <= MAX_MEDIA_BYTES {
-        return item;
-    }
-    let mime = mime.and_then(Value::as_str).unwrap_or("binary data");
-    json!({
-        "type": "text",
-        "text": format!(
-            "[gld: left out a {kind} ({mime}) of {size} bytes (base64), over the {} MiB limit per item]",
-            MAX_MEDIA_BYTES / (1024 * 1024)
-        )
-    })
-}
-
-/// 工具清单放不下时先去参数表，再去描述。返回清单和"去掉了什么"。
-fn fit_listing(tools: &[Value]) -> (Vec<Value>, Option<String>) {
-    let brief = |tool: &Value, with_schema: bool, with_description: bool| {
-        let mut out = json!({ "name": tool["name"] });
-        if let Some(title) = tool
-            .get("title")
-            .or_else(|| tool["annotations"].get("title"))
-        {
-            out["title"] = title.clone();
-        }
-        if with_description {
-            if let Some(description) = tool.get("description") {
-                out["description"] = description.clone();
-            }
-        }
-        if with_schema {
-            if let Some(schema) = tool.get("inputSchema") {
-                out["inputSchema"] = schema.clone();
-            }
-            if let Some(annotations) = tool.get("annotations") {
-                out["annotations"] = annotations.clone();
-            }
-        }
-        out
-    };
-    let steps = [
-        (true, true, None),
-        (
-            false,
-            true,
-            Some("input schemas, to fit; ask for one tool with tool=<name> to get its schema"),
-        ),
-        (
-            false,
-            false,
-            Some("descriptions and input schemas, to fit; ask for one tool with tool=<name>"),
-        ),
-    ];
-    let last = steps.len() - 1;
-    for (step, (with_schema, with_description, omitted)) in steps.into_iter().enumerate() {
-        let listed: Vec<Value> = tools
-            .iter()
-            .map(|tool| brief(tool, with_schema, with_description))
-            .collect();
-        // 最后一步不再量：只剩名字和标题还放不下，那是几千个工具，照样给。
-        if step == last || Value::Array(listed.clone()).to_string().len() <= MAX_LISTING_BYTES {
-            return (listed, omitted.map(str::to_string));
-        }
-    }
-    unreachable!("the last step always returns")
-}
-
-/// `[start, end)` 这一段的结尾：不超过 `max` 字节，尽量停在换行后面，至少
-/// 停在字符边界上。
-fn part_end(text: &str, start: usize, max: usize) -> usize {
-    let limit = start.saturating_add(max);
-    if limit >= text.len() {
-        return text.len();
-    }
-    let end = floor_boundary(text, limit);
-    match text[start..end].rfind('\n') {
-        // 离开头太近的换行不要：一行特别长时宁可在行中间断。
-        Some(at) if at >= max / 2 => start + at + 1,
-        _ if end > start => end,
-        // max 比一个字符还小：至少往前走一个字符。
-        _ => ceil_boundary(text, start + 1),
-    }
-}
-
-fn floor_boundary(text: &str, mut at: usize) -> usize {
-    at = at.min(text.len());
-    while !text.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
-}
-
-fn ceil_boundary(text: &str, mut at: usize) -> usize {
-    at = at.min(text.len());
-    while !text.is_char_boundary(at) {
-        at += 1;
-    }
-    at
-}
-
-fn cut_text(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    let end = floor_boundary(text, max);
-    format!(
-        "{}… [gld: cut at {end} of {} bytes]",
-        &text[..end],
-        text.len()
-    )
 }
 
 fn find<'a>(scope: &'a Scope, name: &str) -> Result<&'a Server, Value> {
@@ -849,20 +696,43 @@ fn required(args: &Value, key: &str) -> Result<String, Value> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::machine_mcp::client::tests::{reply, Scripted};
-    use crate::machine_mcp::installed::Source;
-    use crate::machine_mcp::pool::Open;
-    use crate::machine_mcp::transport::Transport;
     use std::collections::BTreeMap;
+    use toexec_mcp::installed::Source;
+    use toexec_mcp::scripted::{reply, Scripted};
+    use toexec_mcp::Transport;
+
+    /// 一个装好的 stdio server，名字随意，测试不会真起它。
+    pub(crate) fn server(name: &str, command: &str) -> Server {
+        Server {
+            name: name.into(),
+            source: Source::Claude,
+            transport: Config::Stdio {
+                command: command.into(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: None,
+            },
+            off_in_source: false,
+            enabled_tools: None,
+            disabled_tools: Vec::new(),
+            startup_timeout: None,
+            tool_timeout: None,
+            missing_env: Vec::new(),
+        }
+    }
 
     /// 一个内存里的 server，工具 `big` 回 `size` 字节的文字，`pic` 回一张图，
     /// `structured` 同时回文字和一份一样的 structuredContent。
     struct Demo;
 
     impl Open for Demo {
-        fn open(&self, _server: &Server, _launch: &Launch) -> Result<Box<dyn Transport>, Error> {
+        fn me(&self) -> (&str, &str) {
+            ("gld-test", "0")
+        }
+
+        fn open(&self, _server: &Server) -> Result<Box<dyn Transport>, Error> {
             Ok(Box::new(Scripted::new(|request| {
                 match request["method"].as_str().unwrap_or("") {
                     "initialize" => vec![reply(
@@ -907,18 +777,18 @@ mod tests {
     }
 
     fn installed() -> Installed {
-        let mut demo = crate::machine_mcp::pool::tests::server("demo", "demo-server");
+        let mut demo = server("demo", "demo-server");
         demo.disabled_tools = vec!["hidden".into()];
-        let mut needs_key = crate::machine_mcp::pool::tests::server("keyed", "x");
+        let mut needs_key = server("keyed", "x");
         needs_key.missing_env = vec!["API_KEY".into()];
-        let off = crate::machine_mcp::pool::tests::server("off", "x");
+        let off = server("off", "x");
         let old = Server {
             transport: Config::Sse {
                 url: "http://127.0.0.1:9/sse".into(),
                 headers: BTreeMap::new(),
             },
             source: Source::Codex,
-            ..crate::machine_mcp::pool::tests::server("old", "x")
+            ..server("old", "x")
         };
         Installed {
             servers: vec![demo, needs_key, off, old],
@@ -943,18 +813,14 @@ mod tests {
             &Scope {
                 on: &on,
                 installed: &installed,
-                launch: Launch {
-                    path: None,
-                    cwd: std::env::temp_dir(),
-                    proxy: crate::machine_mcp::http::Proxy::System,
-                },
+                opener: &Demo,
                 caller,
             },
         )
     }
 
     fn relay() -> Relay {
-        Relay::with_pool(Pool::with_opener(Box::new(Demo)))
+        Relay::with_pool(Pool::new())
     }
 
     fn code(result: &Value) -> &str {
@@ -1161,29 +1027,5 @@ mod tests {
             result.get("structuredContent").is_none(),
             "不是 gld 的错误信封"
         );
-    }
-
-    #[test]
-    fn parts_end_on_character_boundaries() {
-        let text = "é".repeat(10);
-        let end = part_end(&text, 0, 3);
-        assert!(text.is_char_boundary(end) && end <= 3);
-        assert_eq!(part_end(&text, 0, 1), 2, "比一个字符还小也要往前走");
-        assert_eq!(ceil_boundary(&text, 1), 2);
-    }
-
-    #[test]
-    fn a_listing_too_big_for_one_answer_drops_schemas_first() {
-        let tools: Vec<Value> = (0..200)
-            .map(|i| json!({
-                "name": format!("t{i}"),
-                "description": "d".repeat(100),
-                "inputSchema": { "type": "object", "properties": { "x": { "description": "s".repeat(400) } } }
-            }))
-            .collect();
-        let (listed, omitted) = fit_listing(&tools);
-        assert!(omitted.unwrap().starts_with("input schemas"));
-        assert!(listed[0].get("inputSchema").is_none());
-        assert!(listed[0].get("description").is_some());
     }
 }

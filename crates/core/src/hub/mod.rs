@@ -219,9 +219,11 @@ pub struct Hub {
     connections: Connections,
     /// 转发本机装好的 MCP server（`gld mcp on` 开了才有东西）。
     relay: Relay,
-    /// 测试用：不读这台机器的 `~/.claude.json`，用给定的一份。
+    /// 测试用：不读这台机器的 `~/.claude.json`，用给定的一份；也不真起进程。
     #[cfg(test)]
     installed: Option<Installed>,
+    #[cfg(test)]
+    opener: Option<Box<dyn toexec_mcp::Open>>,
 }
 
 impl Hub {
@@ -262,13 +264,15 @@ impl Hub {
             relay: Relay::new(),
             #[cfg(test)]
             installed: None,
+            #[cfg(test)]
+            opener: None,
         }
     }
 
     /// 测试用：换成内存里的 MCP server，装了哪些也由测试给。
     #[cfg(test)]
-    fn with_relay(mut self, relay: Relay, installed: Installed) -> Self {
-        self.relay = relay;
+    fn with_relay(mut self, opener: Box<dyn toexec_mcp::Open>, installed: Installed) -> Self {
+        self.opener = Some(opener);
         self.installed = Some(installed);
         self
     }
@@ -324,13 +328,20 @@ impl Hub {
         }
         let installed = self.installed_mcp();
         let caller = auth.tag();
+        let real = machine_mcp::open::Opener::new(machine_mcp::launch(settings));
+        #[allow(unused_mut)]
+        let mut opener: &dyn toexec_mcp::Open = &real;
+        #[cfg(test)]
+        if let Some(fake) = &self.opener {
+            opener = fake.as_ref();
+        }
         self.relay.call(
             tool,
             args,
             &machine_mcp::Scope {
                 on: &settings.relayed_mcp_servers,
                 installed: &installed,
-                launch: machine_mcp::launch(settings),
+                opener,
                 caller: &caller,
             },
         )
@@ -3223,25 +3234,22 @@ mod tests {
 
     // ---- 本机装好的 MCP server（RFC-0006）----
 
-    use crate::machine_mcp::pool::{Launch, Pool};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 每开一条连接记一次数，连上的是内存里的 server（两个工具，调用回显参数）。
     struct Counting(Arc<AtomicUsize>);
 
-    impl crate::machine_mcp::pool::Open for Counting {
+    impl toexec_mcp::Open for Counting {
         fn open(
             &self,
-            _server: &crate::machine_mcp::installed::Server,
-            _launch: &Launch,
-        ) -> Result<
-            Box<dyn crate::machine_mcp::transport::Transport>,
-            crate::machine_mcp::client::Error,
-        > {
+            _server: &toexec_mcp::Server,
+        ) -> Result<Box<dyn toexec_mcp::Transport>, toexec_mcp::Error> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(crate::machine_mcp::client::tests::plain_server(
-                "2025-06-18",
-            )))
+            Ok(Box::new(toexec_mcp::scripted::plain_server("2025-06-18")))
+        }
+
+        fn me(&self) -> (&str, &str) {
+            ("gld-test", "0")
         }
     }
 
@@ -3256,8 +3264,8 @@ mod tests {
         let opened = Arc::new(AtomicUsize::new(0));
         let installed = Installed {
             servers: vec![
-                crate::machine_mcp::pool::tests::server("context7", "npx"),
-                crate::machine_mcp::pool::tests::server("desktop-commander", "npx"),
+                crate::machine_mcp::relay::tests::server("context7", "npx"),
+                crate::machine_mcp::relay::tests::server("desktop-commander", "npx"),
             ],
             ..Installed::default()
         };
@@ -3269,10 +3277,7 @@ mod tests {
                 settings,
             },
         )
-        .with_relay(
-            Relay::with_pool(Pool::with_opener(Box::new(Counting(opened.clone())))),
-            installed,
-        );
+        .with_relay(Box::new(Counting(opened.clone())), installed);
         (hub, opened, dir)
     }
 
