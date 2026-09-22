@@ -84,7 +84,7 @@ gld mcp off context7              # 关（--all 全关）
 
 ## 7. 后来：共用代码进了 toexec（2026-09-22，v4 第 3 步）
 
-这一步刚做完时共用代码没进 toexec：toexec 的规矩是"两个产品都真的在用才进来、不加依赖"，而那时只有 gld 读这两份配置。第 3 步 ccnm 也要同一套（它在项目那台机器上转 server，外加项目的 `.mcp.json`），就把读配置、握手调用、子进程通道、连接池、结果整理整块搬成了 `toexec-mcp` 0.1.0，gld 删掉自己那份改链它；toexec 那条"不加依赖"为它破了例（serde_json、toml），理由写在 toexec 的开发规矩里。gld 留下的是自己的决定：`machine_mcp/open.rs`（`PATH`、工作目录、进程组、怎么杀）、`http.rs`、`relay.rs`（三个工具、结果交法、留着分段读的全文）。行为没变；跟着代码搬走的测试在 toexec 里接着跑。
+这一步刚做完时共用代码没进 toexec：toexec 的规矩是"两个产品都真的在用才进来、不加依赖"，而那时只有 gld 读这两份配置。第 3 步 ccnm 也要同一套（它在项目那台机器上转 server，外加项目的 `.mcp.json`），就把读配置、握手调用、子进程通道、连接池、结果整理整块搬成了 `toexec-mcp` 0.1.0，gld 删掉自己那份改链它；toexec 那条"不加依赖"为它破了例（serde_json、toml），理由写在 toexec 的开发规矩里。gld 留下的是自己的决定：`machine_mcp/open.rs`（`PATH`、工作目录、进程组、怎么杀）、`http.rs`、`relay.rs`（三个工具、结果交法、留着分段读的全文）。行为没变；跟着代码搬走的测试在 toexec 里接着跑。v4 第 4 步 ccnm 在 Agent 上转 server 也要"留着分段读的全文"和"拆 SSE 回复"这两块，于是又搬成了 `toexec-mcp` 0.2.0 的 `kept`、`sse`，gld 的 `relay.rs`、`http.rs` 改用它们（`6d3acc1`），行为同样没变；`http.rs` 发请求那一半（reqwest、代理）仍是 gld 自己的。
 
 同一天 hub 加了 `remote_call_mcp_tool`：远端 ccnm 项目那台机器上的 server 经它用，和 `remote_exec_command` 一样要 coding 句柄。远端没有可转的 server 时 ccnm 不列那个工具，hub 这边报"那边没东西可转"，不报"升级 ccnm"。
 
