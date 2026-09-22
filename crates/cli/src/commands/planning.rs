@@ -14,7 +14,7 @@ use crate::output::or_dash;
 pub async fn run(ctx: &mut Ctx, command: PlanningCmd) -> CliResult {
     let target = ctx.target.clone();
     match command {
-        PlanningCmd::Show => {
+        PlanningCmd::List => {
             let state: PlanningState = ctx
                 .backend
                 .call_typed(Request::PlanningState { target })

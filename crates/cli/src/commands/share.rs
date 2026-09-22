@@ -1,49 +1,277 @@
 //! `gld share`：一条命令拿到公网地址。
 //!
-//! 这个命令不做任何别处做不到的事，它只是把最常走的那条路合成一步。
-//! 以前接 ChatGPT 要敲：
+//! 这个命令不做任何别处做不到的事，它只是把最常走的那条路合成一步：配公网入口、
+//! 起服务、查连接信息。以前接 ChatGPT 要敲三条，其中两条是"仪式"——用户想要的
+//! 只是那个地址。
 //!
-//! ```text
-//! gld ws set mcp.tunnel=cloudflare mcp.cloudflare-mode=quick
-//! gld restart          # 忘了这步就是"配了没反应"
-//! gld ls               # 才看得到公网地址
-//! ```
-//!
-//! 三条里有两条是"仪式"：用户想要的只是那个地址。
+//! RFC-0004 之后公网入口属于**服务**（只有一个），`--tunnel` 的写法没变。项目自己的
+//! GPT Actions 还是一个项目一条隧道，那一半是下面 `configure` 起的几个函数，
+//! `-s actions` 走它们。
 //!
 //! 这里的 `--tunnel` 解析和套用逻辑也被 `gld start --tunnel` 和
 //! `gld upgrade --tunnel` 复用——三个命令说的是同一件事，不该有三套规则。
 
-use gld_core::app::{WorkspaceTarget, WorkspaceUpdate};
+use gld_core::app::{HubStatusDto, WorkspaceTarget, WorkspaceUpdate};
 use gld_core::runtime::ServiceKind;
+use gld_core::settings::HubConfig;
 use gld_core::tunnel::{TunnelServiceKind, TunnelStatus};
 use gld_core::workspace::{RuntimeStatusDto, WorkspaceProfile};
 use gld_daemon::Request;
 
 use super::{service, Ctx};
-use crate::cli::{ListArgs, ShareArgs, TunnelService, TunnelSpec};
+use crate::cli::{ShareArgs, TunnelService, TunnelSpec};
 use crate::error::{CliError, CliResult};
 
+/// 服务的 FRP 子域名不给时用它。服务只有一个，没有"项目名"可以拿来当子域名。
+const DEFAULT_SERVICE_SUBDOMAIN: &str = "gld";
+
 pub async fn run(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
-    let profile = service::resolve_or_register(
-        ctx,
-        args.path.as_deref(),
-        gld_core::app::WorkspaceCreateOptions::default(),
-    )
+    if matches!(args.service, TunnelService::Actions) {
+        return run_actions(ctx, args).await;
+    }
+    service::pick_project_quietly(ctx, args.path.as_deref(), true).await?;
+    let current: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    let spec = match (args.off, args.tunnel) {
+        (true, _) => Some(TunnelSpec::Off),
+        (false, Some(spec)) => Some(spec),
+        // 已经配好了入口（固定域名、FRP、自建反代）就沿用：以前这里一律改成临时
+        // 地址，对一个配了固定域名的服务等于顺手把固定地址抹了。
+        (false, None) if has_public_entry(&current.config) => None,
+        // 一个都没配就是"给我个能贴进 ChatGPT 的地址"——Cloudflare 临时隧道零配置。
+        (false, None) => Some(TunnelSpec::Cloudflare {
+            named: false,
+            domain: None,
+        }),
+    };
+    match &spec {
+        Some(spec) => {
+            configure_service(
+                ctx,
+                spec,
+                args.subdomain.as_deref(),
+                args.tunnel_token.as_deref(),
+            )
+            .await?
+        }
+        None if args.subdomain.is_some() => {
+            return Err(CliError::new(
+                "--subdomain 要配合 --tunnel frp:<配置名> 一起用。",
+            ))
+        }
+        None => {}
+    }
+    if matches!(spec, Some(TunnelSpec::Off)) {
+        return report_service_off(ctx).await;
+    }
+
+    // 服务没在跑就起来；上次隧道没起来也再试一次。在跑且好好的就不碰它：
+    // 重启一次，Cloudflare 临时地址就换了。（配置真的变了的话，上面那步已经重启过。）
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubEnsureStarted).await?;
+    ensure_service_public(ctx, &status).await?;
+    // 地址、认证方式、凭据统一由 ls 渲染：两处各印一份迟早对不上。
+    service::show_service(ctx, false).await
+}
+
+/// 服务现在有没有公网入口（任何一种）。
+fn has_public_entry(config: &HubConfig) -> bool {
+    config.tunnel_type != "none" || config.use_global_gateway || !config.public_url.is_empty()
+}
+
+/// 把 `--tunnel` 写进服务配置（在跑的服务会被顺带重启）。
+///
+/// 每一种写法都显式写全（隧道类型、公网地址、不走全局入口），否则从别的写法切过来会
+/// 留下上一次的残值——例如从 frp 换到 cloudflare，旧的 public_url 还挂在那里，
+/// `gld ls` 会显示一个已经失效的地址。
+pub async fn configure_service(
+    ctx: &mut Ctx,
+    spec: &TunnelSpec,
+    subdomain: Option<&str>,
+    token: Option<&str>,
+) -> CliResult {
+    if let (Some(sub), false) = (subdomain, matches!(spec, TunnelSpec::Frp { .. })) {
+        return Err(CliError::new(format!(
+            "--subdomain {sub} 只对 FRP 有意义。要固定域名：--tunnel frp:<配置名> --subdomain {sub}"
+        )));
+    }
+    // token 必须赶在写配置之前落实：配置一写进去，在跑的服务就会带着固定域名
+    // 模式重启，而那一步没有 token 是起不来的。
+    if matches!(spec, TunnelSpec::Cloudflare { named: true, .. }) {
+        ensure_service_token(ctx, token).await?;
+    } else if token.is_some() {
+        return Err(CliError::new(
+            "--token 是 Cloudflare 固定域名用的，配合 --tunnel cf:<域名>。\n  \
+             临时地址（--tunnel cf）不需要它；FRP 的 token 配在 gld frp add --token 里。",
+        ));
+    }
+    let subdomain = subdomain.map(str::to_string);
+    let status = service::update_service(ctx, |config| {
+        config.use_global_gateway = false;
+        match spec {
+            TunnelSpec::Off => {
+                config.tunnel_type = "none".into();
+                config.public_url.clear();
+            }
+            TunnelSpec::Url(url) => {
+                config.tunnel_type = "none".into();
+                config.public_url = public_base(url, TunnelService::Mcp);
+            }
+            TunnelSpec::Cloudflare { named: false, .. } => {
+                config.tunnel_type = "cloudflare".into();
+                config.cloudflare_mode = "quick".into();
+                // quick 的地址是每次启动现拿的，留着上一种写法的固定地址只会让
+                // `gld ls` 显示一个早就失效的域名。
+                config.public_url.clear();
+            }
+            TunnelSpec::Cloudflare {
+                named: true,
+                domain,
+            } => {
+                config.tunnel_type = "cloudflare".into();
+                config.cloudflare_mode = "named".into();
+                match domain {
+                    Some(domain) => config.public_url = public_base(domain, TunnelService::Mcp),
+                    // cf:named：沿用已经配好的那个，没有就当场说怎么给。
+                    None if config.public_url.is_empty() => {
+                        return Err(CliError::new(
+                            "Cloudflare 固定域名模式需要一个对外域名。连域名一起给：\n  \
+                             gld share --tunnel cf:mcp.example.com\n\
+                             临时地址（每次重启都会变）用：gld share --tunnel cf",
+                        ))
+                    }
+                    None => {}
+                }
+            }
+            TunnelSpec::Frp { profile } => {
+                config.tunnel_type = "frp".into();
+                config.frp_profile_id = profile.clone();
+                config.frp_subdomain = match subdomain {
+                    Some(sub) => sub,
+                    None if !config.frp_subdomain.is_empty() => config.frp_subdomain.clone(),
+                    None => DEFAULT_SERVICE_SUBDOMAIN.into(),
+                };
+                config.public_url.clear();
+            }
+        }
+        Ok(())
+    })
     .await?;
-    // 后面每一步都锁死同一个工作区：中途按目录重新推断的话，
-    // 配置和启动有可能落到两个工作区上。
+    if !status.tunnel_error.is_empty() && status.state == "running" {
+        // 配置存下了、服务也按新配置重启了，只是隧道没起来。后面 ensure_service_public
+        // 会把它报成错误；这里不提前返回，免得 --port 之类的后续步骤被跳过。
+        ctx.out
+            .note(format!("公网入口没起来：{}", status.tunnel_error));
+    }
+    Ok(())
+}
+
+/// 服务的 Cloudflare Tunnel Token：命令行给了就存下来，没给也没配过就当场问。
+async fn ensure_service_token(ctx: &mut Ctx, token: Option<&str>) -> CliResult {
+    let value = match token {
+        Some(given) => given.trim().to_string(),
+        None => {
+            let saved: String = ctx
+                .backend
+                .call_typed(Request::HubSecret {
+                    key: "cloudflare_token".into(),
+                })
+                .await?;
+            if !saved.trim().is_empty() {
+                return Ok(());
+            }
+            crate::prompt::secret(
+                "Cloudflare Tunnel Token（Zero Trust 后台复制，输入不显示）：",
+                "Cloudflare 固定域名要 Tunnel Token。非交互环境这样给：\n  \
+                 gld secret set cloudflare_token <token>\n  \
+                 或者在命令里带上：--token <token>",
+            )?
+        }
+    };
+    if value.is_empty() {
+        return Err(CliError::new(
+            "Tunnel Token 是空的，没往下走。临时地址不需要 token：--tunnel cf",
+        ));
+    }
+    ctx.backend
+        .call(Request::SetHubSecret {
+            key: "cloudflare_token".into(),
+            value,
+        })
+        .await?;
+    Ok(())
+}
+
+/// 服务起来了之后确认公网入口真的在：隧道报了错、或者没拿到地址，都是非零退出。
+///
+/// 服务自己照样在本地跑（本机客户端不受影响），所以报错里说清楚这一点，
+/// 免得用户以为整条命令都失败了、原样再跑一遍。
+pub async fn ensure_service_public(ctx: &mut Ctx, status: &HubStatusDto) -> CliResult {
+    if !status.tunnel_error.is_empty() {
+        return Err(CliError::new(format!(
+            "服务起来了，但公网入口没起来：{}\n本机客户端照常能用；修好后 gld share 重试（gld logs 看隧道输出）。",
+            status.tunnel_error
+        )));
+    }
+    if status.config.tunnel_type != "none" && status.public_endpoint.is_empty() {
+        return Err(CliError::new(
+            "隧道起来了，但没拿到公网地址。gld logs 看隧道输出。",
+        ));
+    }
+    verify_named_service_public(ctx, status).await
+}
+
+/// Cloudflare 固定域名起来之后访问一次公网地址。回源端口是云端配置说了算的，
+/// 两边对不上时隧道照样显示 running、公网却是 502。
+pub async fn verify_named_service_public(ctx: &mut Ctx, status: &HubStatusDto) -> CliResult {
+    let named = status.config.tunnel_type == "cloudflare"
+        && status.config.cloudflare_mode == "named"
+        && status.state == "running";
+    if !named || status.public_endpoint.is_empty() {
+        return Ok(());
+    }
+    let check = gld_core::health::check_service_public_endpoint(
+        &status.public_endpoint,
+        status.config.local_port,
+    )
+    .await;
+    if !check.ok {
+        return Err(CliError::new(format!(
+            "公网检查未通过：{}\n{}\n配置已保存，本次检查不会停止本地服务或隧道，无需重新输入 Token；修正后用 gld health 复查。",
+            check.detail, check.hint
+        )));
+    }
+    ctx.out
+        .note("公网端点已响应；这不代表 OAuth 登录和工具调用已验证。");
+    Ok(())
+}
+
+async fn report_service_off(ctx: &mut Ctx) -> CliResult {
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    if ctx.out.json_or(&status) {
+        return Ok(());
+    }
+    ctx.out.line("已关闭公网入口。");
+    ctx.out
+        .line(format!("本地地址仍然可用：{}", status.local_endpoint));
+    Ok(())
+}
+
+/// `gld share -s actions`：给一个项目的 GPT Actions 起隧道（这条线路还是一个项目一条）。
+async fn run_actions(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
+    let profile = match service::pick_project(ctx, args.path.as_deref()).await? {
+        Some(profile) => profile,
+        None => service::resolve_current(ctx).await?,
+    };
+    // 后面每一步都锁死同一个项目：中途按目录重新推断的话，
+    // 配置和启动有可能落到两个项目上。
     let target = WorkspaceTarget::selector(profile.id.clone());
     let spec = match (args.off, args.tunnel) {
         (true, _) => TunnelSpec::Off,
         (false, Some(spec)) => spec,
-        // 不带参数就是"给我个能贴进 ChatGPT 的地址"——Cloudflare 临时隧道零配置。
         (false, None) => TunnelSpec::Cloudflare {
             named: false,
             domain: None,
         },
     };
-
     configure(
         ctx,
         &target,
@@ -51,37 +279,31 @@ pub async fn run(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
         &spec,
         args.subdomain.as_deref(),
         args.tunnel_token.as_deref(),
-        args.service,
+        TunnelService::Actions,
     )
     .await?;
-
-    let service_kind = service_kind(args.service);
     if matches!(spec, TunnelSpec::Off) {
-        return report_off(ctx, &target, service_kind).await;
+        return report_off(ctx, &target, ServiceKind::Actions).await;
     }
-
     // 服务没在跑就先起来：隧道是把本地端口转出去的，本地没人听，
     // 公网地址拿到了也只会 502。
     let status: RuntimeStatusDto = ctx
         .backend
         .call_typed(Request::ServiceStatus {
             target: target.clone(),
-            kind: service_kind,
+            kind: ServiceKind::Actions,
         })
         .await?;
     if status.state == "stopped" {
         ctx.backend
             .call(Request::StartService {
                 target: target.clone(),
-                kind: service_kind,
+                kind: ServiceKind::Actions,
             })
             .await?;
     }
-
-    ensure_tunnel_up(ctx, &target, &spec, args.service).await?;
-
-    // 地址、认证方式、凭据统一由 list 渲染：两处各印一份迟早对不上。
-    service::show_detail(ctx, &target, ListArgs::default()).await
+    ensure_tunnel_up(ctx, &target, &spec, TunnelService::Actions).await?;
+    service::show_project(ctx, target, false).await
 }
 
 pub fn service_kind(service: TunnelService) -> ServiceKind {
@@ -98,7 +320,7 @@ fn tunnel_kind(service: TunnelService) -> TunnelServiceKind {
     }
 }
 
-/// 把 `--tunnel` 写进工作区配置（正在跑的服务会被顺带重启）。
+/// 把 `--tunnel` 写进项目的 GPT Actions 配置（正在跑的会被顺带重启）。
 pub async fn configure(
     ctx: &mut Ctx,
     target: &WorkspaceTarget,

@@ -19,8 +19,25 @@ pub async fn run(ctx: &mut Ctx) -> CliResult {
         };
     }
 
-    let mut current_scope = String::new();
+    // 同一个归属的检查来自好几轮（配置一轮、端口一轮），按第一次出现的顺序归到一起，
+    // 不然"MCP 服务"会在输出里出现两段。
+    let mut scopes: Vec<&str> = Vec::new();
     for check in &diagnosis.checks {
+        if !scopes.contains(&check.scope.as_str()) {
+            scopes.push(&check.scope);
+        }
+    }
+    let mut ordered = Vec::with_capacity(diagnosis.checks.len());
+    for scope in &scopes {
+        ordered.extend(
+            diagnosis
+                .checks
+                .iter()
+                .filter(|check| check.scope == *scope),
+        );
+    }
+    let mut current_scope = String::new();
+    for check in ordered {
         if check.scope != current_scope {
             if !current_scope.is_empty() {
                 ctx.out.line("");

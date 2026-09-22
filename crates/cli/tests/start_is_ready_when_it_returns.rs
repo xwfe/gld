@@ -12,7 +12,7 @@ mod common;
 use common::env::{free_port, Env};
 use common::http::{get, post_json};
 
-/// MCP：start 返回后零延迟连发多次，全部要有响应。
+/// MCP 服务：start 返回后零延迟连发多次，全部要有响应。
 ///
 /// 连发是为了压中窗口——单次请求撞上竞态的概率本来就低，这也是它以前
 /// 只在 CI 上偶发的原因。
@@ -42,17 +42,8 @@ fn the_mcp_service_answers_immediately_after_start_returns() {
 fn the_actions_service_answers_immediately_after_start_returns() {
     let env = Env::new();
     let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "ready",
-        "--mcp-port",
-        &free_port().to_string(),
-        "--actions-port",
-        &port.to_string(),
-    ]);
+    env.ok(&["add", ".", "--name", "ready"]);
+    env.ok(&["set", &format!("actions.port={port}")]);
     env.ok(&["start", "-s", "actions"]);
 
     for attempt in 0..10 {
@@ -76,10 +67,10 @@ fn a_restarted_service_answers_immediately_too() {
         "--port",
         &port.to_string(),
     ]);
-    env.ok(&["ws", "set", "auth=noauth"]);
+    env.ok(&["upgrade", "--auth", "noauth"]);
 
     for attempt in 0..3 {
-        env.ok(&["restart", "-s", "mcp"]);
+        env.ok(&["restart"]);
         let reply = post_json(
             port,
             "/mcp",
@@ -118,6 +109,6 @@ fn the_readiness_probe_does_not_show_up_in_usage() {
                 .find(|service| service["service"] == "mcp")
                 .and_then(|service| service["requestCount"].as_u64())
         })
-        .expect("usage 里没有 mcp 那一行");
+        .expect("usage 里没有服务那一行");
     assert_eq!(count, 0, "就绪探测被算进了请求统计");
 }

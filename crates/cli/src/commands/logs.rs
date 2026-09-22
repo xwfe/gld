@@ -20,25 +20,37 @@ use crate::output::Output;
 const FETCH_BYTES: usize = 256 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-pub async fn workspace_logs(ctx: &mut Ctx, args: LogsArgs) -> CliResult {
-    let kind = match args.service {
-        LogService::Mcp => ServiceKind::Mcp,
-        LogService::Actions => ServiceKind::Actions,
+/// `gld logs`：默认是服务的日志（所有项目的请求、监听器报错、隧道输出）。
+///
+/// `-w <项目>` 看那个项目自己的请求日志——服务把每个项目的请求在它自己的目录里
+/// 也记了一份（带 `[hub]` 前缀）；`-s actions` 看项目的 GPT Actions。
+pub async fn logs(ctx: &mut Ctx, args: LogsArgs) -> CliResult {
+    let project = ctx.explicit_workspace || matches!(args.service, LogService::Actions);
+    let chunks: Vec<LogChunk> = if project {
+        let kind = match args.service {
+            LogService::Mcp => ServiceKind::Mcp,
+            LogService::Actions => ServiceKind::Actions,
+        };
+        ctx.backend
+            .call_typed(Request::Logs {
+                target: ctx.target.clone(),
+                kind,
+                max_bytes: FETCH_BYTES,
+            })
+            .await?
+    } else {
+        ctx.backend
+            .call_typed(Request::HubLogs {
+                max_bytes: FETCH_BYTES,
+            })
+            .await?
     };
-    let chunks: Vec<LogChunk> = ctx
-        .backend
-        .call_typed(Request::Logs {
-            target: ctx.target.clone(),
-            kind,
-            max_bytes: FETCH_BYTES,
-        })
-        .await?;
     if ctx.out.json_or(&chunks) {
         return Ok(());
     }
     if chunks.is_empty() {
         ctx.out
-            .line("还没有日志。服务启动过一次后这里会有 stdout / stderr / 请求日志。");
+            .line("还没有日志。服务启动过一次后这里会有请求日志和报错。");
         return Ok(());
     }
     let files: Vec<(String, PathBuf)> = chunks

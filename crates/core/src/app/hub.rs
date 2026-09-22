@@ -5,20 +5,33 @@
 //! 哪些改动要重启 hub：端口、认证、工具集、公网地址、凭据——它们在监听器起来时就定死了。
 //! 哪些不用：增删成员、成员自己改配置——hub 每次请求都重新读，重启反而会掉客户端连接。
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use super::runtime::{ensure_port_available, wait_until_answering, READY_PROBE_BUDGET};
-use super::workspace_fields::{parse_choice, MCP_AUTH_CHOICES, TOOL_PROFILE_CHOICES};
+use super::workspace_fields::{
+    parse_choice, resolve_frp_profile, MCP_AUTH_CHOICES, TOOL_PROFILE_CHOICES,
+};
 use super::{App, WorkspaceTarget};
 use crate::bridge::member::{CcnmMember, Mode};
 use crate::error::{AppError, AppResult};
 use crate::global_gateway;
-use crate::hub::runtime::HubState;
-use crate::hub::{self, HubSecrets, HUB_SCOPE, HUB_SECRET_KEYS};
+use crate::hub::runtime::{HubState, TunnelOutcome};
+use crate::hub::{self, HubSecrets, HUB_SCOPE, HUB_SECRET_KEYS, HUB_TUNNEL_SECRET_KEYS};
 use crate::logs::append_profile_log;
 use crate::runtime::ServiceKind;
 use crate::settings::{AppSettings, HubConfig};
+use crate::tunnel::standalone::{self, CloudflareSpec};
 use crate::workspace::WorkspaceProfile;
+
+/// 服务的起、停、按新配置重启一次只做一件。
+///
+/// 重启是"停掉 → 确认端口空出来 → 起隧道 → 起监听器"好几步。两条 `gld start`
+/// 同时进来的话，第二条会在第一条停掉旧监听器、还没起新的那一刻看到端口"空了"，
+/// 然后两边抢着 bind。
+static LIFECYCLE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +86,12 @@ pub struct HubStatusDto {
     pub local_endpoint: String,
     /// 公网地址（带 `/mcp`）；没有公网入口时为空串。
     pub public_endpoint: String,
+    /// 公网入口是怎么来的，给人看的一句话（"Cloudflare 临时地址"、"FRP（子域名 x）"…）。
+    #[serde(default)]
+    pub tunnel_label: String,
+    /// 隧道没起来的原因。服务照样在本地跑；起来了或没配隧道时是空串。
+    #[serde(default)]
+    pub tunnel_error: String,
     pub members: Vec<HubMemberDto>,
 }
 
@@ -97,23 +116,29 @@ impl App {
         let profiles = self.list_workspaces()?;
         let (state, detail) = match hub::runtime::state().await {
             HubState::Running { .. } => ("running", String::new()),
-            HubState::Stopped if config.members.is_empty() => (
-                "stopped",
-                "还没有成员：先 gld hub add 把工作区加进来，再 gld hub start".to_string(),
-            ),
-            HubState::Stopped => ("stopped", "未启动：gld hub start".to_string()),
+            HubState::Stopped if config.members.is_empty() => {
+                ("stopped", "还没有项目：gld start <项目目录>".to_string())
+            }
+            HubState::Stopped => ("stopped", "未启动：gld start".to_string()),
             HubState::Exited { .. } => (
                 "error",
                 format!(
-                    "监听器意外退出，原因见 {}；修好后 gld hub start 重新拉起",
+                    "监听器意外退出，原因见 {}；修好后 gld start 重新拉起",
                     crate::logs::log_dir_for_profile(HUB_SCOPE)
                         .join("stderr.log")
                         .display()
                 ),
             ),
         };
-        // 公网地址从磁盘读：全局入口拿到临时地址后是直接写文件的，内存里这份可能还是旧的。
-        let public_base = hub::public_base_url(&AppSettings::load_or_default());
+        // 跑着就以这次实际拿到的为准：Cloudflare 临时地址每次都变，配置里推不出来。
+        // 停着就按配置推；全局入口的临时地址是它直接写进文件的，所以从磁盘读。
+        let (public_base, tunnel_error) = match hub::runtime::public_base().await {
+            Some(running) if state == "running" => running,
+            _ => (
+                hub::public_base_url(&AppSettings::load_or_default()),
+                String::new(),
+            ),
+        };
         let remotes = self.ccnm_members()?;
         // 按加入顺序，本地和远端混在一条名单里——hub 路由看到的就是这一份。
         let members = config
@@ -141,6 +166,8 @@ impl App {
             } else {
                 format!("{public_base}/mcp")
             },
+            tunnel_label: tunnel_label(&config),
+            tunnel_error,
             members,
             config,
         })
@@ -156,18 +183,38 @@ impl App {
         }
         let auth_type = parse_choice(&config.auth_type, MCP_AUTH_CHOICES)?;
         let tool_profile = parse_choice(&config.tool_profile, TOOL_PROFILE_CHOICES)?;
-        let before = self.settings()?.hub;
+        let settings = self.settings()?;
+        let before = settings.hub.clone();
         if config.local_port != before.local_port {
             self.validate_hub_port(config.local_port)?;
         }
+        let tunnel_type = match config.tunnel_type.trim() {
+            "" | "none" | "off" => "none".to_string(),
+            "cf" | "cloudflare" => "cloudflare".to_string(),
+            "frp" => "frp".to_string(),
+            other => {
+                return Err(AppError::Message(format!(
+                    "看不懂的隧道类型「{other}」，只能是 none、cloudflare 或 frp"
+                )))
+            }
+        };
+        let cloudflare_mode = parse_choice(&config.cloudflare_mode, &["quick", "named"])?;
+        // FRP 配置按名称、id 或 id 前缀都认（和工作区字段同一个口径），存下来的一律
+        // 是 id：改名不该让隧道断掉。
+        let frp_profile_id = resolve_frp_profile(&config.frp_profile_id, &settings.frp_profiles)?;
         let after = HubConfig {
             auth_type,
             tool_profile,
             public_url: config.public_url.trim().trim_end_matches('/').to_string(),
+            tunnel_type,
+            cloudflare_mode,
+            frp_profile_id,
+            frp_subdomain: config.frp_subdomain.trim().to_string(),
             members: before.members.clone(),
             restore_on_launch: before.restore_on_launch,
             ..config
         };
+        validate_tunnel(&after)?;
         reject_public_noauth(&after)?;
         if after != before {
             let saved = after.clone();
@@ -176,10 +223,39 @@ impl App {
                 Ok(())
             })?;
             if hub::runtime::state().await != HubState::Stopped {
-                self.start_hub_listener().await?;
+                self.restart_after_change().await?;
             }
         }
         self.hub_status().await
+    }
+
+    /// 配置已经落盘之后按它重启。起不来时要说清楚：配置存下了，但服务现在是停的——
+    /// 只报一句"端口被占"的话，用户会以为这次改动没生效、服务还是老样子在跑。
+    async fn restart_after_change(&self) -> AppResult<()> {
+        self.start_hub_listener().await.map_err(|error| {
+            AppError::Message(format!(
+                "新配置已经保存，但服务重启失败、现在是停的：{error}\n修好后 gld start。"
+            ))
+        })
+    }
+
+    /// 服务没在跑、或者上次隧道没起来，就（重新）起；跑得好好的就什么都不做。
+    ///
+    /// `gld start` 走这里：重复敲一次不该掉客户端连接，Cloudflare 临时地址也不该
+    /// 因此换掉。真要重启用 [`Self::start_hub`]（`gld restart`）。
+    pub async fn ensure_hub_started(&self) -> AppResult<HubStatusDto> {
+        let running = matches!(hub::runtime::state().await, HubState::Running { .. });
+        let tunnel_failed = hub::runtime::public_base()
+            .await
+            .is_some_and(|(_, error)| !error.is_empty());
+        if running && !tunnel_failed {
+            self.update_settings(|settings| {
+                settings.hub.restore_on_launch = true;
+                Ok(())
+            })?;
+            return self.hub_status().await;
+        }
+        self.start_hub().await
     }
 
     /// 把工作区加进 hub。不重启：hub 每次请求都重新读成员表。
@@ -229,7 +305,7 @@ impl App {
             .find(|item| item.name.eq_ignore_ascii_case(&member.name))
         {
             return Err(AppError::Message(format!(
-                "已经有一个叫「{}」的远端成员了（id {}）。换个名字，或者先 gld hub remote rm {} 再加。",
+                "已经有一个叫「{}」的远端成员了（id {}）。换个名字，或者先 gld rm {} 再加。",
                 clash.name,
                 crate::short_id(&clash.id),
                 clash.name
@@ -285,7 +361,7 @@ impl App {
             });
         let Some(member) = found.cloned() else {
             return Err(AppError::Message(format!(
-                "没有叫「{selector}」的远端成员。看看有哪些：gld hub show"
+                "没有叫「{selector}」的远端成员。看看有哪些：gld ls"
             )));
         };
         let dto = remote_dto(&member);
@@ -319,7 +395,7 @@ impl App {
                 .any(|remote| remote.id == selector || remote.name.eq_ignore_ascii_case(selector))
             {
                 return Err(AppError::Message(format!(
-                    "「{selector}」是远端 ccnm 成员，用 gld hub remote rm {selector} 删它。"
+                    "「{selector}」是远端 ccnm 成员，用 gld rm {selector} 删它。"
                 )));
             }
             match self.resolve_workspace(target) {
@@ -374,7 +450,10 @@ impl App {
     }
 
     pub async fn stop_hub(&self) -> AppResult<HubStatusDto> {
-        hub::runtime::stop().await;
+        {
+            let _one_at_a_time = LIFECYCLE.lock().await;
+            hub::runtime::stop().await;
+        }
         self.update_settings(|settings| {
             settings.hub.restore_on_launch = false;
             Ok(())
@@ -383,9 +462,69 @@ impl App {
     }
 
     /// 取 hub 的一项凭据；还没生成过就当场生成。
+    ///
+    /// 隧道用的 token 不生成——随机一串 Cloudflare 不认，没设过就是空串。
     pub fn hub_secret(&self, key: &str) -> AppResult<String> {
+        if HUB_TUNNEL_SECRET_KEYS.contains(&key) {
+            return self
+                .with_data(|store| Ok(store.get_app_secret(HUB_SCOPE, key).unwrap_or_default()));
+        }
         validate_hub_key(key)?;
         self.with_data(|store| store.get_or_create_app_secret(HUB_SCOPE, key))
+    }
+
+    /// 自己定一项凭据（记得住的授权口令、Cloudflare Tunnel Token）；服务在跑就重启，
+    /// 否则监听器里还是旧值。
+    pub async fn set_hub_secret(&self, key: &str, value: &str) -> AppResult<()> {
+        if !HUB_TUNNEL_SECRET_KEYS.contains(&key) {
+            validate_hub_key(key)?;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(AppError::Message(format!(
+                "{key} 不能设成空的。要换一个随机值：gld secret regen {key}"
+            )));
+        }
+        self.with_data(|store| store.set_app_secret(HUB_SCOPE, key, value))?;
+        if hub::runtime::state().await != HubState::Stopped {
+            self.restart_after_change().await?;
+        }
+        Ok(())
+    }
+
+    /// 把登记了但还不在服务里的项目都加进来，返回这次加进来的。
+    ///
+    /// RFC-0004 之前一个目录可以"登记了但不在 hub 里"。`gld start` 调它，并把
+    /// 名字逐个打出来：不在后台悄悄扩大 AI 能碰的范围。
+    pub fn join_all_workspaces(&self) -> AppResult<Vec<HubMemberDto>> {
+        let profiles = self.list_workspaces()?;
+        let mut joined = Vec::new();
+        self.update_settings(|settings| {
+            for profile in &profiles {
+                if !settings.hub.members.contains(&profile.id) {
+                    settings.hub.members.push(profile.id.clone());
+                    joined.push(member_dto(profile));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(joined)
+    }
+
+    /// 服务的逐项检查：本地 /mcp、公网 /mcp，OAuth 时再看两份元数据。
+    pub async fn hub_health(&self) -> AppResult<Vec<crate::health::HealthItem>> {
+        let status = self.hub_status().await?;
+        let public_base = status
+            .public_endpoint
+            .strip_suffix("/mcp")
+            .unwrap_or(&status.public_endpoint)
+            .to_string();
+        Ok(crate::health::run_service_health_checks(
+            &status.local_endpoint,
+            &public_base,
+            status.config.auth_type == "oauth",
+        )
+        .await)
     }
 
     /// 重新生成一项凭据；hub 在跑就重启，否则监听器里还是旧值。
@@ -393,13 +532,14 @@ impl App {
         validate_hub_key(key)?;
         let value = self.with_data(|store| store.regenerate_app_secret(HUB_SCOPE, key))?;
         if hub::runtime::state().await != HubState::Stopped {
-            self.start_hub_listener().await?;
+            self.restart_after_change().await?;
         }
         Ok(value)
     }
 
     /// 按当前配置（重）起监听器，不动恢复标记。守护进程启动恢复时也走这里。
     pub(super) async fn start_hub_listener(&self) -> AppResult<()> {
+        let _one_at_a_time = LIFECYCLE.lock().await;
         let settings = self.settings()?;
         let config = settings.hub.clone();
         self.validate_hub_port(config.local_port)?;
@@ -410,7 +550,7 @@ impl App {
                 return Err(AppError::Message(
                     "hub 设了经全局入口暴露，但全局入口没启用。\
                      先配好并启用它（gld gateway set --enabled true），\
-                     或改回直连：gld hub set --global-gateway false"
+                     或改用服务自己的公网入口：gld share --tunnel <入口>"
                         .into(),
                 ));
             }
@@ -427,9 +567,9 @@ impl App {
         })?;
 
         hub::runtime::stop().await;
-        ensure_port_available(config.local_port, "聚合入口 ").await?;
-        let public_base = hub::public_base_url(&AppSettings::load_or_default());
-        hub::runtime::start(&config, public_base, secrets).await?;
+        ensure_port_available(config.local_port, "MCP 服务").await?;
+        let outcome = self.start_hub_tunnel(&config).await;
+        hub::runtime::start(&config, outcome, secrets).await?;
         // 和工作区服务一样，报 running 之前确认它真的开始应答，理由见 wait_until_answering。
         if !wait_until_answering(config.local_port, ServiceKind::Mcp, READY_PROBE_BUDGET).await {
             append_profile_log(
@@ -446,22 +586,74 @@ impl App {
         Ok(())
     }
 
+    /// 起服务自己的隧道（配了的话）。起不来不拦着服务：本机客户端照样能用，
+    /// 原因记下来，`gld ls` / `gld share` 把它报出来。
+    async fn start_hub_tunnel(&self, config: &HubConfig) -> TunnelOutcome {
+        let settings = AppSettings::load_or_default();
+        let started = match config.tunnel_type.as_str() {
+            "cloudflare" => {
+                let token = self.hub_secret("cloudflare_token").unwrap_or_default();
+                standalone::start_cloudflare(CloudflareSpec {
+                    port: config.local_port,
+                    log_name: "logs/hub/cloudflared.log",
+                    mode: &config.cloudflare_mode,
+                    token: &token,
+                    public_url: &config.public_url,
+                    use_proxy: config.use_proxy,
+                })
+                .await
+            }
+            "frp" => standalone::start_frp(hub::frp_spec(config), &settings).await,
+            _ => {
+                return TunnelOutcome {
+                    public_base: hub::public_base_url(&settings),
+                    tunnel: None,
+                    error: String::new(),
+                }
+            }
+        };
+        match started {
+            Ok((public_base, tunnel)) => TunnelOutcome {
+                public_base,
+                tunnel: Some(tunnel),
+                error: String::new(),
+            },
+            Err(error) => {
+                append_profile_log(HUB_SCOPE, "stderr.log", &format!("[tunnel] {error}"));
+                TunnelOutcome {
+                    // 固定域名、FRP 的地址是配置定的，隧道这次没起来也还是它；
+                    // 临时地址推不出来，就是空的。
+                    public_base: hub::public_base_url(&settings),
+                    tunnel: None,
+                    error: error.to_string(),
+                }
+            }
+        }
+    }
+
     /// 端口已经分给了别的 gld 服务就当场拒。
     ///
     /// 不拦的话要等到两边都启动时才撞，而且报错里只有"被本进程占用"，看不出是谁。
+    ///
+    /// 项目登记时还会分到一个 MCP 端口，那是单项目服务留下的（RFC-0004 之后没有
+    /// 命令会去监听它），所以只在那个服务真的跑着时才算冲突；Actions 端口照算。
     fn validate_hub_port(&self, port: u16) -> AppResult<()> {
         if self.settings()?.global_gateway.local_port == port {
             return Err(AppError::Message(format!(
-                "端口 {port} 已经是全局入口的本地端口，给 hub 换一个：gld hub set --port <端口>"
+                "端口 {port} 已经是全局入口的本地端口，换一个：gld upgrade --port <端口>"
             )));
         }
-        if let Some(profile) = self.list_workspaces()?.iter().find(|profile| {
-            profile.runtime.local_port == port || profile.actions.local_port == port
-        }) {
-            return Err(AppError::Message(format!(
-                "端口 {port} 已经分给了工作区「{}」，给 hub 换一个：gld hub set --port <端口>",
-                profile.name
-            )));
+        for profile in self.list_workspaces()? {
+            let mcp_clash = profile.runtime.local_port == port
+                && self
+                    .is_service_running(&profile.id, ServiceKind::Mcp)
+                    .unwrap_or(false);
+            if mcp_clash || profile.actions.local_port == port {
+                return Err(AppError::Message(format!(
+                    "端口 {port} 已经分给了项目「{}」，换一个：gld upgrade --port <端口>",
+                    profile.name
+                )));
+            }
         }
         Ok(())
     }
@@ -473,16 +665,49 @@ impl App {
 /// 一个无认证的公网地址等于把这几个项目的"执行任意命令"一起开放给整个互联网，
 /// 而且谁连上来先调 list_workspaces 就知道有哪几个。
 fn reject_public_noauth(config: &HubConfig) -> AppResult<()> {
-    let public = config.use_global_gateway || !config.public_url.trim().is_empty();
+    let public = config.use_global_gateway
+        || config.tunnel_type != "none"
+        || !config.public_url.trim().is_empty();
     if config.auth_type == "noauth" && public {
         return Err(AppError::Message(
-            "hub 挂了公网入口（经全局入口或手动公网地址），不能用 noauth：\
-             那等于把全部成员的执行权限开放给整个互联网。\
-             改用认证：gld hub set --auth oauth；确实只在本机用就先撤掉公网入口再改 noauth。"
+            "服务挂了公网入口，不能用 noauth：那等于把全部项目的执行权限开放给整个互联网。\
+             改用认证：gld upgrade --auth oauth；确实只在本机用就先撤掉公网入口（gld share --off）再改 noauth。"
                 .into(),
         ));
     }
     Ok(())
+}
+
+/// 隧道配置自洽：少了哪样起不来，保存时就说，而不是等 start 时 cloudflared / frpc 报一句看不懂的。
+fn validate_tunnel(config: &HubConfig) -> AppResult<()> {
+    match config.tunnel_type.as_str() {
+        "cloudflare" if config.cloudflare_mode == "named" && config.public_url.is_empty() => {
+            Err(AppError::Message(
+                "Cloudflare 固定域名要一个对外域名。连域名一起给：gld share --tunnel cf:mcp.example.com"
+                    .into(),
+            ))
+        }
+        "frp" if config.frp_profile_id.is_empty() => Err(AppError::Message(
+            "FRP 隧道要选一个 FRP 服务器配置：gld share --tunnel frp:<配置名>（gld frp list 看有哪些）"
+                .into(),
+        )),
+        "frp" if config.frp_subdomain.is_empty() => Err(AppError::Message(
+            "FRP 隧道要一个子域名：gld share --tunnel frp:<配置名> --subdomain <子域名>".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// 公网入口是怎么来的，给人看的一句话。地址本身在同一屏的"公网地址"那行。
+fn tunnel_label(config: &HubConfig) -> String {
+    match config.tunnel_type.as_str() {
+        "cloudflare" if config.cloudflare_mode == "named" => "Cloudflare 固定域名".into(),
+        "cloudflare" => "Cloudflare 临时地址（每次重启都会变）".into(),
+        "frp" => format!("FRP（子域名 {}）", config.frp_subdomain),
+        _ if config.use_global_gateway => "经全局入口（/hub）".into(),
+        _ if !config.public_url.trim().is_empty() => "固定地址（自建入口）".into(),
+        _ => "没有".into(),
+    }
 }
 
 fn member_dto(profile: &WorkspaceProfile) -> HubMemberDto {
@@ -564,8 +789,9 @@ fn validate_hub_key(key: &str) -> AppResult<()> {
         Ok(())
     } else {
         Err(AppError::Message(format!(
-            "无效的 hub 凭据名「{key}」。可用：{}",
-            HUB_SECRET_KEYS.join(", ")
+            "没有叫「{key}」的服务凭据。可用：{}、{}",
+            HUB_SECRET_KEYS.join("、"),
+            HUB_TUNNEL_SECRET_KEYS.join("、")
         )))
     }
 }

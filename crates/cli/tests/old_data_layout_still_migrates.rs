@@ -16,11 +16,11 @@ use common::env::Env;
 #[test]
 fn a_workspace_and_its_secrets_survive_the_old_two_file_layout() {
     let env = Env::new();
-    env.ok(&["ws", "add", ".", "--name", "oldlayout"]);
+    env.ok(&["add", ".", "--name", "oldlayout"]);
     let token_before = env.json(&[
         "--json",
         "secret",
-        "show",
+        "ls",
         "bearer_token",
         "-w",
         "oldlayout",
@@ -54,13 +54,13 @@ fn a_workspace_and_its_secrets_survive_the_old_two_file_layout() {
     std::fs::remove_dir_all(home.join("data")).expect("删掉新布局");
 
     // 下一条命令应当把旧布局读进来。
-    let listed = env.ok(&["ws", "list"]);
-    assert!(listed.contains("oldlayout"), "工作区没迁过来：{listed}");
+    let listed = env.ok(&["ls"]);
+    assert!(listed.contains("oldlayout"), "项目没迁过来：{listed}");
 
     let token_after = env.json(&[
         "--json",
         "secret",
-        "show",
+        "ls",
         "bearer_token",
         "-w",
         "oldlayout",
@@ -84,4 +84,15 @@ fn a_workspace_and_its_secrets_survive_the_old_two_file_layout() {
         "旧 app_settings.json 没备份"
     );
     assert!(home.join("data/profiles.json").is_file(), "没写出新布局");
+
+    // 旧布局里没有"服务"这回事，迁过来的项目登记着但不在服务里：`ls` 要说出来，
+    // `start` 把它加进去并点名，不在后台悄悄扩大 AI 能碰的范围。
+    assert!(listed.contains("不在服务里"), "{listed}");
+    let port = common::env::free_port();
+    let started = env.ok(&["start", "--port", &port.to_string()]);
+    assert!(
+        started.contains("现在加进来了") && started.contains("oldlayout"),
+        "{started}"
+    );
+    assert!(!env.ok(&["ls"]).contains("不在服务里"));
 }

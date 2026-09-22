@@ -94,12 +94,32 @@ pub struct HubConfig {
     /// 这里写 advanced 也放不开一个 read-only 的成员。
     #[serde(default = "default_hub_tool_profile")]
     pub tool_profile: String,
-    /// 手动公网地址（自建反代时填，不带 `/mcp`）。
+    /// 公网基地址（不带 `/mcp`）。`tunnel_type` 是 none 时它就是入口（自建反代）；
+    /// Cloudflare 固定域名时它是那个域名。临时地址和 FRP 的地址是起隧道时现算的，
+    /// 不存这里。
     #[serde(default)]
     pub public_url: String,
     /// 经全局入口暴露为 `<入口公网地址>/hub/mcp`。
+    ///
+    /// 老路子：服务有了自己的隧道（下面几项）之后命令行不再提供它，老配置照旧生效。
     #[serde(default)]
     pub use_global_gateway: bool,
+    /// 服务自己的公网隧道：none | cloudflare | frp（RFC-0004）。
+    #[serde(default = "default_hub_tunnel_type")]
+    pub tunnel_type: String,
+    /// cloudflare 时：quick（临时地址，每次重启都变）| named（固定域名，要
+    /// Tunnel Token，存在服务凭据 `cloudflare_token` 里）。
+    #[serde(default = "default_global_gateway_cloudflare_mode")]
+    pub cloudflare_mode: String,
+    /// frp 时用哪个 FRP 服务器配置（`gld frp list` 里的 id）。
+    #[serde(default)]
+    pub frp_profile_id: String,
+    /// frp 时的子域名，公网地址是 `https://<子域名>.<frps 域名>`。
+    #[serde(default)]
+    pub frp_subdomain: String,
+    /// 隧道进程是否套用全局出站代理（和工作区隧道的默认一样）。
+    #[serde(default = "default_global_gateway_use_proxy")]
+    pub use_proxy: bool,
     /// 成员工作区 id，按加入顺序。
     ///
     /// 存 id 不存名字：工作区改名不该让它悄悄掉出 hub。工作区被 destroy 时
@@ -122,6 +142,11 @@ impl Default for HubConfig {
             tool_profile: default_hub_tool_profile(),
             public_url: String::new(),
             use_global_gateway: false,
+            tunnel_type: default_hub_tunnel_type(),
+            cloudflare_mode: default_global_gateway_cloudflare_mode(),
+            frp_profile_id: String::new(),
+            frp_subdomain: String::new(),
+            use_proxy: default_global_gateway_use_proxy(),
             members: Vec::new(),
             restore_on_launch: false,
         }
@@ -207,6 +232,9 @@ fn default_hub_auth_type() -> String {
 }
 fn default_hub_tool_profile() -> String {
     "compact".to_string()
+}
+fn default_hub_tunnel_type() -> String {
+    "none".to_string()
 }
 
 impl AppSettings {

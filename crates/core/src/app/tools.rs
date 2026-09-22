@@ -33,7 +33,7 @@ impl App {
         if !exposed.contains(&canonical) {
             return Err(AppError::Message(format!(
                 "当前工具集「{}」没有暴露工具「{name}」。`gld tool list` 查看可用工具，\
-                 或用 `gld ws set mcp.tool-profile=advanced` 换一个工具集。",
+                 或用 `gld set <项目> tool-profile=advanced` 换一个工具集。",
                 profile.runtime.tool_profile
             )));
         }

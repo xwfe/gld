@@ -1,13 +1,13 @@
 //! 另外两条"接客户端"的路：GPT Actions 和全局入口。
 //!
-//! MCP 那条路有 oauth_connector_flow 盯着，这两条之前只有单元测试。
+//! MCP 服务那条路有 oauth_connector_flow 盯着，这两条之前只有单元测试。
 //! 它们的失败方式都很难查：
 //!
-//! - Actions：自定义 GPT 是照着 `/openapi.json` 生成调用的。文档里
-//!   少一个 security、servers 写的是 127.0.0.1，GPT 那边只会说"调用失败"，
-//!   本机 curl 却一切正常，因为 curl 不看文档。
-//! - 全局入口：多个工作区共用一个域名，按 `/w/<id>` 分流。路由错了就是
-//!   把请求转给了别人的工作区——这种错误不会报错，只会读到别人的文件。
+//! - Actions（RFC-0004 之后唯一还按项目起的线路）：自定义 GPT 是照着
+//!   `/openapi.json` 生成调用的。文档里少一个 security、servers 写的是 127.0.0.1，
+//!   GPT 那边只会说"调用失败"，本机 curl 却一切正常，因为 curl 不看文档。
+//! - 全局入口（旧的共享入口）：按 `/w/<id>` 和 `/hub` 分流。路由错了就是把请求
+//!   转给了别人的项目——这种错误不会报错，只会读到别人的文件。
 
 mod common;
 
@@ -22,24 +22,15 @@ fn actions_service_serves_an_importable_openapi_and_enforces_the_api_key() {
     let env = Env::new();
     env.write("note.txt", "actions-e2e-marker\n");
     let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "act",
-        "--mcp-port",
-        &free_port().to_string(),
-        "--actions-port",
-        &port.to_string(),
-    ]);
+    env.ok(&["add", ".", "--name", "act"]);
+    env.ok(&["set", "act", &format!("actions.port={port}")]);
     env.ok(&["start", "-s", "actions"]);
 
     let health = get(port, "/health").json();
     assert_eq!(health["ok"], true);
     assert_eq!(
         health["auth_type"], "api_key",
-        "新工作区的 Actions 默认用 API Key"
+        "新项目的 Actions 默认用 API Key"
     );
     let tools_loaded = health["tools_loaded"].as_u64().unwrap_or(0);
     assert!(tools_loaded > 0, "一个工具都没装上：{health}");
@@ -84,7 +75,15 @@ fn actions_service_serves_an_importable_openapi_and_enforces_the_api_key() {
     assert_eq!(get(port, "/privacy").status, 200);
 
     // 认证：没 Key、错 Key 都得挡住，对的 Key 才真的执行工具。
-    let key = env.json(&["--json", "secret", "show", "actions_api_key", "--reveal"])["value"]
+    let key = env.json(&[
+        "--json",
+        "secret",
+        "ls",
+        "actions_api_key",
+        "--reveal",
+        "-w",
+        "act",
+    ])["value"]
         .as_str()
         .expect("actions_api_key")
         .to_string();
@@ -101,12 +100,12 @@ fn actions_service_serves_an_importable_openapi_and_enforces_the_api_key() {
     assert_eq!(called.status, 200, "带对 Key 也调不通：{}", called.body);
     assert!(
         called.body.contains("actions-e2e-marker"),
-        "没读到工作区里的文件：{}",
+        "没读到项目里的文件：{}",
         called.body
     );
 
     // 换成 OAuth：文档也得跟着换，否则 GPT 不知道要走授权流程，一样次次 401。
-    env.ok(&["ws", "set", "actions.auth=oauth"]);
+    env.ok(&["set", "actions.auth=oauth"]);
     env.ok(&["restart", "-s", "actions"]);
     let doc = get(port, "/openapi.json").json();
     let flow = &doc["components"]["securitySchemes"]["oauthAuth"]["flows"]["authorizationCode"];
@@ -130,31 +129,26 @@ fn actions_service_serves_an_importable_openapi_and_enforces_the_api_key() {
     env.ok(&["stop"]);
 }
 
-/// 全局入口：按 `/w/<工作区 id>` 分流，没接入的工作区不该被转发。
+/// 全局入口：按 `/w/<项目 id>/actions` 和 `/hub` 分流，没接入的不该被转发。
 #[test]
-fn global_gateway_routes_only_the_workspaces_that_opted_in() {
+fn global_gateway_routes_only_what_opted_in() {
     let env = Env::new();
-    env.write("gw.txt", "gateway-e2e-marker\n");
-    let mcp_port = free_port();
+    let service_port = free_port();
     let actions_port = free_port();
     let gateway_port = free_port();
-    let id = env.json(&[
-        "--json",
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "gw",
-        "--mcp-port",
-        &mcp_port.to_string(),
-        "--actions-port",
-        &actions_port.to_string(),
-    ])["id"]
+    let id = env.json(&["--json", "add", ".", "--name", "gw"])[0]["id"]
         .as_str()
-        .expect("workspace id")
+        .expect("project id")
         .to_string();
-    env.ok(&["ws", "set", "mcp.auth=noauth"]);
-    env.ok(&["start", "-s", "mcp"]);
+    env.ok(&["set", "gw", &format!("actions.port={actions_port}")]);
+    env.ok(&[
+        "upgrade",
+        "--port",
+        &service_port.to_string(),
+        "--auth",
+        "noauth",
+    ]);
+    env.ok(&["start"]);
 
     env.ok(&[
         "gateway",
@@ -171,64 +165,34 @@ fn global_gateway_routes_only_the_workspaces_that_opted_in() {
     env.ok(&["gateway", "start"]);
     assert_eq!(get(gateway_port, "/health").json()["ok"], true);
 
+    // 服务还没接入全局入口：`/hub` 存在，但不该把请求转过去。
     let list_tools = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-
-    // 还没接入：入口存在，但不该把请求转过去。
-    let not_routed = post_json(gateway_port, &format!("/w/{id}/mcp"), list_tools, None);
-    assert_eq!(
-        not_routed.status, 404,
-        "没打开 mcp.global-gateway 就不该被转发：{}",
-        not_routed.body
-    );
-    // 两种 404 得分清楚：这里是"工作区在、但没接入"，
-    // 如果变成"工作区找不到"，说明是 id 查找坏了，不是路由策略生效。
+    let not_routed = post_json(gateway_port, "/hub/mcp", list_tools, None);
+    assert_eq!(not_routed.status, 404, "{}", not_routed.body);
     assert!(
         not_routed.body.contains("not routed"),
         "拒绝的理由应当是没接入，实际：{}",
         not_routed.body
     );
 
-    // 接入后才路由；改配置要重启服务才生效，这也是 ws set 提示的那句话。
-    env.ok(&["ws", "set", "mcp.global-gateway=true"]);
-    env.ok(&["restart", "-s", "mcp"]);
-    let routed = wait_for_route(gateway_port, &format!("/w/{id}/mcp"), list_tools);
-    assert_eq!(routed.status, 200, "接入后应当能路由：{}", routed.body);
-    assert!(
-        routed.json()["result"]["tools"]
-            .as_array()
-            .is_some_and(|tools| !tools.is_empty()),
-        "转发回来的应当是真的工具清单：{}",
-        routed.body
-    );
-
-    // 不存在的工作区不能穿透。
-    let unknown = post_json(
-        gateway_port,
-        "/w/00000000000000000000000000000000/mcp",
-        list_tools,
-        None,
-    );
-    assert_eq!(unknown.status, 404, "未知工作区必须 404：{}", unknown.body);
-    assert!(
-        unknown.body.contains("workspace not found"),
-        "未知工作区的理由应当是找不到，实际：{}",
-        unknown.body
-    );
-
-    // 给用户看的公网地址要带上 /w/<id> 前缀，否则粘到 ChatGPT 里连不上。
-    let listing = env.json(&["--json", "list"]);
-    assert_eq!(
-        listing["mcp"]["public_url"],
-        format!("https://gw.example.com/w/{id}/mcp")
-    );
-
-    // Actions 接入后，文档里的 servers 也必须换成公网路径——
-    // 否则 GPT 导入的是 http://127.0.0.1:<port>，它根本打不到。
-    env.ok(&["ws", "set", "actions.global-gateway=true"]);
+    // 项目的 Actions 也一样：没接入就不转，理由要分清是"没接入"还是"找不到"。
+    let actions_path = format!("/w/{id}/actions/openapi.json");
     env.ok(&["start", "-s", "actions"]);
-    let doc = get(actions_port, "/openapi.json").json();
+    let not_routed = get(gateway_port, &actions_path);
+    assert_eq!(not_routed.status, 404, "{}", not_routed.body);
+    assert!(
+        not_routed.body.contains("not routed"),
+        "{}",
+        not_routed.body
+    );
+
+    // 接入后文档里的 servers 必须换成公网路径——否则 GPT 导入的是
+    // http://127.0.0.1:<port>，它根本打不到。
+    env.ok(&["set", "gw", "actions.global-gateway=true"]);
+    let routed = wait_for_get(gateway_port, &actions_path);
+    assert_eq!(routed.status, 200, "接入后应当能路由：{}", routed.body);
     assert_eq!(
-        doc["servers"][0]["url"],
+        routed.json()["servers"][0]["url"],
         format!("https://gw.example.com/w/{id}/actions")
     );
     assert_eq!(
@@ -236,13 +200,25 @@ fn global_gateway_routes_only_the_workspaces_that_opted_in() {
         format!("https://gw.example.com/w/{id}/actions/openapi.json")
     );
 
+    // 不存在的项目不能穿透。
+    let unknown = get(
+        gateway_port,
+        "/w/00000000000000000000000000000000/actions/openapi.json",
+    );
+    assert_eq!(unknown.status, 404, "未知项目必须 404：{}", unknown.body);
+    assert!(
+        unknown.body.contains("workspace not found"),
+        "未知项目的理由应当是找不到，实际：{}",
+        unknown.body
+    );
+
     env.ok(&["gateway", "stop"]);
     env.ok(&["stop"]);
 }
 
-/// `gateway set --frp-profile` 收的写法要和工作区那边一模一样。
+/// `gateway set --frp-profile` 收的写法要和别处一模一样。
 ///
-/// 用户在 `gld frp add --name 公司` 里给的是名字，`gld ws set frp-profile=公司`
+/// 用户在 `gld frp add --name 公司` 里给的是名字，`gld share --tunnel frp:公司`
 /// 也认名字。网关这边以前只认 32 位 id：同一个名字在一处能用、在另一处报
 /// "没有名为「公司」的 FRP 配置"，而报错还建议你去 `gld frp add` 再建一个。
 #[test]
@@ -271,7 +247,7 @@ fn the_gateway_takes_an_frp_profile_by_name_just_like_a_workspace_does() {
         "按名称给的时候，存下来的应当是解析后的 id"
     );
 
-    // id 前缀（≥4 位，和工作区 selector 同一个口径）。
+    // id 前缀（≥4 位，和项目 selector 同一个口径）。
     env.ok(&["gateway", "set", "--frp-profile", &id[..4]]);
     assert_eq!(gateway_frp_profile(&env), id);
 
@@ -310,7 +286,7 @@ fn the_gateway_takes_an_frp_profile_by_name_just_like_a_workspace_does() {
     env.ok(&["frp", "remove", &id, "--force"]);
     env.ok(&["gateway", "set", "--port", "28999"]);
     assert_eq!(
-        env.json(&["--json", "gateway", "show"])["config"]["localPort"],
+        env.json(&["--json", "gateway", "ls"])["config"]["localPort"],
         28999,
         "一个失效的 frp-profile 不该拖累无关字段"
     );
@@ -319,29 +295,29 @@ fn the_gateway_takes_an_frp_profile_by_name_just_like_a_workspace_does() {
 /// 字段名取不到时直接把整段打出来：`unwrap_or_default()` 会把"字段改名了"
 /// 变成一句"期望 abc 实际空字符串"，查起来要重跑一遍才知道是断言写错了。
 fn gateway_frp_profile(env: &Env) -> String {
-    let show = env.json(&["--json", "gateway", "show"]);
+    let show = env.json(&["--json", "gateway", "ls"]);
     show["config"]["frpProfileId"]
         .as_str()
-        .unwrap_or_else(|| panic!("gateway show 里没有 config.frpProfileId：{show}"))
+        .unwrap_or_else(|| panic!("gateway ls 里没有 config.frpProfileId：{show}"))
         .to_string()
 }
 
 fn connect_openapi_url(env: &Env) -> String {
-    env.json(&["--json", "list"])["actions"]["openapi_url"]
+    env.json(&["--json", "ls", "gw"])["actions"]["openapiUrl"]
         .as_str()
         .unwrap_or_default()
         .to_string()
 }
 
-/// 重启是异步的：命令返回时监听器可能还没换上新配置，等它一会儿。
-fn wait_for_route(port: u16, path: &str, body: &str) -> common::http::Reply {
-    let mut last = post_json(port, path, body, None);
+/// 改配置到入口按新配置转发之间可能有一小段延迟，等它一会儿。
+fn wait_for_get(port: u16, path: &str) -> common::http::Reply {
+    let mut last = get(port, path);
     for _ in 0..50 {
         if last.status == 200 {
             return last;
         }
         std::thread::sleep(Duration::from_millis(100));
-        last = post_json(port, path, body, None);
+        last = get(port, path);
     }
     last
 }

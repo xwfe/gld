@@ -163,7 +163,7 @@ pub struct Workspace {
     /// 那时候仓库里任何一段文字都可能是提示词注入，"能读整台机器"就成了实打实的风险。
     ///
     /// 所以默认收紧，需要读隔壁仓库 / 系统头文件的人自己打开
-    /// （`gld ws set mcp.confine-reads=false`）。
+    /// （`gld set <项目> confine-reads=false`）。
     confine_reads: bool,
 }
 
@@ -279,8 +279,8 @@ impl Workspace {
             code: "READS_CONFINED_TO_WORKSPACE",
             message: format!(
                 "只允许读 Workspace 内的文件，{raw_path} 在外面。\
-                 确实需要读外部路径就关掉这个限制：gld ws set confine-reads=false（\
-                 Actions 侧写全 actions.confine-reads）；改完服务会自动重启。"
+                 确实需要读外部路径就关掉这个限制：gld set <项目> confine-reads=false（\
+                 GPT Actions 那条线路写全 actions.confine-reads）；改完下一次调用就生效。"
             ),
             category: "security",
             retryable: false,

@@ -1,6 +1,7 @@
 mod access;
 pub(crate) mod cloudflare;
 pub(crate) mod frp;
+pub mod standalone;
 mod supervisor;
 
 use crate::error::AppError;

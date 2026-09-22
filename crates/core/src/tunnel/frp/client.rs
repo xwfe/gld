@@ -637,8 +637,8 @@ fn frpc_exit_error(status: std::process::ExitStatus, log_path: &Path) -> AppErro
     let detail = frpc_log_summary(log_path);
     if detail.is_empty() {
         return AppError::Message(format!(
-            "frpc 退出，状态码 {status}。先看服务器地址、端口、Token、子域名对不对：gld ws show；\
-             用全局 FRP 配置的话，确认工作区选中了它：gld frp list 拿到 id，再 gld ws set mcp.frp-profile=<id>"
+            "frpc 退出，状态码 {status}。先看服务器地址、端口、Token、子域名对不对：gld frp list、gld ls；\
+             gld doctor 会指出引用了不存在的 FRP 配置的地方"
         ));
     }
     AppError::Message(format!("frpc 退出，状态码 {status}。{detail}"))

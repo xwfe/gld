@@ -1,7 +1,7 @@
-//! 聚合入口：一条连接访问多个工作区，彼此不串。
+//! 服务（RFC-0004 之后唯一的 MCP 入口，内部叫 hub）：一条连接访问多个项目，彼此不串。
 //!
 //! 单元测试（core 的 hub 模块）已经把路由规则逐条钩住了。这里测的是拼起来之后的样子：
-//! 真的守护进程、真的 HTTP、真的认证——尤其是凭据不互通、日志分开记、
+//! 真的守护进程、真的 HTTP、真的认证——尤其是凭据只有一把、日志分开记、
 //! 守护进程重启后还在这几条，只有跑在真服务上才看得见。
 
 mod common;
@@ -15,66 +15,30 @@ use common::oauth::connect_a_connector;
 struct Hub {
     env: Env,
     web_dir: tempfile::TempDir,
-    /// api 工作区自己的 MCP 端口（不启动就没人听）。
-    api_port: u16,
     port: u16,
     token: String,
 }
 
-/// 两个工作区 api（项目目录）和 web（另一个临时目录），都加进 hub，bearer 认证起起来。
+/// 两个项目 api（项目目录）和 web（另一个临时目录），bearer 认证把服务起起来。
 fn hub_with_two_members() -> Hub {
     let env = Env::new();
     env.write("only-api.txt", "api-marker\n");
     let web_dir = tempfile::tempdir().expect("web dir");
     std::fs::write(web_dir.path().join("only-web.txt"), "web-marker\n").expect("web file");
 
-    let api_port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "api",
-        "--mcp-port",
-        &api_port.to_string(),
-    ]);
-    env.ok(&[
-        "ws",
-        "add",
-        web_dir.path().to_str().unwrap(),
-        "--name",
-        "web",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    env.ok(&["add", ".", "--name", "api"]);
+    env.ok(&["add", web_dir.path().to_str().unwrap(), "--name", "web"]);
 
     let port = free_port();
-    env.ok(&[
-        "hub",
-        "set",
-        "--port",
-        &port.to_string(),
-        "--auth",
-        "bearer",
-    ]);
-    env.ok(&["hub", "add", "api", "web"]);
-    env.ok(&["hub", "start"]);
-    let token = hub_token(&env);
+    env.ok(&["upgrade", "--port", &port.to_string(), "--auth", "bearer"]);
+    env.ok(&["start"]);
+    let token = env.service_secret("bearer_token");
     Hub {
         env,
         web_dir,
-        api_port,
         port,
         token,
     }
-}
-
-fn hub_token(env: &Env) -> String {
-    let shown = env.json(&["--json", "hub", "show", "--reveal"]);
-    shown["credentials"][0]["value"]
-        .as_str()
-        .unwrap_or_else(|| panic!("hub show 没给出 bearer token：{shown}"))
-        .to_string()
 }
 
 fn rpc(
@@ -113,12 +77,12 @@ fn call(hub: &Hub, id: u64, tool: &str, arguments: Value) -> Value {
 }
 
 fn workspace_id(env: &Env, name: &str) -> String {
-    let listed = env.json(&["--json", "ws", "list"]);
-    listed
+    let listed = env.json(&["--json", "ls"]);
+    listed["service"]["members"]
         .as_array()
         .and_then(|items| items.iter().find(|item| item["name"] == name))
         .and_then(|item| item["id"].as_str())
-        .unwrap_or_else(|| panic!("找不到工作区 {name}：{listed}"))
+        .unwrap_or_else(|| panic!("找不到项目 {name}：{listed}"))
         .to_string()
 }
 
@@ -155,7 +119,7 @@ fn one_connection_reaches_each_member_and_nothing_crosses_over() {
         "{instructions}"
     );
 
-    // 同一条连接，两个工作区各读各的。
+    // 同一条连接，两个项目各读各的。
     let api = call(
         &hub,
         101,
@@ -171,7 +135,7 @@ fn one_connection_reaches_each_member_and_nothing_crosses_over() {
     );
     assert!(web.to_string().contains("web-marker"), "{web}");
 
-    // 同一个相对路径换个工作区就是另一个根目录，读不到对方的文件。
+    // 同一个相对路径换个项目就是另一个根目录，读不到对方的文件。
     let crossed = call(
         &hub,
         303,
@@ -187,7 +151,7 @@ fn one_connection_reaches_each_member_and_nothing_crosses_over() {
         "{unrouted}"
     );
 
-    // 日志分开记：api 的日志里只有落到 api 的请求，web 的同理，hub 自己的记全部。
+    // 日志分开记：api 的日志里只有落到 api 的请求，web 的同理，服务自己的记全部。
     let api_log = request_log(&hub.env, &workspace_id(&hub.env, "api"));
     let web_log = request_log(&hub.env, &workspace_id(&hub.env, "web"));
     let hub_log = request_log(&hub.env, "hub");
@@ -212,17 +176,25 @@ fn one_connection_reaches_each_member_and_nothing_crosses_over() {
         "{hub_log}"
     );
 
-    // 移出 web：不重启 hub，下一次调用就访问不到了；api 照常。
-    hub.env.ok(&["hub", "rm", "web"]);
+    // 删掉 web：不重启服务，下一次调用就访问不到了；api 照常。
+    // 报错和填一个从来没有过的名字一模一样——删掉的项目不该还能被认出来。
+    hub.env.ok(&["rm", "web", "-y"]);
     let removed = call(
         &hub,
         505,
         "read_file",
         json!({ "workspace": "web", "path": "only-web.txt" }),
     );
+    let never = call(
+        &hub,
+        506,
+        "read_file",
+        json!({ "workspace": "never-existed", "path": "only-web.txt" }),
+    );
+    assert_eq!(removed["ok"], false, "{removed}");
     assert_eq!(
-        removed["error"]["code"], "WORKSPACE_NOT_IN_HUB",
-        "{removed}"
+        removed["error"]["code"], never["error"]["code"],
+        "{removed} / {never}"
     );
     let still = call(
         &hub,
@@ -234,58 +206,38 @@ fn one_connection_reaches_each_member_and_nothing_crosses_over() {
     drop(hub.web_dir);
 }
 
-/// 拿到一个工作区的凭据不等于拿到 hub，反过来也一样。
+/// 服务只有一把钥匙：项目自己留着的凭据（GPT Actions 那套、以前单项目服务那套）
+/// 打不开它；换掉服务的 token，旧的当场失效、新的能用。
 #[test]
-fn workspace_and_hub_credentials_do_not_open_each_other() {
+fn the_service_credential_is_the_only_key() {
     let hub = hub_with_two_members();
-    hub.env.ok(&["ws", "set", "-w", "api", "auth=bearer"]);
-    hub.env.ok(&["start", "-w", "api"]);
-    let api_token = hub.env.json(&[
+    let project_token = hub.env.json(&[
         "--json",
         "secret",
-        "show",
+        "ls",
         "bearer_token",
         "--reveal",
         "-w",
         "api",
     ])["value"]
         .as_str()
-        .expect("api token")
+        .expect("project token")
         .to_string();
-    let api_port = hub.api_port;
 
     let (no_token, _) = rpc(hub.port, "/mcp", None, 1, "tools/list", json!({}));
     assert_eq!(no_token, 401);
-    let (with_api_token, _) = rpc(
+    let (with_project_token, _) = rpc(
         hub.port,
         "/mcp",
-        Some(&api_token),
+        Some(&project_token),
         2,
         "tools/list",
         json!({}),
     );
-    assert_eq!(with_api_token, 401, "工作区的 token 打开了 hub");
-    let (with_hub_token, _) = rpc(
-        api_port,
-        "/mcp",
-        Some(&hub.token),
-        3,
-        "tools/list",
-        json!({}),
-    );
-    assert_eq!(with_hub_token, 401, "hub 的 token 打开了工作区自己的服务");
-    let (own, _) = rpc(
-        api_port,
-        "/mcp",
-        Some(&api_token),
-        4,
-        "tools/list",
-        json!({}),
-    );
-    assert_eq!(own, 200, "工作区自己的服务用自己的 token 应当进得去");
+    assert_eq!(with_project_token, 401, "项目自己的 token 打开了服务");
 
-    // 换 hub 的 token：旧的当场失效，新的能用（hub 在跑，会自动重启）。
-    let fresh = hub.env.json(&["--json", "hub", "regen", "bearer_token"])["value"]
+    // 换服务的 token：旧的当场失效，新的能用（服务在跑，会自动重启）。
+    let fresh = hub.env.json(&["--json", "secret", "regen", "bearer_token"])["value"]
         .as_str()
         .expect("new token")
         .to_string();
@@ -302,79 +254,33 @@ fn workspace_and_hub_credentials_do_not_open_each_other() {
     assert_eq!(new, 200);
 }
 
-/// 默认认证是 OAuth（ChatGPT 连接器走的就是它）：hub 自己能走完整套授权，
-/// 而工作区发出去的 OAuth 令牌打到 hub 上是 401，反过来也一样。
+/// 默认认证是 OAuth（ChatGPT 连接器走的就是它）：服务自己能走完整套授权，
+/// 拿到的令牌按 workspace 参数读各个项目。
 #[test]
-fn oauth_on_the_hub_is_a_separate_authorization() {
+fn oauth_on_the_service_works_end_to_end() {
     let hub = hub_with_two_members();
-    hub.env.ok(&["hub", "set", "--auth", "oauth"]);
-    let shown = hub.env.json(&["--json", "hub", "show", "--reveal"]);
-    let password = shown["credentials"]
-        .as_array()
-        .and_then(|items| {
-            items.iter().find(|item| {
-                item["label"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("oauth_password")
-            })
-        })
-        .and_then(|item| item["value"].as_str())
-        .unwrap_or_else(|| panic!("hub show 没给出授权口令：{shown}"))
-        .to_string();
-    let (_, hub_access, _, _) = connect_a_connector(hub.port, &password);
-    let api = {
+    hub.env.ok(&["upgrade", "--auth", "oauth"]);
+    let password = hub.env.service_secret("oauth_password");
+    let (_, access, _, _) = connect_a_connector(hub.port, &password);
+    for (workspace, file, marker) in [
+        ("api", "only-api.txt", "api-marker"),
+        ("web", "only-web.txt", "web-marker"),
+    ] {
         let (status, body) = rpc(
             hub.port,
             "/mcp",
-            Some(&hub_access),
+            Some(&access),
             1,
             "tools/call",
-            json!({ "name": "read_file", "arguments": { "workspace": "api", "path": "only-api.txt" } }),
+            json!({ "name": "read_file", "arguments": { "workspace": workspace, "path": file } }),
         );
         assert_eq!(status, 200, "{body}");
-        body
-    };
-    assert!(api.to_string().contains("api-marker"), "{api}");
-
-    // api 工作区自己的服务默认也是 OAuth，单独授权一次拿它的令牌。
-    hub.env.ok(&["start", "-w", "api"]);
-    let api_password = hub.env.json(&[
-        "--json",
-        "secret",
-        "show",
-        "oauth_password",
-        "--reveal",
-        "-w",
-        "api",
-    ])["value"]
-        .as_str()
-        .expect("api oauth_password")
-        .to_string();
-    let (_, api_access, _, _) = connect_a_connector(hub.api_port, &api_password);
-
-    let (workspace_token_on_hub, _) = rpc(
-        hub.port,
-        "/mcp",
-        Some(&api_access),
-        2,
-        "tools/list",
-        json!({}),
-    );
-    assert_eq!(workspace_token_on_hub, 401, "工作区的 OAuth 令牌打开了 hub");
-    let (hub_token_on_workspace, _) = rpc(
-        hub.api_port,
-        "/mcp",
-        Some(&hub_access),
-        3,
-        "tools/list",
-        json!({}),
-    );
-    assert_eq!(hub_token_on_workspace, 401, "hub 的 OAuth 令牌打开了工作区");
+        assert!(body.to_string().contains(marker), "{body}");
+    }
 }
 
 #[test]
-fn the_hub_comes_back_after_a_daemon_restart_unless_it_was_stopped() {
+fn the_service_comes_back_after_a_daemon_restart_unless_it_was_stopped() {
     let hub = hub_with_two_members();
 
     hub.env.ok(&["daemon", "restart"]);
@@ -386,19 +292,22 @@ fn the_hub_comes_back_after_a_daemon_restart_unless_it_was_stopped() {
         "tools/list",
         json!({}),
     );
-    assert_eq!(status, 200, "守护进程重启后 hub 没有自动恢复");
+    assert_eq!(status, 200, "守护进程重启后服务没有自动恢复");
 
-    hub.env.ok(&["hub", "stop"]);
+    hub.env.ok(&["stop"]);
     hub.env.ok(&["daemon", "restart"]);
-    let shown = hub.env.json(&["--json", "hub", "show"]);
-    assert_eq!(shown["status"]["state"], "stopped", "{shown}");
+    let shown = hub.env.json(&["--json", "ls"]);
+    assert_eq!(shown["service"]["state"], "stopped", "{shown}");
     assert!(
         std::net::TcpStream::connect(("127.0.0.1", hub.port)).is_err(),
-        "gld hub stop 过的 hub 在守护进程重启后又被拉起来了"
+        "gld stop 过的服务在守护进程重启后又被拉起来了"
     );
 }
 
-/// 经全局入口暴露：`<入口>/hub/mcp` 转到 hub。hub 没声明走入口时，入口不替它转。
+/// 老路子：经全局入口暴露为 `<入口>/hub/mcp`。服务没声明走入口时，入口不替它转。
+///
+/// 服务现在有自己的隧道（`gld share --tunnel`），这条路不再出现在帮助里，但老配置
+/// 还在用它，所以照样钉住。
 #[test]
 fn the_global_gateway_forwards_hub_only_when_asked_to() {
     let hub = hub_with_two_members();
@@ -449,12 +358,12 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
     assert!(names.contains(&"list_workspaces"), "{names:?}");
 
     // 公网客户端靠发现文档里的地址找授权页，前缀少了 /hub 就会打到入口根上去。
-    let shown = hub.env.json(&["--json", "hub", "show"]);
+    let shown = hub.env.json(&["--json", "ls"]);
     assert_eq!(
-        shown["status"]["publicEndpoint"], "https://gw.example.com/hub/mcp",
+        shown["service"]["publicEndpoint"], "https://gw.example.com/hub/mcp",
         "{shown}"
     );
-    hub.env.ok(&["hub", "set", "--auth", "oauth"]);
+    hub.env.ok(&["upgrade", "--auth", "oauth"]);
     let metadata = get(gateway_port, "/.well-known/oauth-authorization-server/hub");
     assert_eq!(metadata.status, 200, "{}", metadata.body);
     let metadata = metadata.json();
@@ -477,16 +386,16 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
     );
 
     // 挂着公网入口改 noauth 要当场拒，配置不落盘。
-    let refused = hub.env.gld(&["hub", "set", "--auth", "noauth"]);
+    let refused = hub.env.gld(&["upgrade", "--auth", "noauth"]);
     assert!(
         !refused.status.success(),
-        "公网 hub 改成 noauth 居然保存成功了"
+        "公网服务改成 noauth 居然保存成功了"
     );
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("noauth"),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
-    let shown = hub.env.json(&["--json", "hub", "show"]);
-    assert_eq!(shown["status"]["config"]["authType"], "oauth", "{shown}");
+    let shown = hub.env.json(&["--json", "ls"]);
+    assert_eq!(shown["service"]["config"]["authType"], "oauth", "{shown}");
 }

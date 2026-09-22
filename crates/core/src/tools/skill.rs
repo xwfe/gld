@@ -128,7 +128,7 @@ fn files_readable<'a>(ctx: &ToolContext, skill: &'a SkillEntry) -> Result<&'a Pa
         return Ok(dir);
     }
     Err(format!(
-        "this skill is outside the workspace and was found by automatic discovery; its files are read only once its source is configured explicitly (gld settings runtime --skill-sources {}) or reads are unconfined (gld ws set confine-reads=false)",
+        "this skill is outside the workspace and was found by automatic discovery; its files are read only once its source is configured explicitly (gld cfg runtime --skill-sources {}) or reads are unconfined (gld set <project> confine-reads=false)",
         skill.descriptor.provider
     ))
 }

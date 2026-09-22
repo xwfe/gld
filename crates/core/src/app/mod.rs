@@ -37,8 +37,8 @@ mod workspace;
 mod workspace_fields;
 
 pub use doctor::{
-    config_checks, port_check, software_check, Diagnosis, DoctorCheck, DoctorLevel, PortOccupant,
-    SecretLookup,
+    config_checks, port_check, service_checks, service_port_check, software_check, Diagnosis,
+    DoctorCheck, DoctorLevel, PortOccupant, SecretLookup,
 };
 pub use hub::{CcnmMemberSpec, HubMemberDto, HubMembershipChange, HubStatusDto};
 pub use logs::LogChunk;

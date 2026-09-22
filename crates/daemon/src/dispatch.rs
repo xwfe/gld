@@ -135,6 +135,15 @@ pub async fn dispatch(
         R::HubStop => ok(&app.stop_hub().await?),
         R::HubSecret { key } => ok(&app.hub_secret(&key)?),
         R::RegenerateHubSecret { key } => ok(&app.regenerate_hub_secret(&key).await?),
+        R::SetHubSecret { key, value } => {
+            app.set_hub_secret(&key, &value).await?;
+            ok(&true)
+        }
+        R::HubJoinAll => ok(&app.join_all_workspaces()?),
+        R::HubHealth => ok(&app.hub_health().await?),
+        R::HubEnsureStarted => ok(&app.ensure_hub_started().await?),
+        R::HubUsage => ok(&gld_core::hub::runtime::usage().await),
+        R::HubLogs { max_bytes } => ok(&app.hub_logs(max_bytes)?),
 
         // ---- 密钥 ----
         R::WorkspaceSecret { target, key } => {
@@ -298,7 +307,7 @@ pub async fn dispatch(
         }
 
         // ---- 观察 ----
-        R::Doctor => ok(&app.doctor()?),
+        R::Doctor => ok(&app.doctor().await?),
         R::Health { target } => {
             let profile = resolve(app, &target)?;
             ok(&app.health_checks(&profile.id).await?)

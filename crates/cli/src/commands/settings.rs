@@ -10,7 +10,7 @@ use crate::output::{or_dash, yes_no};
 
 pub async fn run(ctx: &mut Ctx, command: SettingsCmd) -> CliResult {
     match command {
-        SettingsCmd::Show => {
+        SettingsCmd::List => {
             let proxy: ProxyConfig = ctx.backend.call_typed(Request::Proxy).await?;
             let runtime: GlobalRuntimeSettingsDto =
                 ctx.backend.call_typed(Request::RuntimeSettings).await?;
@@ -22,28 +22,33 @@ pub async fn run(ctx: &mut Ctx, command: SettingsCmd) -> CliResult {
             ) {
                 return Ok(());
             }
-            ctx.out.kv(&[
+            let mut rows = vec![
                 ("数据目录", home.display().to_string()),
                 ("代理", describe_proxy(&proxy.mode, &proxy.url)),
                 ("局域网访问", yes_no(runtime.allow_lan_access).into()),
                 (
-                    "启动时恢复服务",
-                    yes_no(runtime.restore_runtime_state_on_launch).into(),
+                    "启动时恢复 Actions",
+                    format!(
+                        "{}（MCP 服务不看这个开关：没被 gld stop 过就会恢复）",
+                        yes_no(runtime.restore_runtime_state_on_launch)
+                    ),
                 ),
                 ("全局可执行路径", or_dash(&runtime.executable_paths)),
                 ("全局 Agent 说明", or_dash(&runtime.ai_instructions)),
                 ("说明来源", or_dash(&runtime.instruction_sources.join(","))),
                 ("Skill 来源", or_dash(&runtime.skill_sources.join(","))),
-                (
+            ];
+            // 全局入口是旧的共享入口（多个单项目服务共用一个域名），开着才值得占一行。
+            if gateway.enabled {
+                rows.push((
                     "全局入口",
                     format!(
-                        "{}（端口 {}，隧道 {}）",
-                        yes_no(gateway.enabled),
-                        gateway.local_port,
-                        gateway.tunnel_type
+                        "开（端口 {}，隧道 {}）",
+                        gateway.local_port, gateway.tunnel_type
                     ),
-                ),
-            ]);
+                ));
+            }
+            ctx.out.kv(&rows);
             Ok(())
         }
         SettingsCmd::Proxy { mode, url } => {

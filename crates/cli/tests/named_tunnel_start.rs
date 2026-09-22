@@ -1,3 +1,6 @@
+//! Cloudflare 固定域名：回源端口由云端配置决定，gld 起完隧道要自己访问一次公网地址。
+//! RFC-0004 之后这条隧道属于服务，`--port` 改的也是服务的端口。
+
 mod common;
 
 use clap::Parser;
@@ -5,16 +8,16 @@ use common::env::{free_port, Env};
 use gld::Cli;
 
 #[test]
-fn explicit_port_applies_to_new_and_running_workspace() {
+fn explicit_port_applies_to_a_new_and_a_running_service() {
     let env = Env::new();
     let first = free_port();
     env.ok(&["start", ".", "--port", &first.to_string()]);
     let second = free_port();
     env.ok(&["start", ".", "--port", &second.to_string()]);
     env.ok(&["start"]);
-    let state = env.json(&["--json", "list"]);
+    let state = env.json(&["--json", "ls"]);
     assert_eq!(
-        state["mcp"]["local_url"],
+        state["service"]["localEndpoint"],
         format!("http://127.0.0.1:{second}/mcp")
     );
     assert!(std::net::TcpStream::connect(("127.0.0.1", second)).is_ok());
@@ -27,7 +30,7 @@ fn named_tunnel_accepts_a_reachable_endpoint_with_new_token_flag() {
     let mut env = Env::new();
     env.fake_binary("cloudflared", "#!/bin/sh\necho 'INF Registered tunnel connection connIndex=0'\nwhile true; do sleep 1; done\n");
     let port = free_port();
-    // 用真实本地 MCP 作为入口，隔离测试不访问 Cloudflare。
+    // 用真实本地服务作为"公网"入口，隔离测试不访问 Cloudflare。
     let state = env.json(&[
         "--json",
         "start",
@@ -39,7 +42,11 @@ fn named_tunnel_accepts_a_reachable_endpoint_with_new_token_flag() {
         "--token",
         "fixture-token",
     ]);
-    assert_eq!(state["mcp"]["state"], "running");
+    assert_eq!(state["service"]["state"], "running", "{state}");
+    assert_eq!(
+        state["service"]["publicEndpoint"],
+        format!("http://127.0.0.1:{port}/mcp")
+    );
     env.ok(&["start"]);
 }
 
@@ -121,9 +128,9 @@ fn registered_named_tunnel_with_502_must_not_report_success() {
     );
     assert!(stderr.contains("回源"), "{stderr}");
     assert!(!stderr.contains("fixture-token"), "凭据泄露");
-    let state = env.json(&["--json", "list"]);
+    let state = env.json(&["--json", "ls"]);
     assert_eq!(
-        state["mcp"]["state"], "running",
+        state["service"]["state"], "running",
         "失败不能停本地服务：{state}"
     );
 }

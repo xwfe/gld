@@ -103,7 +103,7 @@ impl App {
         }
         if profiles.is_empty() {
             return Err(AppError::Message(
-                "还没有任何工作区。先执行 `gld workspace add <项目目录>`。".into(),
+                "还没有任何项目。先执行 `gld add <项目目录>`。".into(),
             ));
         }
         let cwd_hint = target
@@ -112,7 +112,7 @@ impl App {
             .map(|cwd| format!("当前目录 {} 不属于任何工作区。", cwd.display()))
             .unwrap_or_default();
         Err(AppError::Message(format!(
-            "{cwd_hint}请用 --workspace/-w 指定 id、名称或路径（`gld workspace list` 查看）。"
+            "{cwd_hint}请用 -w 指定项目的 id、名称或路径（`gld ls` 查看）。"
         )))
     }
 
@@ -129,7 +129,7 @@ impl App {
                 .find(|profile| same_path(&profile.path, &root))
             {
                 return Err(AppError::Message(format!(
-                    "该目录已经是工作区「{}」（id {}）",
+                    "该目录已经是项目「{}」（id {}）",
                     existing.name,
                     crate::short_id(&existing.id)
                 )));
@@ -153,6 +153,13 @@ impl App {
             }
             store.init_workspace_secrets(&profile.id)?;
             store.add(profile.clone())?;
+            // 登记即加入服务（RFC-0004）。只剩一个服务之后，"登记了但 AI 看不见"
+            // 这种状态只会让人困惑，没有一个用得上它的场景。
+            let mut settings = store.settings();
+            if !settings.hub.members.contains(&profile.id) {
+                settings.hub.members.push(profile.id.clone());
+                store.update_settings(settings)?;
+            }
             Ok(profile)
         })
     }
@@ -333,7 +340,7 @@ fn validate_unique_path(
         }
         if same_path(&profile.path, &root) {
             return Err(AppError::Message(format!(
-                "目录 {} 已经是工作区「{}」（id {}）。同一个目录只能属于一个工作区。",
+                "目录 {} 已经是项目「{}」（id {}）。同一个目录只能属于一个项目。",
                 root.display(),
                 profile.name,
                 profile.id
@@ -458,7 +465,7 @@ fn resolve_by_selector(
     }
 
     Err(AppError::Message(format!(
-        "未找到工作区「{selector}」。可用 `gld workspace list` 查看，selector 支持 id、id 前缀（≥4 位）、名称或路径。"
+        "未找到项目「{selector}」。可用 `gld ls` 查看，项目可以写 id、id 前缀（≥4 位）、名称或路径。"
     )))
 }
 
@@ -495,7 +502,7 @@ fn resolve_by_dir(profiles: &[WorkspaceProfile], cwd: &Path) -> AppResult<Worksp
     }
     best.map(|(profile, _)| profile.clone()).ok_or_else(|| {
         AppError::Message(format!(
-            "当前目录 {} 不属于任何工作区。请用 --workspace/-w 指定，或先执行 `gld workspace add <目录>`。",
+            "当前目录 {} 不属于任何项目。请写出项目名（或 -w 指定），或先执行 `gld add <目录>`。",
             cwd.display()
         ))
     })

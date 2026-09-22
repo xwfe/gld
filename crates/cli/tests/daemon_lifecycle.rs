@@ -1,5 +1,5 @@
 //! 真实进程级集成测试：用编译出来的 `gld` 二进制走一遍
-//! 添加工作区 → 自动拉起守护进程 → 启动 MCP → 通过 TCP 请求 → 停止 → 退出守护进程。
+//! 加项目 → 自动拉起守护进程 → 启动服务 → 通过 TCP 请求 → 停止 → 退出守护进程。
 //!
 //! 每个测试用独立的 `GLD_HOME`，不会碰真实的 `~/.config/gld`。
 
@@ -22,34 +22,26 @@ fn full_lifecycle_through_the_real_binary() {
     let status = env.gld(&["daemon", "status"]);
     assert_eq!(status.status.code(), Some(3));
 
-    // 直连模式下登记工作区、改配置，不需要守护进程。
-    let created = env.json(&[
-        "--json",
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "it",
-        "--mcp-port",
-        &port_arg,
-    ]);
-    assert_eq!(created["name"], "it");
-    assert_eq!(created["runtime"]["local_port"], port);
-    assert_eq!(created["tunnel"]["type"], "none");
-    env.ok(&["ws", "set", "mcp.auth=noauth"]);
+    // 直连模式下加项目、改配置，不需要守护进程。
+    let created = env.json(&["--json", "add", ".", "--name", "it"]);
+    assert_eq!(created[0]["name"], "it");
+    env.ok(&["upgrade", "--port", &port_arg, "--auth", "noauth"]);
     assert!(!Path::new(&env.home.path().join("daemon.json")).exists());
 
     // start 会自动拉起守护进程。
     let started = env.json(&["--json", "start"]);
-    assert_eq!(started[0]["status"]["state"], "running");
+    assert_eq!(started["state"], "running");
+    assert_eq!(
+        started["localEndpoint"],
+        format!("http://127.0.0.1:{port}/mcp")
+    );
     let info = env.json(&["--json", "daemon", "status"]);
     assert_eq!(info["running"], true);
-    assert_eq!(info["info"]["running_services"], 1);
     assert_eq!(info["version_matches_cli"], true);
 
-    let running = env.json(&["--json", "ps"]);
-    assert_eq!(running.as_array().map(Vec::len), Some(1));
-    assert_eq!(running[0]["service"], "mcp");
+    let status = env.json(&["--json", "status"]);
+    assert_eq!(status["service"]["state"], "running");
+    assert_eq!(status["service"]["members"][0]["name"], "it");
 
     // 服务真的在这个端口上提供 MCP。
     let response = get(port, "/mcp");
@@ -61,14 +53,15 @@ fn full_lifecycle_through_the_real_binary() {
     );
 
     // 守护进程在跑时，配置类命令也走守护进程。
-    let shown = env.json(&["--json", "ws", "show"]);
-    assert_eq!(shown["name"], "it");
+    let shown = env.json(&["--json", "ls", "it"]);
+    assert_eq!(shown["project"]["name"], "it");
+    assert_eq!(shown["inService"], true);
     let logs = env.json(&["--json", "logs", "-n", "5"]);
     assert!(logs.as_array().map(|a| !a.is_empty()).unwrap_or(false));
 
     env.ok(&["stop"]);
-    let running = env.json(&["--json", "ps"]);
-    assert_eq!(running.as_array().map(Vec::len), Some(0));
+    let status = env.json(&["--json", "status"]);
+    assert_eq!(status["service"]["state"], "stopped");
     assert!(
         TcpStream::connect(("127.0.0.1", port)).is_err(),
         "port should be released"
@@ -83,7 +76,7 @@ fn full_lifecycle_through_the_real_binary() {
 #[test]
 fn no_autostart_reports_exit_code_3() {
     let env = Env::new();
-    env.ok(&["ws", "add", ".", "--name", "quiet"]);
+    env.ok(&["add", ".", "--name", "quiet"]);
     let output = env.gld(&["--no-autostart", "start"]);
     assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -91,29 +84,30 @@ fn no_autostart_reports_exit_code_3() {
 }
 
 #[test]
-fn workspace_resolution_by_name_prefix_and_cwd() {
+fn project_resolution_by_name_prefix_and_cwd() {
     let env = Env::new();
     // 下面要在子目录里执行命令，先把它建出来。
     env.write("src/main.js", "console.log('ok')\n");
-    let created = env.json(&["--json", "ws", "add", ".", "--name", "alpha"]);
-    let id = created["id"].as_str().unwrap().to_string();
-    let by_prefix = env.json(&["--json", "-w", &id[..6], "ws", "show"]);
-    assert_eq!(by_prefix["id"], id);
-    let by_name = env.json(&["--json", "-w", "ALPHA", "ws", "show"]);
-    assert_eq!(by_name["id"], id);
-    // 在工作区子目录里执行，不指定 -w 也能找到。
+    let created = env.json(&["--json", "add", ".", "--name", "alpha"]);
+    let id = created[0]["id"].as_str().unwrap().to_string();
+    let by_prefix = env.json(&["--json", "ls", &id[..6]]);
+    assert_eq!(by_prefix["project"]["id"], id);
+    let by_name = env.json(&["--json", "-w", "ALPHA", "ls"]);
+    assert_eq!(by_name["project"]["id"], id);
+    // 在项目子目录里执行，不指定项目也能找到（ws show 是按当前目录看一个项目的老写法）。
     let sub = env.project.path().join("src");
     let output = Command::new(env!("CARGO_BIN_EXE_gld"))
         .args(["--json", "ws", "show"])
         .env("GLD_HOME", env.home.path())
+        .env_remove("GLD_WORKSPACE")
         .current_dir(&sub)
         .output()
         .unwrap();
     assert!(output.status.success());
     let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(shown["id"], id);
+    assert_eq!(shown["project"]["id"], id);
 
-    let missing = env.gld(&["-w", "does-not-exist", "ws", "show"]);
+    let missing = env.gld(&["ls", "does-not-exist"]);
     assert_eq!(missing.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("未找到工作区"));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("未找到项目"));
 }

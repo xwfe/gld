@@ -12,10 +12,11 @@
 
 mod common;
 
-use common::env::{free_port, Env};
+use common::env::Env;
 use common::http::post_json;
+use common::service::Service;
 
-/// 补全脚本必须五种 shell 都能生成，而且不依赖守护进程和工作区。
+/// 补全脚本必须五种 shell 都能生成，而且不依赖守护进程和项目。
 ///
 /// `completions` 在 Backend 连接之前就被处理掉了——装完 gld 第一件事往往
 /// 就是配补全，那时候既没有工作区也没有守护进程。这条路一旦被改坏，
@@ -37,12 +38,12 @@ fn completions_work_for_every_shell_without_a_workspace_or_daemon() {
         );
         // 补全脚本要能补到子命令，否则等于没有。
         assert!(
-            script.contains("workspace") && script.contains("share"),
+            script.contains("add") && script.contains("share"),
             "{shell} 的补全脚本里没有子命令"
         );
     }
 
-    // 没有工作区、没有守护进程，也不该顺手拉起一个。
+    // 没有项目、没有守护进程，也不该顺手拉起一个。
     assert_ne!(
         env.gld(&["daemon", "status"]).status.code(),
         Some(0),
@@ -56,18 +57,7 @@ fn completions_work_for_every_shell_without_a_workspace_or_daemon() {
 #[test]
 fn usage_counts_real_requests() {
     let env = Env::new();
-    let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "counted",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["ws", "set", "auth=noauth"]);
-    env.ok(&["start"]);
+    let port = env.serve("counted", "noauth").port;
 
     let before = mcp_request_count(&env);
     assert_eq!(before, 0, "刚起来就有请求计数？");
@@ -95,7 +85,7 @@ fn mcp_request_count(env: &Env) -> u64 {
                 .find(|service| service["service"] == "mcp")
                 .and_then(|service| service["requestCount"].as_u64())
         })
-        .expect("usage 里没有 mcp 那一行")
+        .expect("usage 里没有服务那一行")
 }
 
 /// `logs` 要能看到刚发生的那次请求。
@@ -105,18 +95,7 @@ fn mcp_request_count(env: &Env) -> u64 {
 #[test]
 fn logs_show_the_request_that_just_happened() {
     let env = Env::new();
-    let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "logged",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["ws", "set", "auth=noauth"]);
-    env.ok(&["start"]);
+    let port = env.serve("logged", "noauth").port;
     post_json(
         port,
         "/mcp",
@@ -139,18 +118,7 @@ fn logs_show_the_request_that_just_happened() {
 #[test]
 fn logs_show_requests_rejected_by_auth_without_the_credential() {
     let env = Env::new();
-    let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "guarded",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["ws", "set", "auth=bearer"]);
-    env.ok(&["start"]);
+    let port = env.serve("guarded", "bearer").port;
     let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
     let wrong = "almost-the-right-token-0123456789";
     assert_eq!(post_json(port, "/mcp", body, None).status, 401);
@@ -178,18 +146,7 @@ fn logs_show_requests_rejected_by_auth_without_the_credential() {
 #[test]
 fn health_probes_the_local_endpoint_without_going_through_a_proxy() {
     let env = Env::new();
-    let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "proxied",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["ws", "set", "auth=noauth"]);
-    env.ok(&["start"]);
+    env.serve("proxied", "noauth");
 
     let output = env.gld_with_env(
         &["health"],
@@ -219,8 +176,8 @@ fn health_probes_the_local_endpoint_without_going_through_a_proxy() {
 /// 有人把规则写进 `.cursorrules`，在 context 里看到它列着，以为生效了——
 /// 改半天没反应也想不到是这儿。
 ///
-/// 交叉验证的对象是 MCP `initialize` 回包里的 instructions：那是真正递给
-/// 模型的文本，不是另一处推算出来的数字。
+/// 交叉验证的对象是服务 `workspace_context` 工具给这个项目的说明和 Skill 目录：
+/// 那是真正递给模型的文本（模型第一次进一个项目前先调它），不是另一处推算出来的数字。
 #[test]
 fn context_marks_what_is_actually_injected() {
     let env = Env::new();
@@ -242,18 +199,7 @@ fn context_marks_what_is_actually_injected() {
         ".claude/skills/deploy-skill/SKILL.md",
         "---\nname: deploy-skill\ndescription: DEPLOY-MARKER-3b4a ships to prod.\ndisable-model-invocation: true\n---\nBody.\n",
     );
-    let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "ctx",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["ws", "set", "auth=noauth"]);
-    env.ok(&["start"]);
+    let service = env.serve("ctx", "noauth");
 
     // 默认 compact：只有 AGENTS.md 进得去。
     let snapshot = env.json(&["--json", "context"]);
@@ -309,7 +255,7 @@ fn context_marks_what_is_actually_injected() {
         .unwrap_or_else(|| panic!("点名才用的 skill 也要列出来：{human}"));
     assert!(deploy_line.contains("只在用户点名时用"), "{deploy_line}");
 
-    let text = mcp_instructions(port);
+    let text = model_context(&service);
     assert!(
         text.contains("AGENTS-MARKER-1f2e"),
         "报告说注入了 AGENTS.md，实际没进去"
@@ -328,7 +274,7 @@ fn context_marks_what_is_actually_injected() {
     );
 
     // 换成 advanced，两份都该进去，报告也要跟着变。
-    env.ok(&["ws", "set", "tool-profile=advanced"]);
+    env.ok(&["set", "tool-profile=advanced"]);
     let snapshot = env.json(&["--json", "context"]);
     assert_eq!(
         injected_paths(&snapshot).len(),
@@ -337,7 +283,7 @@ fn context_marks_what_is_actually_injected() {
     );
     assert_eq!(snapshot["skillsInjected"], true);
 
-    let text = mcp_instructions(port);
+    let text = model_context(&service);
     assert!(
         text.contains("AGENTS-MARKER-1f2e") && text.contains("CURSOR-MARKER-9a8b"),
         "advanced 下两份说明都该注入：{text}"
@@ -362,27 +308,23 @@ fn injected_paths(snapshot: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// MCP `initialize` 回包里的 instructions——真正递给模型的那段文本。
-fn mcp_instructions(port: u16) -> String {
-    let response = post_json(
-        port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
-        None,
-    );
-    assert_eq!(response.status, 200, "initialize 没通");
-    let body: serde_json::Value = serde_json::from_str(&response.body).expect("initialize 回包");
-    body["result"]["instructions"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string()
+/// 服务给这个项目的说明和 Skill 目录——模型第一次进项目前调 `workspace_context`
+/// 拿到的那段文本。
+fn model_context(service: &Service) -> String {
+    let context = service.call_tool("workspace_context", serde_json::json!({}));
+    assert_eq!(context["ok"], true, "workspace_context 没通：{context}");
+    format!(
+        "{}\n{}",
+        context["instructions"].as_str().unwrap_or_default(),
+        context["skills"].as_str().unwrap_or_default()
+    )
 }
 
 /// `history` 在没有档案时要说清楚下一步，而不是空着。
 #[test]
 fn history_explains_itself_when_there_is_nothing_yet() {
     let env = Env::new();
-    env.ok(&["ws", "add", ".", "--name", "hist"]);
+    env.ok(&["add", ".", "--name", "hist"]);
 
     let text = env.ok(&["history"]);
     assert!(text.contains("还没有历史会话"), "{text}");
@@ -401,7 +343,7 @@ fn history_explains_itself_when_there_is_nothing_yet() {
 #[test]
 fn global_settings_round_trip_and_reject_nonsense() {
     let env = Env::new();
-    env.ok(&["ws", "add", ".", "--name", "cfg"]);
+    env.ok(&["add", ".", "--name", "cfg"]);
 
     env.ok(&[
         "settings",
@@ -411,7 +353,7 @@ fn global_settings_round_trip_and_reject_nonsense() {
         "--url",
         "http://127.0.0.1:7890",
     ]);
-    let shown = env.json(&["--json", "settings", "show"]);
+    let shown = env.json(&["--json", "cfg", "ls"]);
     assert_eq!(shown["proxy"]["mode"], "manual");
     assert_eq!(shown["proxy"]["url"], "http://127.0.0.1:7890");
 
@@ -420,19 +362,19 @@ fn global_settings_round_trip_and_reject_nonsense() {
     assert!(!bad.status.success(), "manual 缺地址被接受了");
     assert!(String::from_utf8_lossy(&bad.stderr).contains("必须填写代理地址"));
     assert_eq!(
-        env.json(&["--json", "settings", "show"])["proxy"]["url"],
+        env.json(&["--json", "cfg", "ls"])["proxy"]["url"],
         "http://127.0.0.1:7890",
         "被拒绝的设置不该动到已存的值"
     );
 
     env.ok(&["settings", "runtime", "--lan-access", "true"]);
     assert_eq!(
-        env.json(&["--json", "settings", "show"])["runtime"]["allowLanAccess"],
+        env.json(&["--json", "cfg", "ls"])["runtime"]["allowLanAccess"],
         true
     );
 }
 
-/// `tunnel snippet` 给的必须是一份能直接跑的 frpc 配置。
+/// `tunnel snippet` 给的必须是一份能直接跑的 frpc 配置（项目的 GPT Actions 那条隧道）。
 ///
 /// 以前它只吐 `[[proxies]]` 一段：没有 serverAddr、没有 token，存成 frpc.toml
 /// 起不来——而报错来自 frpc（"server address is empty"），不是 gld，
@@ -440,7 +382,7 @@ fn global_settings_round_trip_and_reject_nonsense() {
 #[test]
 fn tunnel_snippet_is_a_complete_frpc_config_with_the_token_hidden_by_default() {
     let env = Env::new();
-    env.ok(&["ws", "add", ".", "--name", "snip"]);
+    env.ok(&["add", ".", "--name", "snip"]);
     env.ok(&[
         "frp",
         "add",
@@ -454,14 +396,13 @@ fn tunnel_snippet_is_a_complete_frpc_config_with_the_token_hidden_by_default() {
         "super-secret-token",
     ]);
     env.ok(&[
-        "ws",
         "set",
-        "tunnel=frp",
-        "frp-profile=office",
-        "frp-subdomain=demo",
+        "actions.tunnel=frp",
+        "actions.frp-profile=office",
+        "actions.frp-subdomain=demo",
     ]);
 
-    let masked = env.ok(&["tunnel", "snippet"]);
+    let masked = env.ok(&["tunnel", "snippet", "-s", "actions"]);
     for needed in ["serverAddr", "serverPort", "[[proxies]]", "subdomain"] {
         assert!(masked.contains(needed), "配置里缺 {needed}：{masked}");
     }
@@ -474,7 +415,7 @@ fn tunnel_snippet_is_a_complete_frpc_config_with_the_token_hidden_by_default() {
         "脱敏了却没说怎么拿真值：{masked}"
     );
 
-    let revealed = env.ok(&["tunnel", "snippet", "--reveal"]);
+    let revealed = env.ok(&["tunnel", "snippet", "-s", "actions", "--reveal"]);
     assert!(
         revealed.contains("super-secret-token"),
         "--reveal 没给出真实 token：{revealed}"

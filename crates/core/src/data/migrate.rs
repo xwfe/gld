@@ -83,7 +83,7 @@ fn corrupt_data_file(path: &Path, error: &serde_json::Error) -> AppError {
          这个文件里存着所有工作区配置和密钥，gld 不会覆盖它。请三选一：\n\
          1) 有备份就还原备份；\n\
          2) 用编辑器把 JSON 改回合法（多半是文件被截断，末尾缺 }}）；\n\
-         3) 确认不要这些数据了，先 mv \"{0}\" \"{0}.bad\" 再重新 gld ws add。",
+         3) 确认不要这些数据了，先 mv \"{0}\" \"{0}.bad\" 再重新 gld add。",
         path.display()
     ))
 }

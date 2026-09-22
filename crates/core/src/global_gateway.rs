@@ -9,15 +9,13 @@ use axum::routing::{any, get};
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::json;
-use tokio::process::Child;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::data::DataStore;
 use crate::error::{AppError, AppResult};
 use crate::local_network;
 use crate::settings::{AppSettings, GlobalGatewayConfig};
-use crate::tunnel::{cloudflare, frp, TunnelServiceKind};
-use crate::workspace::WorkspaceProfile;
+use crate::tunnel::standalone::{self, CloudflareSpec, FrpSpec, StandaloneTunnel};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -97,18 +95,13 @@ struct ProxyState {
     client: reqwest::Client,
 }
 
-enum TunnelChild {
-    Cloudflare { child: Child, pid: Option<u32> },
-    Frp { child: Child, pid: Option<u32> },
-}
-
 struct GatewayRuntime {
     config: GlobalGatewayConfig,
     public_url: String,
     shutdown: Option<oneshot::Sender<()>>,
     handle: crate::async_rt::JoinHandle<()>,
     running: bool,
-    tunnel: Option<TunnelChild>,
+    tunnel: Option<StandaloneTunnel>,
 }
 
 static RUNTIME: LazyLock<Mutex<Option<GatewayRuntime>>> = LazyLock::new(|| Mutex::new(None));
@@ -284,25 +277,14 @@ async fn stop_runtime(mut runtime: GatewayRuntime) {
     }
     let _ = runtime.handle.await;
     if let Some(tunnel) = runtime.tunnel.take() {
-        match tunnel {
-            TunnelChild::Cloudflare { child, pid } => {
-                let _ = cloudflare::stop_child(child, pid).await;
-            }
-            TunnelChild::Frp { mut child, pid } => {
-                if let Some(pid) = pid {
-                    let _ = crate::platform::platform().terminate_process_tree(pid);
-                }
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-            }
-        }
+        tunnel.stop().await;
     }
 }
 
 async fn start_tunnel(
     config: &GlobalGatewayConfig,
     settings: &AppSettings,
-) -> AppResult<(String, Option<TunnelChild>)> {
+) -> AppResult<(String, Option<StandaloneTunnel>)> {
     match config.tunnel_type.as_str() {
         "" | "none" => Ok((config.public_url.trim_end_matches('/').to_string(), None)),
         "cloudflare" => {
@@ -311,62 +293,37 @@ async fn start_tunnel(
                     "全局 Gateway 当前优先支持 Cloudflare Quick；固定域名请使用 FRP 或外部反向代理。独立 Workspace Tunnel 仍保留 Named Cloudflare。".into(),
                 ));
             }
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let log = crate::home::data_home()?.join("global-gateway-cloudflared.log");
-            let handle = cloudflare::spawn_cloudflare_tunnel(
-                config.local_port,
-                &cwd,
-                &log,
-                "quick",
-                "",
-                "",
-                config.use_proxy,
-            )
+            let (public_url, tunnel) = standalone::start_cloudflare(CloudflareSpec {
+                port: config.local_port,
+                log_name: "global-gateway-cloudflared.log",
+                mode: "quick",
+                token: "",
+                public_url: "",
+                use_proxy: config.use_proxy,
+            })
             .await?;
-            let public_url = handle.public_url.clone();
-            Ok((
-                public_url,
-                Some(TunnelChild::Cloudflare {
-                    child: handle.child,
-                    pid: handle.pid,
-                }),
-            ))
+            Ok((public_url, Some(tunnel)))
         }
         "frp" => {
-            let mut profile = WorkspaceProfile::new(
-                std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .display()
-                    .to_string(),
-                Some("Global Gateway".into()),
-            );
-            profile.id = "global-gateway".into();
-            profile.runtime.local_port = config.local_port;
-            profile.tunnel.tunnel_type = "frp".into();
-            profile.tunnel.frp_profile_id = config.frp_profile_id.clone();
-            profile.tunnel.frp_server = config.frp_server.clone();
-            profile.tunnel.frp_server_port = config.frp_server_port;
-            profile.tunnel.frp_subdomain = config.frp_subdomain.clone();
-            profile.tunnel.use_proxy = config.use_proxy;
-            if profile.tunnel.frp_subdomain.trim().is_empty() {
+            if config.frp_subdomain.trim().is_empty() {
                 return Err(AppError::Message(
                     "全局 Gateway FRP 子域名不能为空。".into(),
                 ));
             }
-            let handle = frp::spawn_frpc(
-                "global-gateway",
-                &[(&profile, TunnelServiceKind::Mcp)],
+            let (public_url, tunnel) = standalone::start_frp(
+                FrpSpec {
+                    name: "global-gateway",
+                    port: config.local_port,
+                    frp_profile_id: &config.frp_profile_id,
+                    frp_server: &config.frp_server,
+                    frp_server_port: config.frp_server_port,
+                    subdomain: &config.frp_subdomain,
+                    use_proxy: config.use_proxy,
+                },
                 settings,
             )
             .await?;
-            let public_url = frp::frp_public_url(&profile, TunnelServiceKind::Mcp, settings);
-            Ok((
-                public_url,
-                Some(TunnelChild::Frp {
-                    child: handle.child,
-                    pid: handle.pid,
-                }),
-            ))
+            Ok((public_url, Some(tunnel)))
         }
         other => Err(AppError::Message(format!(
             "不支持的全局 Gateway tunnel_type: {other}"

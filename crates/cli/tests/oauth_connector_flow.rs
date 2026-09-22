@@ -1,6 +1,6 @@
 //! ChatGPT 连接器接进来时走的那套 OAuth，从发现文档一路跑到 tools/call。
 //!
-//! 这是 `mcp.auth` 的默认值，也就是绝大多数人第一次接客户端时走的路径，
+//! 这是服务认证的默认值，也就是绝大多数人第一次接客户端时走的路径，
 //! 而它由「发现文档 → 动态注册 → 授权页 → PKCE 换 token → 带 token 调用」
 //! 五段拼成，任何一段的字段名写错，客户端那边只会显示一句
 //! “无法连接到 MCP 服务器”，从日志里分不出断在哪一段。
@@ -24,21 +24,10 @@ fn connector_survives_a_service_restart() {
     let env = Env::new();
     env.write("hello.txt", "restart-marker\n");
     let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "restart",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["start"]);
+    env.ok(&["add", ".", "--name", "restart"]);
+    env.ok(&["start", "--port", &port.to_string()]);
 
-    let password = env.json(&["--json", "secret", "show", "oauth_password", "--reveal"])["value"]
-        .as_str()
-        .expect("oauth_password")
-        .to_string();
+    let password = env.service_secret("oauth_password");
     let (client_id, access, refresh, token_path) = connect_a_connector(port, &password);
 
     env.ok(&["stop"]);
@@ -79,7 +68,7 @@ fn connector_survives_a_service_restart() {
     let with_renewed = post_json(
         port,
         "/mcp",
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"hello.txt"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"restart","path":"hello.txt"}}}"#,
         Some(&renewed),
     );
     assert!(
@@ -111,27 +100,16 @@ fn chatgpt_connector_oauth_flow_works_end_to_end() {
     let env = Env::new();
     env.write("hello.txt", "oauth-e2e-marker\n");
     let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "oauth",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    // 不设 mcp.auth：默认就是 oauth，顺带确认默认值没被改掉。
+    env.ok(&["add", ".", "--name", "oauth"]);
+    // 不设认证：默认就是 oauth，顺带确认默认值没被改掉。
     assert_eq!(
-        env.json(&["--json", "ws", "show"])["auth"]["type"],
+        env.json(&["--json", "ls"])["service"]["config"]["authType"],
         "oauth",
-        "新工作区的 MCP 默认认证方式应当是 oauth"
+        "服务的默认认证方式应当是 oauth"
     );
-    env.ok(&["start"]);
+    env.ok(&["start", "--port", &port.to_string()]);
 
-    let password = env.json(&["--json", "secret", "show", "oauth_password", "--reveal"])["value"]
-        .as_str()
-        .expect("oauth_password")
-        .to_string();
+    let password = env.service_secret("oauth_password");
 
     // 1. 没凭据的请求必须被拒，并且要告诉客户端去哪儿拿凭据。
     //    少了 WWW-Authenticate 里的 resource_metadata，ChatGPT 不会发起授权，
@@ -392,7 +370,7 @@ fn chatgpt_connector_oauth_flow_works_end_to_end() {
     let called = post_json(
         port,
         "/mcp",
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"hello.txt"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"oauth","path":"hello.txt"}}}"#,
         Some(&access),
     );
     assert_eq!(called.status, 200);

@@ -10,11 +10,11 @@ use std::process::Command;
 
 use common::env::Env;
 
-/// `gld tool` / `gld doctor` 都在一个已登记的工作区上跑，这里统一建好。
+/// `gld tool` / `gld doctor` 都在一个已登记的项目上跑，这里统一建好。
 fn probe_env() -> Env {
     let env = Env::new();
     env.write("src/main.rs", "fn main() {}\n");
-    env.ok(&["ws", "add", ".", "--name", "probe"]);
+    env.ok(&["add", ".", "--name", "probe"]);
     env
 }
 
@@ -181,7 +181,7 @@ fn exec_sessions_survive_between_calls_only_through_the_daemon() {
 }
 
 #[test]
-fn doctor_passes_on_a_fresh_workspace_and_fails_on_a_broken_tunnel() {
+fn doctor_passes_on_a_fresh_project_and_fails_on_a_broken_tunnel() {
     let env = probe_env();
 
     let healthy = env.json(&["--json", "doctor"]);
@@ -189,11 +189,25 @@ fn doctor_passes_on_a_fresh_workspace_and_fails_on_a_broken_tunnel() {
     assert!(!checks.is_empty());
     assert!(
         !checks.iter().any(|check| check["level"] == "fail"),
-        "新建工作区不该有 fail：{healthy:#}"
+        "新建项目不该有 fail：{healthy:#}"
     );
 
-    // 选了 frp 却没有 FRP 配置：必须报 fail，并给出下一条命令。
-    env.ok(&["ws", "set", "mcp.tunnel=frp"]);
+    // 服务的公网入口引用的 FRP 配置被强删了：必须报 fail，并给出下一条命令。
+    // （配置时就会校验，所以只能这样造出一个悬空引用——`frp remove --force` 是真会发生的。）
+    env.ok(&[
+        "frp",
+        "add",
+        "--name",
+        "office",
+        "--server",
+        "frp.example.com",
+    ]);
+    env.ok(&["upgrade", "--tunnel", "frp:office"]);
+    let id = env.json(&["--json", "frp", "list"])[0]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    env.ok(&["frp", "remove", &id, "--force"]);
     let broken = env.gld(&["--json", "doctor"]);
     assert_eq!(broken.status.code(), Some(1));
     let payload: serde_json::Value = serde_json::from_slice(&broken.stdout).expect("json");
@@ -206,9 +220,16 @@ fn doctor_passes_on_a_fresh_workspace_and_fails_on_a_broken_tunnel() {
             .clone()
     };
 
-    let tunnel = by_label("MCP 公网入口");
+    let tunnel = by_label("公网入口");
+    assert_eq!(tunnel["scope"], "MCP 服务");
     assert_eq!(tunnel["level"], "fail");
-    assert!(tunnel["fix"].as_str().unwrap().contains("gld frp add"));
+    assert!(
+        tunnel["fix"]
+            .as_str()
+            .unwrap()
+            .contains("gld share --tunnel frp:"),
+        "{tunnel:#}"
+    );
 
     // 用了 frp 就必须有 frpc；本机没装时也要报出来（装了则为 ok）。
     //
@@ -222,6 +243,6 @@ fn doctor_passes_on_a_fresh_workspace_and_fails_on_a_broken_tunnel() {
 
     // 人类可读输出里也要带上修复命令。
     let text = String::from_utf8_lossy(&env.gld(&["doctor"]).stdout).into_owned();
-    assert!(text.contains("gld frp add"), "{text}");
+    assert!(text.contains("gld share --tunnel frp:"), "{text}");
     assert!(text.contains("需要处理"), "{text}");
 }

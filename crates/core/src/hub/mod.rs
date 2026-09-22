@@ -93,11 +93,26 @@ pub struct HubSecrets {
     pub oauth_token_secret: String,
 }
 
-/// hub 对外的基地址（不带 `/mcp`）；没有公网入口时为空串。
+/// 起隧道要的密钥，只能由用户给（`gld secret set`），不能重新生成：
+/// 随机一串 Cloudflare 不认。
+pub const HUB_TUNNEL_SECRET_KEYS: &[&str] = &["cloudflare_token"];
+
+/// 按配置推得出的公网基地址（不带 `/mcp`）；没有公网入口、或者要等隧道起来才知道
+/// （Cloudflare 临时地址）时为空串。跑着的服务以 [`runtime::public_base`] 为准。
 ///
-/// 走全局入口时是 `<入口公网地址>/hub`，入口按这个前缀转到 hub 的本地端口；
-/// 入口没启用就退回手动填的 public_url，和工作区 `effective_public_url` 一个口径。
+/// 服务自己的隧道（RFC-0004）优先；没配隧道时走老路子：经全局入口是
+/// `<入口公网地址>/hub`，入口按这个前缀转到本地端口；入口没启用就退回手动填的
+/// public_url，和工作区 `effective_public_url` 一个口径。
 pub fn public_base_url(settings: &AppSettings) -> String {
+    let hub = &settings.hub;
+    match hub.tunnel_type.as_str() {
+        "frp" => return crate::tunnel::standalone::frp_public_base(&frp_spec(hub), settings),
+        "cloudflare" if hub.cloudflare_mode == "named" => {
+            return hub.public_url.trim_end_matches('/').to_string()
+        }
+        "cloudflare" => return String::new(),
+        _ => {}
+    }
     if settings.hub.use_global_gateway && settings.global_gateway.enabled {
         let base = settings.global_gateway.public_url.trim_end_matches('/');
         if base.is_empty() {
@@ -106,6 +121,20 @@ pub fn public_base_url(settings: &AppSettings) -> String {
         return format!("{base}/hub");
     }
     settings.hub.public_url.trim_end_matches('/').to_string()
+}
+
+/// 服务那条 FRP 隧道的参数。`name` 也是它的 frpc 配置和日志目录名，和
+/// [`HUB_SCOPE`] 一样，于是 frpc 的日志就落在服务自己的日志目录里。
+pub fn frp_spec(hub: &HubConfig) -> crate::tunnel::standalone::FrpSpec<'_> {
+    crate::tunnel::standalone::FrpSpec {
+        name: HUB_SCOPE,
+        port: hub.local_port,
+        frp_profile_id: &hub.frp_profile_id,
+        frp_server: "",
+        frp_server_port: 0,
+        subdomain: &hub.frp_subdomain,
+        use_proxy: hub.use_proxy,
+    }
 }
 
 /// hub 自己提供的两个工具。列成员不需要 `workspace`，取说明需要。
@@ -666,7 +695,7 @@ impl Hub {
             return plain_result(tool_err(WorkspaceError::ToolDetails {
                 code: "REMOTE_IS_READ_ONLY",
                 message: format!(
-                    "Remote workspace {} is configured read-only, so it has no writing session. The operator raises that with `gld hub remote add ... --mode coding`.",
+                    "Remote workspace {} is configured read-only, so it has no writing session. The operator raises that with `gld remote add ... --mode coding`.",
                     member.name
                 ),
                 category: "permission",
@@ -1357,6 +1386,35 @@ mod tests {
 
         settings.global_gateway.enabled = true;
         assert_eq!(public_base_url(&settings), "https://gw.example.com/hub");
+    }
+
+    /// 服务自己的隧道优先于老路子（全局入口、手填地址）。临时地址推不出来，
+    /// 是空的——跑着的时候以运行时拿到的为准。
+    #[test]
+    fn the_services_own_tunnel_decides_the_public_address() {
+        let mut settings = AppSettings::default();
+        settings.hub.public_url = "https://fixed.example.com".into();
+        settings.hub.use_global_gateway = true;
+        settings.global_gateway.enabled = true;
+        settings.global_gateway.public_url = "https://gw.example.com".into();
+
+        settings.hub.tunnel_type = "cloudflare".into();
+        settings.hub.cloudflare_mode = "quick".into();
+        assert_eq!(public_base_url(&settings), "");
+
+        settings.hub.cloudflare_mode = "named".into();
+        assert_eq!(public_base_url(&settings), "https://fixed.example.com");
+
+        settings.hub.tunnel_type = "frp".into();
+        settings.hub.frp_profile_id = "p1".into();
+        settings.hub.frp_subdomain = "mcp".into();
+        settings.frp_profiles.push(crate::settings::FrpProfile {
+            id: "p1".into(),
+            name: "公司".into(),
+            server: "frp.example.com".into(),
+            server_port: 7000,
+        });
+        assert_eq!(public_base_url(&settings), "https://mcp.frp.example.com");
     }
 
     #[test]

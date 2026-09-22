@@ -48,6 +48,37 @@ impl App {
         Ok(chunks)
     }
 
+    /// 服务（多项目那一个）的日志：所有项目的请求、监听器报错、隧道输出。
+    ///
+    /// 某个项目的请求在它自己的目录里也有一份（带 `[hub]` 前缀），见 [`Self::workspace_logs`]。
+    pub fn hub_logs(&self, max_bytes: usize) -> AppResult<Vec<LogChunk>> {
+        let hub = self.settings()?.hub;
+        let log_dir = log_dir_for_profile(crate::hub::HUB_SCOPE);
+        let tunnel = match hub.tunnel_type.as_str() {
+            "cloudflare" => Some("cloudflared.log"),
+            "frp" => Some("frpc-mcp.log"),
+            _ => None,
+        };
+        let mut chunks = Vec::new();
+        for name in tunnel
+            .into_iter()
+            .chain(["mcp-requests.log", "stderr.log", "stdout.log"])
+        {
+            let path = log_dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let (content, truncated) = read_log_tail(&path, max_bytes)?;
+            chunks.push(LogChunk {
+                name: name.to_string(),
+                path,
+                content,
+                truncated,
+            });
+        }
+        Ok(chunks)
+    }
+
     /// 工作区日志目录（给 `-f` 跟随模式直接 tail 文件用）。
     pub fn workspace_log_dir(&self, id: &str) -> AppResult<PathBuf> {
         self.ensure_workspace_exists(id)?;

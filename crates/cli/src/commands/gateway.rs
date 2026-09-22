@@ -10,7 +10,7 @@ use crate::output::{or_dash, yes_no};
 
 pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
     match command {
-        GatewayCmd::Show => {
+        GatewayCmd::List => {
             let config: GlobalGatewayConfig =
                 ctx.backend.call_typed(Request::GatewayConfig).await?;
             let status: GlobalGatewayStatusDto =
@@ -46,7 +46,7 @@ pub async fn run(ctx: &mut Ctx, command: GatewayCmd) -> CliResult {
                 ("使用代理", yes_no(config.use_proxy).to_string()),
             ]);
             ctx.out.line("");
-            ctx.out.line(ctx.out.dim("工作区通过 gld ws set mcp.global-gateway=true 接入，公网路径为 <公网地址>/w/<工作区id>/mcp"));
+            ctx.out.line(ctx.out.dim("这是旧的共享入口：项目的 GPT Actions 用 gld set <项目> actions.global-gateway=true 接入；MCP 服务的公网入口用 gld share"));
             Ok(())
         }
         GatewayCmd::Set(args) => {

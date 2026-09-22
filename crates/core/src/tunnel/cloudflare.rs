@@ -178,7 +178,7 @@ impl SpawnFailure {
                 AppError::Message(format!(
                     "cloudflared 起来了，但 {} 秒内没能连上 Cloudflare 边缘{tried}。\n\
                      依次排查：1) 本机 {port} 端口的 MCP 服务是否在跑（gld status）；\
-                     2) 出网是否需要代理（gld settings proxy --mode manual --url http://127.0.0.1:7890）；\
+                     2) 出网是否需要代理（gld cfg proxy --mode manual --url http://127.0.0.1:7890）；\
                      3) 看日志 {log_hint}",
                     READY_TIMEOUT.as_secs(),
                     log_hint = log_path.display()

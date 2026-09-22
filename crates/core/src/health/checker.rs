@@ -187,24 +187,9 @@ pub async fn check_public_endpoint(
             "actions",
         ),
     };
-    // 不把 Access 登录页的重定向当成 MCP/Actions 入口响应。
-    let mut builder = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none());
-    if is_loopback_url(&url) {
-        builder = builder.no_proxy();
-    }
-    let client = builder.build().expect("failed to build HTTP client");
-    let mut detail = String::new();
-    for attempt in 0..3 {
-        let (ok, result) = check_url(&client, &url).await;
-        detail = result;
-        if ok {
-            return health_item("公网端点", true, detail, "");
-        }
-        if attempt < 2 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+    let (ok, detail) = probe_with_retries(&url).await;
+    if ok {
+        return health_item("公网端点", true, detail, "");
     }
     health_item(
         "公网端点",
@@ -216,6 +201,115 @@ pub async fn check_public_endpoint(
              或用 gld start --service {service} --port <回源端口> 对齐本地端口。若端口一致，再检查域名、路径、网络和访问策略。"
         ),
     )
+}
+
+/// 服务（RFC-0004 之后唯一的那个 MCP 入口）起完固定地址的隧道后探一次公网。
+///
+/// 和 [`check_public_endpoint`] 一样的探法，只是端口和地址来自服务配置而不是工作区。
+pub async fn check_service_public_endpoint(public_endpoint: &str, port: u16) -> HealthItem {
+    let (ok, detail) = probe_with_retries(public_endpoint).await;
+    if ok {
+        return health_item("公网端点", true, detail, "");
+    }
+    health_item(
+        "公网端点",
+        false,
+        format!("{public_endpoint}: {detail}"),
+        &format!(
+            "Cloudflare 固定隧道的回源由云端配置控制，gld 不会自动修改它。\n\
+             请核对该域名的回源服务为 http://127.0.0.1:{port}（HTTP，不附加 /mcp）；\n\
+             或用 gld upgrade --port <回源端口> 对齐本地端口。若端口一致，再检查域名、路径、网络和访问策略。"
+        ),
+    )
+}
+
+/// 不跟重定向（Access 登录页的 302 不算入口有响应），失败最多重试两次。
+async fn probe_with_retries(url: &str) -> (bool, String) {
+    let mut builder = reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none());
+    if is_loopback_url(url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().expect("failed to build HTTP client");
+    let mut detail = String::new();
+    for attempt in 0..3 {
+        let (ok, result) = check_url(&client, url).await;
+        detail = result;
+        if ok {
+            return (true, detail);
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    (false, detail)
+}
+
+/// 服务的逐项检查：本地 /mcp、公网 /mcp，认证是 OAuth 时再看两份元数据。
+///
+/// 不是 OAuth 就不查元数据：bearer / noauth 的服务本来就没有它们，报两个 ✗ 只会
+/// 让人去修一个不存在的问题。
+pub async fn run_service_health_checks(
+    local_endpoint: &str,
+    public_base: &str,
+    oauth: bool,
+) -> Vec<HealthItem> {
+    let clients = Clients::new();
+    let (local_ok, local_detail) = check_url(clients.for_url(local_endpoint), local_endpoint).await;
+    let mut items = vec![health_item(
+        "本地 /mcp",
+        local_ok,
+        local_detail,
+        "服务没在跑就 gld start；在跑却不通，看 gld logs。",
+    )];
+    if public_base.is_empty() {
+        items.push(health_item(
+            "公网 /mcp",
+            false,
+            "没有公网入口".into(),
+            "本机客户端用不着它；要接 ChatGPT 就 gld share。",
+        ));
+        return items;
+    }
+    let public_endpoint = format!("{}/mcp", public_base.trim_end_matches('/'));
+    let (public_ok, public_detail) =
+        check_mcp_public_url(clients.for_url(&public_endpoint), &public_endpoint).await;
+    items.push(health_item(
+        "公网 /mcp",
+        public_ok,
+        public_detail,
+        "检查隧道是否已连接（gld status），或公网地址是否写对。",
+    ));
+    if oauth {
+        let oauth_url = well_known_url(public_base, ".well-known/oauth-authorization-server");
+        let (ok, detail) = check_json_field(
+            clients.for_url(&oauth_url),
+            &oauth_url,
+            "token_endpoint_auth_methods_supported",
+        )
+        .await;
+        items.push(health_item(
+            "OAuth 授权元数据",
+            ok,
+            detail,
+            "公网地址要能访问；自建反代要把 /.well-known/ 也转过来。",
+        ));
+        let protected_url = well_known_url(public_base, ".well-known/oauth-protected-resource");
+        let (ok, detail) = check_json_field(
+            clients.for_url(&protected_url),
+            &protected_url,
+            "authorization_servers",
+        )
+        .await;
+        items.push(health_item(
+            "OAuth 受保护资源",
+            ok,
+            detail,
+            "确认公网根地址和服务配置里的一致（gld ls）。",
+        ));
+    }
+    items
 }
 
 pub async fn run_health_checks(profile: &WorkspaceProfile) -> Vec<HealthItem> {
@@ -306,7 +400,7 @@ pub async fn run_health_checks(profile: &WorkspaceProfile) -> Vec<HealthItem> {
             "本地 Actions /health",
             actions_local_ok,
             actions_local_detail,
-            "确认 Actions 服务已启动；端口被别的程序占着就换一个：gld ws set actions.port=<其他端口>",
+            "确认 Actions 服务已启动；端口被别的程序占着就换一个：gld set <项目> actions.port=<其他端口>",
         ),
         health_item(
             "本地 Actions /openapi.json",

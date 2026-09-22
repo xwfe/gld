@@ -230,7 +230,7 @@ pub fn spawn_hub_listener(
     if auth.bearer_enabled() && secrets.bearer_token.is_empty() {
         return Err(
             "聚合入口的认证方式是 bearer，但没有 bearer_token，任何客户端都会拿 401。\
-             先执行 `gld hub regen bearer_token`。"
+             先执行 `gld secret regen bearer_token`。"
                 .into(),
         );
     }

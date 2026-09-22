@@ -5,17 +5,28 @@ use gld_daemon::Request;
 use serde_json::Value;
 
 use super::Ctx;
-use crate::cli::ContextArgs;
+use crate::cli::{ContextArgs, HealthArgs, TunnelService};
 use crate::error::{CliError, CliResult};
 use crate::output::human_time;
 
-pub async fn health(ctx: &mut Ctx) -> CliResult {
-    let items: Vec<HealthItem> = ctx
-        .backend
-        .call_typed(Request::Health {
-            target: ctx.target.clone(),
-        })
-        .await?;
+pub async fn health(ctx: &mut Ctx, args: HealthArgs) -> CliResult {
+    let items: Vec<HealthItem> = match args.service {
+        TunnelService::Mcp => ctx.backend.call_typed(Request::HubHealth).await?,
+        // 项目的 GPT Actions：旧的逐项目检查里只留 Actions 那几项——MCP 那几项查的是
+        // 项目自己那个已经没有了的监听器。
+        TunnelService::Actions => {
+            let items: Vec<HealthItem> = ctx
+                .backend
+                .call_typed(Request::Health {
+                    target: ctx.target.clone(),
+                })
+                .await?;
+            items
+                .into_iter()
+                .filter(|item| item.label.contains("Actions"))
+                .collect()
+        }
+    };
     if ctx.out.json_or(&items) {
         return Ok(());
     }
@@ -31,11 +42,6 @@ pub async fn health(ctx: &mut Ctx) -> CliResult {
         }
     }
     let failed = items.iter().filter(|item| !item.ok).count();
-    ctx.out.line("");
-    ctx.out.line(
-        ctx.out
-            .dim("没配置的入口（例如没开 Actions）显示失败是正常的；只看你实际使用的那几项。"),
-    );
     if failed == items.len() {
         return Err(CliError::new(
             "所有检查项均失败：服务大概率没有启动，先执行 gld start。",
@@ -92,20 +98,42 @@ fn pick(value: &Value, keys: &[&str]) -> String {
 }
 
 pub async fn usage(ctx: &mut Ctx) -> CliResult {
-    let stats: Vec<ServiceUsageStats> = ctx
-        .backend
-        .call_typed(Request::Usage {
-            target: ctx.target.clone(),
-        })
-        .await?;
-    if ctx.out.json_or(&stats) {
+    // 服务一行（所有项目合计）；给了 -w 再加上那个项目的 GPT Actions。
+    let service: Option<ServiceUsageStats> = ctx.backend.call_typed(Request::HubUsage).await?;
+    let mut stats: Vec<(String, ServiceUsageStats)> = Vec::new();
+    if let Some(service) = service {
+        stats.push(("MCP 服务".into(), service));
+    }
+    if ctx.explicit_workspace {
+        let project: Vec<ServiceUsageStats> = ctx
+            .backend
+            .call_typed(Request::Usage {
+                target: ctx.target.clone(),
+            })
+            .await?;
+        stats.extend(
+            project
+                .into_iter()
+                .filter(|item| item.service == "actions")
+                .map(|item| ("GPT Actions".into(), item)),
+        );
+    }
+    if ctx
+        .out
+        .json_or(&stats.iter().map(|(_, item)| item).collect::<Vec<_>>())
+    {
+        return Ok(());
+    }
+    if stats.is_empty() {
+        ctx.out
+            .line("服务没在跑，没有可统计的请求。gld start 之后再看。");
         return Ok(());
     }
     let rows = stats
         .iter()
-        .map(|s| {
+        .map(|(label, s)| {
             vec![
-                s.service.clone(),
+                label.clone(),
                 s.request_count.to_string(),
                 s.tool_call_count.to_string(),
                 s.error_count.to_string(),
@@ -125,9 +153,11 @@ pub async fn usage(ctx: &mut Ctx) -> CliResult {
         ],
         &rows,
     );
-    ctx.out.line(ctx.out.dim(
-        "Token 按请求 / 响应大小估算（4 字节 ≈ 1 token），不保存请求正文；守护进程重启后清零。",
-    ));
+    ctx.out.line(
+        ctx.out.dim(
+            "Token 按请求 / 响应大小估算（4 字节 ≈ 1 token），不保存请求正文；服务重启后清零。",
+        ),
+    );
     Ok(())
 }
 
@@ -154,7 +184,7 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
         }
         ctx.out.line("");
         ctx.out.line(format!(
-            "可启用：gld settings runtime --instruction-sources {} --skill-sources {}",
+            "可启用：gld cfg runtime --instruction-sources {} --skill-sources {}",
             scan.detected_instruction_sources.join(","),
             scan.detected_skill_sources.join(",")
         ));
@@ -284,8 +314,10 @@ pub async fn context(ctx: &mut Ctx, args: ContextArgs) -> CliResult {
                 "打 · 的 Skill 没进目录：compact 档的目录有字符上限。它们没有失效——AI 调 list_skills 照样拿得到，只是不会自己想起来。",
             ));
         }
-        ctx.out
-            .line(ctx.out.dim("要全部进去：gld ws set tool-profile=advanced"));
+        ctx.out.line(
+            ctx.out
+                .dim("要全部进去：gld set <项目> tool-profile=advanced"),
+        );
     }
     Ok(())
 }

@@ -106,10 +106,10 @@ impl App {
 
     /// 删除一个 FRP 服务器配置。
     ///
-    /// 还有工作区指着它时默认拒绝：删掉之后那些工作区不会有任何变化，
-    /// 直到某次 `gld start` 报「引用的 FRP 配置 xxx 不存在」——那时手里
-    /// 只剩一个 id，已经查不出它原来是哪台服务器了。确实要删就加 `force`，
-    /// 报错里会告诉你有哪些工作区受影响。
+    /// 还有人指着它时默认拒绝（服务的公网入口、项目的 GPT Actions、全局入口）：
+    /// 删掉之后它们不会有任何变化，直到某次 `gld start` 报「引用的 FRP 配置 xxx
+    /// 不存在」——那时手里只剩一个 id，已经查不出它原来是哪台服务器了。确实要删就加
+    /// `force`，报错里会告诉你有哪些地方受影响。
     pub fn delete_frp_profile(&self, id: &str, force: bool) -> AppResult<()> {
         self.with_data(|store| {
             let mut settings = store.settings();
@@ -118,16 +118,19 @@ impl App {
             };
             if !force {
                 let mut users = frp_profile_users(store.list(), id);
+                if settings.hub.tunnel_type == "frp" && settings.hub.frp_profile_id == id {
+                    users.insert(0, "  MCP 服务的公网入口（gld ls）".to_string());
+                }
                 if settings.global_gateway.frp_profile_id == id {
-                    users.push("  全局入口（gld gateway show）".to_string());
+                    users.push("  全局入口（gld gateway ls）".to_string());
                 }
                 if !users.is_empty() {
                     let name = settings.frp_profiles[position].name.clone();
                     return Err(AppError::Message(format!(
                         "FRP 配置「{name}」还在被这些地方用着：\n{}\n\
-                         先把它们改到别的配置（gld ws set -w <工作区> frp-profile=<名称>）\
-                         或收回公网入口（gld share --off -w <工作区>）；\
-                         确定要留下悬空引用就加 --force。",
+                         先把它们改到别的配置（服务：gld share --tunnel frp:<名称>；\
+                         项目的 GPT Actions：gld set <项目> actions.frp-profile=<名称>）\
+                         或收回公网入口（gld share --off）；确定要留下悬空引用就加 --force。",
                         users.join("\n")
                     )));
                 }
@@ -223,19 +226,16 @@ fn validate_proxy_mode(mode: &str, url: &str) -> AppResult<()> {
 /// 哪些工作区的哪条线路正引用着这个 FRP 配置，写成可读的一行一条。
 ///
 /// 全局入口（gateway）不在这里查：它的配置在 settings 里，由调用方另外判断。
+/// 哪些项目的 GPT Actions 指着这个 FRP 配置。
+///
+/// 项目自己那个 MCP 服务的引用不算（RFC-0004 之后没有它了，那个字段也改不了）：
+/// 算进来的话，删配置会被一个谁也改不动的引用挡住。
 fn frp_profile_users(profiles: &[crate::workspace::WorkspaceProfile], id: &str) -> Vec<String> {
-    let mut users = Vec::new();
-    for profile in profiles {
-        for (label, referenced) in [
-            ("MCP", profile.tunnel.frp_profile_id.as_str()),
-            ("Actions", profile.actions.frp_profile_id.as_str()),
-        ] {
-            if referenced == id {
-                users.push(format!("  工作区「{}」的 {label}", profile.name));
-            }
-        }
-    }
-    users
+    profiles
+        .iter()
+        .filter(|profile| profile.actions.frp_profile_id == id)
+        .map(|profile| format!("  项目「{}」的 GPT Actions", profile.name))
+        .collect()
 }
 
 #[cfg(test)]
@@ -251,16 +251,17 @@ mod tests {
     }
 
     #[test]
-    fn frp_profile_users_names_each_side_separately() {
+    fn frp_profile_users_counts_only_the_actions_lines() {
         let profiles = vec![
             workspace("api", "p1", ""),
             workspace("web", "p2", "p1"),
             workspace("both", "p1", "p1"),
         ];
         let users = frp_profile_users(&profiles, "p1");
-        assert_eq!(users.len(), 4, "{users:#?}");
-        assert!(users[0].contains("api") && users[0].contains("MCP"));
-        assert!(users[1].contains("web") && users[1].contains("Actions"));
+        // 项目自己那个 MCP 服务的引用不算：它没有了，那个字段也改不动。
+        assert_eq!(users.len(), 2, "{users:#?}");
+        assert!(users[0].contains("web") && users[0].contains("Actions"));
+        assert!(users[1].contains("both"));
         assert!(frp_profile_users(&profiles, "p3").is_empty());
     }
 }

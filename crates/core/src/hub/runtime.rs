@@ -14,12 +14,26 @@ use crate::error::{AppError, AppResult};
 use crate::mcp::ShutdownSender;
 use crate::runtime::await_listener_shutdown;
 use crate::settings::HubConfig;
+use crate::tunnel::standalone::StandaloneTunnel;
 
 struct HubRuntime {
     port: u16,
     shutdown: Option<ShutdownSender>,
     handle: JoinHandle<()>,
     hub: Arc<Hub>,
+    /// 服务自己的隧道进程，跟着监听器一起停。
+    tunnel: Option<StandaloneTunnel>,
+    /// 这次起来实际用的公网基地址。Cloudflare 临时地址每次都不一样，配置里推不出来。
+    public_base: String,
+    /// 隧道没起来的原因。服务照样在本地跑（本机客户端不受影响），`gld ls` 把它报出来。
+    tunnel_error: String,
+}
+
+/// 这次起隧道的结果，由调用方（`App`）起好交进来。
+pub struct TunnelOutcome {
+    pub public_base: String,
+    pub tunnel: Option<StandaloneTunnel>,
+    pub error: String,
 }
 
 static RUNTIME: LazyLock<Mutex<Option<HubRuntime>>> = LazyLock::new(|| Mutex::new(None));
@@ -40,7 +54,7 @@ pub enum HubState {
 /// 按给定配置起监听器。调用方要先 [`stop`] 并确认端口空出来。
 pub async fn start(
     config: &HubConfig,
-    public_base_url: String,
+    outcome: TunnelOutcome,
     secrets: HubSecrets,
 ) -> AppResult<()> {
     let mut guard = RUNTIME.lock().await;
@@ -48,19 +62,31 @@ pub async fn start(
         stop_runtime(previous).await;
     }
     let hub = Arc::new(Hub::new(config));
-    let (shutdown, handle) = crate::mcp::spawn_hub_listener(
+    let spawned = crate::mcp::spawn_hub_listener(
         config.local_port,
         hub.clone(),
         &config.auth_type,
-        public_base_url,
+        outcome.public_base.clone(),
         secrets,
-    )
-    .map_err(AppError::Message)?;
+    );
+    let (shutdown, handle) = match spawned {
+        Ok(listener) => listener,
+        Err(error) => {
+            // 监听器起不来，隧道留着就成了一条转到没人听的端口的孤儿进程。
+            if let Some(tunnel) = outcome.tunnel {
+                tunnel.stop().await;
+            }
+            return Err(AppError::Message(error));
+        }
+    };
     *guard = Some(HubRuntime {
         port: config.local_port,
         shutdown: Some(shutdown),
         handle,
         hub,
+        tunnel: outcome.tunnel,
+        public_base: outcome.public_base,
+        tunnel_error: outcome.error,
     });
     Ok(())
 }
@@ -69,6 +95,24 @@ pub async fn stop() {
     if let Some(runtime) = RUNTIME.lock().await.take() {
         stop_runtime(runtime).await;
     }
+}
+
+/// 跑着的服务实际用的公网基地址和隧道报错；没在跑是 `None`。
+pub async fn public_base() -> Option<(String, String)> {
+    RUNTIME
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| (runtime.public_base.clone(), runtime.tunnel_error.clone()))
+}
+
+/// 服务这次运行期间的请求统计（所有项目合计）。没在跑是 `None`。
+pub async fn usage() -> Option<crate::usage::ServiceUsageStats> {
+    RUNTIME
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| runtime.hub.usage().snapshot(super::HUB_SCOPE, "mcp"))
 }
 
 pub async fn state() -> HubState {
@@ -84,6 +128,9 @@ async fn stop_runtime(mut runtime: HubRuntime) {
         let _ = shutdown.send(());
     }
     await_listener_shutdown(Some(runtime.handle), runtime.port).await;
+    if let Some(tunnel) = runtime.tunnel.take() {
+        tunnel.stop().await;
+    }
     // 成员里经 hub 起的命令，hub 停了就没人能再读它们的输出或杀掉它们。
     // 结束进程要阻塞等待，不能占着异步 worker。
     let hub = runtime.hub;

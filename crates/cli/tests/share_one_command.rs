@@ -1,4 +1,6 @@
-//! `gld share`：从"刚登记完项目"到"手里有个能贴进 ChatGPT 的公网地址"。
+//! `gld share`：从"刚加完项目"到"手里有个能贴进 ChatGPT 的公网地址"。
+//!
+//! RFC-0004 之后公网入口属于服务（只有一个），不再是每个项目一条隧道。
 //!
 //! 这条路以前要三条命令，中间那条 `gld restart` 忘了就是"配了没反应"。
 //! 合成一条之后，值得盯住的是三件在真实使用中最容易出岔子的事：
@@ -8,12 +10,26 @@
 //! 2. 隧道起不来必须当场报错。start 内部那次隧道尝试是"失败只写日志"的
 //!    （不能让隧道问题把服务一起拖垮），照搬到 share 上就会变成
 //!    "报告成功、但没有地址"；
-//! 3. 关掉之后不能留残值：从有地址切到 --off，`gld list` 不该还显示
+//! 3. 关掉之后不能留残值：从有地址切到 --off，`gld ls` 不该还显示
 //!    那个已经失效的地址。
 
 mod common;
 
 use common::env::{free_port, Env};
+
+/// 服务现在的公网地址（带 `/mcp`），没有就是空串。
+fn public_endpoint(env: &Env) -> String {
+    env.json(&["--json", "ls"])["service"]["publicEndpoint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// 加一个项目，服务端口定下来，但先不起。
+fn project(env: &Env, name: &str) {
+    env.ok(&["add", ".", "--name", name]);
+    env.ok(&["upgrade", "--port", &free_port().to_string()]);
+}
 
 /// 一个假的 cloudflared：打出 quick 隧道那两行关键日志，然后挂着不退。
 ///
@@ -27,19 +43,10 @@ while true; do sleep 1; done
 ";
 
 #[test]
-fn share_takes_a_fresh_workspace_all_the_way_to_a_public_url() {
+fn share_takes_a_fresh_project_all_the_way_to_a_public_url() {
     let mut env = Env::new();
     env.fake_binary("cloudflared", FAKE_CLOUDFLARED);
-    let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "pub",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
+    project(&env, "pub");
 
     // 服务此刻没在跑，一条 share 要负责起服务 + 起隧道 + 报地址。
     let text = env.ok(&["share"]);
@@ -48,19 +55,52 @@ fn share_takes_a_fresh_workspace_all_the_way_to_a_public_url() {
         "没拿到公网地址：{text}"
     );
 
-    let overview = env.json(&["--json", "ps"]);
+    let overview = env.json(&["--json", "status"]);
     assert_eq!(
-        overview.as_array().map(Vec::len),
-        Some(1),
+        overview["service"]["state"], "running",
         "share 应当把服务拉起来：{overview}"
     );
 
     // --off 要把地址清干净，不能留一个已经失效的值在 ls 里显示。
     env.ok(&["share", "--off"]);
-    let after = env.json(&["--json", "list"]);
+    assert_eq!(public_endpoint(&env), "", "关掉之后还留着旧地址");
+}
+
+/// 一个假的 frpc：问版本就答一个够新的版本，否则打出"代理起来了"那行然后挂着。
+const FAKE_FRPC: &str = "#!/bin/sh
+if [ \"$1\" = \"--version\" ]; then echo 0.61.2; exit 0; fi
+echo '[hub-mcp] start proxy success'
+while true; do sleep 1; done
+";
+
+/// FRP 固定域名：服务的子域名默认是 gld，`--subdomain` 能换；公网地址就是
+/// `https://<子域名>.<frps 域名>/mcp`。
+#[cfg(unix)]
+#[test]
+fn share_through_frp_uses_the_service_subdomain() {
+    let mut env = Env::new();
+    env.fake_binary("frpc", FAKE_FRPC);
+    env.ok(&[
+        "frp",
+        "add",
+        "--name",
+        "office",
+        "--server",
+        "frp.example.com",
+        "--token",
+        "frps-token",
+    ]);
+    project(&env, "viafrp");
+
+    env.ok(&["share", "--tunnel", "frp:office"]);
+    assert_eq!(public_endpoint(&env), "https://gld.frp.example.com/mcp");
+
+    env.ok(&["share", "--tunnel", "frp:office", "--subdomain", "mine"]);
+    assert_eq!(public_endpoint(&env), "https://mine.frp.example.com/mcp");
     assert_eq!(
-        after["mcp"]["public_url"], "",
-        "关掉之后还留着旧地址：{after}"
+        env.json(&["--json", "status"])["service"]["tunnelError"],
+        "",
+        "隧道该是好的"
     );
 }
 
@@ -82,15 +122,7 @@ fn share_reports_the_missing_binary_instead_of_a_silent_no_url() {
         return;
     }
     let env = Env::new();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "nocf",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    project(&env, "nocf");
 
     let output = env.gld(&["share"]);
     assert!(!output.status.success(), "没有隧道却报成功了");
@@ -112,22 +144,19 @@ fn share_reports_the_missing_binary_instead_of_a_silent_no_url() {
 #[test]
 fn a_ready_made_url_does_not_need_any_tunnel_binary() {
     let env = Env::new();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "own",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    project(&env, "own");
 
     env.ok(&["share", "--tunnel", "https://mcp.example.com/"]);
-    let ls = env.json(&["--json", "list"]);
     assert_eq!(
-        ls["mcp"]["public_url"], "https://mcp.example.com/mcp",
-        "登记的公网地址没生效：{ls}"
+        public_endpoint(&env),
+        "https://mcp.example.com/mcp",
+        "登记的公网地址没生效"
     );
+
+    // 再敲一次不带 --tunnel 的 share：沿用已经配好的入口。以前这里一律换成
+    // Cloudflare 临时地址，对一个配了固定地址的服务等于顺手把它抹了。
+    env.ok(&["share"]);
+    assert_eq!(public_endpoint(&env), "https://mcp.example.com/mcp");
 }
 
 /// 用户手里的地址通常是从客户端复制来的完整端点，末尾就带着 `/mcp`。
@@ -137,27 +166,16 @@ fn a_ready_made_url_does_not_need_any_tunnel_binary() {
 #[test]
 fn a_pasted_endpoint_does_not_end_up_doubled() {
     let env = Env::new();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "pasted",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    project(&env, "pasted");
 
     env.ok(&["share", "--tunnel", "https://mcp.example.com/mcp"]);
-    assert_eq!(
-        env.json(&["--json", "list"])["mcp"]["public_url"],
-        "https://mcp.example.com/mcp"
-    );
+    assert_eq!(public_endpoint(&env), "https://mcp.example.com/mcp");
 }
 
 /// 缺 Tunnel Token 要在动手之前拦住，并说清楚怎么补上。
 ///
 /// 以前这个值只能事先 `gld secret set cloudflare_token`，忘了的话整条命令会
-/// 一路打成功——登记工作区、写配置、起服务——直到最后一步才蹦出
+/// 一路打成功——加项目、写配置、起服务——直到最后一步才蹦出
 /// "需要填写 Tunnel Token"。前面全是成功，用户只会以为整条命令失败了。
 #[test]
 fn a_named_cloudflare_tunnel_refuses_before_it_starts_anything() {
@@ -176,8 +194,8 @@ fn a_named_cloudflare_tunnel_refuses_before_it_starts_anything() {
     assert!(stderr.contains("Tunnel Token"), "没说缺什么：{stderr}");
     assert!(stderr.contains("--token"), "报错要给出怎么补上：{stderr}");
     assert_eq!(
-        env.json(&["--json", "ps"]).as_array().map(Vec::len),
-        Some(0),
+        env.json(&["--json", "status"])["service"]["state"],
+        "stopped",
         "拦截发生得太晚，服务已经起来了"
     );
 }
@@ -186,15 +204,7 @@ fn a_named_cloudflare_tunnel_refuses_before_it_starts_anything() {
 #[test]
 fn the_tunnel_token_can_be_given_on_the_command_line() {
     let env = Env::new();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "named",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    project(&env, "named");
 
     // 服务没在跑，upgrade 只写配置不去起隧道——这里要验的是 token 有没有落到位。
     env.ok(&[
@@ -205,27 +215,19 @@ fn the_tunnel_token_can_be_given_on_the_command_line() {
         "tok-abc123",
     ]);
 
-    let secret = env.json(&["--json", "secret", "show", "cloudflare_token", "--reveal"]);
-    assert_eq!(secret["value"], "tok-abc123", "token 没存进去：{secret}");
     assert_eq!(
-        env.json(&["--json", "list"])["mcp"]["public_url"],
-        "https://mcp.example.com/mcp"
+        env.service_secret("cloudflare_token"),
+        "tok-abc123",
+        "token 没存进去"
     );
+    assert_eq!(public_endpoint(&env), "https://mcp.example.com/mcp");
 }
 
 /// FRP 配置填了个不存在的名字，要在这一步就拦住并把已有的列出来。
 #[test]
 fn share_rejects_an_unknown_frp_profile_up_front() {
     let env = Env::new();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "frp-ws",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    project(&env, "frp-ws");
     env.ok(&[
         "frp",
         "add",
@@ -249,15 +251,7 @@ fn share_rejects_an_unknown_frp_profile_up_front() {
 #[test]
 fn a_malformed_tunnel_value_is_rejected_before_anything_changes() {
     let env = Env::new();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "bad",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    project(&env, "bad");
 
     // 忘了协议头是最常见的写法错误，不能被当成某种模式名默默吃掉。
     let output = env.gld(&["share", "--tunnel", "mcp.example.com"]);
@@ -269,30 +263,18 @@ fn a_malformed_tunnel_value_is_rejected_before_anything_changes() {
         "报错要列出可用写法：{stderr}"
     );
 
-    assert_eq!(
-        env.json(&["--json", "list"])["mcp"]["public_url"],
-        "",
-        "被拒绝的参数不该改到配置"
-    );
+    assert_eq!(public_endpoint(&env), "", "被拒绝的参数不该改到配置");
 }
 
 /// 反过来也得挡：正在被引用的 FRP 配置不能说删就删。
 ///
-/// 删掉之后引用它的工作区不会有任何变化，直到某次 start 报
+/// 删掉之后引用它的服务不会有任何变化，直到某次 start 报
 /// 「引用的 FRP 配置 3f58e6b4… 不存在」——那时手里只剩一个 id，
 /// 已经查不出它原来是哪台服务器、token 是什么了。
 #[test]
 fn removing_an_frp_profile_still_in_use_needs_force() {
     let env = Env::new();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "user",
-        "--mcp-port",
-        &free_port().to_string(),
-    ]);
+    project(&env, "user");
     env.ok(&[
         "frp",
         "add",
@@ -301,7 +283,8 @@ fn removing_an_frp_profile_still_in_use_needs_force() {
         "--server",
         "frp.example.com",
     ]);
-    env.ok(&["ws", "set", "tunnel=frp", "frp-profile=office"]);
+    // 服务没在跑：只写配置，不去起 frpc。
+    env.ok(&["upgrade", "--tunnel", "frp:office"]);
     let id = env.json(&["--json", "frp", "list"])[0]["id"]
         .as_str()
         .expect("id")
@@ -312,7 +295,7 @@ fn removing_an_frp_profile_still_in_use_needs_force() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("还在被这些地方用着"), "{stderr}");
     assert!(
-        stderr.contains("工作区「user」的 MCP"),
+        stderr.contains("MCP 服务的公网入口"),
         "要指名道姓说是谁在用：{stderr}"
     );
     assert_eq!(

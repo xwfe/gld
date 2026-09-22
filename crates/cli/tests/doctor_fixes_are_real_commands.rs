@@ -7,7 +7,9 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use gld_core::app::{config_checks, port_check, software_check, PortOccupant};
+use gld_core::app::{
+    config_checks, port_check, service_checks, service_port_check, software_check, PortOccupant,
+};
 use gld_core::runtime::ServiceKind;
 use gld_core::settings::{AppSettings, FrpProfile};
 use gld_core::workspace::WorkspaceProfile;
@@ -105,6 +107,41 @@ fn all_fix_texts() -> BTreeSet<String> {
 
     let mut checks = config_checks(&profiles, &settings, &|_, _, _| false);
 
+    // 服务自己的几种坏法：noauth 挂公网 / 开局域网、FRP 缺配置 / 悬空 / 缺子域名、
+    // 固定域名缺域名 / 缺 token、老配置走了没开的全局入口、没有公网入口、有项目不在服务里。
+    let service_cases: [(&str, &str, &str, &str, &str, bool); 9] = [
+        ("noauth", "cloudflare", "quick", "", "", false),
+        ("noauth", "none", "quick", "", "", false),
+        ("oauth", "frp", "quick", "", "", false),
+        ("oauth", "frp", "quick", "missing-id", "sub", false),
+        ("oauth", "frp", "quick", "known", "", false),
+        ("oauth", "cloudflare", "named", "", "", false),
+        (
+            "oauth",
+            "cloudflare",
+            "named",
+            "https://mcp.example.com",
+            "",
+            false,
+        ),
+        ("oauth", "none", "quick", "", "", true),
+        ("oauth", "none", "quick", "", "", false),
+    ];
+    for (auth, tunnel, mode, profile_or_url, subdomain, gateway) in service_cases {
+        let mut service = settings.clone();
+        service.hub.auth_type = auth.into();
+        service.hub.tunnel_type = tunnel.into();
+        service.hub.cloudflare_mode = mode.into();
+        if tunnel == "frp" {
+            service.hub.frp_profile_id = profile_or_url.into();
+        } else {
+            service.hub.public_url = profile_or_url.into();
+        }
+        service.hub.frp_subdomain = subdomain.into();
+        service.hub.use_global_gateway = gateway;
+        checks.extend(service_checks(&profiles, &service, &|_| false));
+    }
+
     // 端口检查的每种组合（判定已抽成纯函数，这里穷举）。
     let occupied = Some(PortOccupant {
         is_self: false,
@@ -122,8 +159,16 @@ fn all_fix_texts() -> BTreeSet<String> {
             (false, own.clone()),
             (false, None),
         ] {
-            checks.push(port_check("ws", kind, 28766, running, occupant));
+            checks.push(port_check("ws", kind, 28766, running, occupant.clone()));
         }
+    }
+    for (running, occupant) in [
+        (true, None),
+        (true, occupied.clone()),
+        (false, occupied.clone()),
+        (false, None),
+    ] {
+        checks.push(service_port_check(28764, running, occupant));
     }
 
     // 外部二进制：装了 / 没装。

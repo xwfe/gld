@@ -1,169 +1,62 @@
+//! 项目的增删改：`gld add` / `gld rm` / `gld set` / `gld fields`，以及旧的 `gld ws …`。
+//!
+//! 看（`gld ls`）在 [`super::service`]：项目表和服务的连接信息是同一屏。
+
 use std::io::{BufRead, IsTerminal, Write};
 
 use gld_core::app::{
-    workspace_field_catalog, WorkspaceCreateOptions, WorkspaceTarget, WorkspaceUpdate,
+    workspace_field_catalog, HubMemberDto, HubMembershipChange, HubStatusDto, WorkspaceTarget,
+    WorkspaceUpdate,
 };
 use gld_core::runtime::ServiceKind;
 use gld_core::workspace::WorkspaceProfile;
 use gld_daemon::Request;
 
-use super::Ctx;
-use crate::cli::{DestroyArgs, WorkspaceCmd};
+use super::{service, Ctx};
+use crate::cli::{AddArgs, ListArgs, RemoveArgs, SetArgs, WorkspaceCmd};
 use crate::error::{CliError, CliResult};
-use crate::output::yes_no;
 
+/// 旧的 `gld ws …`：照新语义走（`ws add` 也会加入服务）。
 pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
     match command {
         WorkspaceCmd::Add {
             path,
             name,
-            mcp_port,
+            mcp_port: _,
             actions_port,
         } => {
-            let profile: WorkspaceProfile = ctx
-                .backend
-                .call_typed(Request::CreateWorkspace {
-                    path: super::absolutize(&path)?,
-                    options: WorkspaceCreateOptions {
-                        name,
-                        mcp_port,
-                        actions_port,
-                    },
-                })
-                .await?;
-            if !ctx.out.json_or(&profile) {
-                ctx.out.line(format!("已添加工作区「{}」", profile.name));
-                show_profile(ctx, &profile);
-                ctx.out.line("");
-                ctx.out.line(format!(
-                    "下一步：gld start -w {}   （或进入该目录后直接 gld start）",
-                    profile.name
-                ));
+            add(
+                ctx,
+                AddArgs {
+                    paths: vec![path],
+                    name,
+                },
+            )
+            .await?;
+            if let Some(port) = actions_port {
+                let target = ctx.target.clone();
+                set_fields(ctx, target, vec![("actions.port".into(), port.to_string())]).await?;
             }
             Ok(())
         }
-        WorkspaceCmd::List => {
-            let profiles: Vec<WorkspaceProfile> =
-                ctx.backend.call_typed(Request::ListWorkspaces).await?;
-            if ctx.out.json_or(&profiles) {
-                return Ok(());
-            }
-            if profiles.is_empty() {
-                ctx.out
-                    .line("还没有工作区。在项目目录里执行 `gld start` 就会自动登记并启动。");
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = profiles
-                .iter()
-                .map(|p| {
-                    vec![
-                        gld_core::short_id(&p.id).to_string(),
-                        p.name.clone(),
-                        p.runtime.local_port.to_string(),
-                        p.actions.local_port.to_string(),
-                        p.auth.auth_type.clone(),
-                        p.tunnel.tunnel_type.clone(),
-                        p.path.clone(),
-                    ]
-                })
-                .collect();
-            ctx.out.table(
-                &[
-                    "ID",
-                    "名称",
-                    "MCP端口",
-                    "Actions端口",
-                    "认证",
-                    "隧道",
-                    "路径",
-                ],
-                &rows,
-            );
-            Ok(())
-        }
+        WorkspaceCmd::List => service::list(ctx, ListArgs::default()).await,
         WorkspaceCmd::Show => {
-            let profile: WorkspaceProfile = ctx
-                .backend
-                .call_typed(Request::ResolveWorkspace {
-                    target: ctx.target.clone(),
-                })
-                .await?;
-            if !ctx.out.json_or(&profile) {
-                show_profile(ctx, &profile);
-            }
-            Ok(())
+            let profile = service::resolve_current(ctx).await?;
+            service::show_project(ctx, WorkspaceTarget::selector(profile.id), false).await
         }
         WorkspaceCmd::Remove { yes } => {
-            // 和 `gld destroy` 是同一件事，只是入口不同。
-            destroy(
+            remove(
                 ctx,
-                DestroyArgs {
-                    workspace: None,
+                RemoveArgs {
+                    projects: Vec::new(),
                     all: false,
                     yes,
                 },
             )
             .await
         }
-        WorkspaceCmd::Set { assignments } => {
-            let mut pairs = Vec::with_capacity(assignments.len());
-            for item in &assignments {
-                let Some((key, value)) = item.split_once('=') else {
-                    return Err(CliError::new(format!(
-                        "格式应为 KEY=VALUE，收到「{item}」。`gld workspace fields` 查看字段。"
-                    )));
-                };
-                pairs.push((key.trim().to_string(), value.to_string()));
-            }
-            let update: WorkspaceUpdate = ctx
-                .backend
-                .call_typed(Request::SetWorkspaceFields {
-                    target: ctx.target.clone(),
-                    assignments: pairs,
-                })
-                .await?;
-            if ctx.out.json_or(&update) {
-                return Ok(());
-            }
-            ctx.out
-                .line(format!("已更新工作区「{}」。", update.profile.name));
-            show_profile(ctx, &update.profile);
-            report_restarts(ctx, &update)
-        }
-        WorkspaceCmd::Fields { all } => {
-            let catalog = workspace_field_catalog();
-            // --json 永远给完整表：脚本要的是全集，不是给人看的精简版。
-            if ctx.out.json_or(&catalog) {
-                return Ok(());
-            }
-            let shown = catalog
-                .iter()
-                .filter(|f| all || !f.key.starts_with("actions."));
-            let rows: Vec<Vec<String>> = shown
-                .map(|f| {
-                    vec![
-                        // 省掉 mcp. 前缀显示，因为敲的时候也可以省。
-                        f.key.strip_prefix("mcp.").unwrap_or(f.key).to_string(),
-                        f.value.to_string(),
-                        f.description.to_string(),
-                    ]
-                })
-                .collect();
-            ctx.out.table(&["字段", "取值", "说明"], &rows);
-            ctx.out.line("");
-            ctx.out
-                .line("用法：gld workspace set port=30000 auth=bearer");
-            if !all {
-                ctx.out.line(format!(
-                    "Actions 那条线路有同名的 {} 个字段，前缀写成 actions.：{}",
-                    gld_core::app::actions_field_suffixes().len(),
-                    gld_core::app::actions_field_suffixes().join(" / ")
-                ));
-                ctx.out
-                    .line(ctx.out.dim("完整列表：gld workspace fields --all"));
-            }
-            Ok(())
-        }
+        WorkspaceCmd::Set { assignments } => set(ctx, SetArgs { args: assignments }).await,
+        WorkspaceCmd::Fields { all } => fields(ctx, all),
         WorkspaceCmd::Use => {
             let profile: WorkspaceProfile = ctx
                 .backend
@@ -173,7 +66,7 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
                 .await?;
             if !ctx.out.json_or(&profile) {
                 ctx.out.line(format!(
-                    "已记住最近使用的工作区：{}（{}）",
+                    "已记住最近使用的项目：{}（{}）",
                     profile.name,
                     gld_core::short_id(&profile.id)
                 ));
@@ -183,61 +76,132 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
     }
 }
 
-/// `gld destroy`：停服务、停隧道、删配置与密钥。项目文件不动。
-///
-/// 删掉的是"gld 这边关于这个项目的一切"：端口、认证方式、密钥、隧道配置、
-/// 历史与 Planning 的记账。密钥没有备份，客户端里存着的 token / 口令随之失效，
-/// 所以默认要确认一次，`-y` 是给脚本用的。
-pub async fn destroy(ctx: &mut Ctx, args: DestroyArgs) -> CliResult {
-    let victims = if args.all {
-        ctx.backend.call_typed(Request::ListWorkspaces).await?
+/// `gld add`：登记即加入服务。已经登记过的，确认它在服务里。
+pub async fn add(ctx: &mut Ctx, args: AddArgs) -> CliResult {
+    let paths = if args.paths.is_empty() {
+        vec![std::path::PathBuf::from(".")]
     } else {
-        let target = match &args.workspace {
-            Some(selector) => {
-                if ctx.explicit_workspace {
-                    return Err(CliError::new(format!(
-                        "同时给了 {selector} 和 -w {}，不知道该听哪个。去掉其中一个。",
-                        ctx.target.selector.clone().unwrap_or_default()
-                    )));
-                }
-                // 带上当前目录：selector 可以是相对路径（`gld destroy ../ccnm`），
-                // 而守护进程的工作目录是数据目录，它自己解析会指到别处。
-                WorkspaceTarget::new(Some(selector.clone()), ctx.target.cwd.clone())
-            }
-            None => ctx.target.clone(),
-        };
-        let profile: WorkspaceProfile = ctx
-            .backend
-            .call_typed(Request::ResolveWorkspace { target })
-            .await?;
-        vec![profile]
+        args.paths
     };
+    if args.name.is_some() && paths.len() > 1 {
+        return Err(CliError::new(
+            "--name 只能配一个目录：一次给了好几个的话，名字该给谁说不清。",
+        ));
+    }
+    let mut added = Vec::new();
+    for path in paths {
+        let absolute = super::absolutize(&path)?;
+        let ensured = service::register(ctx, absolute, args.name.clone()).await?;
+        let profile = ensured.profile;
+        // 已经登记过、但不在服务里（RFC-0004 之前的老数据）：补加进去。
+        let change: HubMembershipChange = ctx
+            .backend
+            .call_typed(Request::HubAddMembers {
+                targets: vec![WorkspaceTarget::selector(profile.id.clone())],
+            })
+            .await?;
+        if !ctx.out.json {
+            if !change.changed.is_empty() {
+                ctx.out
+                    .line(format!("「{}」以前登记过，现在加进服务了。", profile.name));
+            } else if !ensured.created {
+                // 刚登记的 register 已经说过"已加入"，这里只管本来就在的。
+                ctx.out.line(format!(
+                    "「{}」本来就在（{}）。",
+                    profile.name, profile.path
+                ));
+            }
+        }
+        added.push(profile);
+    }
+    if ctx.out.json_or(&added) {
+        return Ok(());
+    }
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    if status.state == "running" {
+        // 项目表是服务每次请求现读的。不说清楚的话，用户会顺手 gld restart 一遍，
+        // 白白掉一次客户端连接。
+        ctx.out
+            .line(ctx.out.dim("服务正在运行，下一次调用就生效，不用重启。"));
+    } else {
+        ctx.out.note("服务没在跑：gld start");
+    }
+    Ok(())
+}
 
-    if victims.is_empty() {
+/// `gld rm`：从服务里拿掉，并删掉它在 gld 这边的配置和记账。项目文件不动。
+///
+/// 删掉的是"gld 这边关于这个项目的一切"：配置、它自己的密钥、历史与 Planning 的
+/// 记账。服务的凭据不受影响。默认要确认一次，`-y` 是给脚本用的。
+pub async fn remove(ctx: &mut Ctx, args: RemoveArgs) -> CliResult {
+    let remotes: Vec<HubMemberDto> = remote_members(ctx).await?;
+    let mut locals: Vec<WorkspaceProfile> = Vec::new();
+    let mut remote_victims: Vec<HubMemberDto> = Vec::new();
+    if args.all {
+        locals = ctx.backend.call_typed(Request::ListWorkspaces).await?;
+    } else if args.projects.is_empty() {
+        locals.push(service::resolve_current(ctx).await?);
+    } else {
+        if ctx.explicit_workspace {
+            return Err(CliError::new(format!(
+                "同时给了 {} 和 -w {}，不知道该听哪个。去掉其中一个。",
+                args.projects.join(" "),
+                ctx.target.selector.clone().unwrap_or_default()
+            )));
+        }
+        for selector in &args.projects {
+            // 远端项目按名字或 id 认：它们没有本机路径，也不在工作区表里。
+            if let Some(remote) = remotes
+                .iter()
+                .find(|remote| remote.id == *selector || remote.name.eq_ignore_ascii_case(selector))
+            {
+                remote_victims.push(remote.clone());
+                continue;
+            }
+            // 带上当前目录：selector 可以是相对路径（`gld rm ../ccnm`），
+            // 而守护进程的工作目录是数据目录，它自己解析会指到别处。
+            let profile: WorkspaceProfile = ctx
+                .backend
+                .call_typed(Request::ResolveWorkspace {
+                    target: WorkspaceTarget::new(Some(selector.clone()), ctx.target.cwd.clone()),
+                })
+                .await?;
+            locals.push(profile);
+        }
+    }
+
+    if locals.is_empty() && remote_victims.is_empty() {
         if !ctx.out.json_or(&Vec::<WorkspaceProfile>::new()) {
-            ctx.out.line("没有工作区可销毁。");
+            ctx.out.line("没有项目可删。");
         }
         return Ok(());
     }
 
     if !args.yes {
-        // 一次列清楚要销毁谁：--all 的时候尤其重要，名字看着眼熟不代表就是它。
+        // 一次列清楚要删谁：--all 的时候尤其重要，名字看着眼熟不代表就是它。
         ctx.out.line(format!(
-            "将销毁 {} 个工作区（服务和隧道会先停掉，项目文件不动）：",
-            victims.len()
+            "将删除 {} 个项目（它们经服务起的命令会先停掉，项目文件不动）：",
+            locals.len() + remote_victims.len()
         ));
-        for profile in &victims {
+        for profile in &locals {
             ctx.out
                 .line(format!("  {}  {}", profile.name, profile.path));
         }
-        if !confirm("确认销毁？配置和密钥会被删除，且无法恢复。")? {
+        for remote in &remote_victims {
+            ctx.out.line(format!(
+                "  {}  远端 {}:{}",
+                remote.name, remote.node, remote.workspace
+            ));
+        }
+        if !confirm("确认删除？项目在 gld 这边的配置和记账会被删掉，且无法恢复。")?
+        {
             ctx.out.line("已取消。");
             return Ok(());
         }
     }
 
-    let mut removed = Vec::with_capacity(victims.len());
-    for profile in victims {
+    let mut removed = Vec::new();
+    for profile in locals {
         let gone: WorkspaceProfile = ctx
             .backend
             .call_typed(Request::DeleteWorkspace {
@@ -245,18 +209,93 @@ pub async fn destroy(ctx: &mut Ctx, args: DestroyArgs) -> CliResult {
             })
             .await?;
         if !ctx.out.json {
-            ctx.out.line(format!("已销毁工作区「{}」。", gone.name));
+            ctx.out.line(format!("已删除项目「{}」。", gone.name));
         }
-        removed.push(gone);
+        removed.push(serde_json::json!({ "id": gone.id, "name": gone.name, "kind": "local" }));
+    }
+    for remote in remote_victims {
+        let _: HubMembershipChange = ctx
+            .backend
+            .call_typed(Request::HubRemoveRemote {
+                selector: remote.id.clone(),
+            })
+            .await?;
+        if !ctx.out.json {
+            ctx.out.line(format!("已删除远端项目「{}」。", remote.name));
+        }
+        removed.push(serde_json::json!({ "id": remote.id, "name": remote.name, "kind": "remote" }));
     }
     ctx.out.json_or(&removed);
     Ok(())
 }
 
+async fn remote_members(ctx: &mut Ctx) -> CliResult<Vec<HubMemberDto>> {
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    Ok(status
+        .members
+        .into_iter()
+        .filter(|member| member.kind == "remote")
+        .collect())
+}
+
+/// `gld set [项目] key=value…`：第一个不带 `=` 的是项目。
+pub async fn set(ctx: &mut Ctx, args: SetArgs) -> CliResult {
+    let mut words = args.args.into_iter().peekable();
+    let target = match words.peek() {
+        Some(first) if !first.contains('=') => {
+            let selector = words.next().unwrap_or_default();
+            if ctx.explicit_workspace {
+                return Err(CliError::new(format!(
+                    "同时给了 {selector} 和 -w {}，不知道该听哪个。去掉其中一个。",
+                    ctx.target.selector.clone().unwrap_or_default()
+                )));
+            }
+            WorkspaceTarget::new(Some(selector), ctx.target.cwd.clone())
+        }
+        _ => ctx.target.clone(),
+    };
+    let mut pairs = Vec::new();
+    for item in words {
+        let Some((key, value)) = item.split_once('=') else {
+            return Err(CliError::new(format!(
+                "格式应为 KEY=VALUE，收到「{item}」。项目只能写在最前面；`gld fields` 查看字段。"
+            )));
+        };
+        pairs.push((key.trim().to_string(), value.to_string()));
+    }
+    if pairs.is_empty() {
+        return Err(CliError::new(
+            "没说要改什么。写法：gld set <项目> tool-profile=read-only（字段见 gld fields）",
+        ));
+    }
+    set_fields(ctx, target, pairs).await
+}
+
+async fn set_fields(
+    ctx: &mut Ctx,
+    target: WorkspaceTarget,
+    pairs: Vec<(String, String)>,
+) -> CliResult {
+    let update: WorkspaceUpdate = ctx
+        .backend
+        .call_typed(Request::SetWorkspaceFields {
+            target,
+            assignments: pairs,
+        })
+        .await?;
+    if ctx.out.json_or(&update) {
+        return Ok(());
+    }
+    ctx.out
+        .line(format!("已更新项目「{}」。", update.profile.name));
+    report_restarts(ctx, &update)
+}
+
 /// 把"为了让新配置生效做了什么"讲清楚。
 ///
-/// 三种情况读者关心的东西完全不同：重启成功要确认已生效；没在跑要知道
-/// 下次 start 会带上；重启失败最要紧——配置存下了，但服务现在是停的。
+/// 服务每次调用都重新读项目配置，所以 MCP 那一半改完就生效，不用重启；只有项目
+/// 自己的 GPT Actions 要重启——重启成功要确认已生效，失败最要紧（配置存下了，
+/// 但它现在是停的）。
 fn report_restarts(ctx: &Ctx, update: &WorkspaceUpdate) -> CliResult {
     if !update.restart_failures.is_empty() {
         for failure in &update.restart_failures {
@@ -268,78 +307,66 @@ fn report_restarts(ctx: &Ctx, update: &WorkspaceUpdate) -> CliResult {
             ));
         }
         return Err(CliError::new(
-            "新配置已经保存，但服务没能用它起来——现在是停的。按上面的错误修好后 `gld restart`。",
+            "新配置已经保存，但服务没能用它起来——现在是停的。按上面的错误修好后 `gld restart -s actions`。",
         ));
     }
-    match update.restarted.as_slice() {
-        [] => ctx
-            .out
-            .note("服务没在跑，新配置会在下次 `gld start` 时生效。"),
-        kinds => ctx.out.line(format!(
+    if update.restarted.is_empty() {
+        ctx.out.line(ctx.out.dim("下一次调用就生效，不用重启。"));
+    } else {
+        ctx.out.line(format!(
             "已重启 {}，新配置已生效。",
-            kinds
+            update
+                .restarted
                 .iter()
                 .map(|kind| service_label(*kind))
                 .collect::<Vec<_>>()
                 .join(" 和 ")
-        )),
+        ));
     }
     Ok(())
 }
 
 fn service_label(kind: ServiceKind) -> &'static str {
     match kind {
-        ServiceKind::Mcp => "MCP",
-        ServiceKind::Actions => "Actions",
+        ServiceKind::Mcp => "单项目 MCP",
+        ServiceKind::Actions => "GPT Actions",
     }
 }
 
-pub fn show_profile(ctx: &Ctx, p: &WorkspaceProfile) {
-    ctx.out.kv(&[
-        ("名称", p.name.clone()),
-        ("ID", gld_core::short_id(&p.id).to_string()),
-        ("路径", p.path.clone()),
-        ("MCP 端口", p.runtime.local_port.to_string()),
-        (
-            "MCP 认证",
-            format!(
-                "{}（共享密钥：{}）",
-                p.auth.auth_type,
-                yes_no(p.auth.use_shared_secrets)
-            ),
-        ),
-        ("MCP 工具集", p.runtime.tool_profile.clone()),
-        (
-            "MCP 隧道",
-            super::service::tunnel_config_label(
-                &p.tunnel.tunnel_type,
-                &p.tunnel.cloudflare_mode,
-                &p.tunnel.frp_subdomain,
-                &p.tunnel.public_url,
-                p.tunnel.use_global_gateway,
-            ),
-        ),
-        ("Actions 端口", p.actions.local_port.to_string()),
-        (
-            "Actions 认证",
-            format!(
-                "{}（共享密钥：{}）",
-                p.actions.auth_type,
-                yes_no(p.actions.use_shared_secrets)
-            ),
-        ),
-        (
-            "Actions 隧道",
-            super::service::tunnel_config_label(
-                &p.actions.tunnel_type,
-                &p.actions.cloudflare_mode,
-                &p.actions.frp_subdomain,
-                &p.actions.public_url,
-                p.actions.use_global_gateway,
-            ),
-        ),
-        ("历史记录", yes_no(p.runtime.history_recording).to_string()),
-    ]);
+/// `gld fields`：set 能改的项目字段。
+pub fn fields(ctx: &Ctx, all: bool) -> CliResult {
+    let catalog = workspace_field_catalog();
+    // --json 永远给完整表：脚本要的是全集，不是给人看的精简版。
+    if ctx.out.json_or(&catalog) {
+        return Ok(());
+    }
+    let shown = catalog
+        .iter()
+        .filter(|f| all || !f.key.starts_with("actions."));
+    let rows: Vec<Vec<String>> = shown
+        .map(|f| {
+            vec![
+                // 省掉 mcp. 前缀显示，因为敲的时候也可以省。
+                f.key.strip_prefix("mcp.").unwrap_or(f.key).to_string(),
+                f.value.to_string(),
+                f.description.to_string(),
+            ]
+        })
+        .collect();
+    ctx.out.table(&["字段", "取值", "说明"], &rows);
+    ctx.out.line("");
+    ctx.out
+        .line("用法：gld set <项目> tool-profile=read-only allowed-commands=rg,gh");
+    ctx.out.line(ctx.out.dim(
+        "服务本身的端口、认证、公网入口不在这里：gld upgrade --port / --auth，gld share --tunnel",
+    ));
+    if !all {
+        ctx.out.line(format!(
+            "GPT Actions（自定义 GPT）那条线路另有 {} 个字段，写成 actions.<字段>：gld fields --all",
+            gld_core::app::actions_field_suffixes().len()
+        ));
+    }
+    Ok(())
 }
 
 fn confirm(question: &str) -> CliResult<bool> {

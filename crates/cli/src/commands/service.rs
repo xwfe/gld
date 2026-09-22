@@ -1,39 +1,56 @@
+//! 服务的起停与查看（RFC-0004：只有一个 MCP 服务，项目都挂在它下面）。
+//!
+//! 服务在内部仍叫 hub（`Request::Hub*`），命令行里不再出现这个词。项目自己的
+//! GPT Actions 还是一个项目一个，那一半在 [`super::actions`]。
+
 use std::path::Path;
 
-use gld_core::app::{EnsuredWorkspace, ServiceOverview, WorkspaceCreateOptions, WorkspaceTarget};
+use gld_core::app::{
+    EnsuredWorkspace, HubMemberDto, HubMembershipChange, HubStatusDto, ServiceOverview,
+    WorkspaceCreateOptions, WorkspaceTarget,
+};
 use gld_core::runtime::ServiceKind;
-use gld_core::tunnel::{TunnelServiceKind, TunnelStatus};
+use gld_core::settings::HubConfig;
 use gld_core::workspace::{RuntimeStatusDto, WorkspaceProfile};
 use gld_daemon::lifecycle::{self, DaemonProbe};
 use gld_daemon::Request;
 use serde_json::json;
 
-use super::{share, Ctx};
-use crate::cli::{ListArgs, ServiceArg, ServiceArgs, StartArgs, StopArgs, TunnelService};
+use super::{actions, share, Ctx};
+use crate::cli::{ListArgs, ServiceArg, ServiceArgs, StartArgs, StopArgs};
 use crate::error::{CliError, CliResult};
 use crate::output::{human_duration, mask, or_dash, yes_no};
 
-fn kinds(service: Option<ServiceArg>, default: ServiceArg) -> Vec<ServiceKind> {
+/// `-s` 选的是服务、项目的 Actions，还是两个都要。
+fn wants(service: Option<ServiceArg>, default: ServiceArg) -> (bool, bool) {
     match service.unwrap_or(default) {
-        ServiceArg::Mcp => vec![ServiceKind::Mcp],
-        ServiceArg::Actions => vec![ServiceKind::Actions],
-        ServiceArg::All => vec![ServiceKind::Mcp, ServiceKind::Actions],
+        ServiceArg::Mcp => (true, false),
+        ServiceArg::Actions => (false, true),
+        ServiceArg::All => (true, true),
     }
 }
 
-/// 定位工作区；目录没登记过就当场登记。
+/// `start` / `share` 没给目录时要不要加当前目录，给了目录就一定加。
 ///
-/// `gld start ~/code/x` 和 `gld start`（在还没登记的目录里）都走这里。以前
-/// 必须先 `workspace add` 再 `start`——第一条命令唯一的作用就是让第二条别报
-/// "当前目录不属于任何工作区"，读者却要先读懂"工作区"这个概念才敢往下走。
+/// 没给目录时只有两种情况加当前目录：它本来就是（或在）一个项目里，或者一个项目
+/// 都还没有（第一次用）。其余情况只起服务——只剩一个服务之后，`gld start` 也是
+/// "把服务拉起来"的那条命令，在主目录里随手敲一下不该把整个主目录登记成项目。
 ///
-/// 写了 `-w` 却找不到时不自动登记：那是名字拼错了，凭空建一个新工作区
-/// 只会让人对着两个空工作区更迷惑。
-pub async fn resolve_or_register(
+/// 写了 `-w` 却找不到时不自动登记：那是名字拼错了，凭空建一个新项目只会更迷惑。
+pub async fn pick_project(
     ctx: &mut Ctx,
     path: Option<&Path>,
-    options: WorkspaceCreateOptions,
-) -> CliResult<WorkspaceProfile> {
+) -> CliResult<Option<WorkspaceProfile>> {
+    pick_project_quietly(ctx, path, false).await
+}
+
+/// 同 [`pick_project`]；`quiet` 时当前目录没加进来也不提示——`share` 要的是公网
+/// 地址，不是加项目，那句提示对它只是噪音。
+pub async fn pick_project_quietly(
+    ctx: &mut Ctx,
+    path: Option<&Path>,
+    quiet: bool,
+) -> CliResult<Option<WorkspaceProfile>> {
     if let Some(path) = path {
         if ctx.explicit_workspace {
             return Err(CliError::new(format!(
@@ -42,7 +59,9 @@ pub async fn resolve_or_register(
                 ctx.target.selector.clone().unwrap_or_default()
             )));
         }
-        return register(ctx, super::absolutize(path)?, options).await;
+        return register(ctx, super::absolutize(path)?, None)
+            .await
+            .map(|ensured| Some(ensured.profile));
     }
     if ctx.explicit_workspace {
         // -w 写了却没解析到 = 名字拼错了，把原始报错（带候选列表）给用户。
@@ -51,91 +70,102 @@ pub async fn resolve_or_register(
             .call_typed(Request::ResolveWorkspace {
                 target: ctx.target.clone(),
             })
-            .await;
+            .await
+            .map(Some);
     }
-    register(ctx, std::env::current_dir()?, options).await
+    let cwd = std::env::current_dir()?;
+    // 登记时存的是规范化过的路径（macOS 上 /var 其实是 /private/var），比之前先对齐。
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+    let profiles: Vec<WorkspaceProfile> = ctx.backend.call_typed(Request::ListWorkspaces).await?;
+    let inside = profiles
+        .iter()
+        .any(|profile| canonical.starts_with(&profile.path));
+    if inside || profiles.is_empty() {
+        return register(ctx, cwd, None)
+            .await
+            .map(|ensured| Some(ensured.profile));
+    }
+    if !quiet {
+        ctx.out.note(format!(
+            "当前目录 {} 不是项目，没加进来。要加：gld add .",
+            cwd.display()
+        ));
+    }
+    Ok(None)
 }
 
-async fn register(
+/// 按目录登记（登记即加入服务）；已经登记过就返回那一个。
+pub async fn register(
     ctx: &mut Ctx,
     path: std::path::PathBuf,
-    options: WorkspaceCreateOptions,
-) -> CliResult<WorkspaceProfile> {
+    name: Option<String>,
+) -> CliResult<EnsuredWorkspace> {
     let ensured: EnsuredWorkspace = ctx
         .backend
-        .call_typed(Request::EnsureWorkspace { path, options })
+        .call_typed(Request::EnsureWorkspace {
+            path,
+            options: WorkspaceCreateOptions {
+                name,
+                ..WorkspaceCreateOptions::default()
+            },
+        })
         .await?;
     if ensured.created {
         // 自动登记必须让人看见：否则在随手进的目录里敲 gld start，
-        // 工作区悄悄多了一个，而用户以为自己起的是别的项目。
+        // 项目悄悄多了一个，而用户以为自己起的是别的。
         ctx.out.line(format!(
-            "已登记工作区「{}」（{}），MCP 端口 {}。",
-            ensured.profile.name, ensured.profile.path, ensured.profile.runtime.local_port
+            "已加入项目「{}」（{}）。",
+            ensured.profile.name, ensured.profile.path
         ));
         // 措辞是「不想要它的话」而不是「登记错了」：后者读起来像在报错，
         // 而这一步其实是成功的——用户反馈说「为啥总提示登记错了，但又成功了」。
         ctx.out.note(format!(
-            "不想要它的话：gld destroy {}（只删 gld 这边的配置，项目文件不动）。",
+            "不想要它的话：gld rm {}（只删 gld 这边的配置，项目文件不动）。",
             ensured.profile.name
         ));
     }
-    Ok(ensured.profile)
+    Ok(ensured)
+}
+
+/// 老数据里登记了但不在服务里的项目，这次加进来，并逐个说出来。
+async fn join_leftovers(ctx: &mut Ctx) -> CliResult {
+    let joined: Vec<HubMemberDto> = ctx.backend.call_typed(Request::HubJoinAll).await?;
+    if !joined.is_empty() {
+        ctx.out.line(format!(
+            "这些项目以前登记了但不在服务里，现在加进来了：{}",
+            names(&joined)
+        ));
+    }
+    Ok(())
 }
 
 pub async fn start(ctx: &mut Ctx, args: StartArgs) -> CliResult {
-    let actions_side = matches!(args.service, Some(ServiceArg::Actions));
-    // 新登记的工作区直接用指定端口建；已经存在的走下面的 set。
-    let options = WorkspaceCreateOptions {
-        name: None,
-        mcp_port: (!actions_side).then_some(args.port).flatten(),
-        actions_port: actions_side.then_some(args.port).flatten(),
-    };
-    let profile = resolve_or_register(ctx, args.path.as_deref(), options).await?;
-    let target = WorkspaceTarget::selector(profile.id.clone());
-    let tunnel_service = if actions_side {
-        TunnelService::Actions
-    } else {
-        TunnelService::Mcp
-    };
-
-    if let Some(port) = args.port {
-        let key = if actions_side {
-            "actions.port"
-        } else {
-            "mcp.port"
+    let (service, actions_too) = wants(args.service, ServiceArg::Mcp);
+    if !service {
+        // 只起项目的 Actions：这条线路还是一个项目一个。
+        let profile = match pick_project(ctx, args.path.as_deref()).await? {
+            Some(profile) => profile,
+            None => resolve_current(ctx).await?,
         };
-        let current = if actions_side {
-            profile.actions.local_port
-        } else {
-            profile.runtime.local_port
-        };
-        if current != port {
-            let update: gld_core::app::WorkspaceUpdate = ctx
-                .backend
-                .call_typed(Request::SetWorkspaceFields {
-                    target: target.clone(),
-                    assignments: vec![(key.into(), port.to_string())],
-                })
-                .await?;
-            if let Some(failure) = update.restart_failures.first() {
-                return Err(CliError::new(format!(
-                    "端口配置已保存，但服务重启失败：{}",
-                    failure.error
-                )));
-            }
-        }
+        return actions::start(ctx, &profile, &args).await;
     }
 
+    let project = pick_project(ctx, args.path.as_deref()).await?;
+    join_leftovers(ctx).await?;
+    if let Some(port) = args.port {
+        update_service(ctx, |config| {
+            config.local_port = port;
+            Ok(())
+        })
+        .await?;
+    }
     // 先配公网入口再启动：反过来的话服务刚起来就要为了新配置重启一次。
     if let Some(spec) = &args.tunnel {
-        share::configure(
+        share::configure_service(
             ctx,
-            &target,
-            &profile,
             spec,
             args.subdomain.as_deref(),
             args.tunnel_token.as_deref(),
-            tunnel_service,
         )
         .await?;
     } else if let Some(sub) = &args.subdomain {
@@ -144,38 +174,33 @@ pub async fn start(ctx: &mut Ctx, args: StartArgs) -> CliResult {
         )));
     }
 
-    let mut results = Vec::new();
-    for kind in kinds(args.service, ServiceArg::Mcp) {
-        let status: RuntimeStatusDto = ctx
-            .backend
-            .call_typed(Request::StartService {
-                target: target.clone(),
-                kind,
-            })
-            .await?;
-        if !ctx.out.json {
-            print_service_status(ctx, kind, &status);
+    // 已经在跑就不碰它：重复敲 start 不该掉客户端连接，临时地址也不该换。
+    // （上面改了端口或公网入口的话，那一步已经按新配置重启过。）
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubEnsureStarted).await?;
+    if actions_too {
+        if let Some(profile) = &project {
+            actions::start(ctx, profile, &args).await?;
         }
-        results.push(json!({ "service": kind, "status": status }));
     }
-
-    if let Some(spec) = &args.tunnel {
-        share::ensure_tunnel_up(ctx, &target, spec, tunnel_service).await?;
+    if args.tunnel.is_some() {
+        share::ensure_service_public(ctx, &status).await?;
         // 配了公网入口就是奔着"连上去"来的，直接把地址和凭据摆出来。
-        // （`--json` 下这里是唯一一份输出，上面的服务状态不再单独打印。）
-        return show_detail(ctx, &target, ListArgs::default()).await;
+        return show_service(ctx, false).await;
     }
-    for kind in kinds(args.service, ServiceArg::Mcp) {
-        let service = match kind {
-            ServiceKind::Mcp => TunnelService::Mcp,
-            ServiceKind::Actions => TunnelService::Actions,
-        };
-        share::verify_named_public(ctx, &target, service).await?;
+    share::verify_named_service_public(ctx, &status).await?;
+    if ctx.out.json_or(&status) {
+        return Ok(());
     }
-    if !ctx.out.json_or(&results) {
-        ctx.out
-            .note("守护进程在后台持有服务；`gld list` 查看连接信息，`gld stop` 停止。");
+    print_endpoints(ctx, &status);
+    if !status.tunnel_error.is_empty() {
+        ctx.out.line(format!(
+            "{} 公网入口没起来：{}",
+            ctx.out.red("✗"),
+            status.tunnel_error
+        ));
     }
+    ctx.out
+        .note("守护进程在后台持有服务；`gld ls` 看地址和凭据，`gld stop` 停止。");
     Ok(())
 }
 
@@ -186,281 +211,408 @@ pub async fn stop(ctx: &mut Ctx, args: StopArgs) -> CliResult {
         }
         return Ok(());
     }
-    if args.all {
-        return stop_everything(ctx, args.service).await;
+    let (service, actions_too) = wants(args.service, ServiceArg::All);
+    if !service {
+        let profile = resolve_current(ctx).await?;
+        return actions::stop(ctx, &profile).await;
     }
-    let mut results = Vec::new();
-    for kind in kinds(args.service, ServiceArg::All) {
-        let current: RuntimeStatusDto = ctx
-            .backend
-            .call_typed(Request::ServiceStatus {
-                target: ctx.target.clone(),
-                kind,
-            })
-            .await?;
-        if current.state == "stopped" && args.service.is_none() {
-            continue;
-        }
-        let status: RuntimeStatusDto = ctx
-            .backend
-            .call_typed(Request::StopService {
-                target: ctx.target.clone(),
-                kind,
-            })
-            .await?;
-        if !ctx.out.json {
-            print_service_status(ctx, kind, &status);
-        }
-        results.push(json!({ "service": kind, "status": status }));
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubStop).await?;
+    let mut stopped = vec![json!({ "service": "mcp", "status": status })];
+    if !ctx.out.json {
+        ctx.out
+            .line(format!("MCP 服务  {}", ctx.out.state(&status.state)));
     }
-    if !ctx.out.json_or(&results) && results.is_empty() {
-        ctx.out.line("该工作区没有正在运行的服务。");
-    }
-    Ok(())
-}
-
-/// `gld stop --all`：把所有工作区正在跑的服务都停掉（隧道跟着停）。
-///
-/// 和 `gld daemon stop` 的区别：那个连守护进程一起退出，下次任何命令都要重新
-/// 拉一次；这个只是让服务停下来，守护进程还在，`gld start` 立刻就能用。
-/// 配置和密钥都不动——要删得用 `gld destroy`。
-async fn stop_everything(ctx: &mut Ctx, service: Option<ServiceArg>) -> CliResult {
-    let overview: Vec<ServiceOverview> = ctx.backend.call_typed(Request::Overview).await?;
-    let selected = kinds(service, ServiceArg::All);
-
-    let mut results = Vec::new();
-    for item in &overview {
-        for kind in &selected {
-            let current = match kind {
-                ServiceKind::Mcp => &item.mcp,
-                ServiceKind::Actions => &item.actions,
-            };
-            if current.state == "stopped" {
-                continue;
+    if actions_too {
+        // 各项目自己的线路：GPT Actions，以及 RFC-0004 之前起的、还在跑的单项目 MCP。
+        let overview: Vec<ServiceOverview> = ctx.backend.call_typed(Request::Overview).await?;
+        for item in &overview {
+            for (kind, current) in [
+                (ServiceKind::Mcp, &item.mcp),
+                (ServiceKind::Actions, &item.actions),
+            ] {
+                if current.state == "stopped" {
+                    continue;
+                }
+                let status: RuntimeStatusDto = ctx
+                    .backend
+                    .call_typed(Request::StopService {
+                        target: WorkspaceTarget::selector(item.workspace.id.clone()),
+                        kind,
+                    })
+                    .await?;
+                if !ctx.out.json {
+                    ctx.out.line(format!(
+                        "{} {}  {}",
+                        item.workspace.name,
+                        line_label(kind),
+                        ctx.out.state(&status.state)
+                    ));
+                }
+                stopped.push(json!({
+                    "workspace": item.workspace.id,
+                    "name": item.workspace.name,
+                    "service": kind,
+                    "status": status,
+                }));
             }
-            let target = WorkspaceTarget::selector(item.workspace.id.clone());
-            let status: RuntimeStatusDto = ctx
-                .backend
-                .call_typed(Request::StopService {
-                    target,
-                    kind: *kind,
-                })
-                .await?;
-            if !ctx.out.json {
-                ctx.out.line(format!(
-                    "{:12} {}",
-                    item.workspace.name,
-                    format_args!("{} {}", kind.as_str(), ctx.out.state(&status.state))
-                ));
-            }
-            results.push(json!({
-                "workspace": item.workspace.id,
-                "name": item.workspace.name,
-                "service": kind,
-                "status": status,
-            }));
         }
     }
-    if !ctx.out.json_or(&results) && results.is_empty() {
-        ctx.out.line("没有正在运行的服务。");
-    }
+    ctx.out.json_or(&stopped);
     Ok(())
 }
 
 pub async fn restart(ctx: &mut Ctx, args: ServiceArgs) -> CliResult {
-    let selected = kinds(args.service, ServiceArg::All);
-    let mut targets = Vec::new();
-    if args.service.is_none() && ctx.backend.is_remote() {
-        // 默认只重启正在运行的；什么都没在跑就按 start 的默认（MCP）处理。
-        for kind in &selected {
-            let current: RuntimeStatusDto = ctx
-                .backend
-                .call_typed(Request::ServiceStatus {
-                    target: ctx.target.clone(),
-                    kind: *kind,
-                })
-                .await?;
-            if current.state != "stopped" {
-                targets.push(*kind);
-            }
-        }
-        if targets.is_empty() {
-            targets.push(ServiceKind::Mcp);
-        }
-    } else if args.service.is_none() {
-        targets.push(ServiceKind::Mcp);
-    } else {
-        targets = selected;
+    let (service, actions_too) = wants(args.service, ServiceArg::Mcp);
+    if actions_too {
+        let profile = resolve_current(ctx).await?;
+        actions::restart(ctx, &profile).await?;
     }
-    let mut results = Vec::new();
-    for kind in targets {
-        let status: RuntimeStatusDto = ctx
-            .backend
-            .call_typed(Request::RestartService {
-                target: ctx.target.clone(),
-                kind,
-            })
-            .await?;
-        if !ctx.out.json {
-            print_service_status(ctx, kind, &status);
+    if service {
+        let status: HubStatusDto = ctx.backend.call_typed(Request::HubStart).await?;
+        if !ctx.out.json_or(&status) {
+            print_endpoints(ctx, &status);
         }
-        results.push(json!({ "service": kind, "status": status }));
     }
-    ctx.out.json_or(&results);
     Ok(())
-}
-
-fn print_service_status(ctx: &Ctx, kind: ServiceKind, status: &RuntimeStatusDto) {
-    let label = match kind {
-        ServiceKind::Mcp => "MCP",
-        ServiceKind::Actions => "Actions",
-    };
-    ctx.out.line(format!(
-        "{label:8} {}  {}",
-        ctx.out.state(&status.state),
-        status.local_message
-    ));
-    if !matches!(status.state.as_str(), "running" | "starting") {
-        return;
-    }
-    if !status.local_endpoint.is_empty() {
-        ctx.out
-            .line(format!("{:8} 本地 {}", "", status.local_endpoint));
-    }
-    if !status.public_endpoint.is_empty() && !is_loopback_url(&status.public_endpoint) {
-        ctx.out
-            .line(format!("{:8} 公网 {}", "", status.public_endpoint));
-    }
-}
-
-/// Actions 没配公网地址时会回退成本地地址；在“公网”栏里显示它只会误导。
-fn is_loopback_url(url: &str) -> bool {
-    url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")
 }
 
 pub async fn status(ctx: &mut Ctx) -> CliResult {
     let daemon = lifecycle::probe(ctx.backend.paths()).await;
+    let hub: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
     let overview: Vec<ServiceOverview> = ctx.backend.call_typed(Request::Overview).await?;
-
-    if ctx.explicit_workspace {
-        let profile: WorkspaceProfile = ctx
-            .backend
-            .call_typed(Request::ResolveWorkspace {
-                target: ctx.target.clone(),
-            })
-            .await?;
-        let item = overview.iter().find(|item| item.workspace.id == profile.id);
-        if ctx
-            .out
-            .json_or(&json!({ "daemon": daemon_json(&daemon), "workspace": item }))
-        {
-            return Ok(());
-        }
-        print_daemon_line(ctx, &daemon);
-        if let Some(item) = item {
-            print_workspace_detail(ctx, item);
-        }
-        return Ok(());
-    }
-
-    if ctx
-        .out
-        .json_or(&json!({ "daemon": daemon_json(&daemon), "workspaces": overview }))
-    {
+    let lines: Vec<(&ServiceOverview, ServiceKind, &RuntimeStatusDto)> = overview
+        .iter()
+        .flat_map(|item| {
+            [
+                (item, ServiceKind::Mcp, &item.mcp),
+                (item, ServiceKind::Actions, &item.actions),
+            ]
+        })
+        .filter(|(_, _, status)| status.state != "stopped")
+        .collect();
+    if ctx.out.json_or(&json!({
+        "daemon": daemon_json(&daemon),
+        "service": hub,
+        "projectLines": lines.iter().map(|(item, kind, status)| json!({
+            "workspace": item.workspace.id,
+            "name": item.workspace.name,
+            "service": kind,
+            "status": status,
+        })).collect::<Vec<_>>(),
+    })) {
         return Ok(());
     }
     print_daemon_line(ctx, &daemon);
-    if overview.is_empty() {
-        ctx.out
-            .line("还没有工作区。执行 `gld workspace add <项目目录>` 添加一个。");
-        return Ok(());
+    print_endpoints(ctx, &hub);
+    if !hub.tunnel_error.is_empty() {
+        ctx.out.line(format!(
+            "{} 公网入口没起来：{}",
+            ctx.out.red("✗"),
+            hub.tunnel_error
+        ));
     }
-    let rows: Vec<Vec<String>> = overview
-        .iter()
-        .map(|item| {
-            vec![
-                item.workspace.name.clone(),
-                format!(
-                    "{} :{}",
-                    ctx.out.state(&item.mcp.state),
-                    item.workspace.runtime.local_port
-                ),
-                status_public_cell(ctx, &item.mcp_tunnel.state, &item.mcp.public_endpoint),
-                format!(
-                    "{} :{}",
-                    ctx.out.state(&item.actions.state),
-                    item.workspace.actions.local_port
-                ),
-                status_public_cell(
-                    ctx,
-                    &item.actions_tunnel.state,
-                    &item.actions.public_endpoint,
-                ),
-            ]
-        })
-        .collect();
-    ctx.out.table(
-        &["工作区", "MCP", "MCP 公网", "Actions", "Actions 公网"],
-        &rows,
-    );
+    if !lines.is_empty() {
+        ctx.out.line("");
+        ctx.out.line(ctx.out.bold("项目自己的线路"));
+        let rows: Vec<Vec<String>> = lines
+            .iter()
+            .map(|(item, kind, status)| {
+                vec![
+                    item.workspace.name.clone(),
+                    line_label(*kind).to_string(),
+                    ctx.out.state(&status.state),
+                    or_dash(&status.local_endpoint),
+                ]
+            })
+            .collect();
+        ctx.out.table(&["项目", "线路", "状态", "本地地址"], &rows);
+        if lines.iter().any(|(_, kind, _)| *kind == ServiceKind::Mcp) {
+            ctx.out.line(ctx.out.dim(
+                "「单项目 MCP」是旧版本起的，现在只用上面那一个服务；gld stop 会把它一起停掉。",
+            ));
+        }
+    }
     ctx.out.line("");
     ctx.out.line(
         ctx.out
-            .dim("详情：gld status -w <工作区>；连接信息：gld list -w <工作区>"),
+            .dim("地址和凭据：gld ls；某个项目的配置：gld ls <项目>"),
     );
     Ok(())
 }
 
-pub async fn ps(ctx: &mut Ctx) -> CliResult {
-    let overview: Vec<ServiceOverview> = ctx.backend.call_typed(Request::Overview).await?;
-    let mut rows = Vec::new();
-    let mut items = Vec::new();
-    for item in &overview {
-        for (kind, status, tunnel) in [
-            ("mcp", &item.mcp, &item.mcp_tunnel),
-            ("actions", &item.actions, &item.actions_tunnel),
-        ] {
-            if status.state == "stopped" {
-                continue;
-            }
-            items.push(json!({ "workspace": item.workspace.id, "name": item.workspace.name, "service": kind, "status": status, "tunnel": tunnel }));
-            rows.push(vec![
-                item.workspace.name.clone(),
-                kind.to_string(),
-                ctx.out.state(&status.state),
-                status.local_endpoint.clone(),
-                if is_loopback_url(&status.public_endpoint) {
-                    "-".into()
+fn line_label(kind: ServiceKind) -> &'static str {
+    match kind {
+        ServiceKind::Mcp => "单项目 MCP",
+        ServiceKind::Actions => "GPT Actions",
+    }
+}
+
+/// `gld ls`：不给项目就是服务的连接信息和项目表，给了就是那个项目的配置。
+pub async fn list(ctx: &mut Ctx, args: ListArgs) -> CliResult {
+    if let Some(project) = &args.project {
+        if ctx.explicit_workspace {
+            return Err(CliError::new(format!(
+                "同时给了 {project} 和 -w {}，不知道该听哪个。去掉其中一个。",
+                ctx.target.selector.clone().unwrap_or_default()
+            )));
+        }
+        let target = WorkspaceTarget::new(Some(project.clone()), ctx.target.cwd.clone());
+        return show_project(ctx, target, args.reveal).await;
+    }
+    if ctx.explicit_workspace {
+        let target = ctx.target.clone();
+        return show_project(ctx, target, args.reveal).await;
+    }
+    show_service(ctx, args.reveal).await
+}
+
+/// 服务的连接信息：地址、公网入口、认证、凭据，和项目表。
+pub async fn show_service(ctx: &mut Ctx, reveal: bool) -> CliResult {
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    let mut credentials: Vec<(&str, String)> = Vec::new();
+    for &(label, key) in credential_keys(&status.config.auth_type) {
+        let value: String = ctx
+            .backend
+            .call_typed(Request::HubSecret { key: key.into() })
+            .await?;
+        credentials.push((label, if reveal { value } else { mask(&value) }));
+    }
+    let payload = json!({
+        "service": status,
+        "credentials": credentials
+            .iter()
+            .map(|(label, value)| json!({ "label": label, "value": value }))
+            .collect::<Vec<_>>(),
+    });
+    if ctx.out.json_or(&payload) {
+        return Ok(());
+    }
+
+    let out = ctx.out;
+    let state = format!("{}  {}", out.state(&status.state), status.detail);
+    let mut rows: Vec<(&str, String)> = vec![
+        ("状态", state.trim_end().to_string()),
+        ("本地地址", status.local_endpoint.clone()),
+        ("公网地址", or_dash(&status.public_endpoint)),
+        ("公网入口", status.tunnel_label.clone()),
+        ("认证方式", status.config.auth_type.clone()),
+    ];
+    rows.extend(credentials);
+    rows.push((
+        "工具集",
+        format!(
+            "{}（项目自己的工具集照样生效，取交集）",
+            status.config.tool_profile
+        ),
+    ));
+    out.line(out.bold("MCP 服务"));
+    out.kv(&rows);
+    if !status.tunnel_error.is_empty() {
+        out.line(format!(
+            "{} 公网入口没起来：{}",
+            out.red("✗"),
+            status.tunnel_error
+        ));
+    }
+    // 登记了却不在服务里的（RFC-0004 之前的老数据）也列出来：看不见的话，用户只会
+    // 以为它丢了。`gld start` 会把它们加进来。
+    let profiles: Vec<WorkspaceProfile> = ctx.backend.call_typed(Request::ListWorkspaces).await?;
+    let outside: Vec<&WorkspaceProfile> = profiles
+        .iter()
+        .filter(|profile| !status.members.iter().any(|member| member.id == profile.id))
+        .collect();
+    out.line("");
+    if status.members.is_empty() && outside.is_empty() {
+        out.line("项目：还没有。gld add <项目目录> 把项目加进来。");
+    } else {
+        out.line(out.bold(&format!("项目（{}）", status.members.len() + outside.len())));
+        let rows: Vec<Vec<String>> = status
+            .members
+            .iter()
+            .map(|member| {
+                // 远端项目没有本机路径和工具集，那两列给的是它在对面的位置
+                // 和访问上限——远端的 root 由 ccnm 自己解析，gld 不知道。
+                let (profile, location) = if member.kind == "remote" {
+                    (
+                        format!("{}（远端）", member.mode),
+                        format!("{}:{}", member.node, member.workspace),
+                    )
                 } else {
-                    or_dash(&status.public_endpoint)
-                },
-                tunnel.state.clone(),
-            ]);
+                    (member.tool_profile.clone(), member.path.clone())
+                };
+                vec![
+                    member.name.clone(),
+                    gld_core::short_id(&member.id).to_string(),
+                    profile,
+                    location,
+                ]
+            })
+            .chain(outside.iter().map(|profile| {
+                vec![
+                    profile.name.clone(),
+                    gld_core::short_id(&profile.id).to_string(),
+                    out.yellow("不在服务里"),
+                    profile.path.clone(),
+                ]
+            }))
+            .collect();
+        out.table(&["名称", "ID", "工具集 / 模式", "路径 / 位置"], &rows);
+        if !outside.is_empty() {
+            out.line(out.yellow(
+                "标了「不在服务里」的 AI 看不见（以前的版本登记的）。gld start 会把它们加进来。",
+            ));
         }
     }
-    if ctx.out.json_or(&items) {
-        return Ok(());
+    out.line("");
+    out.line(out.dim(
+        "客户端里只配上面这一条地址。AI 每次调用都要带 workspace 参数（项目名称或 id），说明见 docs/concepts.md",
+    ));
+    if status.public_endpoint.is_empty() {
+        out.line(out.yellow("还没有公网地址：ChatGPT 只能连公网 HTTPS。一条命令拿一个：gld share"));
     }
-    if rows.is_empty() {
-        ctx.out.line("没有正在运行的服务。");
-        return Ok(());
+    if !reveal && !status.config.auth_type.eq("noauth") {
+        out.line(out.dim("凭据已脱敏，--reveal 显示明文。"));
     }
-    ctx.out.table(
-        &["工作区", "服务", "状态", "本地地址", "公网地址", "隧道"],
-        &rows,
-    );
     Ok(())
 }
 
-/// `gld status` 的"公网"格：地址为主，隧道没跑起来时在前面标出来。
-fn status_public_cell(ctx: &Ctx, tunnel_state: &str, public_endpoint: &str) -> String {
-    if public_endpoint.is_empty() || is_loopback_url(public_endpoint) {
-        return ctx.out.dim("-");
+/// 每种认证方式下，客户端要填的凭据。
+pub fn credential_keys(auth_type: &str) -> &'static [(&'static str, &'static str)] {
+    match auth_type {
+        "oauth" => &[
+            ("OAuth Client ID", "oauth_client_id"),
+            ("授权口令 (oauth_password)", "oauth_password"),
+        ],
+        "bearer" => &[("Bearer Token", "bearer_token")],
+        _ => &[],
     }
-    match tunnel_state {
-        "running" => public_endpoint.to_string(),
-        other => format!("{} {}", ctx.out.dim(&format!("({other})")), public_endpoint),
+}
+
+/// 一个项目的配置：它是谁、在不在服务里、AI 在它里面能做什么，以及它的 GPT Actions。
+pub async fn show_project(ctx: &mut Ctx, target: WorkspaceTarget, reveal: bool) -> CliResult {
+    let profile: WorkspaceProfile = ctx
+        .backend
+        .call_typed(Request::ResolveWorkspace { target })
+        .await?;
+    let hub: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    let in_service = hub.members.iter().any(|member| member.id == profile.id);
+    let actions = actions::detail(ctx, &profile, reveal).await?;
+    if ctx.out.json_or(&json!({
+        "project": profile,
+        "inService": in_service,
+        "actions": actions,
+    })) {
+        return Ok(());
     }
+    let out = ctx.out;
+    out.line(out.bold(&format!(
+        "项目 {}  ({})",
+        profile.name,
+        gld_core::short_id(&profile.id)
+    )));
+    let runtime = &profile.runtime;
+    out.kv(&[
+        ("路径", profile.path.clone()),
+        (
+            "在服务里",
+            if in_service {
+                "是".to_string()
+            } else {
+                "否（AI 看不见它；gld start 会把它加进来）".to_string()
+            },
+        ),
+        ("工具集", runtime.tool_profile.clone()),
+        ("权限模式", runtime.permission_mode.clone()),
+        ("只读工作区内", yes_no(runtime.confine_reads).to_string()),
+        ("追加命令", or_dash(&runtime.allowed_commands)),
+        ("历史记录", yes_no(runtime.history_recording).to_string()),
+    ]);
+    actions::print_detail(ctx, &actions);
+    out.line("");
+    out.line(out.dim(&format!(
+        "改它：gld set {} <字段>=<值>（字段见 gld fields）",
+        profile.name
+    )));
+    Ok(())
+}
+
+/// 当前目录 / `-w` 对应的项目，不登记。
+pub async fn resolve_current(ctx: &mut Ctx) -> CliResult<WorkspaceProfile> {
+    ctx.backend
+        .call_typed(Request::ResolveWorkspace {
+            target: ctx.target.clone(),
+        })
+        .await
+}
+
+/// 读服务配置 → 改 → 整体发回；服务在跑且配置真的变了会自动重启。
+pub async fn update_service(
+    ctx: &mut Ctx,
+    change: impl FnOnce(&mut HubConfig) -> CliResult,
+) -> CliResult<HubStatusDto> {
+    let current: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    let mut config = current.config;
+    change(&mut config)?;
+    ctx.backend
+        .call_typed(Request::SetHubConfig { config })
+        .await
+}
+
+pub fn print_endpoints(ctx: &Ctx, status: &HubStatusDto) {
+    ctx.out.kv(&[
+        (
+            "MCP 服务",
+            format!("{}  {}", ctx.out.state(&status.state), status.detail)
+                .trim_end()
+                .to_string(),
+        ),
+        ("本地地址", status.local_endpoint.clone()),
+        ("公网地址", or_dash(&status.public_endpoint)),
+        ("认证方式", status.config.auth_type.clone()),
+        ("项目", status.members.len().to_string()),
+    ]);
+}
+
+pub fn names(members: &[HubMemberDto]) -> String {
+    members
+        .iter()
+        .map(|member| {
+            if member.name.is_empty() {
+                // 项目已经不在了、只剩 id 的成员。
+                member.id.clone()
+            } else {
+                member.name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+/// 加入 / 移出服务的结果。
+pub fn print_change(
+    ctx: &Ctx,
+    change: &HubMembershipChange,
+    changed: &str,
+    unchanged: &str,
+) -> CliResult {
+    if ctx.out.json_or(change) {
+        return Ok(());
+    }
+    if !change.changed.is_empty() {
+        ctx.out
+            .line(format!("{changed}：{}", names(&change.changed)));
+    }
+    if !change.unchanged.is_empty() {
+        ctx.out
+            .line(format!("{unchanged}：{}", names(&change.unchanged)));
+    }
+    // 项目表是服务每次请求现读的。不说清楚的话，用户会顺手 gld restart 一遍，
+    // 白白掉一次客户端连接。
+    if change.status.state == "running" {
+        ctx.out
+            .line(ctx.out.dim("服务正在运行，下一次调用就生效，不用重启。"));
+    }
+    Ok(())
 }
 
 fn daemon_json(probe: &DaemonProbe) -> serde_json::Value {
@@ -489,439 +641,9 @@ fn print_daemon_line(ctx: &Ctx, probe: &DaemonProbe) {
             record.pid
         )),
         _ => ctx.out.line(format!(
-            "守护进程 {}  （所有服务均已停止；gld start 会自动拉起）",
+            "守护进程 {}  （服务已停止；gld start 会自动拉起）",
             ctx.out.dim("未运行")
         )),
     }
     ctx.out.line("");
-}
-
-fn print_workspace_detail(ctx: &Ctx, item: &ServiceOverview) {
-    let ws = &item.workspace;
-    ctx.out.line(
-        ctx.out
-            .bold(&format!("{}  ({})", ws.name, gld_core::short_id(&ws.id))),
-    );
-    ctx.out.line(format!("路径  {}", ws.path));
-    ctx.out.line("");
-    for (label, status, tunnel, port) in [
-        ("MCP", &item.mcp, &item.mcp_tunnel, ws.runtime.local_port),
-        (
-            "Actions",
-            &item.actions,
-            &item.actions_tunnel,
-            ws.actions.local_port,
-        ),
-    ] {
-        ctx.out.line(ctx.out.bold(label));
-        ctx.out.kv(&[
-            (
-                "  状态",
-                format!("{}  {}", ctx.out.state(&status.state), status.local_message),
-            ),
-            ("  端口", port.to_string()),
-            ("  本地地址", or_dash(&status.local_endpoint)),
-            ("  公网地址", or_dash(&status.public_endpoint)),
-            (
-                "  隧道",
-                format!(
-                    "{}{}",
-                    tunnel.state,
-                    tunnel
-                        .tunnel_pid
-                        .map(|pid| format!("（pid {pid}）"))
-                        .unwrap_or_default()
-                ),
-            ),
-        ]);
-        ctx.out.line("");
-    }
-}
-
-/// `gld list`：一个工作区就看详情，多个就先列出来。
-///
-/// 不指定工作区时的两种情形读者要的东西不一样：在项目目录里敲，想要的是
-/// "这个项目的地址和凭据"；在别处敲，想要的是"我都有哪些工作区、谁在跑"。
-pub async fn list(ctx: &mut Ctx, args: ListArgs) -> CliResult {
-    if args.all {
-        return show_list(ctx).await;
-    }
-    if ctx.explicit_workspace {
-        let target = ctx.target.clone();
-        return show_detail(ctx, &target, args).await;
-    }
-    let resolved: CliResult<WorkspaceProfile> = ctx
-        .backend
-        .call_typed(Request::ResolveWorkspace {
-            target: ctx.target.clone(),
-        })
-        .await;
-    match resolved {
-        Ok(profile) => show_detail(ctx, &WorkspaceTarget::selector(profile.id), args).await,
-        Err(_) => show_list(ctx).await,
-    }
-}
-
-/// 所有工作区一览：一行一条正在用的线路，带隧道与认证方式。
-async fn show_list(ctx: &mut Ctx) -> CliResult {
-    let overview: Vec<ServiceOverview> = ctx.backend.call_typed(Request::Overview).await?;
-    if ctx.out.json_or(&overview) {
-        return Ok(());
-    }
-    if overview.is_empty() {
-        ctx.out
-            .line("还没有工作区。在项目目录里执行 `gld start` 就会自动登记并启动。");
-        return Ok(());
-    }
-    let mut rows = Vec::new();
-    for item in &overview {
-        let ws = &item.workspace;
-        rows.push(vec![
-            ws.name.clone(),
-            "mcp".into(),
-            ctx.out.state(&item.mcp.state),
-            or_dash(&item.mcp.local_endpoint),
-            public_cell(&item.mcp.public_endpoint),
-            tunnel_cell(
-                ctx,
-                &ws.tunnel.tunnel_type,
-                ws.tunnel.use_global_gateway,
-                &tunnel_config_label(
-                    &ws.tunnel.tunnel_type,
-                    &ws.tunnel.cloudflare_mode,
-                    &ws.tunnel.frp_subdomain,
-                    &ws.tunnel.public_url,
-                    ws.tunnel.use_global_gateway,
-                ),
-                &item.mcp_tunnel.state,
-            ),
-            ws.auth.auth_type.clone(),
-        ]);
-        // Actions 是可选的第二条线路，没在跑就不占一行。
-        if item.actions.state != "stopped" {
-            rows.push(vec![
-                ws.name.clone(),
-                "actions".into(),
-                ctx.out.state(&item.actions.state),
-                or_dash(&item.actions.local_endpoint),
-                public_cell(&item.actions.public_endpoint),
-                tunnel_cell(
-                    ctx,
-                    &ws.actions.tunnel_type,
-                    ws.actions.use_global_gateway,
-                    &tunnel_config_label(
-                        &ws.actions.tunnel_type,
-                        &ws.actions.cloudflare_mode,
-                        &ws.actions.frp_subdomain,
-                        &ws.actions.public_url,
-                        ws.actions.use_global_gateway,
-                    ),
-                    &item.actions_tunnel.state,
-                ),
-                ws.actions.auth_type.clone(),
-            ]);
-        }
-    }
-    ctx.out.table(
-        &[
-            "工作区",
-            "服务",
-            "状态",
-            "本地地址",
-            "公网地址",
-            "隧道",
-            "认证",
-        ],
-        &rows,
-    );
-    ctx.out.line("");
-    ctx.out.line(
-        ctx.out
-            .dim("详情与凭据：gld list -w <工作区>；换公网入口：gld upgrade --tunnel <地址>"),
-    );
-    Ok(())
-}
-
-/// 一个工作区的连接信息：地址、认证、凭据、隧道。
-pub async fn show_detail(ctx: &mut Ctx, target: &WorkspaceTarget, args: ListArgs) -> CliResult {
-    let profile: WorkspaceProfile = ctx
-        .backend
-        .call_typed(Request::ResolveWorkspace {
-            target: target.clone(),
-        })
-        .await?;
-    let target = WorkspaceTarget::selector(profile.id.clone());
-    let mcp: RuntimeStatusDto = ctx
-        .backend
-        .call_typed(Request::ServiceStatus {
-            target: target.clone(),
-            kind: ServiceKind::Mcp,
-        })
-        .await?;
-    let actions: RuntimeStatusDto = ctx
-        .backend
-        .call_typed(Request::ServiceStatus {
-            target: target.clone(),
-            kind: ServiceKind::Actions,
-        })
-        .await?;
-
-    let mut credentials: Vec<(&str, String)> = Vec::new();
-    match profile.auth.auth_type.as_str() {
-        "oauth" => {
-            let client_id = if profile.auth.use_shared_secrets {
-                secret(ctx, &target, "oauth_client_id", true).await?
-            } else {
-                Some(profile.auth.oauth_client_id.clone())
-            };
-            let password = secret(
-                ctx,
-                &target,
-                "oauth_password",
-                profile.auth.use_shared_secrets,
-            )
-            .await?;
-            credentials.push(("OAuth Client ID", client_id.unwrap_or_default()));
-            credentials.push(("授权口令 (oauth_password)", password.unwrap_or_default()));
-        }
-        "bearer" => {
-            let token = secret(
-                ctx,
-                &target,
-                "bearer_token",
-                profile.auth.use_shared_secrets,
-            )
-            .await?;
-            credentials.push(("Bearer Token", token.unwrap_or_default()));
-        }
-        _ => {}
-    }
-    let actions_key = if profile.actions.auth_type == "api_key" {
-        secret(
-            ctx,
-            &target,
-            "actions_api_key",
-            profile.actions.use_shared_secrets,
-        )
-        .await?
-    } else {
-        None
-    };
-
-    // 隧道状态和服务状态是两回事：服务好好跑着、隧道断了，公网地址照样贴不出去。
-    let mcp_tunnel: TunnelStatus = ctx
-        .backend
-        .call_typed(Request::TunnelStatus {
-            target: target.clone(),
-            kind: TunnelServiceKind::Mcp,
-        })
-        .await?;
-    let actions_tunnel: TunnelStatus = ctx
-        .backend
-        .call_typed(Request::TunnelStatus {
-            target: target.clone(),
-            kind: TunnelServiceKind::Actions,
-        })
-        .await?;
-    let mcp_tunnel_label = tunnel_config_label(
-        &profile.tunnel.tunnel_type,
-        &profile.tunnel.cloudflare_mode,
-        &profile.tunnel.frp_subdomain,
-        &profile.tunnel.public_url,
-        profile.tunnel.use_global_gateway,
-    );
-    let actions_tunnel_label = tunnel_config_label(
-        &profile.actions.tunnel_type,
-        &profile.actions.cloudflare_mode,
-        &profile.actions.frp_subdomain,
-        &profile.actions.public_url,
-        profile.actions.use_global_gateway,
-    );
-
-    let payload = json!({
-        "workspace": { "id": profile.id, "name": profile.name, "path": profile.path },
-        "mcp": {
-            "state": mcp.state,
-            "auth": profile.auth.auth_type,
-            "local_url": mcp.local_endpoint,
-            "public_url": mcp.public_endpoint,
-            "credentials": credentials.iter().map(|(k, v)| json!({ "label": k, "value": if args.reveal { v.clone() } else { mask(v) } })).collect::<Vec<_>>(),
-            "tunnel": { "config": mcp_tunnel_label, "state": mcp_tunnel.state, "pid": mcp_tunnel.tunnel_pid },
-        },
-        "actions": {
-            "state": actions.state,
-            "auth": profile.actions.auth_type,
-            "local_url": actions.local_endpoint,
-            "openapi_url": actions.public_endpoint,
-            "api_key": actions_key.as_ref().map(|v| if args.reveal { v.clone() } else { mask(v) }),
-            "tunnel": { "config": actions_tunnel_label, "state": actions_tunnel.state, "pid": actions_tunnel.tunnel_pid },
-        }
-    });
-    if ctx.out.json_or(&payload) {
-        return Ok(());
-    }
-
-    let out = ctx.out;
-    out.line(out.bold(&format!("工作区 {}  ({})", profile.name, profile.path)));
-    out.line("");
-    out.line(out.bold("MCP（ChatGPT 连接器 / 其他 MCP 客户端）"));
-    let mut rows: Vec<(String, String)> = vec![
-        ("  状态".into(), out.state(&mcp.state)),
-        ("  本地地址".into(), or_dash(&mcp.local_endpoint)),
-        ("  公网地址".into(), or_dash(&mcp.public_endpoint)),
-        (
-            "  隧道".into(),
-            tunnel_detail(
-                ctx,
-                &profile.tunnel.tunnel_type,
-                profile.tunnel.use_global_gateway,
-                &mcp_tunnel_label,
-                &mcp_tunnel,
-            ),
-        ),
-        ("  认证方式".into(), profile.auth.auth_type.clone()),
-    ];
-    for (label, value) in &credentials {
-        let shown = if args.reveal {
-            value.clone()
-        } else {
-            mask(value)
-        };
-        rows.push((format!("  {label}"), shown));
-    }
-    rows.push((
-        "  共享密钥池".into(),
-        yes_no(profile.auth.use_shared_secrets).to_string(),
-    ));
-    rows.push(("  工具集".into(), profile.runtime.tool_profile.clone()));
-    out.kv(&rows);
-    out.line("");
-    out.line(out.bold("GPT Actions（自定义 GPT 导入 OpenAPI）"));
-    out.kv(&[
-        ("  状态", out.state(&actions.state)),
-        ("  本地地址", or_dash(&actions.local_endpoint)),
-        (
-            "  OpenAPI 地址",
-            if is_loopback_url(&actions.public_endpoint) {
-                format!("{}（未配置公网，仅本机）", actions.public_endpoint)
-            } else {
-                or_dash(&actions.public_endpoint)
-            },
-        ),
-        (
-            "  隧道",
-            tunnel_detail(
-                ctx,
-                &profile.actions.tunnel_type,
-                profile.actions.use_global_gateway,
-                &actions_tunnel_label,
-                &actions_tunnel,
-            ),
-        ),
-        ("  认证方式", profile.actions.auth_type.clone()),
-        (
-            "  API Key",
-            actions_key
-                .map(|v| if args.reveal { v } else { mask(&v) })
-                .unwrap_or_else(|| "-".into()),
-        ),
-    ]);
-    out.line("");
-    if mcp.public_endpoint.is_empty() {
-        out.line(out.yellow("还没有公网地址：ChatGPT 只能连公网 HTTPS。一条命令拿一个：gld share"));
-    } else {
-        out.line("ChatGPT：设置 → 开发人员模式 → 插件 → 新建 MCP，粘贴上面的公网地址，认证方式与此一致。");
-    }
-    if !args.reveal {
-        out.line(out.dim("凭据已脱敏，--reveal 显示明文。"));
-    }
-    Ok(())
-}
-
-/// 配置里的公网入口长什么样（不含运行状态）。
-///
-/// `gld list`、`gld workspace show` 都用它，措辞只有一处。这里不重复地址本身——
-/// 它就在同一屏的"公网地址"那一行 / 那一列里。
-pub fn tunnel_config_label(
-    kind: &str,
-    cloudflare_mode: &str,
-    subdomain: &str,
-    public_url: &str,
-    gateway: bool,
-) -> String {
-    if gateway {
-        return "全局入口（/w/<id>）".into();
-    }
-    match kind {
-        "frp" => format!("frp（子域名 {}）", or_dash(subdomain)),
-        "cloudflare" => format!("cloudflare（{cloudflare_mode}）"),
-        _ if !public_url.trim().is_empty() => "固定地址（自建入口）".into(),
-        _ => "none".into(),
-    }
-}
-
-/// 详情里的隧道一行：配置 + 运行状态 + pid。
-///
-/// 只有 frp / cloudflare 在本机开进程。自建反代（固定地址）和全局入口不开，
-/// 给它们标一个 `stopped` 只会让人以为哪里坏了，跑去查一个根本不存在的进程。
-fn tunnel_detail(
-    ctx: &Ctx,
-    kind: &str,
-    gateway: bool,
-    label: &str,
-    status: &TunnelStatus,
-) -> String {
-    if gateway {
-        return format!("{label}  {}", ctx.out.dim("（进程属于全局入口）"));
-    }
-    match kind {
-        "frp" | "cloudflare" => {
-            let pid = status
-                .tunnel_pid
-                .map(|pid| format!("，pid {pid}"))
-                .unwrap_or_default();
-            format!("{label}  {}{pid}", ctx.out.state(&status.state))
-        }
-        _ if label == "none" => ctx.out.dim("none（没有公网入口）"),
-        // 固定地址：label 已经说清了，不必再补一句状态。
-        _ => label.to_string(),
-    }
-}
-
-/// 列表里的隧道一格：配置 + 状态，没配就一个横杠。
-///
-/// 状态只对本机真的开着进程的隧道有意义，理由同 [`tunnel_detail`]。
-fn tunnel_cell(ctx: &Ctx, kind: &str, gateway: bool, label: &str, state: &str) -> String {
-    if label == "none" {
-        return ctx.out.dim("-");
-    }
-    if gateway || !matches!(kind, "frp" | "cloudflare") {
-        return label.to_string();
-    }
-    format!("{label} {}", ctx.out.state(state))
-}
-
-/// Actions 没配公网地址时会回退成本地地址；把它放进"公网地址"栏只会误导。
-fn public_cell(endpoint: &str) -> String {
-    if endpoint.is_empty() || is_loopback_url(endpoint) {
-        return "-".into();
-    }
-    endpoint.to_string()
-}
-
-async fn secret(
-    ctx: &mut Ctx,
-    target: &WorkspaceTarget,
-    key: &str,
-    shared: bool,
-) -> CliResult<Option<String>> {
-    let request = if shared {
-        Request::SharedSecret { key: key.into() }
-    } else {
-        Request::WorkspaceSecret {
-            target: target.clone(),
-            key: key.into(),
-        }
-    };
-    ctx.backend.call_typed(request).await
 }

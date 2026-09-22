@@ -1,3 +1,6 @@
+//! `gld secret`：不带 `-w` 是服务的凭据（RFC-0004 之后只有一个服务、一套凭据）；
+//! 带了 `-w` 是那个项目自己的——现在只有它的 GPT Actions 还用得上。
+
 use gld_core::app::{reads_from_shared_pool, SHARED_SECRET_KEYS, WORKSPACE_SECRET_KEYS};
 use gld_core::workspace::WorkspaceProfile;
 use gld_daemon::Request;
@@ -8,26 +11,25 @@ use crate::cli::{SecretCmd, SharedSecretCmd};
 use crate::error::CliResult;
 use crate::output::mask;
 
-const KEY_DOCS: &[(&str, &str)] = &[
-    ("bearer_token", "MCP 认证方式为 bearer 时客户端携带的 Token"),
+/// 服务的凭据名和用途。顺序就是 `gld secret ls` 列出来的顺序。
+const SERVICE_KEYS: &[(&str, &str)] = &[
+    ("oauth_password", "OAuth 授权页输入的口令"),
     (
         "oauth_client_id",
-        "MCP OAuth Client ID（仅共享池；工作区级用 gld ws set mcp.oauth-client-id）",
+        "OAuth 静态 Client ID（ChatGPT 这类自动注册的客户端用不到）",
     ),
-    (
-        "oauth_client_secret",
-        "MCP OAuth 静态 Client Secret（可选；ChatGPT 走 PKCE 不需要）",
-    ),
-    ("oauth_password", "MCP OAuth 授权页输入的口令"),
     (
         "oauth_token_secret",
-        "签发 MCP Access / Refresh Token 用的密钥",
+        "签发访问令牌的密钥；换了所有已授权的客户端都要重新授权",
     ),
-    ("cloudflare_token", "MCP Named Cloudflare Tunnel 的 token"),
+    ("bearer_token", "认证方式为 bearer 时客户端携带的 Token"),
     (
-        "frp_token",
-        "覆盖 MCP 隧道使用的 frps token（通常配在 FRP 配置里）",
+        "cloudflare_token",
+        "Cloudflare 固定域名的 Tunnel Token（只能 set，不能 regen）",
     ),
+];
+
+const KEY_DOCS: &[(&str, &str)] = &[
     ("actions_api_key", "Actions 认证方式为 api_key 时的 Key"),
     ("actions_oauth_client_secret", "Actions OAuth Client Secret"),
     ("actions_oauth_password", "Actions OAuth 授权口令"),
@@ -40,12 +42,131 @@ const KEY_DOCS: &[(&str, &str)] = &[
 ];
 
 pub async fn run(ctx: &mut Ctx, command: SecretCmd) -> CliResult {
+    if ctx.explicit_workspace && !matches!(command, SecretCmd::Keys | SecretCmd::Shared(_)) {
+        return run_project(ctx, command).await;
+    }
+    match command {
+        SecretCmd::List { key, reveal } => list_service(ctx, key, reveal).await,
+        SecretCmd::Set { key, value } => {
+            ctx.backend
+                .call(Request::SetHubSecret {
+                    key: key.clone(),
+                    value,
+                })
+                .await?;
+            if !ctx.out.json_or(&json!({ "key": key, "updated": true })) {
+                ctx.out
+                    .line(format!("已设置 {key}；服务在跑的话已自动重启。"));
+                ctx.out.note(client_impact(&key));
+            }
+            Ok(())
+        }
+        SecretCmd::Regenerate { key } => regenerate_service(ctx, key).await,
+        SecretCmd::Shared(command) => shared(ctx, command).await,
+        SecretCmd::Keys => {
+            if ctx.out.json_or(&json!({
+                "service": SERVICE_KEYS.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                "workspace": WORKSPACE_SECRET_KEYS,
+                "shared": SHARED_SECRET_KEYS,
+            })) {
+                return Ok(());
+            }
+            let mut rows: Vec<Vec<String>> = SERVICE_KEYS
+                .iter()
+                .map(|(key, doc)| vec![key.to_string(), "服务".into(), doc.to_string()])
+                .collect();
+            rows.extend(
+                KEY_DOCS
+                    .iter()
+                    .map(|(key, doc)| vec![key.to_string(), "项目（-w）".into(), doc.to_string()]),
+            );
+            ctx.out.table(&["凭据名", "属于", "用途"], &rows);
+            ctx.out.line("");
+            ctx.out.line(
+                "服务的：gld secret ls|set|regen <KEY>     项目的 GPT Actions：gld secret ls|set|regen <KEY> -w <项目>",
+            );
+            Ok(())
+        }
+    }
+}
+
+async fn list_service(ctx: &mut Ctx, key: Option<String>, reveal: bool) -> CliResult {
+    let keys: Vec<&str> = match &key {
+        Some(key) => vec![key.as_str()],
+        None => SERVICE_KEYS.iter().map(|(key, _)| *key).collect(),
+    };
+    let mut rows = Vec::new();
+    for key in keys {
+        let value: String = ctx
+            .backend
+            .call_typed(Request::HubSecret { key: key.into() })
+            .await?;
+        rows.push((key.to_string(), value));
+    }
+    let shown: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|(key, value)| {
+            let text = if value.is_empty() {
+                String::new()
+            } else if reveal {
+                value
+            } else {
+                mask(&value)
+            };
+            (key, text)
+        })
+        .collect();
+    if ctx.out.json_or(&json!(shown
+        .iter()
+        .map(|(key, value)| json!({ "key": key, "value": value, "scope": "service" }))
+        .collect::<Vec<_>>()))
+    {
+        return Ok(());
+    }
+    ctx.out.kv(&shown
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.as_str(),
+                if value.is_empty() {
+                    ctx.out.dim("未设置")
+                } else {
+                    value.clone()
+                },
+            )
+        })
+        .collect::<Vec<_>>());
+    if !reveal {
+        ctx.out.note("已脱敏，--reveal 显示明文。");
+    }
+    Ok(())
+}
+
+pub async fn regenerate_service(ctx: &mut Ctx, key: String) -> CliResult {
+    let value: String = ctx
+        .backend
+        .call_typed(Request::RegenerateHubSecret { key: key.clone() })
+        .await?;
+    if ctx.out.json_or(&json!({ "key": key, "value": value })) {
+        return Ok(());
+    }
+    ctx.out.kv(&[(key.as_str(), value)]);
+    ctx.out.note(client_impact(&key));
+    Ok(())
+}
+
+/// 旧的项目级凭据（`-w <项目>`）：现在只有项目的 GPT Actions 用。
+async fn run_project(ctx: &mut Ctx, command: SecretCmd) -> CliResult {
     let target = ctx.target.clone();
     match command {
-        SecretCmd::Show { key, reveal } => {
-            // 勾了 shared-secrets 的工作区，服务读的是共享池，工作区自己那份
-            // 完全不参与。这里必须给"真正生效的那个"，否则用户照着配客户端
-            // 会一直 401——而 gld list 显示的又是对的，两边对不上更难查。
+        SecretCmd::List { key, reveal } => {
+            let Some(key) = key else {
+                return Err(crate::error::CliError::new(
+                    "项目的凭据要点名看哪一项：gld secret ls <KEY> -w <项目>（gld secret keys 看有哪些）",
+                ));
+            };
+            // 勾了 shared-secrets 的项目，服务读的是共享池，项目自己那份
+            // 完全不参与。这里必须给"真正生效的那个"。
             let profile: WorkspaceProfile = ctx
                 .backend
                 .call_typed(Request::ResolveWorkspace {
@@ -66,7 +187,7 @@ pub async fn run(ctx: &mut Ctx, command: SecretCmd) -> CliResult {
                     .await?
             };
             let hint = shared.then_some(
-                "这个工作区勾了 shared-secrets，值来自共享池；改它用 gld secret shared set。",
+                "这个项目勾了 shared-secrets，值来自共享池；改它用 gld secret shared set。",
             );
             let scope = if shared { "shared" } else { "workspace" };
             show_scoped(ctx, &key, value, reveal, scope, hint)
@@ -83,7 +204,7 @@ pub async fn run(ctx: &mut Ctx, command: SecretCmd) -> CliResult {
             if !ctx.out.json_or(&json!({ "key": key, "updated": true })) {
                 if shared {
                     // 这种情况下服务不会重启，也不该重启——它读的是另一份。
-                    ctx.out.line(format!("已写入工作区的 {key}。"));
+                    ctx.out.line(format!("已写入项目的 {key}。"));
                 } else {
                     ctx.out
                         .line(format!("已设置 {key}；正在运行且用到它的服务已自动重启。"));
@@ -111,39 +232,13 @@ pub async fn run(ctx: &mut Ctx, command: SecretCmd) -> CliResult {
             }
             Ok(())
         }
-        SecretCmd::Shared(command) => shared(ctx, command).await,
-        SecretCmd::Keys => {
-            if ctx.out.json_or(
-                &json!({ "workspace": WORKSPACE_SECRET_KEYS, "shared": SHARED_SECRET_KEYS }),
-            ) {
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = KEY_DOCS
-                .iter()
-                .map(|(key, doc)| {
-                    let scope = match (
-                        WORKSPACE_SECRET_KEYS.contains(key),
-                        SHARED_SECRET_KEYS.contains(key),
-                    ) {
-                        (true, true) => "工作区 / 共享",
-                        (true, false) => "工作区",
-                        (false, true) => "共享",
-                        (false, false) => "-",
-                    };
-                    vec![key.to_string(), scope.to_string(), doc.to_string()]
-                })
-                .collect();
-            ctx.out.table(&["密钥名", "作用域", "用途"], &rows);
-            ctx.out.line("");
-            ctx.out.line("工作区级：gld secret show|set|regen <KEY>     共享池：gld secret shared show|set|regen <KEY>");
-            Ok(())
-        }
+        SecretCmd::Shared(_) | SecretCmd::Keys => unreachable!("handled by run"),
     }
 }
 
 async fn shared(ctx: &mut Ctx, command: SharedSecretCmd) -> CliResult {
     match command {
-        SharedSecretCmd::Show { key, reveal } => {
+        SharedSecretCmd::List { key, reveal } => {
             let value: Option<String> = ctx
                 .backend
                 .call_typed(Request::SharedSecret { key: key.clone() })
@@ -194,11 +289,15 @@ fn client_impact(key: &str) -> &'static str {
             "已经授权过的客户端不受影响，继续能用。只有下次重新授权时，\
              授权页要填这个新口令。"
         }
+        "oauth_client_id" => {
+            "只影响手填了静态 Client ID 的客户端；ChatGPT 这类自动注册的不受影响。"
+        }
+        "cloudflare_token" => "隧道下次起来时用它；服务在跑的话已经按它重启了。",
         _ => "旧值立即失效，记得更新客户端里的配置。",
     }
 }
 
-/// 当前工作区的这个 key 是不是从共享池读。
+/// 当前项目的这个 key 是不是从共享池读。
 async fn uses_shared_pool(ctx: &mut Ctx, key: &str) -> CliResult<bool> {
     if !SHARED_SECRET_KEYS.contains(&key) {
         return Ok(false);
@@ -216,7 +315,7 @@ async fn uses_shared_pool(ctx: &mut Ctx, key: &str) -> CliResult<bool> {
 fn warn_if_shadowed_by_pool(ctx: &Ctx, key: &str, shared: bool) {
     if shared {
         ctx.out.note(format!(
-            "注意：这个工作区勾了 shared-secrets，服务读的是共享池，这次改动不会生效。\
+            "注意：这个项目勾了 shared-secrets，服务读的是共享池，这次改动不会生效。\
              要改生效的那份：gld secret shared set {key} <值>"
         ));
     }

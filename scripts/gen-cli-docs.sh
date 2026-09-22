@@ -22,19 +22,17 @@ unset GLD_HOME GLD_WORKSPACE
 # 命令树：一行一个，子命令用空格分隔。
 COMMANDS=(
   ""
-  "daemon" "daemon start" "daemon stop" "daemon restart" "daemon status" "daemon run" "daemon logs"
-  "workspace" "workspace add" "workspace list" "workspace show" "workspace remove" "workspace set" "workspace fields" "workspace use"
-  "start" "stop" "restart" "status" "ps" "logs" "list" "share" "upgrade" "destroy" "health" "doctor"
+  "start" "stop" "restart" "status" "list" "add" "remove" "set" "fields" "share" "upgrade"
+  "remote" "remote add" "remote remove"
+  "logs" "health" "doctor"
   "tool" "tool list" "tool schema" "tool call"
-  "tunnel" "tunnel start" "tunnel stop" "tunnel restart" "tunnel test" "tunnel status" "tunnel snippet"
-  "gateway" "gateway show" "gateway set" "gateway start" "gateway stop" "gateway health"
-  "hub" "hub show" "hub add" "hub remove" "hub set" "hub start" "hub stop" "hub regenerate"
-  "hub remote" "hub remote add" "hub remote remove"
-  "secret" "secret show" "secret set" "secret regenerate" "secret shared" "secret keys"
+  "secret" "secret list" "secret set" "secret regenerate" "secret keys"
   "frp" "frp list" "frp add" "frp update" "frp remove"
-  "settings" "settings show" "settings proxy" "settings runtime"
-  "planning" "planning show" "planning mode" "planning goal" "planning goal create" "planning goal update" "planning goal accept" "planning goal reject" "planning plan" "planning plan create" "planning plan update" "planning plan accept" "planning plan reject"
-  "history" "usage" "context" "completions"
+  "settings" "settings list" "settings proxy" "settings runtime"
+  "planning" "planning list" "planning mode" "planning goal" "planning goal create" "planning goal update" "planning goal accept" "planning goal reject" "planning plan" "planning plan create" "planning plan update" "planning plan accept" "planning plan reject"
+  "history" "usage" "context"
+  "daemon" "daemon start" "daemon stop" "daemon restart" "daemon status" "daemon run" "daemon logs"
+  "completions"
 )
 
 {
@@ -43,6 +41,8 @@ COMMANDS=(
   echo "> 本文件由 \`scripts/gen-cli-docs.sh\` 从 \`gld --help\` 自动生成，请勿手改；改帮助文本请改 \`crates/cli/src/cli.rs\`。"
   echo
   echo "退出码：0 成功；1 操作失败；2 参数错误；3 守护进程未运行；4 守护进程版本与命令行不一致。"
+  echo
+  echo "RFC-0004 之前的命令（\`ws\`、\`destroy\`、\`hub\`、\`ps\`、\`tunnel\`、\`gateway\`、各处的 \`show\`）还能敲，只是不进帮助，这里也不列；新旧对照见 [RFC-0004](rfc/0004-one-service-many-projects.md) 第 2 节。"
   echo
   echo "## 目录"
   echo
@@ -72,11 +72,11 @@ COMMANDS=(
     fi
     echo
   done
-  echo "## gld workspace set 支持的字段"
+  echo "## gld set 支持的字段"
   echo
   echo '```text'
   # --all：文档要全集，命令行默认给的是精简版（省掉与 MCP 同名的 actions.*）。
-  "$GLD" workspace fields --all 2>/dev/null || true
+  "$GLD" fields --all 2>/dev/null || true
   echo '```'
   echo
   echo "## gld secret keys 密钥名一览"

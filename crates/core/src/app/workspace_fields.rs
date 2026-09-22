@@ -28,8 +28,8 @@ pub struct FieldContext {
 
 /// 不写前缀时补哪个。
 ///
-/// 一个工作区里 MCP 是主服务（`gld start` 默认起它、`gld list` 默认展示它），
-/// Actions 是可选的第二条线路。所以 `port=30000` 补成 `mcp.port`，改 Actions
+/// 项目上常改的（工具集、命令白名单、读限制……）都是 MCP 那一半，Actions 是可选的
+/// 第二条线路。所以 `tool-profile=read-only` 补成 `mcp.tool-profile`，改 Actions
 /// 才需要写全 `actions.port`——常见的那一半不用打前缀，少一半噪音。
 const IMPLIED_PREFIX: &str = "mcp.";
 
@@ -83,38 +83,6 @@ const FIELDS: &[Field] = &[
         "项目根目录；换目录后服务会重启到新目录（旧目录里的历史档案留在原地）",
         |p, v| {
             p.path = parse_workspace_path(v)?;
-            Ok(())
-        }
-    ),
-    field!("mcp.port", "1-65535", "MCP 本地监听端口", |p, v| {
-        p.runtime.local_port = parse_port(v)?;
-        Ok(())
-    }),
-    field!(
-        "mcp.auth",
-        "oauth | bearer | noauth",
-        "MCP 认证方式",
-        |p, v| {
-            p.auth.auth_type = parse_choice(v, MCP_AUTH_CHOICES)?;
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.oauth-client-id",
-        "文本",
-        "MCP OAuth 静态 Client ID",
-        |p, v| {
-            require_non_empty("mcp.oauth-client-id", v)?;
-            p.auth.oauth_client_id = v.trim().into();
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.shared-secrets",
-        "true | false",
-        "MCP 使用共享密钥池而非工作区密钥",
-        |p, v| {
-            p.auth.use_shared_secrets = parse_bool(v)?;
             Ok(())
         }
     ),
@@ -187,69 +155,6 @@ const FIELDS: &[Field] = &[
         "注入 Agent 的工作区级说明",
         |p, v| {
             p.runtime.ai_instructions = v.into();
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.tunnel",
-        "frp | cf | none",
-        "MCP 公网隧道类型（cf 即 cloudflare，两种写法都收）",
-        |p, v| {
-            p.tunnel.tunnel_type = parse_tunnel_type(v)?;
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.frp-profile",
-        "FRP 配置的名称或 id，或空",
-        "使用哪个 FRP 服务器配置（见 gld frp list）",
-        |p, v, ctx| {
-            p.tunnel.frp_profile_id = resolve_frp_profile(v, &ctx.frp_profiles)?;
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.frp-subdomain",
-        "子域名（小写字母 / 数字 / 连字符）",
-        "FRP 子域名，公网地址为 https://<子域名>.<服务器>",
-        |p, v| {
-            p.tunnel.frp_subdomain = parse_subdomain("mcp.frp-subdomain", v)?;
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.cloudflare-mode",
-        "quick | named",
-        "Cloudflare 隧道模式",
-        |p, v| {
-            p.tunnel.cloudflare_mode = parse_choice(v, &["quick", "named"])?;
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.public-url",
-        "https:// 开头的 URL，或空",
-        "手动指定公网地址（隧道类型 none 时使用）",
-        |p, v| {
-            p.tunnel.public_url = parse_public_url("mcp.public-url", v)?;
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.use-proxy",
-        "true | false",
-        "启动隧道时是否套用全局代理",
-        |p, v| {
-            p.tunnel.use_proxy = parse_bool(v)?;
-            Ok(())
-        }
-    ),
-    field!(
-        "mcp.global-gateway",
-        "true | false",
-        "通过全局共享入口 /w/<id> 暴露而不是独立隧道",
-        |p, v| {
-            p.tunnel.use_global_gateway = parse_bool(v)?;
             Ok(())
         }
     ),
@@ -373,6 +278,49 @@ const FIELDS: &[Field] = &[
     ),
 ];
 
+/// 单项目 MCP 监听器那一半的字段，和现在管它们的命令（RFC-0004）。
+///
+/// 项目自己的 MCP 服务没了，这些值收下也没有东西会读。以前的写法
+/// `gld ws set port=30000` 直接报错并指向服务级的命令，而不是存一个不起作用的值——
+/// 那种"改了没反应"最难查。
+const RETIRED: &[(&str, &str)] = &[
+    ("mcp.port", "服务的端口：gld upgrade --port <端口>"),
+    (
+        "mcp.auth",
+        "服务的认证：gld upgrade --auth oauth|bearer|noauth",
+    ),
+    (
+        "mcp.oauth-client-id",
+        "服务的静态 Client ID：gld secret set oauth_client_id <值>",
+    ),
+    ("mcp.shared-secrets", "服务只有一套凭据：gld secret ls"),
+    ("mcp.tunnel", "服务的公网入口：gld share --tunnel <入口>"),
+    (
+        "mcp.frp-profile",
+        "服务的公网入口：gld share --tunnel frp:<配置名>",
+    ),
+    (
+        "mcp.frp-subdomain",
+        "服务的公网入口：gld share --tunnel frp:<配置名> --subdomain <子域名>",
+    ),
+    (
+        "mcp.cloudflare-mode",
+        "服务的公网入口：gld share --tunnel cf 或 cf:<域名>",
+    ),
+    (
+        "mcp.public-url",
+        "服务的公网入口：gld share --tunnel https://<地址>",
+    ),
+    (
+        "mcp.use-proxy",
+        "服务的隧道默认就套用全局代理（gld cfg proxy）",
+    ),
+    (
+        "mcp.global-gateway",
+        "服务的公网入口：gld share --tunnel <入口>",
+    ),
+];
+
 /// 所有可设置字段及说明，按定义顺序。
 pub fn workspace_field_catalog() -> Vec<WorkspaceFieldDoc> {
     FIELDS
@@ -387,7 +335,7 @@ pub fn workspace_field_catalog() -> Vec<WorkspaceFieldDoc> {
 
 /// 只列出 Actions 侧字段（`actions.` 前缀）的键名，不含前缀。
 ///
-/// `gld ws fields` 默认不把这 13 行铺开：它们和 MCP 侧同名同义，
+/// `gld fields` 默认不把这十几行铺开：Actions（自定义 GPT）大多数人不用，
 /// 列出来只是把表撑长一倍。
 pub fn actions_field_suffixes() -> Vec<&'static str> {
     FIELDS
@@ -420,9 +368,24 @@ pub fn apply_workspace_field(
     ctx: &FieldContext,
 ) -> AppResult<()> {
     let Some(field) = canonical_key(key) else {
+        if let Some((retired, instead)) = retired_key(key) {
+            return Err(AppError::Message(format!(
+                "{} 是项目自己那个 MCP 服务的字段；现在只有一个服务，项目上不再有它。\n{instead}",
+                retired.strip_prefix(IMPLIED_PREFIX).unwrap_or(retired)
+            )));
+        }
         return Err(unknown_field(key.trim()));
     };
     (field.apply)(profile, value, ctx)
+}
+
+fn retired_key(raw: &str) -> Option<(&'static str, &'static str)> {
+    let key = raw.trim().to_ascii_lowercase().replace('_', "-");
+    let implied = format!("{IMPLIED_PREFIX}{key}");
+    RETIRED
+        .iter()
+        .find(|(retired, _)| *retired == key || *retired == implied)
+        .copied()
 }
 
 fn unknown_field(key: &str) -> AppError {
@@ -437,7 +400,7 @@ fn unknown_field(key: &str) -> AppError {
         .join(", ");
     AppError::Message(format!(
         "未知字段「{key}」。可用字段（{IMPLIED_PREFIX} 前缀可省略）：{known}\n\
-         Actions 侧同名字段写成 actions.<字段>；完整列表 gld workspace fields --all。"
+         Actions 那条线路的字段写成 actions.<字段>；完整列表 gld fields --all。"
     ))
 }
 
@@ -683,33 +646,53 @@ mod tests {
     #[test]
     fn applies_known_fields_and_rejects_unknown_ones() {
         let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
-        set(&mut profile, "mcp.port", "30000").unwrap();
-        set(&mut profile, "mcp.auth", "Bearer").unwrap();
+        set(&mut profile, "mcp.tool-profile", "Read-Only").unwrap();
+        set(&mut profile, "actions.auth", "api_key").unwrap();
         set(&mut profile, "mcp.history-context", "3, 1,3").unwrap();
-        assert_eq!(profile.runtime.local_port, 30000);
-        assert_eq!(profile.auth.auth_type, "bearer");
+        assert_eq!(profile.runtime.tool_profile, "read-only");
+        assert_eq!(profile.actions.auth_type, "api_key");
         assert_eq!(profile.runtime.history_context_sessions, vec![1, 3]);
 
         let error = set(&mut profile, "nope", "1").unwrap_err();
         assert!(error.to_string().contains("未知字段"));
-        assert!(set(&mut profile, "mcp.port", "0").is_err());
-        assert!(set(&mut profile, "mcp.auth", "magic").is_err());
+        assert!(set(&mut profile, "actions.port", "0").is_err());
+        assert!(set(&mut profile, "mcp.tool-profile", "magic").is_err());
     }
 
-    /// 不写前缀就是改 MCP。写全的老写法必须继续能用。
+    /// 不写前缀就是改 MCP 那一半。写全的老写法必须继续能用。
     #[test]
     fn a_bare_key_means_the_mcp_side() {
         let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
-        set(&mut profile, "port", "30001").unwrap();
-        set(&mut profile, "auth", "bearer").unwrap();
-        assert_eq!(profile.runtime.local_port, 30001);
-        assert_eq!(profile.auth.auth_type, "bearer");
+        set(&mut profile, "confine-reads", "false").unwrap();
+        assert!(!profile.runtime.confine_reads);
         // Actions 侧没被顺手改掉——补前缀只补 MCP。
-        assert_ne!(profile.actions.local_port, 30001);
+        assert!(profile.actions.confine_reads);
 
         set(&mut profile, "actions.port", "9001").unwrap();
         assert_eq!(profile.actions.local_port, 9001);
-        assert_eq!(profile.runtime.local_port, 30001);
+    }
+
+    /// 单项目 MCP 服务的字段（RFC-0004 起没有了）：不收下一个不起作用的值，
+    /// 而是说清楚现在归哪条命令管。前缀写不写都一样。
+    #[test]
+    fn a_field_of_the_old_per_project_service_points_at_the_service_command() {
+        let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
+        let before = profile.runtime.local_port;
+        for (key, command) in [
+            ("port", "gld upgrade --port"),
+            ("mcp.port", "gld upgrade --port"),
+            ("auth", "gld upgrade --auth"),
+            ("tunnel", "gld share --tunnel"),
+            ("public_url", "gld share --tunnel"),
+            ("shared-secrets", "gld secret ls"),
+        ] {
+            let error = set(&mut profile, key, "x").unwrap_err().to_string();
+            assert!(error.contains(command), "{key}: {error}");
+            assert!(!error.contains("未知字段"), "{key}: {error}");
+        }
+        assert_eq!(profile.runtime.local_port, before, "被拒了就不能写进去");
+        // Actions 那一半照旧能改。
+        set(&mut profile, "actions.tunnel", "cf").unwrap();
     }
 
     /// `name` 没有前缀，不能被补成 `mcp.name`（那个字段不存在，会变成"未知字段"）。
@@ -750,15 +733,15 @@ mod tests {
         };
         let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
 
-        apply_workspace_field(&mut profile, "frp-profile", "公司", &ctx).unwrap();
-        assert_eq!(profile.tunnel.frp_profile_id, "abcd1234");
-        apply_workspace_field(&mut profile, "frp-profile", "efgh5678", &ctx).unwrap();
-        assert_eq!(profile.tunnel.frp_profile_id, "efgh5678");
-        apply_workspace_field(&mut profile, "frp-profile", "abcd", &ctx).unwrap();
-        assert_eq!(profile.tunnel.frp_profile_id, "abcd1234");
+        apply_workspace_field(&mut profile, "actions.frp-profile", "公司", &ctx).unwrap();
+        assert_eq!(profile.actions.frp_profile_id, "abcd1234");
+        apply_workspace_field(&mut profile, "actions.frp-profile", "efgh5678", &ctx).unwrap();
+        assert_eq!(profile.actions.frp_profile_id, "efgh5678");
+        apply_workspace_field(&mut profile, "actions.frp-profile", "abcd", &ctx).unwrap();
+        assert_eq!(profile.actions.frp_profile_id, "abcd1234");
         // 清空仍然要允许：这是"不用 FRP 了"的表达方式。
-        apply_workspace_field(&mut profile, "frp-profile", "", &ctx).unwrap();
-        assert!(profile.tunnel.frp_profile_id.is_empty());
+        apply_workspace_field(&mut profile, "actions.frp-profile", "", &ctx).unwrap();
+        assert!(profile.actions.frp_profile_id.is_empty());
     }
 
     /// 以前填错名字会被静默接受，start 之后没有公网地址才发现。
@@ -769,7 +752,7 @@ mod tests {
         };
         let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
 
-        let error = apply_workspace_field(&mut profile, "frp-profile", "不存在", &ctx)
+        let error = apply_workspace_field(&mut profile, "actions.frp-profile", "不存在", &ctx)
             .unwrap_err()
             .to_string();
         assert!(error.contains("没有名为「不存在」"), "{error}");
@@ -780,11 +763,11 @@ mod tests {
         );
         assert!(error.contains("gld frp add"), "{error}");
         // 被拒绝了就不能顺手把值写进去。
-        assert!(profile.tunnel.frp_profile_id.is_empty());
+        assert!(profile.actions.frp_profile_id.is_empty());
 
         // 一个都没建时不该列一张空表，直接给建的命令。
         let empty = FieldContext::default();
-        let error = apply_workspace_field(&mut profile, "frp-profile", "公司", &empty)
+        let error = apply_workspace_field(&mut profile, "actions.frp-profile", "公司", &empty)
             .unwrap_err()
             .to_string();
         assert!(error.contains("一个都还没建"), "{error}");
@@ -794,13 +777,13 @@ mod tests {
     #[test]
     fn a_malformed_subdomain_is_rejected() {
         let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
-        set(&mut profile, "frp-subdomain", "my-proj").unwrap();
-        assert_eq!(profile.tunnel.frp_subdomain, "my-proj");
-        set(&mut profile, "frp-subdomain", "").unwrap();
-        assert!(profile.tunnel.frp_subdomain.is_empty());
+        set(&mut profile, "actions.frp-subdomain", "my-proj").unwrap();
+        assert_eq!(profile.actions.frp_subdomain, "my-proj");
+        set(&mut profile, "actions.frp-subdomain", "").unwrap();
+        assert!(profile.actions.frp_subdomain.is_empty());
 
         for bad in ["my.proj", "my proj", "MyProj", "-proj", "proj-"] {
-            let error = set(&mut profile, "frp-subdomain", bad)
+            let error = set(&mut profile, "actions.frp-subdomain", bad)
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("子域名"), "{bad} → {error}");
@@ -820,11 +803,11 @@ mod tests {
             ("none", "none"),
             ("frp", "frp"),
         ] {
-            set(&mut profile, "tunnel", written).unwrap();
+            set(&mut profile, "actions.tunnel", written).unwrap();
             // 存进配置文件的永远是规范值，别处的匹配逻辑不用跟着改。
-            assert_eq!(profile.tunnel.tunnel_type, stored, "{written}");
+            assert_eq!(profile.actions.tunnel_type, stored, "{written}");
         }
-        let error = set(&mut profile, "tunnel", "quick")
+        let error = set(&mut profile, "actions.tunnel", "quick")
             .unwrap_err()
             .to_string();
         assert!(error.contains("frp | cf | none"), "{error}");
@@ -855,26 +838,29 @@ mod tests {
     #[test]
     fn a_public_url_must_carry_a_scheme() {
         let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
-        set(&mut profile, "public-url", "https://mcp.example.com/").unwrap();
-        assert_eq!(profile.tunnel.public_url, "https://mcp.example.com");
-        set(&mut profile, "public-url", "").unwrap();
-        assert!(profile.tunnel.public_url.is_empty());
+        set(
+            &mut profile,
+            "actions.public-url",
+            "https://gpt.example.com/",
+        )
+        .unwrap();
+        assert_eq!(profile.actions.public_url, "https://gpt.example.com");
+        set(&mut profile, "actions.public-url", "").unwrap();
+        assert!(profile.actions.public_url.is_empty());
 
-        let error = set(&mut profile, "public-url", "mcp.example.com")
+        let error = set(&mut profile, "actions.public-url", "gpt.example.com")
             .unwrap_err()
             .to_string();
         assert!(error.contains("要带协议头"), "{error}");
     }
 
-    /// Actions 侧字段必须每个都能在 MCP 侧找到同名的，否则 `gld ws fields`
-    /// 的"同名字段换前缀"那句话就是假的。
+    /// 退掉的字段不能又出现在字段表里：两边都有的话，set 收下它、报错又说它没了。
     #[test]
-    fn every_actions_field_mirrors_an_mcp_field() {
-        for suffix in actions_field_suffixes() {
-            let mirrored = format!("{IMPLIED_PREFIX}{suffix}");
+    fn a_retired_field_is_not_in_the_catalog() {
+        for (retired, _) in RETIRED {
             assert!(
-                FIELDS.iter().any(|field| field.key == mirrored),
-                "actions.{suffix} 没有对应的 {mirrored}"
+                FIELDS.iter().all(|field| field.key != *retired),
+                "{retired} 既在字段表里又在退役表里"
             );
         }
     }

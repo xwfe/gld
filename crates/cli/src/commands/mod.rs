@@ -1,6 +1,7 @@
 //! 子命令实现。每个文件对应 `cli.rs` 里的一组命令，只做三件事：
 //! 组装 `Request`、调用后端、渲染结果。
 
+mod actions;
 mod daemon;
 mod doctor;
 mod frp;
@@ -34,7 +35,7 @@ pub struct Ctx {
     pub backend: Backend,
     pub out: Output,
     pub target: WorkspaceTarget,
-    /// 用户是否显式指定了工作区（决定 `status` 显示总览还是详情）。
+    /// 用户是否显式写了 `-w`（决定 `ls` / `logs` / `secret` 看服务还是某个项目）。
     pub explicit_workspace: bool,
 }
 
@@ -66,23 +67,22 @@ pub async fn run(cli: Cli) -> CliResult {
 
     match cli.command {
         Command::Daemon(_) | Command::Completions { .. } => unreachable!("handled above"),
-        Command::Workspace(command) => workspace::run(&mut ctx, command).await,
         Command::Start(args) => service::start(&mut ctx, args).await,
         Command::Stop(args) => service::stop(&mut ctx, args).await,
-        Command::Destroy(args) => workspace::destroy(&mut ctx, args).await,
         Command::Restart(args) => service::restart(&mut ctx, args).await,
         Command::Status => service::status(&mut ctx).await,
-        Command::Ps => service::ps(&mut ctx).await,
-        Command::Logs(args) => logs::workspace_logs(&mut ctx, args).await,
         Command::List(args) => service::list(&mut ctx, args).await,
+        Command::Add(args) => workspace::add(&mut ctx, args).await,
+        Command::Remove(args) => workspace::remove(&mut ctx, args).await,
+        Command::Set(args) => workspace::set(&mut ctx, args).await,
+        Command::Fields { all } => workspace::fields(&ctx, all),
         Command::Share(args) => share::run(&mut ctx, args).await,
         Command::Upgrade(args) => upgrade::run(&mut ctx, args).await,
-        Command::Health => inspect::health(&mut ctx).await,
+        Command::Remote(command) => hub::remote(&mut ctx, command).await,
+        Command::Logs(args) => logs::logs(&mut ctx, args).await,
+        Command::Health(args) => inspect::health(&mut ctx, args).await,
         Command::Doctor => doctor::run(&mut ctx).await,
         Command::Tool(command) => tool::run(&mut ctx, command).await,
-        Command::Tunnel(command) => tunnel::run(&mut ctx, command).await,
-        Command::Gateway(command) => gateway::run(&mut ctx, command).await,
-        Command::Hub(command) => hub::run(&mut ctx, command).await,
         Command::Secret(command) => secret::run(&mut ctx, command).await,
         Command::Frp(command) => frp::run(&mut ctx, command).await,
         Command::Settings(command) => settings::run(&mut ctx, command).await,
@@ -90,6 +90,10 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::History => inspect::history(&mut ctx).await,
         Command::Usage => inspect::usage(&mut ctx).await,
         Command::Context(args) => inspect::context(&mut ctx, args).await,
+        Command::Workspace(command) => workspace::run(&mut ctx, command).await,
+        Command::Hub(command) => hub::run(&mut ctx, command).await,
+        Command::Tunnel(command) => tunnel::run(&mut ctx, command).await,
+        Command::Gateway(command) => gateway::run(&mut ctx, command).await,
     }
 }
 

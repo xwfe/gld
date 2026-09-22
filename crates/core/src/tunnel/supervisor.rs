@@ -866,12 +866,12 @@ fn unsupported_tunnel_type(tunnel_type: &str, kind: TunnelServiceKind) -> AppErr
     let tunnel_type = tunnel_type.trim();
     if tunnel_type.is_empty() || tunnel_type == "none" {
         AppError::Message(format!(
-            "这个工作区还没选公网隧道。先选一种再启动：\
-             gld ws set {field}=cloudflare（免配置，地址每次变）或 gld ws set {field}=frp（需要自己的 frps）"
+            "这个项目还没选公网隧道。先选一种再启动：\
+             gld set <项目> {field}=cloudflare（免配置，地址每次变）或 gld set <项目> {field}=frp（需要自己的 frps）"
         ))
     } else {
         AppError::Message(format!(
-            "不认识的隧道类型「{tunnel_type}」。可用 frp 或 cloudflare：gld ws set {field}=cloudflare"
+            "不认识的隧道类型「{tunnel_type}」。可用 frp 或 cloudflare：gld set <项目> {field}=cloudflare"
         ))
     }
 }

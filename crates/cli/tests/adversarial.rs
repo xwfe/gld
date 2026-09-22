@@ -11,43 +11,6 @@ use common::env::{free_port, Env};
 use common::http::{post_json, request, Reply};
 use serde_json::Value;
 
-/// 起一个带 bearer 认证的 MCP，返回端口和 token。
-fn running_mcp(env: &Env, name: &str) -> (u16, String) {
-    let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        name,
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["ws", "set", "mcp.auth=bearer"]);
-    let token = env.json(&["--json", "secret", "show", "bearer_token", "--reveal"])["value"]
-        .as_str()
-        .expect("bearer token")
-        .to_string();
-    env.ok(&["start"]);
-    (port, token)
-}
-
-/// 调一个工具，返回工具自己的结构化结果（不是 JSON-RPC 外壳）。
-fn call_tool(port: u16, token: &str, name: &str, arguments: Value) -> Value {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": name, "arguments": arguments }
-    })
-    .to_string();
-    let reply = post_json(port, "/mcp", &body, Some(token));
-    assert_eq!(reply.status, 200, "HTTP 层就失败了：{}", reply.body);
-    let text = reply.json()["result"]["content"][0]["text"]
-        .as_str()
-        .expect("工具结果")
-        .to_string();
-    serde_json::from_str(&text).expect("工具结果是 JSON")
-}
-
 /// 数据文件坏掉时必须停机，不能当成"还没配过"。
 ///
 /// 修之前：截断 profiles.json 之后 `ws list` 回一句"还没有工作区"，
@@ -56,13 +19,13 @@ fn call_tool(port: u16, token: &str, name: &str, arguments: Value) -> Value {
 #[test]
 fn a_corrupt_data_file_stops_gld_instead_of_wiping_every_secret() {
     let env = Env::new();
-    env.ok(&["ws", "add", ".", "--name", "precious"]);
+    env.ok(&["add", ".", "--name", "precious"]);
 
     let data_file = env.home.path().join("data").join("profiles.json");
     let original = fs::read_to_string(&data_file).expect("读数据文件");
     fs::write(&data_file, &original[..original.len() / 2]).expect("截断");
 
-    let listed = env.gld(&["ws", "list"]);
+    let listed = env.gld(&["ls"]);
     assert!(!listed.status.success(), "坏文件必须让命令失败");
     let message = String::from_utf8_lossy(&listed.stderr).into_owned();
     assert!(message.contains("数据文件解析失败"), "{message}");
@@ -70,7 +33,7 @@ fn a_corrupt_data_file_stops_gld_instead_of_wiping_every_secret() {
     assert!(message.contains("还原备份"), "{message}");
 
     // 关键断言：坏文件原地保留，没有被空白配置覆盖。
-    let after = env.gld(&["ws", "add", ".", "--name", "second"]);
+    let after = env.gld(&["add", ".", "--name", "second"]);
     assert!(!after.status.success());
     assert_eq!(
         fs::read_to_string(&data_file).expect("文件还在"),
@@ -92,32 +55,26 @@ fn a_corrupt_data_file_stops_gld_instead_of_wiping_every_secret() {
 fn the_gld_data_home_is_not_readable_even_when_confinement_is_off() {
     let env = Env::new();
     env.write("probe.txt", "workspace file\n");
-    let (port, token) = running_mcp(&env, "victim");
-    env.ok(&["ws", "set", "mcp.confine-reads=false"]);
-    env.ok(&["restart"]);
+    let service = env.serve("victim", "bearer");
+    // 服务每次调用都重新读项目配置，改完不用重启。
+    env.ok(&["set", "confine-reads=false"]);
     let home = env.home.path().display().to_string();
 
     let denied = |result: &Value| result["error"]["code"] == "GLD_DATA_HOME_DENIED";
 
-    let read = call_tool(
-        port,
-        &token,
+    let read = service.call_tool(
         "read_file",
         serde_json::json!({ "path": format!("{home}/data/profiles.json") }),
     );
     assert!(denied(&read), "read_file 读到了密钥库：{read}");
 
-    let listed = call_tool(
-        port,
-        &token,
+    let listed = service.call_tool(
         "list_dir",
         serde_json::json!({ "path": format!("{home}/data") }),
     );
     assert!(denied(&listed), "list_dir 列出了数据目录：{listed}");
 
-    let searched = call_tool(
-        port,
-        &token,
+    let searched = service.call_tool(
         "search_text",
         serde_json::json!({
             "query": "bearer_token", "path": format!("{home}/data"),
@@ -141,9 +98,7 @@ fn the_gld_data_home_is_not_readable_even_when_confinement_is_off() {
         .expect("上一级")
         .join("gld-neighbour.txt");
     fs::write(&neighbour, "neighbour\n").expect("写外部文件");
-    let outside = call_tool(
-        port,
-        &token,
+    let outside = service.call_tool(
         "read_file",
         serde_json::json!({ "path": neighbour.display().to_string() }),
     );
@@ -153,12 +108,7 @@ fn the_gld_data_home_is_not_readable_even_when_confinement_is_off() {
         "confine-reads=false 之后外部文件该读得到：{outside}"
     );
 
-    let inside = call_tool(
-        port,
-        &token,
-        "read_file",
-        serde_json::json!({ "path": "probe.txt" }),
-    );
+    let inside = service.call_tool("read_file", serde_json::json!({ "path": "probe.txt" }));
     assert_eq!(inside["ok"], true, "工作区内的文件被误挡了：{inside}");
 }
 
@@ -171,7 +121,7 @@ fn the_gld_data_home_is_not_readable_even_when_confinement_is_off() {
 fn reads_are_confined_to_the_workspace_by_default() {
     let env = Env::new();
     env.write("probe.txt", "workspace file\n");
-    let (port, token) = running_mcp(&env, "confined");
+    let service = env.serve("confined", "bearer");
 
     let neighbour = env
         .project
@@ -180,9 +130,7 @@ fn reads_are_confined_to_the_workspace_by_default() {
         .expect("上一级")
         .join("gld-outside.txt");
     fs::write(&neighbour, "outside\n").expect("写外部文件");
-    let blocked = call_tool(
-        port,
-        &token,
+    let blocked = service.call_tool(
         "read_file",
         serde_json::json!({ "path": neighbour.display().to_string() }),
     );
@@ -200,11 +148,8 @@ fn reads_are_confined_to_the_workspace_by_default() {
     );
 
     // 开关得真的有用：关掉之后同一条路径要能读。
-    env.ok(&["ws", "set", "mcp.confine-reads=false"]);
-    env.ok(&["restart"]);
-    let allowed = call_tool(
-        port,
-        &token,
+    env.ok(&["set", "confine-reads=false"]);
+    let allowed = service.call_tool(
         "read_file",
         serde_json::json!({ "path": neighbour.display().to_string() }),
     );
@@ -212,55 +157,34 @@ fn reads_are_confined_to_the_workspace_by_default() {
     assert_eq!(allowed["ok"], true, "关掉之后该能读：{allowed}");
 }
 
-/// bearer 认证没有 token 时，服务不许起来。
+/// bearer 认证下 token 丢了，服务当场补一个，而不是起一个谁都拿 401 的服务。
 ///
-/// 修之前照起不误：`gld status` 显示 running、端口也通，但**任何**请求都拿 401
-/// ——包括配置完全正确的客户端。用户看到的是"服务好好的，客户端连不上"。
-/// Actions 那侧一直会拒绝启动，MCP 这侧没有，两边不一致。
+/// 以前单项目服务在这种情况下照起不误：`gld status` 显示 running、端口也通，但
+/// **任何**请求都拿 401——包括配置完全正确的客户端。后来改成拒绝启动。现在只有
+/// 一个服务，它的凭据是用到时生成的：数据文件里没有（手工编辑、旧备份缺字段），
+/// 起服务时就生成一个新的，`gld secret ls` 看得到、拿它的请求能通。
 #[test]
-fn mcp_refuses_to_start_when_bearer_auth_has_no_token() {
+fn a_bearer_service_whose_token_is_gone_gets_a_new_one() {
     let env = Env::new();
     let port = free_port();
-    env.ok(&[
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "tokenless",
-        "--mcp-port",
-        &port.to_string(),
-    ]);
-    env.ok(&["ws", "set", "mcp.auth=bearer"]);
+    env.ok(&["add", ".", "--name", "tokenless"]);
+    env.ok(&["upgrade", "--port", &port.to_string(), "--auth", "bearer"]);
 
-    // 模拟数据文件里没有这个密钥（手工编辑 / 旧版导入 / 备份缺字段）。
+    // 模拟数据文件里没有这个凭据。
     let data_file = env.home.path().join("data").join("profiles.json");
     let mut data: Value =
         serde_json::from_str(&fs::read_to_string(&data_file).expect("读")).expect("解析");
-    for secrets in data["workspace_secrets"]
-        .as_object_mut()
-        .expect("workspace_secrets")
-        .values_mut()
-    {
-        secrets
-            .as_object_mut()
-            .expect("secrets")
-            .remove("bearer_token");
+    if let Some(hub) = data["app_secrets"]["hub"].as_object_mut() {
+        hub.remove("bearer_token");
     }
     fs::write(&data_file, data.to_string()).expect("写回");
 
-    let started = env.gld(&["start"]);
-    let message = format!(
-        "{}{}",
-        String::from_utf8_lossy(&started.stdout),
-        String::from_utf8_lossy(&started.stderr)
-    );
-    assert!(!started.status.success(), "不该启动成功：{message}");
-    assert!(message.contains("bearer_token"), "{message}");
-    // 报错里要给能直接敲的命令。
-    assert!(
-        message.contains("gld secret regen bearer_token"),
-        "{message}"
-    );
+    env.ok(&["start"]);
+    let token = env.service_secret("bearer_token");
+    assert!(!token.is_empty(), "该当场补一个 token");
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    assert_eq!(post_json(port, "/mcp", body, Some(&token)).status, 200);
+    assert_eq!(post_json(port, "/mcp", body, Some("wrong")).status, 401);
 }
 
 /// 网关不能让公网请求自己指定"这个服务对外叫什么"。
@@ -272,23 +196,9 @@ fn mcp_refuses_to_start_when_bearer_auth_has_no_token() {
 #[test]
 fn the_gateway_does_not_let_the_public_dictate_the_upstream_identity() {
     let env = Env::new();
-    let mcp_port = free_port();
+    let service_port = free_port();
     let gateway_port = free_port();
-    let id = env.json(&[
-        "--json",
-        "ws",
-        "add",
-        ".",
-        "--name",
-        "spoof",
-        "--mcp-port",
-        &mcp_port.to_string(),
-    ])["id"]
-        .as_str()
-        .expect("workspace id")
-        .to_string();
-    // public_url 留空，逼上游走"认请求头"那条分支——有配置时头本来就不参与。
-    env.ok(&["ws", "set", "mcp.auth=oauth", "mcp.global-gateway=true"]);
+    env.ok(&["add", ".", "--name", "spoof"]);
     env.ok(&[
         "gateway",
         "set",
@@ -299,8 +209,19 @@ fn the_gateway_does_not_let_the_public_dictate_the_upstream_identity() {
         "--tunnel",
         "none",
     ]);
-    env.ok(&["start", "-s", "mcp"]);
-    env.ok(&["gateway", "start"]);
+    // 服务经全局入口挂出去的老路子（`/hub`）。public_url 留空，逼上游走
+    // "认请求头"那条分支——有配置时头本来就不参与。
+    env.ok(&[
+        "hub",
+        "set",
+        "--port",
+        &service_port.to_string(),
+        "--auth",
+        "oauth",
+        "--global-gateway",
+        "true",
+    ]);
+    env.ok(&["start"]);
 
     let spoofed = [
         ("X-Forwarded-Host", "evil.example"),
@@ -310,7 +231,7 @@ fn the_gateway_does_not_let_the_public_dictate_the_upstream_identity() {
     let metadata = "/.well-known/oauth-authorization-server";
 
     // 直连必须仍然认这个头：用户自己架 nginx / cloudflared 时靠的就是它。
-    let direct = request(mcp_port, "GET", metadata, &spoofed, "");
+    let direct = request(service_port, "GET", metadata, &spoofed, "");
     assert_eq!(
         issuer(&direct),
         "https://evil.example",
@@ -318,11 +239,11 @@ fn the_gateway_does_not_let_the_public_dictate_the_upstream_identity() {
         direct.body
     );
 
-    // 过网关就不认了。
+    // 过网关就不认了：公网传进来的头不能决定上游对外叫什么。
     let through_reply = request(
         gateway_port,
         "GET",
-        &format!("{metadata}/w/{id}"),
+        &format!("{metadata}/hub/mcp"),
         &spoofed,
         "",
     );
@@ -333,12 +254,13 @@ fn the_gateway_does_not_let_the_public_dictate_the_upstream_identity() {
         through_reply.body
     );
     assert!(
-        through_gateway.starts_with("http://127.0.0.1"),
-        "应当退回本机地址，实际：{through_gateway}"
+        !through_gateway.is_empty(),
+        "网关该转到服务的元数据：{}",
+        through_reply.body
     );
 
-    env.ok(&["gateway", "stop"]);
     env.ok(&["stop"]);
+    env.ok(&["gateway", "stop"]);
 }
 
 /// `Authorization` 的 scheme 大小写不敏感（RFC 7235 / RFC 6750）。
@@ -348,7 +270,8 @@ fn the_gateway_does_not_let_the_public_dictate_the_upstream_identity() {
 #[test]
 fn the_authorization_scheme_is_matched_case_insensitively() {
     let env = Env::new();
-    let (port, token) = running_mcp(&env, "casing");
+    let service = env.serve("casing", "bearer");
+    let (port, token) = (service.port, service.token.clone());
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
 
     for scheme in ["Bearer", "bearer", "BEARER"] {

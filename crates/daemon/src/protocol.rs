@@ -24,7 +24,11 @@ use serde_json::Value;
 ///
 /// 2：`set_workspace_fields` 的响应从裸的 WorkspaceProfile 变成
 ///    `WorkspaceUpdate`（多了重启结果），旧命令行解析不了新守护进程的回包。
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3：只留多项目模式（RFC-0004），命令行改用 `hub_ensure_started`、`set_hub_secret`、
+///    `hub_join_all`、`hub_health`、`hub_usage`、`hub_logs`。旧守护进程不认这几个，
+///    不递增的话升级二进制后第一条 `gld start` 报的是"看不懂的请求"，而不是
+///    "请 gld daemon restart"。
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +161,23 @@ pub enum Request {
     },
     RegenerateHubSecret {
         key: String,
+    },
+    /// 自己定一项服务凭据（授权口令、Cloudflare Tunnel Token）。
+    SetHubSecret {
+        key: String,
+        value: String,
+    },
+    /// 把登记了但还不在服务里的项目都加进来（RFC-0004 之前的老数据）。
+    HubJoinAll,
+    /// 服务的本地 / 公网 / OAuth 元数据检查。
+    HubHealth,
+    /// 没在跑就起；跑得好好的什么都不做（`gld start`）。`HubStart` 是按当前配置重启。
+    HubEnsureStarted,
+    /// 服务这次运行期间的请求统计；没在跑是 null。
+    HubUsage,
+    /// 服务自己的日志尾部。
+    HubLogs {
+        max_bytes: usize,
     },
 
     // ---- 密钥 ----
@@ -322,6 +343,7 @@ impl Request {
                 | Request::GatewayStart
                 | Request::GatewayStop
                 | Request::HubStart
+                | Request::HubEnsureStarted
                 | Request::HubStop
         )
     }
@@ -340,9 +362,12 @@ impl Request {
                 | Request::GatewayStart
                 // 这三个在 hub 正跑着时会重启它，走全局入口的还要等入口拿到公网地址。
                 | Request::HubStart
+                | Request::HubEnsureStarted
                 | Request::SetHubConfig { .. }
                 | Request::RegenerateHubSecret { .. }
+                | Request::SetHubSecret { .. }
                 | Request::Health { .. }
+                | Request::HubHealth
                 | Request::GatewayHealth
                 // 工具调用可能跑测试或构建，几分钟都算正常。
                 | Request::CallTool { .. }

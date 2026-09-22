@@ -1,5 +1,9 @@
 //! clap 定义。帮助文本是给第一次接触的人看的：每个子命令都说明它做什么、
 //! 什么时候用、常见的下一步是什么。
+//!
+//! 命令面在 RFC-0004 收过一次：只有一个 MCP 服务，项目挂在它下面，增删改查
+//! 都是顶层的一个词。老命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway`、
+//! 各处的 `show`）还认，只是不进帮助。
 
 use std::path::PathBuf;
 
@@ -7,26 +11,27 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const AFTER_HELP: &str = "\
 快速上手：
-  gld start ~/code/my-project             启动 MCP；目录没登记过会自动登记（守护进程自动在后台拉起）
-  gld start                               同上，作用于当前目录
-  gld list                                看地址、凭据与隧道；不指定工作区时列出全部
-  gld share                               要接 ChatGPT 时用：一条命令拿到公网 HTTPS 地址
-  gld upgrade --tunnel https://x.com/mcp  改目录 / 公网入口 / 端口 / 认证，改完自动重启
-  gld stop                                停止服务（--all 停所有工作区的）；配置不动
-  gld destroy                             销毁工作区：连配置和密钥一起删（项目文件不动）
+  gld start ~/code/api          启动 MCP 服务，并把这个目录加进来（守护进程自动在后台拉起）
+  gld add ~/code/web            再加一个项目；服务在跑就立即生效
+  gld ls                        客户端要填的地址和凭据，和所有项目
+  gld share                     要接 ChatGPT 时用：给服务拿一个公网 HTTPS 地址
+  gld set web tool-profile=read-only   改某个项目的配置（字段见 gld fields）
+  gld rm web                    删掉一个项目（只删 gld 这边的配置，项目文件不动）
+  gld stop                      停服务；项目、配置和凭据都留着
+
+只有一个服务：客户端里只配一条连接，AI 每次调用带 workspace 参数（项目名或 id）选项目。
+拿到服务凭据就能访问全部项目——只想单独给出去的项目别加进来。
 
 公网入口（--tunnel 在 start / share / upgrade 里通用）：
   --tunnel https://mcp.example.com/mcp    已有公网地址（自建反代等），只登记不起隧道
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
   --tunnel cf:mcp.example.com             Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
-  --tunnel cf:mcp.example.com --token <token>
-                                          同上，token 直接写在命令里（会进 shell 历史）
-  --tunnel frp:公司                       FRP 固定域名，子域名默认取工作区名
+  --tunnel frp:公司                       FRP 固定域名，子域名默认 gld
   --tunnel off                            关掉公网入口，只留本地地址
 
-工作区定位：
-  大多数命令接受 -w/--workspace <id|id前缀|名称|路径>。不给时按当前目录归属推断；
-  只有一个工作区时直接使用它。
+项目定位：
+  改项目的命令接受项目名（或 -w <id|id前缀|名称|路径>）。不给时按当前目录归属推断；
+  只有一个项目时直接使用它。
 
 数据目录：
   默认 ~/.config/gld，可用 --home 或环境变量 GLD_HOME 覆盖。里面有配置、密钥、日志，
@@ -38,9 +43,10 @@ const AFTER_HELP: &str = "\
 #[command(
     name = "gld",
     version,
-    about = "把本地项目变成 AI 可通过 MCP / GPT Actions 直接开发的工作区，服务常驻后台",
-    long_about = "gld 管理一组“工作区”（本地项目目录），为每个工作区提供 MCP Streamable HTTP \
-服务和可选的 GPT Actions OpenAPI 网关，并能通过 FRP / Cloudflare 隧道暴露到公网。\n\n\
+    about = "把本地项目变成 AI 可通过 MCP 直接开发的工作区：一个服务，多个项目，常驻后台",
+    long_about = "gld 在后台跑一个 MCP Streamable HTTP 服务，把登记进来的项目目录都挂在它下面：\
+客户端只配一条连接，AI 每次调用用 workspace 参数选项目，项目之间互不串。\
+需要时能通过 FRP / Cloudflare 隧道暴露到公网。\n\n\
 服务运行在一个后台守护进程里：第一次执行 gld start 时自动拉起，之后关闭终端也不受影响；\
 gld daemon status 可以随时查看它是否在跑。",
     after_help = AFTER_HELP,
@@ -57,7 +63,7 @@ pub struct Cli {
 
 #[derive(Debug, Args)]
 pub struct GlobalOpts {
-    /// 目标工作区：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+    /// 目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
     #[arg(
         short = 'w',
         long,
@@ -90,104 +96,120 @@ pub struct GlobalOpts {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// 管理后台守护进程（启动 / 停止 / 状态 / 日志）
-    #[command(subcommand)]
-    Daemon(DaemonCmd),
-
-    /// 管理工作区（登记项目目录、查看、修改配置、删除）
-    #[command(subcommand, visible_alias = "ws")]
-    Workspace(WorkspaceCmd),
-
-    /// 启动 MCP（默认）或 Actions 服务；目录没登记过会自动登记为工作区
+    /// 启动 MCP 服务；给了目录（或当前目录就是项目）会顺带把它加进来
     ///
-    ///   gld start                          当前目录
-    ///   gld start ~/code/api               指定目录
-    ///   gld start ~/code/api --tunnel https://mcp.example.com/mcp
+    ///   gld start                          起服务；当前目录是项目、或者还一个项目都没有时，顺带加当前目录
+    ///   gld start ~/code/api               起服务，并把这个目录加进来
+    ///   gld start --tunnel cf:mcp.example.com
     ///                                      顺带配好公网入口，起完直接打印连接信息
     ///
     /// 守护进程没在跑会自动拉起，之后关掉终端服务也照常在。
+    /// -s actions 起的是这个项目的 GPT Actions（自定义 GPT 用），它还是一个项目一个。
     #[command(verbatim_doc_comment)]
     Start(StartArgs),
 
-    /// 停止服务（默认停当前工作区的全部服务）
+    /// 停止服务（项目、配置、凭据都不动）
     ///
-    ///   gld stop              当前工作区的 MCP 和 Actions
-    ///   gld stop -s mcp       只停 MCP
-    ///   gld stop --all        所有工作区的所有服务（守护进程留着，下次 start 照常用）
+    ///   gld stop              MCP 服务，连同各项目的 GPT Actions
+    ///   gld stop -s actions   只停当前项目的 GPT Actions
     ///
-    /// 配置和密钥都不动；连守护进程一起退出用 gld daemon stop。
+    /// 连守护进程一起退出用 gld daemon stop；要删项目用 gld rm。
     #[command(verbatim_doc_comment)]
     Stop(StopArgs),
 
-    /// 重启工作区的服务（默认全部）
+    /// 重启服务
     ///
-    /// 改端口 / 认证 / 密钥不需要它——ws set 和 secret set 会自己重启受影响的服务。
-    /// 用得上它的场景：改了全局设置（gld settings runtime），或服务卡住了想踢一脚。
+    /// 改端口 / 认证 / 凭据不需要它——upgrade 和 secret set 会自己重启服务。
+    /// 用得上它的场景：改了全局设置（gld cfg runtime），或服务卡住了想踢一脚。
     #[command(verbatim_doc_comment)]
     Restart(ServiceArgs),
 
-    /// 查看服务与隧道状态：不带工作区时列出全部，带工作区时显示详情
+    /// 服务、公网入口和项目的一览
+    #[command(alias = "ps")]
     Status,
 
-    /// 只列出正在运行的服务
-    Ps,
+    /// 客户端要填的地址、凭据，和所有项目；给项目名就看这个项目的配置
+    ///
+    ///   gld ls                  服务的地址、凭据（脱敏）和项目表
+    ///   gld ls api              项目 api 的配置
+    ///   gld ls --reveal         凭据显示明文
+    #[command(verbatim_doc_comment, visible_alias = "ls")]
+    List(ListArgs),
 
-    /// 查看工作区日志尾部，或用 -f 持续跟随
+    /// 加项目：登记目录并加入服务（服务在跑就立即生效，不用重启）
+    ///
+    ///   gld add                 当前目录
+    ///   gld add ~/code/api ~/code/web
+    ///   gld add . --name api    起个名字（默认是目录名）
+    ///
+    /// 另一台机器上 ccnm 管着的项目用 gld remote add。
+    #[command(verbatim_doc_comment)]
+    Add(AddArgs),
+
+    /// 删项目：从服务里拿掉，并删掉它在 gld 这边的配置和记账（项目文件一个字节都不动）
+    ///
+    ///   gld rm api              按名称 / 路径 / id 指定，可以一次给多个
+    ///   gld rm                  当前目录对应的项目
+    ///   gld rm --all -y         全部项目，不询问
+    ///
+    /// 远端项目（gld remote add 加的）也用它删。
+    #[command(verbatim_doc_comment, visible_alias = "rm", alias = "destroy")]
+    Remove(RemoveArgs),
+
+    /// 改项目配置：gld set api tool-profile=read-only（字段见 gld fields）
+    ///
+    ///   gld set tool-profile=read-only              当前目录对应的项目
+    ///   gld set api allowed-commands=rg,gh          按名称指定项目
+    ///
+    /// 下一次调用就生效，不用重启。服务本身的端口、认证、公网入口用 gld upgrade / gld share。
+    #[command(verbatim_doc_comment)]
+    Set(SetArgs),
+
+    /// 列出 set 支持的项目字段及取值（--all 连 GPT Actions 那条线路一起列）
+    Fields {
+        /// 连 actions.* 一起列出
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// 给服务拿一个公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
+    ///
+    /// 它把「配公网入口 → 起服务 → 查连接信息」三步合成一步：
+    ///   gld share                             沿用已配好的入口；一个都没配就用 Cloudflare 临时地址
+    ///   gld share --tunnel cf:mcp.example.com Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
+    ///   gld share --tunnel frp:公司           FRP 固定域名，子域名默认 gld
+    ///   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
+    ///   gld share --off                       关掉公网入口，只留本地地址
+    ///
+    /// 公网入口意味着"在你电脑上跑命令"这件事对外可达，而且一把凭据能进全部项目。
+    /// 开之前请读 docs/security.md。
+    #[command(verbatim_doc_comment)]
+    Share(ShareArgs),
+
+    /// 改服务配置（端口 / 认证 / 工具集 / 公网入口），改完自动重启；也能改项目的目录和名称
+    ///
+    ///   gld upgrade --port 30001 --auth bearer            服务的端口和认证
+    ///   gld upgrade --tunnel https://new.example.com/mcp  换公网地址
+    ///   gld upgrade --off                                 关掉公网入口
+    ///   gld upgrade api --path ~/code/api-v2              项目搬了目录
+    ///
+    /// 项目的其余字段见 gld fields 与 gld set。
+    #[command(verbatim_doc_comment)]
+    Upgrade(UpgradeArgs),
+
+    /// 远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
+    #[command(subcommand)]
+    Remote(RemoteCmd),
+
+    /// 查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
     // 隐藏别名：git 是 log、docker 是 logs，两边习惯的人都不该被一句
     // "unrecognized subcommand" 拦住。不用 visible_alias 是因为它只防手滑，
     // 不值得占帮助里的一行。
     #[command(alias = "log")]
     Logs(LogsArgs),
 
-    /// 列出工作区的连接信息：地址、认证方式、凭据、隧道
-    ///
-    ///   gld list                不指定工作区时列出全部；在工作区目录里则显示这一个的详情
-    ///   gld list -w api         看指定工作区的详情
-    ///   gld list --all          在工作区目录里也强制列出全部
-    ///   gld list --reveal       凭据显示明文（默认脱敏）
-    ///
-    /// 敲惯了 ls 的话，gld ls 是同一条命令。
-    #[command(verbatim_doc_comment, visible_alias = "ls")]
-    List(ListArgs),
-
-    /// 一条命令拿到公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
-    ///
-    /// 它把「配隧道 → 启动服务 → 查连接信息」三步合成一步：
-    ///   gld share                             Cloudflare 临时地址（等价 --tunnel cf）
-    ///   gld share --tunnel cf:mcp.example.com Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
-    ///   gld share --tunnel frp:公司           FRP 固定域名，子域名默认取工作区名
-    ///   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
-    ///   gld share --off                       关掉公网入口，只留本地地址
-    ///
-    /// 公网入口意味着"在你电脑上跑命令"这件事对外可达，开之前请读 docs/security.md。
-    #[command(verbatim_doc_comment)]
-    Share(ShareArgs),
-
-    /// 销毁工作区：停掉服务与隧道，删掉它的配置和密钥（项目文件一个字节都不动）
-    ///
-    ///   gld destroy              当前目录对应的工作区
-    ///   gld destroy api          按名称 / 路径 / id 指定
-    ///   gld destroy --all        全部工作区
-    ///   gld destroy -y           不询问
-    ///
-    /// 只是想停服务用 gld stop——那个不删任何东西。
-    /// 密钥删了就没了，客户端里存的 token / 口令会全部失效。
-    #[command(verbatim_doc_comment)]
-    Destroy(DestroyArgs),
-
-    /// 改工作区配置（目录 / 公网入口 / 端口 / 认证 / 名称），改完自动重启服务
-    ///
-    ///   gld upgrade --tunnel https://new.example.com/mcp   换公网地址
-    ///   gld upgrade --path ~/code/api-v2                   项目搬了目录
-    ///   gld upgrade api --port 30001 --auth bearer         按名称指定工作区
-    ///   gld upgrade --off                                  关掉公网入口
-    ///
-    /// 只改这几项常用配置；全部字段见 gld workspace fields 与 gld workspace set。
-    #[command(verbatim_doc_comment)]
-    Upgrade(UpgradeArgs),
-
     /// 逐项检查本地 / 公网端点与 OAuth 元数据是否可达
-    Health,
+    Health(HealthArgs),
 
     /// 体检：检查配置是否自洽，并给出每个问题的修复命令
     Doctor,
@@ -196,41 +218,23 @@ pub enum Command {
     #[command(subcommand)]
     Tool(ToolCmd),
 
-    /// 管理公网隧道（FRP / Cloudflare）
-    #[command(subcommand)]
-    Tunnel(TunnelCmd),
-
-    /// 管理全局共享公网入口（多个工作区共用一个域名，按 /w/<id> 路由）
-    #[command(subcommand, visible_alias = "gw")]
-    Gateway(GatewayCmd),
-
-    /// 聚合入口：客户端只配一条连接，访问多个工作区（每次调用指明工作区，彼此隔离）
-    ///
-    ///   gld hub add api web      把工作区加进来（立即生效，不用重启）
-    ///   gld hub start            启动；之后守护进程重启会自动恢复
-    ///   gld hub show             地址、凭据、成员
-    ///
-    /// 拿到 hub 凭据就能访问它的全部成员：只想单独给出去的项目别加进来。
-    #[command(subcommand, verbatim_doc_comment)]
-    Hub(HubCmd),
-
-    /// 查看 / 设置 / 重新生成密钥（Bearer Token、OAuth 口令、Actions API Key…）
+    /// 服务的凭据：看 / 自己定 / 重新生成（Bearer Token、OAuth 口令、Tunnel Token…）
     #[command(subcommand)]
     Secret(SecretCmd),
 
-    /// 管理 FRP 服务器配置（多个工作区可复用同一台 frps）
+    /// 管理 FRP 服务器配置（--tunnel frp:<配置名> 引用它）
     #[command(subcommand)]
     Frp(FrpCmd),
 
     /// 全局设置：出站代理、局域网访问、启动时恢复、全局 Agent 说明
-    #[command(subcommand)]
+    #[command(subcommand, visible_alias = "cfg")]
     Settings(SettingsCmd),
 
-    /// Goal / Plan 规划状态与人工验收
+    /// Goal / Plan 规划状态与人工验收（按项目）
     #[command(subcommand)]
     Planning(PlanningCmd),
 
-    /// 列出工作区的历史会话档案（docs/history-session）
+    /// 列出项目的历史会话档案（docs/history-session）
     History,
 
     /// 查看本次守护进程运行期间的请求次数与 Token 估算
@@ -239,12 +243,33 @@ pub enum Command {
     /// 查看会注入给 Agent 的说明文件与 Skill（--global 看用户级来源）
     Context(ContextArgs),
 
+    /// 管理后台守护进程（启动 / 停止 / 状态 / 日志）
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
+
     /// 生成 shell 补全脚本
     #[command(alias = "completion")]
     Completions {
         /// bash | zsh | fish | powershell | elvish
         shell: clap_complete::Shell,
     },
+
+    // ---- 以下是 RFC-0004 之前的命令，还认，不进帮助 ----
+    /// 管理项目（旧写法；现在是顶层的 add / ls / set / rm / fields）
+    #[command(subcommand, alias = "ws", hide = true)]
+    Workspace(WorkspaceCmd),
+
+    /// 服务本身的旧命令组（现在是顶层的 start / stop / ls / upgrade / remote）
+    #[command(subcommand, hide = true)]
+    Hub(HubCmd),
+
+    /// GPT Actions 的隧道（MCP 服务的公网入口用 gld share）
+    #[command(subcommand, hide = true)]
+    Tunnel(TunnelCmd),
+
+    /// 全局共享公网入口（旧：多个单项目服务共用一个域名）
+    #[command(subcommand, alias = "gw", hide = true)]
+    Gateway(GatewayCmd),
 }
 
 // ---------------------------------------------------------------- daemon
@@ -290,7 +315,7 @@ pub enum DaemonCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCmd {
-    /// 把一个项目目录登记为工作区（自动分配空闲端口并生成密钥）
+    /// 登记一个项目目录并加入服务（同 gld add）
     Add {
         /// 项目根目录（默认当前目录）
         #[arg(value_name = "PATH", default_value = ".")]
@@ -305,22 +330,19 @@ pub enum WorkspaceCmd {
         #[arg(long, value_name = "PORT")]
         actions_port: Option<u16>,
     },
-    /// 列出所有工作区
+    /// 列出所有项目（同 gld ls）
     #[command(visible_alias = "ls")]
     List,
-    /// 显示一个工作区的完整配置
+    /// 显示一个项目的配置（同 gld ls <项目>）
     Show,
-    /// 删除工作区（会先停掉它的服务与隧道；不会动项目目录本身）
+    /// 删除项目（同 gld rm）
     #[command(visible_alias = "rm")]
     Remove {
         /// 不询问，直接删除
         #[arg(short = 'y', long)]
         yes: bool,
     },
-    /// 修改配置字段：gld ws set port=30000 auth=bearer（字段见 gld ws fields）
-    ///
-    /// 不写前缀就是改 MCP：port 等价于 mcp.port。改 Actions 那条线路要写全
-    /// actions.port。改完会自动重启受影响且正在运行的服务，不用再敲 gld restart。
+    /// 修改项目字段（同 gld set）
     Set {
         /// KEY=VALUE，可多个
         #[arg(value_name = "KEY=VALUE", required = true)]
@@ -354,33 +376,18 @@ pub struct ServiceArgs {
 
 #[derive(Debug, Args)]
 pub struct StopArgs {
-    /// 停哪个服务（默认 all）
+    /// 停哪个：mcp（服务）| actions（当前项目的 GPT Actions）| all（默认，全部）
     #[arg(short = 's', long, value_enum)]
     pub service: Option<ServiceArg>,
 
-    /// 停所有工作区的服务，而不只是当前这个
-    #[arg(short = 'a', long)]
+    /// 旧写法（停所有工作区的服务），现在不带它也是全部停
+    #[arg(short = 'a', long, hide = true)]
     pub all: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct DestroyArgs {
-    /// 要销毁哪个工作区：目录 / 名称 / id（默认按当前目录推断）
-    #[arg(id = "target", value_name = "WS")]
-    pub workspace: Option<String>,
-
-    /// 销毁全部工作区
-    #[arg(short = 'a', long, conflicts_with = "target")]
-    pub all: bool,
-
-    /// 不询问，直接销毁
-    #[arg(short = 'y', long)]
-    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct StartArgs {
-    /// 项目目录（默认当前目录）；没登记过会自动登记为工作区
+    /// 顺带加进来的项目目录；不给时见上面的说明
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
@@ -397,15 +404,15 @@ pub struct StartArgs {
     )]
     pub tunnel_token: Option<String>,
 
-    /// FRP 子域名（配合 --tunnel frp:<配置名>）；不给则取工作区名
+    /// FRP 子域名（配合 --tunnel frp:<配置名>）；不给则是 gld
     #[arg(long, value_name = "SUB")]
     pub subdomain: Option<String>,
 
-    /// 本地监听端口；Cloudflare 固定隧道需与云端回源端口一致（不会自动修改云端配置）
+    /// 服务的本地端口；Cloudflare 固定隧道需与云端回源端口一致（不会自动修改云端配置）
     #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
 
-    /// 启动哪个服务（默认 mcp）
+    /// 起哪个：mcp（默认，服务）| actions（这个项目的 GPT Actions）| all
     #[arg(short = 's', long, value_enum)]
     pub service: Option<ServiceArg>,
 }
@@ -498,7 +505,7 @@ fn looks_like_domain(value: &str) -> bool {
 
 #[derive(Debug, Args)]
 pub struct LogsArgs {
-    /// 看哪个服务的日志
+    /// mcp：服务的日志（给了 -w 就是那个项目的请求日志）| actions：项目的 GPT Actions
     #[arg(short = 's', long, value_enum, default_value = "mcp")]
     pub service: LogService,
     /// 显示最后 N 行
@@ -517,22 +524,66 @@ pub enum LogService {
 
 #[derive(Debug, Default, Args)]
 pub struct ListArgs {
+    /// 只看这个项目的配置（名称、id、id 前缀或路径）
+    #[arg(value_name = "PROJECT")]
+    pub project: Option<String>,
+
     /// 明文显示密钥（默认脱敏）
     #[arg(long)]
     pub reveal: bool,
 
-    /// 列出全部工作区（在工作区目录里执行时用它看全局）
-    #[arg(short = 'a', long)]
+    /// 旧写法（在工作区目录里也列全部），现在不带它也是全部
+    #[arg(short = 'a', long, hide = true)]
     pub all: bool,
 }
 
 #[derive(Debug, Args)]
+pub struct AddArgs {
+    /// 项目目录，可以一次给多个（默认当前目录）
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+
+    /// 显示名称（默认目录名；只给一个目录时能用）
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    /// 要删的项目：名称 / 路径 / id，可以一次给多个（默认按当前目录推断）
+    #[arg(id = "target", value_name = "PROJECT")]
+    pub projects: Vec<String>,
+
+    /// 删掉全部本地项目
+    #[arg(short = 'a', long, conflicts_with = "target")]
+    pub all: bool,
+
+    /// 不询问，直接删
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SetArgs {
+    /// [项目] KEY=VALUE…：第一个不带 = 的是项目，其余是要改的字段
+    #[arg(value_name = "ARG", required = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct HealthArgs {
+    /// mcp（默认）：服务 | actions：当前项目的 GPT Actions
+    #[arg(short = 's', long, value_enum, default_value = "mcp")]
+    pub service: TunnelService,
+}
+
+#[derive(Debug, Args)]
 pub struct ShareArgs {
-    /// 项目目录（默认当前目录）；没登记过会自动登记为工作区
+    /// 顺带加进来的项目目录（可选，规则同 gld start）
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off（默认 cf）
+    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off（默认沿用已配好的，没有就 cf）
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 
@@ -545,7 +596,7 @@ pub struct ShareArgs {
     )]
     pub tunnel_token: Option<String>,
 
-    /// FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则取工作区名
+    /// FRP 子域名，公网地址为 https://<子域名>.<frps 域名>；不给则是 gld
     #[arg(long, value_name = "SUB")]
     pub subdomain: Option<String>,
 
@@ -553,18 +604,18 @@ pub struct ShareArgs {
     #[arg(long)]
     pub off: bool,
 
-    /// 暴露哪个服务
+    /// 暴露哪个：mcp（默认，服务）| actions（当前项目的 GPT Actions）
     #[arg(short = 's', long, value_enum, default_value = "mcp")]
     pub service: TunnelService,
 }
 
 #[derive(Debug, Args)]
 pub struct UpgradeArgs {
-    /// 要更新哪个工作区：目录 / 名称 / id（默认按当前目录推断）
-    #[arg(id = "target", value_name = "WS")]
+    /// --path / --name 改的是哪个项目：目录 / 名称 / id（默认按当前目录推断）
+    #[arg(id = "target", value_name = "PROJECT")]
     pub workspace: Option<String>,
 
-    /// 把项目根目录换成这个（要已存在）；挑哪个工作区用上面的 WS 或 -w，不是它
+    /// 把项目根目录换成这个（要已存在）；挑哪个项目用上面的 PROJECT 或 -w，不是它
     #[arg(long, value_name = "DIR")]
     pub path: Option<PathBuf>,
 
@@ -589,23 +640,27 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub off: bool,
 
-    /// 换显示名称
+    /// 换项目的显示名称
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
-    /// 换 MCP 端口
-    #[arg(long, value_name = "PORT")]
+    /// 换服务的端口
+    #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
 
-    /// 换 Actions 端口
+    /// 换项目的 GPT Actions 端口
     #[arg(long, value_name = "PORT")]
     pub actions_port: Option<u16>,
 
-    /// 换 MCP 认证方式：oauth | bearer | noauth
+    /// 换服务的认证方式：oauth | bearer | noauth
     #[arg(long, value_name = "AUTH")]
     pub auth: Option<String>,
 
-    /// 改哪个服务的公网入口
+    /// 换服务列给客户端的工具集；项目自己的工具集照样生效，两边取交集
+    #[arg(long, value_name = "PROFILE")]
+    pub tool_profile: Option<String>,
+
+    /// --tunnel / --off 改哪个：mcp（默认，服务）| actions（项目的 GPT Actions）
     #[arg(short = 's', long, value_enum, default_value = "mcp")]
     pub service: TunnelService,
 }
@@ -621,7 +676,7 @@ pub struct ContextArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ToolCmd {
-    /// 列出当前工作区暴露给 AI 的工具（取决于 mcp.tool-profile）
+    /// 列出当前项目暴露给 AI 的工具（取决于它的 tool-profile）
     #[command(visible_alias = "ls")]
     List,
     /// 显示某个工具的完整定义与参数 Schema
@@ -671,6 +726,8 @@ pub struct TunnelArgs {
     pub service: TunnelService,
 }
 
+/// 旧命令组：项目自己的隧道。MCP 服务的公网入口用 `gld share`，这里现在只对
+/// `-s actions` 还有意义。
 #[derive(Debug, Subcommand)]
 pub enum TunnelCmd {
     /// 启动隧道（服务启动时通常已自动启动，这里用于单独重连）
@@ -698,7 +755,8 @@ pub enum TunnelCmd {
 #[derive(Debug, Subcommand)]
 pub enum GatewayCmd {
     /// 显示全局入口配置与运行状态
-    Show,
+    #[command(visible_alias = "ls", alias = "show")]
+    List,
     /// 修改配置（只改给出的项）
     Set(GatewaySetArgs),
     /// 启动全局入口（含它的隧道）
@@ -738,8 +796,9 @@ pub struct GatewaySetArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum HubCmd {
-    /// 显示状态、地址、认证、凭据和成员（凭据默认脱敏）
-    Show {
+    /// 显示状态、地址、认证、凭据和成员（同 gld ls）
+    #[command(visible_alias = "ls", alias = "show")]
+    List {
         /// 凭据显示明文
         #[arg(long)]
         reveal: bool,
@@ -771,20 +830,20 @@ pub enum HubCmd {
     ///   oauth_client_id      静态 Client ID，只影响手填了它的客户端
     #[command(visible_alias = "regen", verbatim_doc_comment)]
     Regenerate { key: String },
-    /// 远端成员：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 只读访问
+    /// 远端成员（同 gld remote）
     #[command(subcommand)]
-    Remote(HubRemoteCmd),
+    Remote(RemoteCmd),
 }
 
-/// 远端 ccnm workspace 成员。
+/// 远端项目：另一台机器上由 ccnm 管着的 workspace。
 ///
 /// 前提：那台机器上已经装好并配好 ccnm，本机也装了 ccnm（gld 起的是
 /// `ccnm mcp bridge`，SSH 连接由 ccnm 自己管，gld 不碰凭据）。
 #[derive(Debug, Subcommand)]
-pub enum HubRemoteCmd {
-    /// 登记一个远端 workspace 并加进 hub（立即生效，不用重启）
+pub enum RemoteCmd {
+    /// 登记一个远端 workspace 并加进服务（立即生效，不用重启）
     ///
-    ///   gld hub remote add prod --node work --remote-workspace server
+    ///   gld remote add prod --node work --remote-workspace server
     ///
     /// 两个值填的都是 **ccnm 配置里的名字**，不是 host 也不是路径。在那台机器上
     /// 跑 ccnm workspace list 能看到有哪些。
@@ -809,7 +868,7 @@ pub enum HubRemoteCmd {
         #[arg(long, value_name = "MODE")]
         mode: Option<String>,
     },
-    /// 删掉一个远端成员（按名字、id 或 id 前缀）
+    /// 删掉一个远端项目（按名字、id 或 id 前缀；gld rm 也能删）
     #[command(visible_alias = "rm")]
     Remove {
         #[arg(value_name = "NAME")]
@@ -838,29 +897,32 @@ pub struct HubSetArgs {
 
 // ---------------------------------------------------------------- secret
 
+/// 不带 `-w` 是服务的凭据；带了 `-w` 是那个项目自己的（GPT Actions 用的那些）。
 #[derive(Debug, Subcommand)]
 pub enum SecretCmd {
-    /// 显示工作区密钥（默认脱敏，--reveal 明文）
-    Show {
-        key: String,
+    /// 列出凭据（默认脱敏，--reveal 明文）；给了 KEY 只看那一项
+    #[command(visible_alias = "ls", alias = "show")]
+    List {
+        key: Option<String>,
         #[arg(long)]
         reveal: bool,
     },
-    /// 设置工作区密钥；正在运行且用到它的服务会自动重启
+    /// 自己定一项凭据（记得住的授权口令、Cloudflare Tunnel Token）；服务在跑会自动重启
     Set { key: String, value: String },
-    /// 重新生成工作区密钥并返回新值；相关服务自动重启
+    /// 重新生成一项凭据并返回新值；服务在跑会自动重启
     #[command(visible_alias = "regen")]
     Regenerate { key: String },
-    /// 操作共享密钥池（多个工作区勾选 shared-secrets 时共用）
-    #[command(subcommand)]
+    /// 旧的共享密钥池（多个单项目服务共用凭据时用）
+    #[command(subcommand, hide = true)]
     Shared(SharedSecretCmd),
-    /// 列出所有合法的密钥名及用途
+    /// 列出所有凭据名及用途
     Keys,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SharedSecretCmd {
-    Show {
+    #[command(visible_alias = "ls", alias = "show")]
+    List {
         key: String,
         #[arg(long)]
         reveal: bool,
@@ -922,7 +984,8 @@ pub enum FrpCmd {
 #[derive(Debug, Subcommand)]
 pub enum SettingsCmd {
     /// 显示全部全局设置
-    Show,
+    #[command(visible_alias = "ls", alias = "show")]
+    List,
     /// 全局出站代理（隧道进程使用）；不带参数时显示当前值
     Proxy {
         /// none | system | manual
@@ -933,21 +996,22 @@ pub enum SettingsCmd {
         url: Option<String>,
     },
     /// 运行时全局项：局域网访问、启动时恢复、可执行路径、全局 Agent 说明
+    #[command(visible_alias = "set")]
     Runtime(RuntimeSetArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct RuntimeSetArgs {
-    /// 允许 MCP / Actions / 全局入口监听 0.0.0.0（默认只监听 127.0.0.1）
+    /// 允许服务 / Actions / 全局入口监听 0.0.0.0（默认只监听 127.0.0.1）
     #[arg(long, value_name = "true|false")]
     pub lan_access: Option<bool>,
-    /// 守护进程启动时恢复上次运行的服务
+    /// 守护进程启动时恢复上次运行的 GPT Actions（MCP 服务不看它：没被 gld stop 过就恢复）
     #[arg(long, value_name = "true|false")]
     pub restore_on_launch: Option<bool>,
     /// 全局可执行文件搜索路径（换行或分号分隔）
     #[arg(long)]
     pub executable_paths: Option<String>,
-    /// 注入给所有工作区 Agent 的全局说明
+    /// 注入给所有项目 Agent 的全局说明
     #[arg(long)]
     pub ai_instructions: Option<String>,
     /// 全局说明文件来源，逗号分隔（如 cursor,claude,codex）
@@ -967,7 +1031,8 @@ pub struct RuntimeSetArgs {
 #[derive(Debug, Subcommand)]
 pub enum PlanningCmd {
     /// 显示当前模式、Goal / Plan 与执行台账
-    Show,
+    #[command(visible_alias = "ls", alias = "show")]
+    List,
     /// 切换模式：direct（自由改）| plan（只读，AI 先出计划）| goal（写操作须绑定 Goal）
     Mode { mode: String },
     #[command(subcommand)]

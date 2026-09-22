@@ -6,8 +6,8 @@
 //!
 //! 检查分两类：
 //!
-//! - **配置一致性**（[`config_checks`]）：只看 profiles + settings + 密钥是否存在，
-//!   纯函数，可单测；
+//! - **配置一致性**（[`service_checks`]、[`config_checks`]）：只看 profiles +
+//!   settings + 密钥是否存在，纯函数，可单测；
 //! - **环境**：数据目录权限、端口占用、外部二进制是否就位，依赖操作系统状态。
 
 use std::collections::HashMap;
@@ -17,10 +17,14 @@ use serde::{Deserialize, Serialize};
 
 use super::App;
 use crate::error::AppResult;
+use crate::hub::{self, runtime::HubState, HUB_SCOPE};
 use crate::platform::platform;
 use crate::runtime::{is_own_process, ServiceKind};
 use crate::settings::AppSettings;
 use crate::workspace::WorkspaceProfile;
+
+/// 服务那几条检查的归属。
+const SERVICE_SCOPE: &str = "MCP 服务";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,7 +39,7 @@ pub enum DoctorLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorCheck {
-    /// 归属：`环境`、`全局入口` 或工作区名称。
+    /// 归属：`环境`、`MCP 服务`、`全局入口` 或项目名称。
     pub scope: String,
     pub label: String,
     pub level: DoctorLevel,
@@ -96,14 +100,14 @@ impl Diagnosis {
     }
 }
 
-/// 一个工作区某项密钥是否已设置。
+/// 一个项目某项密钥是否已设置（Actions 用）。
 ///
 /// 抽成 trait object 是为了让 [`config_checks`] 不依赖 `App` 和磁盘，可以单测。
 pub type SecretLookup<'a> = &'a dyn Fn(&str, &str, bool) -> bool;
 
 impl App {
     /// 跑一遍全部体检项。
-    pub fn doctor(&self) -> AppResult<Diagnosis> {
+    pub async fn doctor(&self) -> AppResult<Diagnosis> {
         let profiles = self.list_workspaces()?;
         let settings = self.settings()?;
         let secret_present = |workspace_id: &str, key: &str, shared: bool| -> bool {
@@ -117,40 +121,79 @@ impl App {
                 .flatten()
                 .is_some_and(|value| !value.trim().is_empty())
         };
+        let service_secret_present = |key: &str| -> bool {
+            self.with_data(|store| Ok(store.get_app_secret(HUB_SCOPE, key)))
+                .ok()
+                .flatten()
+                .is_some_and(|value| !value.trim().is_empty())
+        };
 
         let mut checks = environment_checks(&settings, &profiles);
+        checks.extend(service_checks(
+            &profiles,
+            &settings,
+            &service_secret_present,
+        ));
         checks.extend(config_checks(&profiles, &settings, &secret_present));
-        checks.extend(self.port_checks(&profiles)?);
+        checks.extend(self.port_checks(&profiles, &settings).await?);
         Ok(Diagnosis { checks })
     }
 
-    fn port_checks(&self, profiles: &[WorkspaceProfile]) -> AppResult<Vec<DoctorCheck>> {
-        let mut checks = Vec::new();
+    async fn port_checks(
+        &self,
+        profiles: &[WorkspaceProfile],
+        settings: &AppSettings,
+    ) -> AppResult<Vec<DoctorCheck>> {
+        let running = !matches!(hub::runtime::state().await, HubState::Stopped);
+        let mut checks = vec![service_port_check(
+            settings.hub.local_port,
+            running,
+            occupant(settings.hub.local_port),
+        )];
         for profile in profiles {
             for kind in ServiceKind::ALL {
+                let running =
+                    self.with_runtime(|runtime| Ok(runtime.is_running(&profile.id, kind)))?;
+                // 项目自己的 MCP 端口是单项目服务留下的（RFC-0004 之后没有命令会
+                // 去监听它）：没在跑就不报，免得为一个用不上的端口让人去改配置。
+                // Actions 没在跑、也没配过公网入口，就是没在用，同理。
+                let in_use = running
+                    || (kind == ServiceKind::Actions
+                        && (profile.actions.tunnel_type != "none"
+                            || !profile.actions.public_url.trim().is_empty()));
+                if !in_use {
+                    continue;
+                }
                 let port = match kind {
                     ServiceKind::Mcp => profile.runtime.local_port,
                     ServiceKind::Actions => profile.actions.local_port,
                 };
-                let running =
-                    self.with_runtime(|runtime| Ok(runtime.is_running(&profile.id, kind)))?;
-                let occupant = platform()
-                    .find_pid_listening_on_port(port)
-                    .ok()
-                    .flatten()
-                    .map(|pid| PortOccupant {
-                        is_self: is_own_process(pid),
-                        image: platform()
-                            .process_image_path(pid)
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| format!("pid {pid}")),
-                    });
-                checks.push(port_check(&profile.name, kind, port, running, occupant));
+                checks.push(port_check(
+                    &profile.name,
+                    kind,
+                    port,
+                    running,
+                    occupant(port),
+                ));
             }
         }
         Ok(checks)
     }
+}
+
+fn occupant(port: u16) -> Option<PortOccupant> {
+    platform()
+        .find_pid_listening_on_port(port)
+        .ok()
+        .flatten()
+        .map(|pid| PortOccupant {
+            is_self: is_own_process(pid),
+            image: platform()
+                .process_image_path(pid)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| format!("pid {pid}")),
+        })
 }
 
 /// 占用端口的进程。
@@ -162,7 +205,8 @@ pub struct PortOccupant {
     pub image: String,
 }
 
-/// 端口状态的判定。抽成纯函数是为了让每个分支（连同它的修复命令）都能被测到。
+/// 项目自己那几条服务（Actions，以及还在跑的旧单项目 MCP）的端口判定。
+/// 抽成纯函数是为了让每个分支（连同它的修复命令）都能被测到。
 pub fn port_check(
     workspace: &str,
     kind: ServiceKind,
@@ -171,25 +215,45 @@ pub fn port_check(
     occupant: Option<PortOccupant>,
 ) -> DoctorCheck {
     let label = format!("{} 端口 {port}", kind.label().trim());
-    let field = match kind {
-        ServiceKind::Mcp => "mcp",
-        ServiceKind::Actions => "actions",
-    };
     match (running, occupant) {
         (true, None) => DoctorCheck::fail(
             workspace,
             &label,
             "标记为运行中，但没有进程在监听这个端口",
-            format!("gld restart -w {workspace} -s {}", kind.as_str()),
+            match kind {
+                ServiceKind::Mcp => "gld stop（这是旧的单项目服务，现在只用一个服务）".to_string(),
+                ServiceKind::Actions => format!("gld restart -w {workspace} -s actions"),
+            },
         ),
         (true, Some(_)) => DoctorCheck::ok(workspace, &label, "运行中"),
         (false, Some(occupant)) if !occupant.is_self => DoctorCheck::warn(
             workspace,
             &label,
             format!("未启动，但端口已被占用：{}", occupant.image),
-            format!("换端口：gld ws set -w {workspace} {field}.port=<其他端口>"),
+            format!("换端口：gld set {workspace} actions.port=<其他端口>"),
         ),
         (false, _) => DoctorCheck::ok(workspace, &label, "空闲"),
+    }
+}
+
+/// 服务端口的判定，修复命令指向服务级的命令。
+pub fn service_port_check(port: u16, running: bool, occupant: Option<PortOccupant>) -> DoctorCheck {
+    let label = format!("端口 {port}");
+    match (running, occupant) {
+        (true, None) => DoctorCheck::fail(
+            SERVICE_SCOPE,
+            &label,
+            "标记为运行中，但没有进程在监听这个端口",
+            "gld restart",
+        ),
+        (true, Some(_)) => DoctorCheck::ok(SERVICE_SCOPE, &label, "运行中"),
+        (false, Some(occupant)) if !occupant.is_self => DoctorCheck::warn(
+            SERVICE_SCOPE,
+            &label,
+            format!("未启动，但端口已被占用：{}", occupant.image),
+            "换端口：gld upgrade --port <其他端口>",
+        ),
+        (false, _) => DoctorCheck::ok(SERVICE_SCOPE, &label, "空闲"),
     }
 }
 
@@ -203,7 +267,7 @@ pub fn software_check(kind: &str, installed_at: Option<&str>) -> DoctorCheck {
         None => DoctorCheck::fail(
             "环境",
             kind,
-            "有工作区配置了这种隧道，但 PATH 里找不到可执行文件",
+            "配置了这种隧道，但 PATH 里找不到可执行文件",
             match kind {
                 "cloudflared" => {
                     "brew install cloudflared（Windows: winget install Cloudflare.cloudflared）"
@@ -245,12 +309,16 @@ fn environment_checks(settings: &AppSettings, profiles: &[WorkspaceProfile]) -> 
     }
 
     // 只有真的会用到隧道时才检查二进制，否则纯本机用户会看到一堆无关的红叉。
-    let needs_frpc = profiles.iter().any(|profile| uses(profile, "frp"))
-        || (settings.global_gateway.enabled && settings.global_gateway.tunnel_type == "frp");
-    let needs_cloudflared = profiles.iter().any(|profile| uses(profile, "cloudflare"))
-        || (settings.global_gateway.enabled && settings.global_gateway.tunnel_type == "cloudflare");
-    for (kind, needed) in [("frpc", needs_frpc), ("cloudflared", needs_cloudflared)] {
-        if !needed {
+    let uses = |tunnel_type: &str| {
+        settings.hub.tunnel_type == tunnel_type
+            || profiles
+                .iter()
+                .any(|profile| actions_uses(profile, tunnel_type))
+            || (settings.global_gateway.enabled
+                && settings.global_gateway.tunnel_type == tunnel_type)
+    };
+    for (kind, tunnel_type) in [("frpc", "frp"), ("cloudflared", "cloudflare")] {
+        if !uses(tunnel_type) {
             continue;
         }
         let found = crate::tunnel::tunnel_binary_path(kind);
@@ -260,9 +328,8 @@ fn environment_checks(settings: &AppSettings, profiles: &[WorkspaceProfile]) -> 
     checks
 }
 
-fn uses(profile: &WorkspaceProfile, tunnel_type: &str) -> bool {
-    (!profile.tunnel.use_global_gateway && profile.tunnel.tunnel_type == tunnel_type)
-        || (!profile.actions.use_global_gateway && profile.actions.tunnel_type == tunnel_type)
+fn actions_uses(profile: &WorkspaceProfile, tunnel_type: &str) -> bool {
+    !profile.actions.use_global_gateway && profile.actions.tunnel_type == tunnel_type
 }
 
 #[cfg(unix)]
@@ -289,6 +356,151 @@ fn data_file_permission_check(_path: &Path) -> Option<DoctorCheck> {
     None
 }
 
+/// 服务（RFC-0004 之后唯一的那个 MCP 入口）自己的检查：认证、公网入口、项目。
+///
+/// 纯函数：`token_present` 回答"服务凭据里这一项设过没有"。
+pub fn service_checks(
+    profiles: &[WorkspaceProfile],
+    settings: &AppSettings,
+    token_present: &dyn Fn(&str) -> bool,
+) -> Vec<DoctorCheck> {
+    let hub = &settings.hub;
+    let mut checks = Vec::new();
+
+    // noauth 本身没问题，前提是**外面真的进不来**。隧道就是从 127.0.0.1 把端口
+    // 转到公网的，绑回环地址对它一点约束都没有。
+    let exposure = if hub.tunnel_type != "none" {
+        Some(format!("配了 {} 隧道", hub.tunnel_type))
+    } else if hub.use_global_gateway {
+        Some("接进了全局入口".to_string())
+    } else if !hub.public_url.trim().is_empty() {
+        Some("填了公网地址".to_string())
+    } else {
+        None
+    };
+    checks.push(match (hub.auth_type.as_str(), exposure) {
+        ("noauth", Some(reason)) => DoctorCheck::fail(
+            SERVICE_SCOPE,
+            "认证",
+            format!("noauth 但{reason}：任何人都能读写全部项目并执行命令"),
+            "gld upgrade --auth oauth；或 gld share --off 收回公网入口",
+        ),
+        ("noauth", None) if settings.allow_lan_access => DoctorCheck::fail(
+            SERVICE_SCOPE,
+            "认证",
+            "noauth 且已开启局域网访问：同网段任何人都能读写全部项目并执行命令",
+            "gld upgrade --auth bearer；或关闭局域网访问 gld cfg runtime --lan-access false",
+        ),
+        ("noauth", None) => DoctorCheck::warn(
+            SERVICE_SCOPE,
+            "认证",
+            "noauth（仅监听 127.0.0.1，且没有公网入口）",
+            "本机自用可以；开局域网访问或开公网入口之前必须换成 bearer 或 oauth",
+        ),
+        (auth, _) => DoctorCheck::ok(SERVICE_SCOPE, "认证", auth.to_string()),
+    });
+
+    const ENTRY: &str = "公网入口";
+    checks.push(match hub.tunnel_type.as_str() {
+        "frp" => match settings.find_frp_profile(&hub.frp_profile_id) {
+            None if hub.frp_profile_id.trim().is_empty() => DoctorCheck::fail(
+                SERVICE_SCOPE,
+                ENTRY,
+                "隧道类型是 frp，但没有选择 FRP 配置",
+                "gld frp add --name <名称> --server <frps地址> --token <token> 后再 gld share --tunnel frp:<名称>",
+            ),
+            None => DoctorCheck::fail(
+                SERVICE_SCOPE,
+                ENTRY,
+                format!(
+                    "引用的 FRP 配置 {} 不存在（多半是被 gld frp remove --force 删掉了）",
+                    hub.frp_profile_id
+                ),
+                "gld frp list 看现有的，再 gld share --tunnel frp:<名称>；不要公网就 gld share --off",
+            ),
+            Some(_) if hub.frp_subdomain.trim().is_empty() => DoctorCheck::fail(
+                SERVICE_SCOPE,
+                ENTRY,
+                "选了 FRP 配置但没有子域名，公网地址无法生成",
+                "gld share --tunnel frp:<名称> --subdomain <子域名>",
+            ),
+            Some(frp) => DoctorCheck::ok(
+                SERVICE_SCOPE,
+                ENTRY,
+                format!("frp https://{}.{}", hub.frp_subdomain.trim(), frp.server),
+            ),
+        },
+        "cloudflare" if hub.cloudflare_mode == "named" => {
+            if hub.public_url.trim().is_empty() {
+                DoctorCheck::fail(
+                    SERVICE_SCOPE,
+                    ENTRY,
+                    "Cloudflare 固定域名模式没有域名",
+                    "gld share --tunnel cf:mcp.example.com",
+                )
+            } else if !token_present("cloudflare_token") {
+                DoctorCheck::fail(
+                    SERVICE_SCOPE,
+                    ENTRY,
+                    "Cloudflare 固定域名模式缺少 Tunnel Token",
+                    "gld secret set cloudflare_token <token>",
+                )
+            } else {
+                DoctorCheck::ok(
+                    SERVICE_SCOPE,
+                    ENTRY,
+                    format!("cloudflare 固定域名 {}", hub.public_url),
+                )
+            }
+        }
+        // 这不算错，但得说出来：用户来跑 doctor 常常就是因为"地址昨天还好好的"。
+        "cloudflare" => DoctorCheck::ok(
+            SERVICE_SCOPE,
+            ENTRY,
+            "cloudflare 临时地址：每次重启都会变，客户端要跟着改",
+        ),
+        _ if hub.use_global_gateway => {
+            if settings.global_gateway.enabled {
+                DoctorCheck::ok(SERVICE_SCOPE, ENTRY, "经全局入口（/hub）")
+            } else {
+                DoctorCheck::fail(
+                    SERVICE_SCOPE,
+                    ENTRY,
+                    "配置为经全局入口，但全局入口没启用",
+                    "改用服务自己的入口：gld share --tunnel cf",
+                )
+            }
+        }
+        _ if !hub.public_url.trim().is_empty() => {
+            DoctorCheck::ok(SERVICE_SCOPE, ENTRY, hub.public_url.clone())
+        }
+        _ => DoctorCheck::warn(
+            SERVICE_SCOPE,
+            ENTRY,
+            "没有公网入口，只能本机访问",
+            "本机客户端（Claude Code / Cursor）够用；ChatGPT 需要公网地址：gld share",
+        ),
+    });
+
+    // 登记了却不在服务里：RFC-0004 之前的老数据才会这样。AI 看不见它们，
+    // 而用户以为加过了。
+    let outside: Vec<&str> = profiles
+        .iter()
+        .filter(|profile| !hub.members.contains(&profile.id))
+        .map(|profile| profile.name.as_str())
+        .collect();
+    if !outside.is_empty() {
+        checks.push(DoctorCheck::warn(
+            SERVICE_SCOPE,
+            "项目",
+            format!("登记了但不在服务里，AI 看不见：{}", outside.join("、")),
+            "gld start（会把它们加进来并逐个列出）",
+        ));
+    }
+
+    checks
+}
+
 /// 纯配置检查：不碰磁盘、不碰端口，只看配置之间是否自洽。
 pub fn config_checks(
     profiles: &[WorkspaceProfile],
@@ -299,15 +511,15 @@ pub fn config_checks(
     if profiles.is_empty() {
         checks.push(DoctorCheck::warn(
             "环境",
-            "工作区",
-            "还没有登记任何工作区",
-            "gld workspace add <项目目录>",
+            "项目",
+            "还没有登记任何项目",
+            "gld add <项目目录>",
         ));
         return checks;
     }
 
-    checks.extend(duplicate_port_checks(profiles));
-    checks.extend(duplicate_subdomain_checks(profiles));
+    checks.extend(duplicate_port_checks(profiles, settings));
+    checks.extend(duplicate_subdomain_checks(profiles, settings));
     checks.extend(gateway_checks(settings));
 
     for profile in profiles {
@@ -322,7 +534,7 @@ pub fn config_checks(
                 scope,
                 "项目目录",
                 format!("{} 不存在或不是目录", profile.path),
-                format!("目录移动了就重新登记：gld ws rm -w {scope} 后 gld ws add <新路径>"),
+                format!("目录搬走了就改过去：gld upgrade {scope} --path <新路径>"),
             )
         });
         if root.is_dir() && !root.join(".git").exists() {
@@ -334,8 +546,8 @@ pub fn config_checks(
             ));
         }
 
-        checks.extend(auth_checks(profile, settings, secret_present));
-        checks.extend(tunnel_checks(profile, settings, secret_present));
+        checks.extend(actions_auth_checks(profile, secret_present));
+        checks.extend(actions_tunnel_checks(profile, settings, secret_present));
     }
 
     checks
@@ -343,8 +555,8 @@ pub fn config_checks(
 
 /// 全局入口自身的配置。
 ///
-/// 它不属于任何工作区，所以逐工作区的那轮检查看不到它。最典型的漏网之鱼是
-/// `gld frp remove --force`：入口引用的 FRP 配置被删掉之后，工作区那边全绿，
+/// 它不属于任何项目，所以逐项目的那轮检查看不到它。最典型的漏网之鱼是
+/// `gld frp remove --force`：入口引用的 FRP 配置被删掉之后，项目那边全绿，
 /// 只有 `gld gateway start` 会失败，而那时的报错只说隧道起不来。
 fn gateway_checks(settings: &AppSettings) -> Vec<DoctorCheck> {
     const SCOPE: &str = "全局入口";
@@ -388,8 +600,7 @@ fn gateway_checks(settings: &AppSettings) -> Vec<DoctorCheck> {
                 ));
             }
         }
-        // quick 是它唯一支持的 Cloudflare 模式，地址每次重启都变。这不算错，
-        // 但得说出来：用户来跑 doctor 常常就是因为"地址昨天还好好的"。
+        // quick 是它唯一支持的 Cloudflare 模式，地址每次重启都变。
         "cloudflare" => checks.push(DoctorCheck::ok(
             SCOPE,
             "隧道",
@@ -398,7 +609,7 @@ fn gateway_checks(settings: &AppSettings) -> Vec<DoctorCheck> {
         _ if gateway.public_url.trim().is_empty() => checks.push(DoctorCheck::fail(
             SCOPE,
             "公网地址",
-            "入口已启用，但既没有隧道也没有手动地址，接入它的工作区拿不到公网地址",
+            "入口已启用，但既没有隧道也没有手动地址，接入它的服务拿不到公网地址",
             "gld gateway set --tunnel frp --frp-profile <名称> --frp-subdomain <子域名>，\
              或用现成地址：--tunnel off --public-url <地址>",
         )),
@@ -412,13 +623,25 @@ fn gateway_checks(settings: &AppSettings) -> Vec<DoctorCheck> {
     checks
 }
 
-fn duplicate_port_checks(profiles: &[WorkspaceProfile]) -> Vec<DoctorCheck> {
+/// 端口撞车：服务端口、全局入口端口、各项目的 Actions 端口。
+///
+/// 项目自己那个 MCP 端口不算：单项目服务没了，那个号码不会被监听。
+fn duplicate_port_checks(
+    profiles: &[WorkspaceProfile],
+    settings: &AppSettings,
+) -> Vec<DoctorCheck> {
     let mut owners: HashMap<u16, Vec<String>> = HashMap::new();
-    for profile in profiles {
+    owners
+        .entry(settings.hub.local_port)
+        .or_default()
+        .push(SERVICE_SCOPE.to_string());
+    if settings.global_gateway.enabled {
         owners
-            .entry(profile.runtime.local_port)
+            .entry(settings.global_gateway.local_port)
             .or_default()
-            .push(format!("{} MCP", profile.name));
+            .push("全局入口".to_string());
+    }
+    for profile in profiles {
         owners
             .entry(profile.actions.local_port)
             .or_default()
@@ -432,47 +655,42 @@ fn duplicate_port_checks(profiles: &[WorkspaceProfile]) -> Vec<DoctorCheck> {
     duplicates
         .into_iter()
         .map(|(port, users)| {
-            // 冲突的可能是 MCP 也可能是 Actions，修复提示要指向对的字段。
-            let field = if users.iter().all(|user| user.ends_with("Actions")) {
-                "actions.port"
+            // 修复提示要指向能改的那一个：服务在里面就改服务，否则改某个项目的 Actions。
+            let fix = if users.iter().any(|user| user == SERVICE_SCOPE) {
+                "给服务换端口：gld upgrade --port <其他端口>".to_string()
             } else {
-                "mcp.port"
+                "给其中一个换端口：gld set <项目> actions.port=<其他端口>".to_string()
             };
             DoctorCheck::fail(
                 "环境",
                 &format!("端口 {port} 冲突"),
                 format!("被多个服务同时占用：{}", users.join("、")),
-                format!("给其中一个换端口：gld ws set -w <工作区> {field}=<其他端口>"),
+                fix,
             )
         })
         .collect()
 }
 
-fn duplicate_subdomain_checks(profiles: &[WorkspaceProfile]) -> Vec<DoctorCheck> {
+fn duplicate_subdomain_checks(
+    profiles: &[WorkspaceProfile],
+    settings: &AppSettings,
+) -> Vec<DoctorCheck> {
     let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+    if settings.hub.tunnel_type == "frp" && !settings.hub.frp_subdomain.trim().is_empty() {
+        owners
+            .entry(settings.hub.frp_subdomain.trim().to_ascii_lowercase())
+            .or_default()
+            .push(SERVICE_SCOPE.to_string());
+    }
     for profile in profiles {
-        for (subdomain, service, gateway, tunnel_type) in [
-            (
-                &profile.tunnel.frp_subdomain,
-                "MCP",
-                profile.tunnel.use_global_gateway,
-                &profile.tunnel.tunnel_type,
-            ),
-            (
-                &profile.actions.frp_subdomain,
-                "Actions",
-                profile.actions.use_global_gateway,
-                &profile.actions.tunnel_type,
-            ),
-        ] {
-            if gateway || tunnel_type != "frp" || subdomain.trim().is_empty() {
-                continue;
-            }
-            owners
-                .entry(subdomain.trim().to_ascii_lowercase())
-                .or_default()
-                .push(format!("{} {service}", profile.name));
+        let subdomain = profile.actions.frp_subdomain.trim();
+        if !actions_uses(profile, "frp") || subdomain.is_empty() {
+            continue;
         }
+        owners
+            .entry(subdomain.to_ascii_lowercase())
+            .or_default()
+            .push(format!("{} Actions", profile.name));
     }
     let mut duplicates: Vec<_> = owners
         .into_iter()
@@ -486,289 +704,136 @@ fn duplicate_subdomain_checks(profiles: &[WorkspaceProfile]) -> Vec<DoctorCheck>
                 "环境",
                 &format!("FRP 子域名 {subdomain} 冲突"),
                 format!("被多个服务同时使用：{}", users.join("、")),
-                "每个服务用不同子域名：gld ws set -w <工作区> mcp.frp-subdomain=<其他名字>",
+                "每个服务用不同子域名：gld set <项目> actions.frp-subdomain=<其他名字>",
             )
         })
         .collect()
 }
 
-/// 这个工作区的 MCP 是不是有公网入口；有的话返回一句人话，用于拼报错。
-///
-/// 三种都算：配了隧道、手填了公网地址、接进了全局共享入口。
-fn public_exposure(profile: &WorkspaceProfile) -> Option<String> {
-    let tunnel = profile.tunnel.tunnel_type.trim();
-    if !tunnel.is_empty() && tunnel != "none" {
-        return Some(format!("配了 {tunnel} 隧道"));
-    }
-    if !profile.tunnel.public_url.trim().is_empty() {
-        return Some("填了公网地址".into());
-    }
-    if profile.tunnel.use_global_gateway {
-        return Some("接进了全局共享入口".into());
-    }
-    None
-}
-
-fn auth_checks(
+/// Actions 是唯一还按项目起的服务（自定义 GPT 导入的是一个项目的 OpenAPI 文档）。
+fn actions_auth_checks(
     profile: &WorkspaceProfile,
-    settings: &AppSettings,
     secret_present: SecretLookup<'_>,
 ) -> Vec<DoctorCheck> {
     let scope = profile.name.as_str();
-    let mut checks = Vec::new();
-    let shared = profile.auth.use_shared_secrets;
-
-    match profile.auth.auth_type.as_str() {
-        "oauth" => {
-            let missing: Vec<&str> = ["oauth_password", "oauth_token_secret"]
-                .into_iter()
-                .filter(|key| !secret_present(&profile.id, key, shared))
-                .collect();
-            checks.push(if missing.is_empty() {
-                DoctorCheck::ok(scope, "MCP 认证", "oauth（凭据齐全）")
-            } else {
-                DoctorCheck::fail(
-                    scope,
-                    "MCP 认证",
-                    format!("oauth 缺少凭据：{}", missing.join("、")),
-                    format!(
-                        "gld secret {}regen {} -w {scope}",
-                        if shared { "shared " } else { "" },
-                        missing[0]
-                    ),
-                )
-            });
-        }
-        "bearer" => {
-            checks.push(if secret_present(&profile.id, "bearer_token", shared) {
-                DoctorCheck::ok(scope, "MCP 认证", "bearer（Token 已设置）")
-            } else {
-                DoctorCheck::fail(
-                    scope,
-                    "MCP 认证",
-                    "bearer 但没有 bearer_token",
-                    format!(
-                        "gld secret {}regen bearer_token -w {scope}",
-                        if shared { "shared " } else { "" }
-                    ),
-                )
-            });
-        }
-        _ => {
-            // noauth 本身没问题，前提是**外面真的进不来**。
-            //
-            // 光看 allow_lan_access 是不够的：隧道（cloudflared / frpc）就是从
-            // 127.0.0.1 把端口转到公网的，绑回环地址对它一点约束都没有。
-            // 以前这种组合只报一句"noauth（仅监听 127.0.0.1）· 本机自用可以"，
-            // 而实际状态是"全互联网都能无认证读写这个项目并执行命令"。
-            checks.push(if let Some(reason) = public_exposure(profile) {
-                DoctorCheck::fail(
-                    scope,
-                    "MCP 认证",
-                    format!("noauth 但{reason}：任何人都能读写这个项目并执行命令"),
-                    format!("gld ws set -w {scope} auth=bearer；或 gld share --off -w {scope} 收回公网入口"),
-                )
-            } else if settings.allow_lan_access {
-                DoctorCheck::fail(
-                    scope,
-                    "MCP 认证",
-                    "noauth 且已开启局域网访问：同网段任何人都能读写这个项目并执行命令",
-                    format!("改认证：gld ws set -w {scope} mcp.auth=bearer；或关闭 gld settings runtime --lan-access false"),
-                )
-            } else {
-                DoctorCheck::warn(
-                    scope,
-                    "MCP 认证",
-                    "noauth（仅监听 127.0.0.1，且没有公网入口）",
-                    "本机自用可以；开局域网访问或开隧道之前必须换成 bearer 或 oauth",
-                )
-            });
-        }
-    }
-
-    let actions_shared = profile.actions.use_shared_secrets;
-    let actions_missing: Vec<&str> = match profile.actions.auth_type.as_str() {
+    let shared = profile.actions.use_shared_secrets;
+    let missing: Vec<&str> = match profile.actions.auth_type.as_str() {
         "api_key" => ["actions_api_key"]
             .into_iter()
-            .filter(|key| !secret_present(&profile.id, key, actions_shared))
+            .filter(|key| !secret_present(&profile.id, key, shared))
             .collect(),
         "oauth" => ["actions_oauth_password", "actions_oauth_token_secret"]
             .into_iter()
-            .filter(|key| !secret_present(&profile.id, key, actions_shared))
+            .filter(|key| !secret_present(&profile.id, key, shared))
             .collect(),
         _ => Vec::new(),
     };
-    if !actions_missing.is_empty() {
-        checks.push(DoctorCheck::fail(
-            scope,
-            "Actions 认证",
-            format!(
-                "{} 缺少凭据：{}",
-                profile.actions.auth_type,
-                actions_missing.join("、")
-            ),
-            format!(
-                "gld secret {}regen {} -w {scope}（Actions 未启用时可忽略）",
-                if actions_shared { "shared " } else { "" },
-                actions_missing[0]
-            ),
-        ));
+    if missing.is_empty() {
+        return Vec::new();
     }
-
-    checks
+    vec![DoctorCheck::fail(
+        scope,
+        "Actions 认证",
+        format!(
+            "{} 缺少凭据：{}",
+            profile.actions.auth_type,
+            missing.join("、")
+        ),
+        format!(
+            "gld secret {}regen {} -w {scope}（Actions 未启用时可忽略）",
+            if shared { "shared " } else { "" },
+            missing[0]
+        ),
+    )]
 }
 
-fn tunnel_checks(
+fn actions_tunnel_checks(
     profile: &WorkspaceProfile,
     settings: &AppSettings,
     secret_present: SecretLookup<'_>,
 ) -> Vec<DoctorCheck> {
+    const LABEL: &str = "Actions 公网入口";
     let scope = profile.name.as_str();
-    let mut checks = Vec::new();
-
-    // 一个工作区只跑一个 frpc 进程，两条线路必须连同一台 frps。
-    let both_frp = !profile.tunnel.use_global_gateway
-        && !profile.actions.use_global_gateway
-        && profile.tunnel.tunnel_type == "frp"
-        && profile.actions.tunnel_type == "frp";
-    if both_frp && profile.tunnel.frp_profile_id != profile.actions.frp_profile_id {
-        checks.push(DoctorCheck::fail(
-            scope,
-            "FRP 服务器一致性",
-            "MCP 与 Actions 指向不同的 FRP 配置，但一个工作区只会启动一个 frpc",
-            format!(
-                "统一：gld ws set -w {scope} actions.frp-profile={}",
-                profile.tunnel.frp_profile_id
-            ),
-        ));
-    }
-
-    for (service, tunnel_type, profile_id, subdomain, gateway, cloudflare_mode, token_key) in [
-        (
-            "MCP",
-            &profile.tunnel.tunnel_type,
-            &profile.tunnel.frp_profile_id,
-            &profile.tunnel.frp_subdomain,
-            profile.tunnel.use_global_gateway,
-            &profile.tunnel.cloudflare_mode,
-            "cloudflare_token",
-        ),
-        (
-            "Actions",
-            &profile.actions.tunnel_type,
-            &profile.actions.frp_profile_id,
-            &profile.actions.frp_subdomain,
-            profile.actions.use_global_gateway,
-            &profile.actions.cloudflare_mode,
-            "actions_cloudflare_token",
-        ),
-    ] {
-        let label = format!("{service} 公网入口");
-        // 修复命令要能直接敲：MCP 侧字段名省前缀，Actions 侧写全并带上 -s actions。
-        let field_prefix = if service == "Actions" { "actions." } else { "" };
-        let expose_service = if service == "Actions" {
-            " -s actions"
+    let actions = &profile.actions;
+    if actions.use_global_gateway {
+        return vec![if settings.global_gateway.enabled {
+            DoctorCheck::ok(scope, LABEL, "走全局共享入口")
         } else {
-            ""
-        };
-        if gateway {
-            checks.push(if settings.global_gateway.enabled {
-                DoctorCheck::ok(scope, &label, "走全局共享入口")
-            } else {
-                DoctorCheck::fail(
+            DoctorCheck::fail(
+                scope,
+                LABEL,
+                "配置为走全局入口，但全局入口未启用",
+                "gld gateway set --enabled true",
+            )
+        }];
+    }
+    match actions.tunnel_type.as_str() {
+        "frp" => {
+            let known = settings.find_frp_profile(&actions.frp_profile_id);
+            vec![
+                if !actions.frp_profile_id.trim().is_empty() && known.is_none() {
+                    DoctorCheck::fail(
+                        scope,
+                        LABEL,
+                        format!(
+                            "引用的 FRP 配置 {} 不存在（多半是被 gld frp remove --force 删掉了）",
+                            actions.frp_profile_id
+                        ),
+                        format!(
+                        "gld frp list 看现有的，再 gld set {scope} actions.frp-profile=<名称>；\
+                         不要公网就 gld share --off -w {scope} -s actions"
+                    ),
+                    )
+                } else if known.is_none() {
+                    DoctorCheck::fail(
                     scope,
-                    &label,
-                    "配置为走全局入口，但全局入口未启用",
-                    "gld gateway set --enabled true",
+                    LABEL,
+                    "隧道类型是 frp，但没有选择 FRP 配置",
+                    "gld frp add --name <名称> --server <frps地址> --token <token> 后再 gld set",
                 )
-            });
-            continue;
-        }
-
-        match tunnel_type.as_str() {
-            "frp" => {
-                let known_profile = settings.find_frp_profile(profile_id);
-                if !profile_id.trim().is_empty() && known_profile.is_none() {
-                    checks.push(DoctorCheck::fail(
+                } else if actions.frp_subdomain.trim().is_empty() {
+                    DoctorCheck::fail(
                         scope,
-                        &label,
-                        format!("引用的 FRP 配置 {profile_id} 不存在（多半是被 gld frp remove --force 删掉了）"),
-                        format!(
-                            "gld frp list 看现有的，再 gld ws set -w {scope} {field_prefix}frp-profile=<名称>；\
-                             不要公网就 gld share --off -w {scope}{expose_service}"
-                        ),
-                    ));
-                } else if known_profile.is_none() {
-                    checks.push(DoctorCheck::fail(
-                        scope,
-                        &label,
-                        "隧道类型是 frp，但没有选择 FRP 配置",
-                        "gld frp add --name <名称> --server <frps地址> --token <token> 后再 gld ws set",
-                    ));
-                } else if subdomain.trim().is_empty() {
-                    checks.push(DoctorCheck::fail(
-                        scope,
-                        &label,
+                        LABEL,
                         "选了 FRP 配置但没有填子域名，公网地址无法生成",
-                        format!(
-                            "gld ws set -w {scope} {}.frp-subdomain=<子域名>",
-                            service.to_ascii_lowercase()
-                        ),
-                    ));
+                        format!("gld set {scope} actions.frp-subdomain=<子域名>"),
+                    )
                 } else {
-                    checks.push(DoctorCheck::ok(
+                    DoctorCheck::ok(
                         scope,
-                        &label,
+                        LABEL,
                         format!(
                             "frp https://{}.{}",
-                            subdomain.trim(),
-                            known_profile.map(|item| item.server.as_str()).unwrap_or("")
+                            actions.frp_subdomain.trim(),
+                            known.map(|item| item.server.as_str()).unwrap_or("")
                         ),
-                    ));
-                }
-            }
-            "cloudflare" => {
-                if cloudflare_mode == "named" && !secret_present(&profile.id, token_key, false) {
-                    checks.push(DoctorCheck::fail(
-                        scope,
-                        &label,
-                        "Cloudflare named 模式缺少 tunnel token",
-                        format!("gld secret set {token_key} <token> -w {scope}"),
-                    ));
-                } else {
-                    checks.push(DoctorCheck::ok(
-                        scope,
-                        &label,
-                        format!("cloudflare（{cloudflare_mode}）"),
-                    ));
-                }
-            }
-            _ => {
-                let public = if service == "MCP" {
-                    &profile.tunnel.public_url
-                } else {
-                    &profile.actions.public_url
-                };
-                if !public.trim().is_empty() {
-                    checks.push(DoctorCheck::ok(scope, &label, public.clone()));
-                    continue;
-                }
-                // Actions 保持出厂状态（无隧道、无公网地址）就是「没在用」，
-                // 不该给只用 MCP 的人重复报一条一模一样的提醒。
-                if service == "Actions" {
-                    continue;
-                }
-                checks.push(DoctorCheck::warn(
-                    scope,
-                    &label,
-                    "没有公网入口，只能本机访问",
-                    "本机客户端（Claude Code / Cursor）够用；ChatGPT 需要公网地址，见 docs/connect-clients.md",
-                ));
-            }
+                    )
+                },
+            ]
         }
+        "cloudflare" => vec![if actions.cloudflare_mode == "named"
+            && !secret_present(&profile.id, "actions_cloudflare_token", false)
+        {
+            DoctorCheck::fail(
+                scope,
+                LABEL,
+                "Cloudflare named 模式缺少 tunnel token",
+                format!("gld secret set actions_cloudflare_token <token> -w {scope}"),
+            )
+        } else {
+            DoctorCheck::ok(
+                scope,
+                LABEL,
+                format!("cloudflare（{}）", actions.cloudflare_mode),
+            )
+        }],
+        // 手填了公网地址就报一句；出厂状态（无隧道、无地址）就是"没在用"，
+        // 不该给只用 MCP 的人报一条与他无关的提醒。
+        _ if !actions.public_url.trim().is_empty() => {
+            vec![DoctorCheck::ok(scope, LABEL, actions.public_url.clone())]
+        }
+        _ => Vec::new(),
     }
-
-    checks
 }
 
 #[cfg(test)]
@@ -785,6 +850,13 @@ mod tests {
         profile
     }
 
+    /// 服务里已经有这几个项目的设置。
+    fn settings_with(members: &[&WorkspaceProfile]) -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.hub.members = members.iter().map(|item| item.id.clone()).collect();
+        settings
+    }
+
     fn all_present(_: &str, _: &str, _: bool) -> bool {
         true
     }
@@ -793,15 +865,27 @@ mod tests {
         checks.iter().find(|check| check.label.contains(label))
     }
 
+    fn frp_profile(settings: &mut AppSettings) {
+        settings.frp_profiles.push(crate::settings::FrpProfile {
+            id: "p1".into(),
+            name: "p".into(),
+            server: "frp.example.com".into(),
+            server_port: 7000,
+        });
+    }
+
     #[test]
-    fn healthy_workspace_reports_no_failures() {
+    fn a_healthy_setup_reports_no_failures() {
         let temp = tempfile::tempdir().expect("workspace");
         std::fs::create_dir_all(temp.path().join(".git")).unwrap();
-        let checks = config_checks(
-            &[profile("solo", temp.path().to_str().unwrap())],
-            &AppSettings::default(),
-            &all_present,
-        );
+        let item = profile("solo", temp.path().to_str().unwrap());
+        let settings = settings_with(&[&item]);
+        let mut checks = config_checks(std::slice::from_ref(&item), &settings, &all_present);
+        checks.extend(service_checks(
+            std::slice::from_ref(&item),
+            &settings,
+            &|_| true,
+        ));
         assert!(
             !checks.iter().any(|check| check.level == DoctorLevel::Fail),
             "{checks:#?}"
@@ -809,124 +893,64 @@ mod tests {
     }
 
     #[test]
-    fn missing_bearer_token_is_a_failure_with_a_command_to_run() {
-        let temp = tempfile::tempdir().expect("workspace");
-        let checks = config_checks(
-            &[profile("api", temp.path().to_str().unwrap())],
-            &AppSettings::default(),
-            &|_, _, _| false,
-        );
-        let auth = find(&checks, "MCP 认证").expect("auth check");
-        assert_eq!(auth.level, DoctorLevel::Fail);
-        assert!(auth.fix.contains("gld secret"), "{}", auth.fix);
-    }
-
-    #[test]
-    fn noauth_plus_lan_access_is_a_failure() {
-        let temp = tempfile::tempdir().expect("workspace");
-        let mut item = profile("open", temp.path().to_str().unwrap());
-        item.auth.auth_type = "noauth".into();
-        let settings = AppSettings {
+    fn noauth_on_the_service_plus_lan_access_is_a_failure() {
+        let mut settings = AppSettings {
             allow_lan_access: true,
             ..AppSettings::default()
         };
-
-        let checks = config_checks(&[item.clone()], &settings, &all_present);
-        assert_eq!(find(&checks, "MCP 认证").unwrap().level, DoctorLevel::Fail);
+        settings.hub.auth_type = "noauth".into();
+        let checks = service_checks(&[], &settings, &|_| true);
+        assert_eq!(find(&checks, "认证").unwrap().level, DoctorLevel::Fail);
 
         // 只监听本机、又没有公网入口时降为提醒。
-        let checks = config_checks(&[item], &AppSettings::default(), &all_present);
-        assert_eq!(find(&checks, "MCP 认证").unwrap().level, DoctorLevel::Warn);
+        settings.allow_lan_access = false;
+        let checks = service_checks(&[], &settings, &|_| true);
+        assert_eq!(find(&checks, "认证").unwrap().level, DoctorLevel::Warn);
     }
 
     /// noauth + 任何一种公网入口都是 Fail，哪怕只监听 127.0.0.1。
     ///
     /// 隧道就是从 127.0.0.1 把端口转到公网的，绑回环地址对它没有任何约束。
-    /// 以前这种组合只报"noauth（仅监听 127.0.0.1）· 本机自用可以"，
-    /// 而实际状态是全互联网都能无认证执行命令。
     #[test]
     fn noauth_plus_a_public_entrance_is_a_failure_even_on_loopback() {
-        let temp = tempfile::tempdir().expect("workspace");
-        let base = |kind: &str| {
-            let mut item = profile("exposed", temp.path().to_str().unwrap());
-            item.auth.auth_type = "noauth".into();
-            match kind {
-                "tunnel" => item.tunnel.tunnel_type = "cloudflare".into(),
-                "public_url" => item.tunnel.public_url = "https://mcp.example.com".into(),
-                _ => item.tunnel.use_global_gateway = true,
-            }
-            item
-        };
-
         for kind in ["tunnel", "public_url", "gateway"] {
-            // 注意 settings 里 lan-access 是关的：要证的就是"绑回环也不安全"。
-            let checks = config_checks(&[base(kind)], &AppSettings::default(), &all_present);
-            let auth = find(&checks, "MCP 认证").expect("auth check");
+            let mut settings = AppSettings::default();
+            settings.hub.auth_type = "noauth".into();
+            match kind {
+                "tunnel" => settings.hub.tunnel_type = "cloudflare".into(),
+                "public_url" => settings.hub.public_url = "https://mcp.example.com".into(),
+                _ => settings.hub.use_global_gateway = true,
+            }
+            let checks = service_checks(&[], &settings, &|_| true);
+            let auth = find(&checks, "认证").expect("auth check");
             assert_eq!(auth.level, DoctorLevel::Fail, "{kind}: {auth:#?}");
-            assert!(auth.fix.contains("auth=bearer"), "{}", auth.fix);
+            assert!(auth.fix.contains("--auth"), "{}", auth.fix);
         }
     }
 
+    /// 项目自己那个 MCP 端口不再有人监听，两个项目分到同一个号码不算冲突；
+    /// 服务端口撞上某个项目的 Actions 端口才算，而且修复命令要指向服务。
     #[test]
-    fn duplicate_ports_and_subdomains_are_reported_once_each() {
+    fn port_clashes_count_the_service_and_actions_only() {
         let temp = tempfile::tempdir().expect("workspace");
         let path = temp.path().to_str().unwrap();
-        let mut first = profile("a", path);
+        let first = profile("a", path);
         let mut second = profile("b", path);
-        // 只让 MCP 端口撞车，Actions 各用各的，便于断言“一个端口一条”。
         second.runtime.local_port = first.runtime.local_port;
         second.actions.local_port = first.actions.local_port + 1;
-        for item in [&mut first, &mut second] {
-            item.tunnel.tunnel_type = "frp".into();
-            item.tunnel.frp_subdomain = "Same".into();
-            item.tunnel.frp_profile_id = "p1".into();
-        }
-        let mut settings = AppSettings::default();
-        settings.frp_profiles.push(crate::settings::FrpProfile {
-            id: "p1".into(),
-            name: "p".into(),
-            server: "frp.example.com".into(),
-            server_port: 7000,
-        });
-
-        let checks = config_checks(&[first, second], &settings, &all_present);
-        let ports: Vec<_> = checks
-            .iter()
-            .filter(|check| check.label.contains("端口") && check.label.contains("冲突"))
-            .collect();
-        assert_eq!(ports.len(), 1, "{checks:#?}");
-        assert_eq!(ports[0].level, DoctorLevel::Fail);
-        assert!(ports[0].fix.contains("mcp.port"), "{}", ports[0].fix);
-        // 子域名大小写不同也算冲突：frps 侧不区分大小写。
-        let subdomains: Vec<_> = checks
-            .iter()
-            .filter(|check| check.label.contains("子域名"))
-            .collect();
-        assert_eq!(subdomains.len(), 1, "{checks:#?}");
-    }
-
-    #[test]
-    fn an_unused_actions_service_does_not_repeat_the_no_public_entry_warning() {
-        let temp = tempfile::tempdir().expect("workspace");
-        let checks = config_checks(
-            &[profile("local-only", temp.path().to_str().unwrap())],
-            &AppSettings::default(),
-            &all_present,
+        let settings = settings_with(&[&first, &second]);
+        let checks = config_checks(&[first.clone(), second.clone()], &settings, &all_present);
+        assert!(
+            !checks.iter().any(|check| check.label.contains("冲突")),
+            "{checks:#?}"
         );
-        let entries: Vec<_> = checks
-            .iter()
-            .filter(|check| check.label.contains("公网入口"))
-            .collect();
-        assert_eq!(entries.len(), 1, "{entries:#?}");
-        assert!(entries[0].label.starts_with("MCP"));
 
-        // 但 Actions 一旦真的配了隧道，就照常检查。
-        let mut configured = profile("with-actions", temp.path().to_str().unwrap());
-        configured.actions.tunnel_type = "frp".into();
-        let checks = config_checks(&[configured], &AppSettings::default(), &all_present);
-        assert!(checks
-            .iter()
-            .any(|check| check.label == "Actions 公网入口" && check.level == DoctorLevel::Fail));
+        let mut settings = settings;
+        settings.hub.local_port = first.actions.local_port;
+        let checks = config_checks(&[first, second], &settings, &all_present);
+        let clash = find(&checks, "冲突").expect("service clash");
+        assert_eq!(clash.level, DoctorLevel::Fail);
+        assert!(clash.fix.contains("gld upgrade --port"), "{}", clash.fix);
     }
 
     #[test]
@@ -935,11 +959,11 @@ mod tests {
         let path = temp.path().to_str().unwrap();
         let mut first = profile("a", path);
         let mut second = profile("b", path);
-        second.runtime.local_port = first.runtime.local_port + 1;
         first.actions.local_port = 9000;
         second.actions.local_port = 9000;
+        let settings = settings_with(&[&first, &second]);
 
-        let checks = config_checks(&[first, second], &AppSettings::default(), &all_present);
+        let checks = config_checks(&[first, second], &settings, &all_present);
         let clash = checks
             .iter()
             .find(|check| check.label.contains("端口 9000"))
@@ -947,61 +971,117 @@ mod tests {
         assert!(clash.fix.contains("actions.port"), "{}", clash.fix);
     }
 
+    /// 子域名大小写不同也算冲突：frps 侧不区分大小写。服务和项目的 Actions 抢同一个也算。
     #[test]
-    fn frp_without_a_profile_or_subdomain_fails_with_the_next_command() {
+    fn a_subdomain_shared_by_the_service_and_an_actions_line_is_reported_once() {
         let temp = tempfile::tempdir().expect("workspace");
-        let mut item = profile("web", temp.path().to_str().unwrap());
-        item.tunnel.tunnel_type = "frp".into();
+        let mut item = profile("a", temp.path().to_str().unwrap());
+        item.actions.tunnel_type = "frp".into();
+        item.actions.frp_profile_id = "p1".into();
+        item.actions.frp_subdomain = "Same".into();
+        let mut settings = settings_with(&[&item]);
+        frp_profile(&mut settings);
+        settings.hub.tunnel_type = "frp".into();
+        settings.hub.frp_profile_id = "p1".into();
+        settings.hub.frp_subdomain = "same".into();
 
-        let checks = config_checks(&[item.clone()], &AppSettings::default(), &all_present);
-        let entry = find(&checks, "MCP 公网入口").expect("tunnel check");
+        let checks = config_checks(&[item], &settings, &all_present);
+        let subdomains: Vec<_> = checks
+            .iter()
+            .filter(|check| check.label.contains("子域名") && check.label.contains("冲突"))
+            .collect();
+        assert_eq!(subdomains.len(), 1, "{checks:#?}");
+    }
+
+    #[test]
+    fn an_unused_actions_service_says_nothing() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let item = profile("local-only", temp.path().to_str().unwrap());
+        let settings = settings_with(&[&item]);
+        let checks = config_checks(std::slice::from_ref(&item), &settings, &all_present);
+        assert!(
+            !checks.iter().any(|check| check.label.contains("Actions")),
+            "{checks:#?}"
+        );
+
+        // 但 Actions 一旦真的配了隧道，就照常检查。
+        let mut configured = profile("with-actions", temp.path().to_str().unwrap());
+        configured.actions.tunnel_type = "frp".into();
+        let checks = config_checks(&[configured], &settings, &all_present);
+        assert!(checks
+            .iter()
+            .any(|check| check.label == "Actions 公网入口" && check.level == DoctorLevel::Fail));
+    }
+
+    #[test]
+    fn the_service_tunnel_says_what_is_missing_and_how_to_give_it() {
+        let mut settings = AppSettings::default();
+        settings.hub.tunnel_type = "frp".into();
+        let checks = service_checks(&[], &settings, &|_| true);
+        let entry = find(&checks, "公网入口").expect("tunnel check");
         assert_eq!(entry.level, DoctorLevel::Fail);
         assert!(entry.fix.contains("gld frp add"), "{}", entry.fix);
 
         // 有配置但没子域名：换一条提示。
-        let mut settings = AppSettings::default();
-        settings.frp_profiles.push(crate::settings::FrpProfile {
-            id: "p1".into(),
-            name: "p".into(),
-            server: "frp.example.com".into(),
-            server_port: 7000,
-        });
-        item.tunnel.frp_profile_id = "p1".into();
-        let checks = config_checks(&[item], &settings, &all_present);
-        let entry = find(&checks, "MCP 公网入口").expect("tunnel check");
+        frp_profile(&mut settings);
+        settings.hub.frp_profile_id = "p1".into();
+        let checks = service_checks(&[], &settings, &|_| true);
+        let entry = find(&checks, "公网入口").expect("tunnel check");
         assert_eq!(entry.level, DoctorLevel::Fail);
-        assert!(entry.fix.contains("frp-subdomain"), "{}", entry.fix);
-    }
+        assert!(entry.fix.contains("--subdomain"), "{}", entry.fix);
 
-    #[test]
-    fn global_gateway_reference_requires_the_gateway_to_be_enabled() {
-        let temp = tempfile::tempdir().expect("workspace");
-        let mut item = profile("hub", temp.path().to_str().unwrap());
-        item.tunnel.use_global_gateway = true;
-
-        let checks = config_checks(&[item.clone()], &AppSettings::default(), &all_present);
-        assert_eq!(
-            find(&checks, "MCP 公网入口").unwrap().level,
-            DoctorLevel::Fail
-        );
-
+        // 固定域名缺 token。
         let mut settings = AppSettings::default();
-        settings.global_gateway.enabled = true;
-        let checks = config_checks(&[item], &settings, &all_present);
-        assert_eq!(
-            find(&checks, "MCP 公网入口").unwrap().level,
-            DoctorLevel::Ok
+        settings.hub.tunnel_type = "cloudflare".into();
+        settings.hub.cloudflare_mode = "named".into();
+        settings.hub.public_url = "https://mcp.example.com".into();
+        let checks = service_checks(&[], &settings, &|_| false);
+        let entry = find(&checks, "公网入口").expect("tunnel check");
+        assert_eq!(entry.level, DoctorLevel::Fail);
+        assert!(
+            entry.fix.contains("gld secret set cloudflare_token"),
+            "{}",
+            entry.fix
         );
+        let checks = service_checks(&[], &settings, &|_| true);
+        assert_eq!(find(&checks, "公网入口").unwrap().level, DoctorLevel::Ok);
     }
 
-    /// 全局入口不属于任何工作区，逐工作区那轮检查覆盖不到它。
+    /// 老配置经全局入口挂公网：入口没开就起不来。
+    #[test]
+    fn the_old_gateway_route_requires_the_gateway_to_be_enabled() {
+        let mut settings = AppSettings::default();
+        settings.hub.use_global_gateway = true;
+        let checks = service_checks(&[], &settings, &|_| true);
+        assert_eq!(find(&checks, "公网入口").unwrap().level, DoctorLevel::Fail);
+
+        settings.global_gateway.enabled = true;
+        let checks = service_checks(&[], &settings, &|_| true);
+        assert_eq!(find(&checks, "公网入口").unwrap().level, DoctorLevel::Ok);
+    }
+
+    /// RFC-0004 之前可以"登记了但不在 hub 里"：AI 看不见它，得报出来。
+    #[test]
+    fn a_project_outside_the_service_is_named() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let inside = profile("inside", temp.path().to_str().unwrap());
+        let outside = profile("outside", temp.path().to_str().unwrap());
+        let settings = settings_with(&[&inside]);
+        let checks = service_checks(&[inside, outside], &settings, &|_| true);
+        let entry = find(&checks, "项目").expect("members check");
+        assert_eq!(entry.level, DoctorLevel::Warn);
+        assert!(entry.detail.contains("outside") && !entry.detail.contains("inside"));
+        assert!(entry.fix.contains("gld start"), "{}", entry.fix);
+    }
+
+    /// 全局入口不属于任何项目，逐项目那轮检查覆盖不到它。
     /// 少了这条，`gld frp remove --force` 留下的悬空引用在 doctor 里全绿，
     /// 直到 `gld gateway start` 起不来。
     #[test]
     fn a_dangling_frp_reference_in_the_gateway_is_reported() {
         let temp = tempfile::tempdir().expect("workspace");
         let item = profile("hub", temp.path().to_str().unwrap());
-        let mut settings = AppSettings::default();
+        let mut settings = settings_with(&[&item]);
         settings.global_gateway.enabled = true;
         settings.global_gateway.tunnel_type = "frp".into();
         settings.global_gateway.frp_profile_id = "已经没了".into();
@@ -1031,13 +1111,12 @@ mod tests {
         );
     }
 
-    /// 入口开着却没有任何拿地址的办法——接进来的工作区会一直没有公网地址，
-    /// 而它们各自的检查只看"入口启用了没有"，是绿的。
+    /// 入口开着却没有任何拿地址的办法——接进来的服务会一直没有公网地址。
     #[test]
     fn an_enabled_gateway_without_any_address_is_reported() {
         let temp = tempfile::tempdir().expect("workspace");
         let item = profile("hub", temp.path().to_str().unwrap());
-        let mut settings = AppSettings::default();
+        let mut settings = settings_with(&[&item]);
         settings.global_gateway.enabled = true;
         settings.global_gateway.tunnel_type = "none".into();
 
@@ -1061,7 +1140,7 @@ mod tests {
     fn a_disabled_gateway_says_nothing() {
         let temp = tempfile::tempdir().expect("workspace");
         let item = profile("hub", temp.path().to_str().unwrap());
-        let mut settings = AppSettings::default();
+        let mut settings = settings_with(&[&item]);
         settings.global_gateway.tunnel_type = "frp".into();
         settings.global_gateway.frp_profile_id = "已经没了".into();
 
@@ -1073,27 +1152,12 @@ mod tests {
     }
 
     #[test]
-    fn split_frp_profiles_in_one_workspace_fail() {
-        let temp = tempfile::tempdir().expect("workspace");
-        let mut item = profile("split", temp.path().to_str().unwrap());
-        item.tunnel.tunnel_type = "frp".into();
-        item.actions.tunnel_type = "frp".into();
-        item.tunnel.frp_profile_id = "p1".into();
-        item.actions.frp_profile_id = "p2".into();
-
-        let checks = config_checks(&[item], &AppSettings::default(), &all_present);
-        let entry = find(&checks, "FRP 服务器一致性").expect("consistency check");
-        assert_eq!(entry.level, DoctorLevel::Fail);
-    }
-
-    #[test]
     fn a_missing_project_directory_fails() {
-        let checks = config_checks(
-            &[profile("gone", "/definitely/not/here/gld")],
-            &AppSettings::default(),
-            &all_present,
-        );
+        let item = profile("gone", "/definitely/not/here/gld");
+        let settings = settings_with(&[&item]);
+        let checks = config_checks(&[item], &settings, &all_present);
         let entry = find(&checks, "项目目录").expect("directory check");
         assert_eq!(entry.level, DoctorLevel::Fail);
+        assert!(entry.fix.contains("--path"), "{}", entry.fix);
     }
 }
