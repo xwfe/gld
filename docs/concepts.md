@@ -436,6 +436,10 @@ Skill（扫到 14，目录里列了 9）
   · [claude/global] brainstorm  ~/.claude/skills/brainstorm/SKILL.md
 ```
 
+写坏了的 SKILL.md（引号没闭合、没写描述、描述超过 1024 字符）不进目录，但也不会悄悄消失：`gld context` 打 `✗` 并写出原因，AI 调 `list_skills` 也在 `skipped` 里看得到。
+
+skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读——只限这个 skill 自己的目录。主目录里的用户级 skill 默认只给正文不给文件，来源明确配置之后才给，边界见[安全](security.md)那一节。
+
 要让它们全部进去：`gld ws set tool-profile=advanced`。
 代价是工具从 28 个涨到 53 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。

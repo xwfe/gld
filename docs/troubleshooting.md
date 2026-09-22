@@ -99,6 +99,8 @@ gld tool call exec_command cmd='cargo test'
 | Agent 说某个工具不存在 | 当前 `mcp.tool-profile` 没暴露它 | `gld tool list` 看实际暴露了什么；`gld ws set tool-profile=advanced` 换更全的工具集 |
 | 写在 `.cursorrules` / `CLAUDE.md` 里的规则 AI 不理 | 默认工具集 compact 只注入工作区里的 `AGENTS.md` 一份 | `gld context` 看谁打 `✓`（真注入）谁打 `·`（只是扫到）；要全部生效 `gld ws set tool-profile=advanced` |
 | AI 说没有 Skill 可用 | 0.4.0 起 compact 下 Skill 目录有字符上限（约 1200 字符），排在后面的没进说明 | `gld context` 看谁打 `✓`；让 AI 调一次 `list_skills` 就能拿到全部；要全部进说明用 `gld ws set tool-profile=advanced` |
+| 自己写的 Skill 在 `gld context` 里打 `✗` | SKILL.md 没收进来：frontmatter 写坏了（报第几行）、没写 `description`、描述超过 1024 字符，或者和另一份内容一模一样 | 照 `✗` 后面的原因改文件；`list_skills` 马上看得到，进说明里的目录要等 AI 下次连上 |
+| AI 说读不到 Skill 里的脚本（`filesUnavailable`） | 这个 skill 在主目录里、是默认的 auto 扫描扫到的：默认只给正文不给文件 | `gld settings runtime --skill-sources claude`（换成它实际的来源）明确启用；或者 `gld ws set confine-reads=false` 放开读取范围 |
 | Plan 模式下写文件被拒 | 设计如此：Plan 模式只读 | `gld planning mode direct` 或 `goal` |
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
 | 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld ws set allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |

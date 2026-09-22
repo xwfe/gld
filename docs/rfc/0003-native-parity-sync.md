@@ -1,6 +1,6 @@
 # RFC-0003：跟上 ccnm 的新工具，补回 compact 档的 skills
 
-日期：2026-09-18。状态：**G1、G2、G3 全部完成**（2026-09-19），过程写在第 4 节。
+日期：2026-09-18。状态：**G1、G2、G3 全部完成**（2026-09-19）；**G2 的后续 G2.4–G2.7 完成**（2026-09-22，跨仓评审 X08 在 gld 这一半）。过程写在第 4 节。
 
 这是跨仓方案 v3（toexec 仓库 `docs/plan/implementation-plan-v3-native-parity.md`）第 5 节第 5 步在 gld 这一侧的落地记录。v3 要的是：经 gld / ccnm 用 AI，能力不低于在项目机器上直接跑官方 CLI。ccnm 那边的执行面已经补了一批（ccnm P36–P41），gld 要跟上。为什么这样分三块、原生 CLI 实际怎么做，都在 v3 方案和 ccnm 的研究记录里，这里只写 gld 要改什么、怎么算做完。
 
@@ -26,6 +26,10 @@
 | G2.1 | compact 下 `list_skills` / `get_skill` 暴露，skill 目录进说明，但有总长上限，放不下的写明"还有几个，调 list_skills 看" |
 | G2.2 | skill frontmatter 用 `toexec-skill` 解析，多行 `description` 读对 |
 | G2.3 | `gld context`、文档里"compact 不带 Skill"的说法同步改 |
+| G2.4 | 读不了的 skill 不再静默跳过：`list_skills` 的 `skipped` 和 `gld context` 列出文件与原因（frontmatter 第几行、没有描述、描述超 1024 字符、和另一份内容相同、读不出来） |
+| G2.5 | 如实说：SKILL.md 超过 100 KB 被截断、原生客户端会整段丢弃这份 frontmatter、有键写了几遍，`get_skill` 的 `notes` 写明 |
+| G2.6 | 内容版本：每个 skill 带 `contentSha256`（`id` 只由路径决定，内容换了不变） |
+| G2.7 | 用户级附件的窄目录读取：`get_skill` 的 `file` 只读这个 skill 自己目录里的文件；`..`、绝对路径、指到外面的符号链接、点开头的文件、gld 数据目录一律拒；工作区外的 skill 要来源是明确配置的或关了 confine-reads 才读，默认的 auto 扫描不算 |
 | G3.1 | 本机 `search_text` 加 `output_mode`（content / files_with_matches / count）、`multiline`、`type`、`include_hidden`；默认行为不变；认不出来的 `output_mode` / `type` 报错而不是当没过滤 |
 | G3.2 | notebook 按 cell 读写（照 ccnm P40 的形状：新工具 `read_notebook`，`apply_patch` 加 `edit_notebook`，不改 `read_file` 返回 JSON 文本的既有行为） |
 
@@ -222,3 +226,24 @@ ccnm 那半边的权威语义在它的协议第 6 节（四个时钟、session-b
 
 验证：`cargo test --workspace` 669 passed / 0 failed（带 `CCNM_BIN` 跑，含两条真实
 组合测试）；fmt、clippy、`cargo +1.89 check --locked` 干净。
+
+### 2026-09-22：G2 后续（跨仓评审 X08 的 gld 半边）
+
+共享库 `toexec-skill` 0.2.0 先落地（`70cd0f0`）：frontmatter 照 Claude Code 2.1.278 的读法读，差分证据在 toexec 仓库 `evidence/x08-skill-frontmatter/`。gld 这边补的是跨仓落地清单第 5 节写的那几样：
+
+**一、读不了的说原因。**以前 `parse_skill` 返回 `None` 就 `continue`：引号没闭合、忘了写描述、描述写超了，skill 都悄悄消失，作者只看到"AI 不用我的 skill"。现在 `scan_skills` 把它们记进 `skipped`，`list_skills` 返回、`gld context` 打 `✗` 列出来。描述超 1024 字符仍然不收（Agent Skills 规范的上限，Codex 也不收），只是说出来了。内容完全相同的两份只收一份，另一份写明是谁的副本。同一个文件从两个来源各扫到一次（`.agents/skills` 同时属于好几家）不算跳过，那是同一个 skill。
+
+**二、如实说。**超过 100 KB 的 SKILL.md 以前被截断后当完整正文交出去；原生会整段丢弃的 frontmatter、写了几遍的键，以前没人提。这三样进 `get_skill` 的 `notes`。
+
+**三、内容版本。**`SkillDescriptor` 加 `contentSha256`。`id` 是路径的哈希，同一个路径下内容改了 id 不变，模型分不清手里那份是不是现在这一版。
+
+**四、附件。**用户级 skill 在主目录里，正文写"跑 scripts/fill.py"，而 `read_file` 默认只读工作区，模型只能干瞪眼。`get_skill` 不带 `file` 时多返回 `files`（这个 skill 目录里的文件，最多 100 个、往下 4 层、不含点开头的），带 `file` 时读其中一个（256 KiB、UTF-8 文本以内）。边界：
+
+- 目录是 SKILL.md 所在的目录，但必须在发现它的那个根**里面**、且不是根本身——`~/.claude/skills/SKILL.md` 的"目录"是整个 skills 根，自定义根配成主目录时就是整个主目录，不给。
+- 比较的是 `canonicalize` 之后的路径：`..`、绝对路径、指到外面的符号链接都拒，报 `SKILL_FILE_OUTSIDE`。
+- 点开头的文件不读也不列：skill 目录里的 `.env` 多半是脚本的密钥。gld 自己的数据目录照旧是另一道独立的门。
+- **工作区外的 skill，默认的 auto 扫描扫到的不给读**，要来源是明确配置的（`gld settings runtime --skill-sources claude`）或者已经 `confine-reads=false`。原因：默认就是 auto，要是扫到就给读，一个挂在公网上的服务会因为这次改动默认多读出一批主目录里的文件。正文照旧给（G2 起就是这样），读不了文件时 `filesUnavailable` 写明怎么打开。
+
+**没做的**：`disable-model-invocation` 在 gld 里仍不生效——gld 没有斜杠命令，藏起来就等于用户也用不了，要不要藏是产品取舍，留给用户定。skill 的参数替换和 `` !`命令` `` 列举（ccnm 的 `load_skill` 有）gld 的 `get_skill` 没有。
+
+验证：`cargo test --workspace` 733 passed / 0 failed（新增：工具层 7 条——附件读取、越界与符号链接、点文件、根上的 SKILL.md、auto 来源要显式开启、`skipped` 原因、`notes`；发现逻辑 1 条截断；`context_marks_what_is_actually_injected` 加了一个写坏的 skill，用真实二进制核对 JSON 和人看的输出都报出原因）；fmt、clippy、`cargo +1.89 check --locked` 干净。Windows 编译检查本机没有 mingw，交给 CI。
