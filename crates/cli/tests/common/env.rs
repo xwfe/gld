@@ -3,7 +3,7 @@
 //! 每个 [`Env`] 一套独立的 `GLD_HOME` 和临时项目目录，互不干扰，也不会碰
 //! 真实的 `~/.config/gld`——集成测试是真的会拉起守护进程、真的会写数据文件的。
 
-use std::net::TcpListener;
+use std::net::TcpStream;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
@@ -158,14 +158,28 @@ const PORT_SPAN: u32 = 12000;
 /// 从 20000 起就没这回事：这一段不在任何一个系统的自动分配范围里，只有明确写了
 /// 端口号的人才会碰它，而那只有我们自己的测试。进程内用原子计数往前走，同一个号
 /// 不发第二次；起点按 pid 错开，免得并行跑的几个测试二进制从同一处开始找；最后
-/// 还是 bind 一次确认当前真的空闲。
+/// 确认一次当前没人在听。
+///
+/// **确认的办法是"连一下"，别改回"bind 一下"。** bind 会在测试进程里开一个监听
+/// socket，而 macOS 没有 `SOCK_CLOEXEC`：Rust 是先建 socket、再补 close-on-exec，
+/// 中间有个空窗。另一个测试线程恰好在这个空窗里 `posix_spawn` 一个 `gld`，这个
+/// 监听 socket 就被那个 CLI 继承了，CLI 再拉起守护进程时又传下去——于是隔壁测试
+/// 分到的端口被一个毫不相干的守护进程一直占着，报
+///
+/// ```text
+/// 错误：MCP 服务端口 20633 已被占用：/…/target/debug/gld（pid 84644）
+/// ```
+///
+/// 并发跑 30 次左右红一次，`--test-threads=1` 永远不红。连一下只会建一个客户端
+/// socket，就算被继承了也不占任何端口。
 pub fn free_port() -> u16 {
     static NEXT: OnceLock<AtomicU32> = OnceLock::new();
     let next = NEXT.get_or_init(|| AtomicU32::new(std::process::id()));
 
     for _ in 0..PORT_SPAN {
         let port = PORT_LOW + (next.fetch_add(1, Ordering::Relaxed) % PORT_SPAN) as u16;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_err() {
             return port;
         }
     }
