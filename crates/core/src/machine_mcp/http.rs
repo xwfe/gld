@@ -24,6 +24,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, 
 use serde_json::Value;
 
 use toexec_mcp::installed::{display_url, is_loopback_url};
+use toexec_mcp::sse::{answers, awaited_id, event_data, event_end};
 use toexec_mcp::transport::{Recv, Transport, MAX_MESSAGE_BYTES};
 use toexec_mcp::Error;
 
@@ -114,10 +115,7 @@ impl Http {
     }
 
     async fn post(&mut self, line: &str, timeout: Duration) -> Result<(), Error> {
-        let waiting_for = serde_json::from_str::<Value>(line)
-            .ok()
-            .filter(|message| message.get("method").is_some())
-            .and_then(|message| message.get("id").cloned());
+        let waiting_for = awaited_id(line);
         let mut request = self
             .client
             .post(&self.url)
@@ -332,50 +330,6 @@ async fn read_capped(
     Ok(body)
 }
 
-/// 缓冲里第一个事件在哪结束：空行（`\n\n` 或 `\r\n\r\n`）。返回事件长度和
-/// 分隔符长度。
-fn event_end(buffer: &[u8]) -> Option<(usize, usize)> {
-    let lf = buffer
-        .windows(2)
-        .position(|w| w == b"\n\n")
-        .map(|at| (at, 2));
-    let crlf = buffer
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|at| (at, 4));
-    match (lf, crlf) {
-        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
-        (one, other) => one.or(other),
-    }
-}
-
-/// 一个事件里所有 `data:` 行拼起来（SSE 规定多行 data 用换行连接）。
-/// 没有 data（注释、只有 `event:` 的心跳）返回 `None`。
-fn event_data(event: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(event);
-    let lines: Vec<&str> = text
-        .lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(|data| data.strip_prefix(' ').unwrap_or(data))
-        .collect();
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
-    }
-}
-
-/// 这段数据是不是 `id` 那条请求的回复（批量回复里有它也算）。
-fn answers(data: &str, id: &Value) -> bool {
-    let is_reply =
-        |message: &Value| message.get("id") == Some(id) && message.get("method").is_none();
-    match serde_json::from_str::<Value>(data) {
-        Ok(Value::Array(batch)) => batch.iter().any(is_reply),
-        Ok(message) => is_reply(&message),
-        Err(_) => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,14 +475,5 @@ mod tests {
             panic!("nothing listens on port 9");
         };
         assert!(matches!(error, Error::Start(_)), "{error}");
-    }
-
-    #[test]
-    fn events_split_on_either_line_ending_and_join_their_data_lines() {
-        let buffer = b"data: {\"a\":\ndata: 1}\r\n\r\nrest";
-        let (end, skip) = event_end(buffer).unwrap();
-        assert_eq!(skip, 4);
-        assert_eq!(event_data(&buffer[..end]).as_deref(), Some("{\"a\":\n1}"));
-        assert_eq!(event_data(b": comment"), None);
     }
 }

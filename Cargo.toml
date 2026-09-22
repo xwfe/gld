@@ -28,8 +28,8 @@ toexec-fs = { git = "https://github.com/xwfe/toexec.git", tag = "toexec-fs-v0.2.
 # `description: >` 这种多行写法读出来是一个 `>`。
 toexec-skill = { git = "https://github.com/xwfe/toexec.git", tag = "toexec-skill-v0.3.0" }
 # 第四个：转发装好的 MCP server 的那几块机制（读配置、握手调用、子进程通道、
-# 连接池、结果整理），ccnm 也用（RFC-0006、v4 第 3 步）。
-toexec-mcp = { git = "https://github.com/xwfe/toexec.git", tag = "toexec-mcp-v0.1.0" }
+# 连接池、结果整理，0.2.0 起还有长结果分段读和 SSE 拆包），ccnm 也用（RFC-0006、v4 第 3、4 步）。
+toexec-mcp = { git = "https://github.com/xwfe/toexec.git", tag = "toexec-mcp-v0.2.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

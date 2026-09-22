@@ -23,14 +23,14 @@
 //!   末尾写明用 `read_mcp_result` 从哪接着读——**不静默截断**；
 //! - 图片、音频原样带，单个超过 [`MAX_MEDIA_BYTES`] 的换成一句说明。
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 use toexec_mcp::installed::{Installed, Server, Transport as Config};
+use toexec_mcp::kept::{self, Kept};
 use toexec_mcp::pool::{Pool, CALL_TIMEOUT};
-use toexec_mcp::shape::{self, ceil_boundary, cut_text, fit_listing, floor_boundary, part_end};
+use toexec_mcp::shape::{self, cut_text, fit_listing, part_end};
 use toexec_mcp::{Error, Open};
 
 use crate::tools::workspace::{tool_err, tool_ok, WorkspaceError};
@@ -90,7 +90,7 @@ pub fn offered<'a>(on: &[String], installed: &'a Installed) -> Vec<&'a Server> {
 
 pub struct Relay {
     pool: Arc<Pool>,
-    results: Results,
+    results: Kept,
 }
 
 impl Default for Relay {
@@ -109,7 +109,11 @@ impl Relay {
     pub fn with_pool(pool: Pool) -> Relay {
         Relay {
             pool: Arc::new(pool),
-            results: Results::default(),
+            results: Kept::new(kept::Limits {
+                keep_for: KEEP_FOR,
+                max_item: MAX_KEPT_BYTES,
+                max_total: KEEP_TOTAL_BYTES,
+            }),
         }
     }
 
@@ -379,21 +383,19 @@ impl Relay {
             ));
         };
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-        if offset > text.len() {
+        let max = args
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .map(|n| (n as usize).clamp(READ_BYTES.1, READ_BYTES.2))
+            .unwrap_or(READ_BYTES.0);
+        let Some((start, end)) = kept::page(&text, offset, max) else {
             return Err(refuse(
                 "INVALID_ARGUMENT",
                 format!("offset {offset} is past the end ({} bytes)", text.len()),
                 "validation",
                 json!({ "size": text.len() }),
             ));
-        }
-        let max = args
-            .get("max_bytes")
-            .and_then(Value::as_u64)
-            .map(|n| (n as usize).clamp(READ_BYTES.1, READ_BYTES.2))
-            .unwrap_or(READ_BYTES.0);
-        let start = ceil_boundary(&text, offset);
-        let end = part_end(&text, start, max);
+        };
         let note = if end < text.len() {
             format!(
                 "[gld: bytes {start}-{end} of {}. Next part: {READ} ref={reference} offset={end}]",
@@ -434,24 +436,21 @@ impl Relay {
     }
 
     /// 大文字：先交一段，全文留着，末尾写明怎么接着读。
-    fn split(&self, mut whole: String, caller: &str, others: Vec<Value>) -> Vec<Value> {
-        let size = whole.len();
-        let kept_all = size <= MAX_KEPT_BYTES;
-        if !kept_all {
-            let cut = floor_boundary(&whole, MAX_KEPT_BYTES);
-            whole.truncate(cut);
-        }
+    fn split(&self, whole: String, caller: &str, others: Vec<Value>) -> Vec<Value> {
+        // 第一段远小于单条上限，先切出来，再把全文交给 `Kept`（超长的它来截）。
         let end = part_end(&whole, 0, INLINE_BYTES);
         let first = whole[..end].to_string();
-        let kept = whole.len();
-        let reference = self.results.put(caller, whole);
+        let stored = self.results.put(caller, whole);
         let mut note = format!(
-            "[gld: this result is {size} bytes, too long to return at once; this part is bytes 0-{end}. Next part: {READ} ref={reference} offset={end}. Kept for {} minutes.",
+            "[gld: this result is {} bytes, too long to return at once; this part is bytes 0-{end}. Next part: {READ} ref={} offset={end}. Kept for {} minutes.",
+            stored.size,
+            stored.reference,
             KEEP_FOR.as_secs() / 60
         );
-        if !kept_all {
+        if stored.kept < stored.size {
             note.push_str(&format!(
-                " Only the first {kept} bytes were kept; the rest is gone, so ask the tool for less if you need it."
+                " Only the first {} bytes were kept; the rest is gone, so ask the tool for less if you need it.",
+                stored.kept
             ));
         }
         note.push(']');
@@ -461,56 +460,6 @@ impl Relay {
         ];
         content.extend(others);
         content
-    }
-}
-
-/// 留着分段读的全文。
-#[derive(Default)]
-struct Results {
-    kept: Mutex<HashMap<String, Kept>>,
-}
-
-struct Kept {
-    caller: String,
-    text: Arc<str>,
-    at: Instant,
-}
-
-impl Results {
-    fn put(&self, caller: &str, text: String) -> String {
-        let reference = format!("r{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
-        let mut kept = self.kept.lock().unwrap_or_else(|p| p.into_inner());
-        kept.retain(|_, item| item.at.elapsed() < KEEP_FOR);
-        let mut total: usize = kept.values().map(|item| item.text.len()).sum();
-        while total + text.len() > KEEP_TOTAL_BYTES {
-            let Some(oldest) = kept
-                .iter()
-                .min_by_key(|(_, item)| item.at)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            if let Some(gone) = kept.remove(&oldest) {
-                total -= gone.text.len();
-            }
-        }
-        kept.insert(
-            reference.clone(),
-            Kept {
-                caller: caller.to_string(),
-                text: text.into(),
-                at: Instant::now(),
-            },
-        );
-        reference
-    }
-
-    /// 别人的结果和不存在的一样：不给猜 ref 的机会。
-    fn get(&self, caller: &str, reference: &str) -> Option<Arc<str>> {
-        let kept = self.kept.lock().unwrap_or_else(|p| p.into_inner());
-        kept.get(reference)
-            .filter(|item| item.caller == caller && item.at.elapsed() < KEEP_FOR)
-            .map(|item| item.text.clone())
     }
 }
 
