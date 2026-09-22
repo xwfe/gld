@@ -106,10 +106,10 @@ remote_view_image      workspace=prod  path=shots/a.png   看对面的图（PNG/
 remote_read_notebook   workspace=prod  path=a.ipynb       按 cell 读对面的 Jupyter notebook
 ```
 
-**能写的远端项目**（`--mode coding`）还多五个，都要先 `remote_coding_begin` 拿一个句柄：
+**能写的远端项目**（`--mode coding`）还多六个，都要先 `remote_coding_begin` 拿一个句柄：
 `remote_apply_patch`（改文件，含整文件覆盖和改 notebook 的 cell）、`remote_exec_command`
 （跑命令，`cmd` 是 argv、`shell` 是一行 bash）、`remote_read_output`（分页读输出）、
-`remote_stop_command`（停掉后台命令）、`remote_coding_end`（关会话、放写锁）。
+`remote_stop_command`（停掉后台命令）、`remote_call_mcp_tool`（用那台机器上的 MCP server：项目 `.mcp.json` 里声明的、执行账号装的，对面的 ccnm 有可转的才有）、`remote_coding_end`（关会话、放写锁）。
 
 **长命令往后台放。**服务对一次远端调用最多等 60 秒，超了这条连接会被丢掉、coding 会话
 跟着结束（对面还会把这个会话起的命令一起停掉）。所以前台命令在这边封顶 50 秒：不给

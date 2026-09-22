@@ -70,22 +70,27 @@ gld mcp off context7              # 关（--all 全关）
 | 服务里的三处 | `hub/mod.rs` 里 `machine_mcp` 的列工具、分发、关服务（`relay`、`installed` 两个字段和 `relay_definitions` / `call_relay`） |
 | 设置 | `AppSettings::relayed_mcp_servers`、`AppData::relayed_mcp_servers` |
 | 命令 | `crates/core/src/app/mcp.rs`、`crates/cli/src/commands/mcp.rs`、`cli.rs` 的 `Mcp`、守护进程的 `McpServers` / `SwitchMcpServers` / `TestMcpServer`、`scripts/gen-cli-docs.sh` 那一行 |
-| 依赖 | `crates/core/Cargo.toml` 的 `toml` |
+| 依赖 | 对 `toexec-mcp` 的依赖（它还要留给 ccnm 用，别删 toexec 那边的 crate） |
 
 别的模块不依赖这里。数据文件里留下的 `relayed_mcp_servers` 键，老版本读的时候忽略。
 
 ## 6. 没做的
 
-- **没抽进 toexec。** 用户要"共用模块进 toexec"，但 toexec 自己的规矩是"两个产品都真的在用才进来、不加依赖"：这一步只有 gld 读这两份配置，而读 Codex 的 TOML 要 `toml` 库。`machine_mcp/installed.rs` 故意只依赖标准库、serde_json、toml，v4 第 3 步 ccnm 也要读时整个搬过去，那时再定 toexec 那条"不加依赖"怎么破例。
 - upstream server 的 resources、prompts 不转，只转工具。
 - 要 OAuth 登录的 server、老的 HTTP+SSE 传输。
 - 按项目、按客户端分别开：只有服务一份名单。
 - 按工具名藏：用来源配置自己的 `enabled_tools` / `disabled_tools`（Codex 的写法），gld 不另设一套。
 - Windows 上没有进程组，关 server 靠杀进程树（没在 Windows 上跑过）。
 
-## 7. 验证
+## 7. 后来：共用代码进了 toexec（2026-09-22，v4 第 3 步）
 
-- `cargo test --workspace` 781 passed / 0 failed（原 741；新增 40 条：读配置 6、通道 4、握手与调用 6、HTTP 4、连接池 5、三个工具 10、服务 3、`gld mcp` 2）；fmt、clippy `-D warnings`、`cargo +1.89 check` 通过。
+这一步刚做完时共用代码没进 toexec：toexec 的规矩是"两个产品都真的在用才进来、不加依赖"，而那时只有 gld 读这两份配置。第 3 步 ccnm 也要同一套（它在项目那台机器上转 server，外加项目的 `.mcp.json`），就把读配置、握手调用、子进程通道、连接池、结果整理整块搬成了 `toexec-mcp` 0.1.0，gld 删掉自己那份改链它；toexec 那条"不加依赖"为它破了例（serde_json、toml），理由写在 toexec 的开发规矩里。gld 留下的是自己的决定：`machine_mcp/open.rs`（`PATH`、工作目录、进程组、怎么杀）、`http.rs`、`relay.rs`（三个工具、结果交法、留着分段读的全文）。行为没变；跟着代码搬走的测试在 toexec 里接着跑。
+
+同一天 hub 加了 `remote_call_mcp_tool`：远端 ccnm 项目那台机器上的 server 经它用，和 `remote_exec_command` 一样要 coding 句柄。远端没有可转的 server 时 ccnm 不列那个工具，hub 这边报"那边没东西可转"，不报"升级 ccnm"。
+
+## 8. 验证
+
+- `cargo test --workspace` 781 passed / 0 failed（原 741；新增 40 条：读配置 6、通道 4、握手与调用 6、HTTP 4、连接池 5、三个工具 10、服务 3、`gld mcp` 2）；fmt、clippy `-D warnings`、`cargo +1.89 check` 通过。搬进 toexec 之后是 764 passed / 0 failed：搬走的测试在 `toexec-mcp` 里（30 条），这边新增 `open.rs` 3 条、hub 的远端工具 2 条、连真实 ccnm 的组合测试 1 条。
 - 真机（开发机，隔离的 `GLD_HOME`、端口 28990）：context7（`npx`）、mcp-time（`uvx`）、Filesystem（`npx`）、deepwiki、exa（远端 HTTP）经服务都调得通；deepwiki 407 KB 分三段读全；停服务后 server 进程连同下面的 `node` / `python` 一个不剩；不停服务、也不再调用时，最后一次调用后 6 分钟（闲 5 分钟 + 每分钟扫一次）它们也全收掉了。`gld mcp test` 在守护进程里对 context7、deepwiki、Puppeteer（2024-11-05）都成功，对一个程序不在的报出找的是哪条 `PATH`。
 - `docs/cli.md` 用 `HOME` 指到空目录跑 `scripts/gen-cli-docs.sh` 重新生成（绕开开发机上跑着的旧守护进程），只多了 `gld mcp` 那几节。
 
