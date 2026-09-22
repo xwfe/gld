@@ -120,6 +120,8 @@ G3.2 notebook 沿 RFC-0003 做：新增 `read_notebook`，补按 cell 编辑，�
 
 skills 继续已有 G2：补用户级附件的窄目录读取、同名来源区分、解析失败原因与预算；不放开整个 HOME。标准 MCP Skills 扩展先与 ccnm 协调协议基线和 Host 能力，再单独排期，不能只加方法就宣称原生 Skill 可用。
 
+> **落地注记（2026-09-22，`de53472`）**：前一句的四样做了，记在 [RFC-0003](../rfc/0003-native-parity-sync.md) 的 G2.4–G2.7。同名来源区分原来就有（同名时 `get_skill` 报 `AMBIGUOUS_SKILL` 并列出各自的来源和 id），这次补的是内容版本 `contentSha256`，以及内容相同的两份不再静默去重。附件读取没有放开整个 HOME：只读 skill 自己的目录，工作区外的还要来源明确配置。标准 MCP Skills 扩展没动。
+
 前端日用按既有 L2/L3：项目 task discovery、dev server readiness、受控浏览器、日志/截图/产物及验证快照。浏览器必须在能访问服务的执行节点上；使用独立测试 profile 和明确 origin，不接管个人浏览器全部登录态。验证后再改代码，需要重新标定证据有效性。
 
 PDF、全桌面自动化、插件市场、自动部署、语义导航全栈、Agent 委派不是本轮新增近期范围。没有新的 Goal/Plan 权威表，没有第三个通用 Server，没有自建模型循环。
