@@ -91,6 +91,7 @@ fn start_outside_any_project_only_starts_the_service() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_gld"))
         .args(["start"])
         .env("GLD_HOME", env.home.path())
+        .env("HOME", env.user_home())
         .env("NO_COLOR", "1")
         .env_remove("GLD_WORKSPACE")
         .current_dir(elsewhere.path())

@@ -47,6 +47,25 @@ impl Env {
         self
     }
 
+    /// 给 gld 当 HOME 的目录，在数据目录里面。
+    ///
+    /// 不设的话守护进程读的是跑测试那个人真实的 HOME：他自己写的
+    /// `~/.agents/mcp.json` 关掉了哪个工具，这里和它毫不相干的测试就跟着红，
+    /// 而且看不出原因。
+    pub fn user_home(&self) -> std::path::PathBuf {
+        let dir = self.home.path().join("user-home");
+        std::fs::create_dir_all(&dir).expect("create user home");
+        dir
+    }
+
+    /// 在这个环境的 HOME 下写 `~/.agents/mcp.json`。
+    pub fn agents_file(&self, text: &str) -> &Self {
+        let dir = self.user_home().join(".agents");
+        std::fs::create_dir_all(&dir).expect("create .agents");
+        std::fs::write(dir.join("mcp.json"), text).expect("write mcp.json");
+        self
+    }
+
     /// 在项目目录里放一个文件，父目录会自动建出来。
     pub fn write(&self, relative: &str, content: &str) -> &Self {
         let path = self.project.path().join(relative);
@@ -71,6 +90,7 @@ impl Env {
         command
             .args(args)
             .env("GLD_HOME", self.home.path())
+            .env("HOME", self.user_home())
             .env("NO_COLOR", "1")
             // 外面的环境变量会改变工作区推断，测试必须只认自己的临时目录。
             .env_remove("GLD_WORKSPACE")
