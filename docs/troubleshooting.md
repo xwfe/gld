@@ -101,6 +101,7 @@ gld tool call exec_command cmd='cargo test'
 | 写在 `.cursorrules` / `CLAUDE.md` 里的规则 AI 不理 | 默认工具集 compact 只注入项目里的 `AGENTS.md` 一份 | `gld context` 看谁打 `✓`（真注入）谁打 `·`（只是扫到）；要全部生效 `gld set <项目> tool-profile=advanced` |
 | AI 说没有 Skill 可用 | 0.4.0 起 compact 下 Skill 目录有字符上限（约 1200 字符），排在后面的没进说明；写了 `disable-model-invocation` 的本来就不进目录（打 `◦`） | `gld context` 看谁打 `✓`；让 AI 调一次 `list_skills` 就能拿到全部；要全部进说明用 `gld set <项目> tool-profile=advanced` |
 | 自己写的 Skill 在 `gld context` 里打 `✗` | SKILL.md 没收进来：frontmatter 写坏了（报第几行）、没写 `description`、描述超过 1024 字符，或者和另一份内容一模一样 | 照 `✗` 后面的原因改文件；`list_skills` 马上看得到，进说明里的目录要等 AI 下次连上 |
+| 装了的 Skill 在 `gld context` 里根本没有 | 它是主目录里链到别处的链接（`~/.claude/skills/x -> ~/code/...`），2026-09-22 之前的 gld 扫描不跟链接；或者被 `--hidden-skills` 藏了 | 升级 gld；`gld cfg runtime` 看"隐藏的 Skill"那一行 |
 | AI 说读不到 Skill 里的脚本（`filesUnavailable`） | 这个 skill 在主目录里、是默认的 auto 扫描扫到的：默认只给正文不给文件 | `gld cfg runtime --skill-sources claude`（换成它实际的来源）明确启用；或者 `gld set <项目> confine-reads=false` 放开读取范围 |
 | Plan 模式下写文件被拒 | 设计如此：Plan 模式只读 | `gld planning mode direct` 或 `goal` |
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |

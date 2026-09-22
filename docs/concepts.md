@@ -381,6 +381,10 @@ frontmatter 写了 `disable-model-invocation: true`（`yes`、`on`、`1` 也算�
 
 skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读——只限这个 skill 自己的目录。主目录里的用户级 skill 默认只给正文不给文件，来源明确配置之后才给，边界见[安全](security.md)那一节。
 
+主目录里**链到别处的 skill 也算**（`~/.claude/skills/x -> ~/code/skills/x`，自己写的 skill 常这么放，skills CLI 也把每个都从 `~/.agents/skills` 链进来）：2026-09-22 之前 gld 扫描不跟链接，这种 skill 整个看不见，原生客户端却看得见。项目里的链接照旧不跟。
+
+**不想让某个装好的 skill 出现**：`gld cfg runtime --hidden-skills pdf,pptx`（按名字，不分大小写；传 `""` 清空）。藏掉的和没装一样：目录里没有、`list_skills` 不列、`get_skill` 拿不到，`skipped` 里也不提。只管主目录和自定义路径里的，项目自己的 skill 由项目决定。
+
 要让它们全部进去：`gld set <项目> tool-profile=advanced`。
 代价是工具从 28 个涨到 53 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。

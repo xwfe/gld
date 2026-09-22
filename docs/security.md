@@ -60,7 +60,7 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 `oauth_password` 和每个项目的 `actions_api_key`——不挡的话，读到一个文件就等于
 拿到了你全部连接器的钥匙。
 
-**一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
+**一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。skill 目录是链到别处的链接时，读的是链接指向的那个目录；指向主目录本身或文件系统根的不给目录（那等于把整个主目录当成"这个 skill 的文件"）。规则和 ccnm 的 `load_skill` 是同一份（toexec-skill 的 `dir` 模块）。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
 
 这几道门都只对文件类工具生效。`exec_command` 里 `cat ~/.config/gld/data/profiles.json`
 照样能读到——它本来就是"以你的身份执行任意代码"，没有再挡一层的意义。
