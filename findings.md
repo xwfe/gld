@@ -39,3 +39,4 @@
 - ChatGPT 连接器的探测请求 id 是 `openai-mcp-discover`，拿到 -32601 后退回 initialize。
 - 命令行只比版本号和协议号；同版本号的新构建不重启不会有任何提示。
 - 本机 `ls` 是 eza 的别名，`ls -t` 会报参数错误，脚本里用 `command ls`。
+- `gld rm` 只删配置、凭据、OAuth 客户端注册；任务记录按目录存在 `harness/`，日志按项目 id 存在 `logs/`，都留着。

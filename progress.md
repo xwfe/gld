@@ -45,7 +45,14 @@
   版本 0.7.0 再升一次，换完未重启时命令行报版本不一致（退出码 4）。两次都备份了二进制和数据目录，
   凭据与 OAuth 注册数据逐项比对指纹一致。
 - ChatGPT：未刷新前日志里自 9-18 起没有 `tools/list`；chatgpt.com/plugins 点 Refresh 后拿到新表。
-- 真机验收项目 `~/xdw/gld-realtest`（已加进服务）：step 2、step 3 全部符合预期，核对都来自 gld 的
+- 真机验收项目 `~/xdw/gld-realtest`（验收完已删）：step 2、step 3 全部符合预期，核对都来自 gld 的
   任务事件、操作记录、Planning 台账和项目文件。
 - 途中磁盘又满（119 MiB）：删了 scratchpad 里子 agent 克隆的 SDK、`cargo clean -p` gld 自己的三个
   crate（18.3 GiB 陈旧产物）。
+
+## 收尾
+
+- 删：`~/xdw/gld-realtest` 及它在数据目录的任务记录和日志（`gld rm` 不删这两样）、`target/review-20260923-*`、
+  `dist/`（9-11 的 0.3.0 包）、`~/.local/opt` 里两份中间备份、scratchpad。
+- 改：`gld rm` 帮助与 concepts.md 的说法、`docs/cli.md` 重新生成（只变这一行）。
+- 全量测试通过后推送。
