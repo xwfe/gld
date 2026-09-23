@@ -78,9 +78,12 @@ fn record_rejection(
         .and_then(|details| details.get("stage"))
         .cloned()
         .unwrap_or(Value::Null);
+    // 有没结束的任务就记在它名下：写前检查拒的恰恰是任务期间的调用，按任务翻操作记录
+    // 得看得到它。读不出任务（比如任务文件坏了）就不挂，拒绝本身照记。
+    let task_id = ctx.harness.active_task().ok().flatten().map(|task| task.id);
     let _ = ctx.harness.record_operation(
         Some(operation_id),
-        None,
+        task_id.as_deref(),
         name,
         "rejected",
         operation_input(args),

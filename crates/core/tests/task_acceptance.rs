@@ -321,6 +321,21 @@ fn 外部修改之后能先看再接纳() {
         .filter_map(Value::as_str)
         .collect();
     assert!(next.contains(&"task_manage:refresh_baseline"), "{next:?}");
+    // 拒掉的这次也要记在任务名下：写前检查拒的恰恰是任务期间的调用，按任务翻操作记录
+    // 要能看到它（真机验收时发现以前这里 task_id 是空的）。
+    let log = call_tool(&fx.ctx, "task_manage", &json!({"action": "operation_log"}));
+    let rejected = log["operations"]
+        .as_array()
+        .expect("operations")
+        .iter()
+        .rev()
+        .find(|op| op["kind"] == "rejected")
+        .unwrap_or_else(|| panic!("没有 rejected 记录：{log}"));
+    assert_eq!(rejected["task_id"], task_id.as_str(), "{rejected}");
+    assert_eq!(
+        rejected["result_summary"]["code"], "FILE_CHANGED_EXTERNALLY",
+        "{rejected}"
+    );
 
     let review = call_tool(
         &fx.ctx,
