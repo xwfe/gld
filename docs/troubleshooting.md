@@ -63,6 +63,7 @@ gld tool call exec_command cmd='cargo test'
 | 工具列表是旧的：AI 说没有 `check_command`、`read_file` 不收 `start_byte` 这类，而你确定服务已经升级 | 客户端缓存了升级前的工具表。服务端声明 `listChanged: false`，不会通知客户端重拉 | 见下面"核对客户端拿到的工具表" |
 | ChatGPT 连接器突然要重新连接，配置看着没动过 | 多半是公网地址变了（临时 `cf` 隧道一重启就换地址） | 换固定地址，见 [connect-clients.md 什么时候要重新授权](connect-clients.md#什么时候要重新授权什么时候要删了重建)。重启服务本身不会掉授权 |
 | 局域网另一台机器连不上 | 默认只监听 127.0.0.1 | `gld cfg runtime --lan-access true` 后 `gld restart`，并确认认证不是 noauth |
+| `gld logs` 里每次连接先有一条 `method=server/discover`，回的是 `Method not found` | 正常。支持 MCP 2026-07-28 的客户端（官方 TS / Python / Go / C# SDK，Claude Code 的 v2 运行时）先发这个探测；gld 讲的是 2025-06-18，回"没有这个方法"，客户端就退回 `initialize` 按 2025-06-18 连，工具和指令都照常。实测官方 TS SDK 2.0 就是这样连上的 | 不用处理。紧接着应该有 `method=initialize`；没有的话，把客户端名字和版本记下来报问题 |
 
 ### 核对客户端拿到的工具表
 

@@ -9,7 +9,7 @@ mod common;
 use serde_json::{json, Value};
 
 use common::env::{free_port, Env};
-use common::http::{get, post_json};
+use common::http::{get, post_json, request};
 use common::oauth::connect_a_connector;
 
 struct Hub {
@@ -437,4 +437,71 @@ fn tool_list_served_is_the_list_clients_get_and_server_info_agrees() {
     assert!(!stopped.status.success(), "服务停了还给出一张表");
     let stderr = String::from_utf8_lossy(&stopped.stderr);
     assert!(stderr.contains("服务没在跑"), "{stderr}");
+}
+
+/// 支持 2026-07-28 的客户端（官方 TS / Python / Go / C# SDK）先发一个新版 `server/discover`
+/// 探测，拿到"旧服务器"的回答才退回 `initialize`（审查 D13）。服务只讲 2025-06-18，
+/// 指令（hub 规则、Skill 目录）只在 `initialize` 里给——客户端要是没退回来，模型就拿不到。
+///
+/// 请求形状照抄 TS SDK 2.0（`mode: 'auto'`）实测发出的。现在的回法（HTTP 200、`-32601`、
+/// id 原样回）四个 SDK 都认成旧服务器；会让连接失败的改法：回 405 或 5xx（C# / TS 报错）、
+/// id 对不上（TS 等到超时）、回 -32020～-32022、或者给 `server/discover` 一个像样的成功结果
+/// （客户端认定是新协议，之后缺 `resultType` / `ttlMs` 校验不过）。
+#[test]
+fn a_new_protocol_probe_falls_back_to_initialize() {
+    let hub = hub_with_two_members();
+    let bearer = format!("Bearer {}", hub.token);
+    let probe = request(
+        hub.port,
+        "POST",
+        "/mcp",
+        &[
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+            ("Authorization", &bearer),
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "server/discover"),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "server-discover-probe-1",
+            "method": "server/discover",
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": { "name": "probe", "version": "0" },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            } }
+        })
+        .to_string(),
+    );
+    assert_eq!(probe.status, 200, "{}", probe.body);
+    let answer = probe.json();
+    assert_eq!(
+        answer["id"], "server-discover-probe-1",
+        "id 要原样回：{answer}"
+    );
+    assert_eq!(answer["error"]["code"], -32601, "{answer}");
+    assert!(answer.get("result").is_none(), "{answer}");
+
+    // 退回之后：SDK 在 initialize 里报它支持的最新旧版本 2025-11-25，服务回 2025-06-18。
+    let (status, initialized) = rpc(
+        hub.port,
+        "/mcp",
+        Some(&hub.token),
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "probe", "version": "0" }
+        }),
+    );
+    assert_eq!(status, 200, "{initialized}");
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
+    assert!(
+        initialized["result"]["instructions"]
+            .as_str()
+            .is_some_and(|text| text.contains("list_workspaces")),
+        "{initialized}"
+    );
 }
