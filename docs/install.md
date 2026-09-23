@@ -50,13 +50,40 @@ gld --version
 
 ## 升级
 
-覆盖掉旧的二进制，然后：
+换掉二进制，然后重启守护进程：
 
 ```bash
+cp ~/.local/bin/gld ~/.local/opt/gld-$(gld --version | awk '{print $2}')  # 留一份好回滚
+install -m 755 target/release/gld ~/.local/bin/gld.new                    # 先写成新文件
+mv ~/.local/bin/gld.new ~/.local/bin/gld                                  # 再改名盖上去
 gld daemon restart
 ```
 
+**别用 `cp` 直接盖正在跑的那个文件。** 在 Apple Silicon 上，往一个已经执行过的
+Mach-O 里写东西会让它的代码签名失效，之后每次 exec 都被 SIGKILL（退出码 137），
+而还在跑的老进程一切正常——症状是 `gld --version` 变成 `Killed: 9`。写新文件再
+改名换的是 inode，跑着的进程留着自己那份，下一次 exec 拿到的是完整、签名正确的。
+
 MCP 服务会跟着守护进程自己回来；项目的 GPT Actions 要各自再 `gld start -s actions`，见[守护进程 · 升级](daemon.md#升级)。
+
+**中断有多久**：`gld daemon restart` 就是顺序的 stop + start，没有 fd 交接，所以新旧进程
+不会并存（单实例靠 `daemon.lock` 的 flock）。在途请求最多有 3 秒宽限，之后强断；服务起来
+就恢复。隧道是 gld 起的话跟着一起重起；自建反代 / 自己跑的 cloudflared 不受影响，只是那几秒
+回源会 502。
+
+**客户端那边不用动**：地址、凭据、OAuth 动态注册（`data/oauth-clients/hub.json`）都在磁盘上，
+换二进制不碰它们。唯一会逼你删掉 ChatGPT 连接器重建的是**公网地址变了**，而那只发生在用
+Cloudflare 临时地址（`--tunnel cf`）的时候，见[连接客户端](connect-clients.md#什么时候要重新授权什么时候要删了重建)。
+
+换完核对三件事：
+
+```bash
+gld daemon status    # 版本、协议号是新的，"运行中的服务" ≥ 1
+gld ls               # 公网地址、Client ID、项目表和升级前一样
+gld doctor --probe   # 隧道此刻在不在，本地 / 公网端点和 OAuth 元数据通不通
+```
+
+回滚就是把备份的那个二进制按同样的"改名"方式放回去，再 `gld daemon restart`。
 
 > 注意别和 `gld upgrade` 搞混：那条命令改的是**服务和项目的配置**（端口、认证、公网入口、
 > 项目目录），不升级 gld 自己。升级 gld 只有"换二进制 + `gld daemon restart`"这一条路。
