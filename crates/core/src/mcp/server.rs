@@ -164,9 +164,11 @@ mod tests {
     use super::{handle_request, initialize_result, tool_arguments};
 
     fn test_context() -> ToolContext {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let harness = tempfile::tempdir().expect("harness");
-        ToolContext::for_test(workspace.keep(), harness.keep()).expect("context")
+        ToolContext::for_test(
+            crate::home::test_scratch_dir("workspace"),
+            crate::home::test_scratch_dir("harness"),
+        )
+        .expect("context")
     }
 
     fn test_state() -> Arc<ToolContext> {

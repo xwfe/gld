@@ -709,11 +709,12 @@ mod tests {
     use std::sync::Arc;
 
     fn state_named(workspace_name: &str) -> ListenerState {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let harness = tempfile::tempdir().expect("harness");
-        let context = ToolContext::for_test(workspace.keep(), harness.keep())
-            .expect("context")
-            .with_workspace_name(workspace_name);
+        let context = ToolContext::for_test(
+            crate::home::test_scratch_dir("workspace"),
+            crate::home::test_scratch_dir("harness"),
+        )
+        .expect("context")
+        .with_workspace_name(workspace_name);
         ListenerState {
             endpoint: Endpoint::Workspace(Arc::new(context)),
             auth: AuthConfig::default(),

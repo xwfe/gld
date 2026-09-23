@@ -1,7 +1,21 @@
+mod common;
+
 use std::fs;
+use std::path::PathBuf;
 
 use gld_core::tools::{call_tool, ToolContext};
 use serde_json::json;
+
+/// 建测试上下文——**别直接调 `ToolContext::for_test`**。
+///
+/// `for_test` 只管工作区和 harness 这两个目录，而工作区写锁走的是数据目录
+/// （`GLD_HOME`，没设就是真实的 `~/.config/gld`）。直接用的后果是每跑一次
+/// 这个文件就往用户的 `~/.config/gld/write-locks/` 里写 7 个锁文件，没人清：
+/// 2026-09-23 在那儿数出 648 个，全是测试留下的。
+fn ctx_for_test(workspace: PathBuf, harness: PathBuf) -> Result<ToolContext, String> {
+    common::isolate_data_home();
+    ToolContext::for_test(workspace, harness)
+}
 
 #[test]
 fn 无任务时仍可执行_dry_run_预检() {
@@ -9,7 +23,7 @@ fn 无任务时仍可执行_dry_run_预检() {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
     fs::write(workspace.join("README.md"), "初始内容\n").expect("写入文件");
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
 
     let result = call_tool(
         &ctx,
@@ -34,8 +48,7 @@ fn codex_patch格式支持新增文件dry_run和实际应用() {
     let temp = tempfile::tempdir().expect("创建临时目录");
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
-    let ctx =
-        ToolContext::for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
     let patch = "*** Begin Patch\n*** Add File: probe.txt\n+probe-v2\n*** End Patch\n";
 
     let dry_run = call_tool(
@@ -66,8 +79,7 @@ fn 无任务时普通_patch也可执行并保留撤销能力() {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
     fs::write(workspace.join("README.md"), "初始内容\n").expect("写入文件");
-    let ctx =
-        ToolContext::for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
 
     let result = call_tool(
         &ctx,
@@ -102,7 +114,7 @@ fn 无任务时_exec_command不返回任务门禁错误() {
     let temp = tempfile::tempdir().expect("创建临时目录");
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
 
     let result = call_tool(
         &ctx,
@@ -132,7 +144,7 @@ fn 无任务时_exec错误不应建议启动任务() {
     let temp = tempfile::tempdir().expect("创建临时目录");
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
 
     let result = call_tool(
         &ctx,
@@ -154,7 +166,7 @@ fn workspace_allows_exec_during_transition() {
     let temp = tempfile::tempdir().expect("创建临时目录");
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
 
     let result = call_tool(&ctx, "exec_command", &json!({"cmd": "python --version"}));
 
@@ -170,7 +182,7 @@ fn harness_tools_support_task_lifecycle() {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
     fs::write(workspace.join("README.md"), "初始内容\n").expect("写入文件");
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
 
     let started = call_tool(
         &ctx,
@@ -206,8 +218,7 @@ fn 外部修改会在写工具执行前被拒绝() {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
     fs::write(workspace.join("README.md"), "初始内容\n").expect("写入文件");
-    let ctx =
-        ToolContext::for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
     let started = call_tool(&ctx, "start_task", &json!({"objective": "检查外部变化"}));
     let task_id = started["task"]["id"].as_str().expect("任务 ID");
     fs::write(workspace.join("README.md"), "外部修改\n").expect("模拟外部修改");
@@ -266,8 +277,7 @@ fn 开了任务之后工具自己的写入不会把自己锁死() {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
     fs::write(workspace.join("README.md"), "初始内容\n").expect("写入文件");
-    let ctx =
-        ToolContext::for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace.clone(), temp.path().join("harness")).expect("创建上下文");
 
     let started = call_tool(
         &ctx,
@@ -332,7 +342,7 @@ fn many_files_context(temp: &tempfile::TempDir) -> ToolContext {
         )
         .expect("写入文件");
     }
-    ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文")
+    ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文")
 }
 
 /// task_context 的 schema 声明了 max_bytes，以前代码不读：`task` 里带着
@@ -373,7 +383,7 @@ fn task_context_按字节装事件并说清从哪接着读() {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).expect("创建工作区");
     fs::write(workspace.join("README.md"), "初始内容\n").expect("写入文件");
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
     let started = call_tool(&ctx, "start_task", &json!({"objective": "很多步"}));
     let task_id = started["task"]["id"].as_str().expect("任务 ID").to_string();
     for i in 0..150 {
@@ -507,7 +517,7 @@ fn finish_task_的摘要只列这个任务期间真正改过的文件() {
     for name in ["README.md", "a.txt", "b.txt"] {
         fs::write(workspace.join(name), "初始内容\n").expect("写入文件");
     }
-    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).expect("创建上下文");
+    let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
     let started = call_tool(&ctx, "start_task", &json!({"objective": "只改一个"}));
     let task_id = started["task"]["id"].as_str().expect("任务 ID").to_string();
     let patched = call_tool(

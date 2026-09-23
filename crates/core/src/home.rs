@@ -139,13 +139,68 @@ fn isolate_for_tests_if_unset() {
     }
 }
 
+/// 这个测试二进制的所有临时目录都建在这一棵树下：
+/// `$TMPDIR/gld-test-homes/<测试二进制名>`，进程里第一次用到时先清掉上一轮的。
+///
+/// **别用 `tempfile::TempDir` 替代它。** TempDir 靠析构函数删目录，而这里的目录
+/// 要么得存在 `static` 里（`GLD_HOME` 是进程级环境变量，一个测试二进制里所有用例
+/// 得指同一个地方），要么得穿过一个不方便带着它的函数签名——两种情况 Rust 都不会
+/// 跑那个析构：`static` 的析构根本不执行，`keep()` 的字面意思就是"别删了"。
+/// 结果是跑一次 `cargo test` 就在 `$TMPDIR` 根下留一堆目录，只增不减
+/// （2026-09-23 实测一轮留 23 个，其中 18 个是空的）。
+///
+/// 换成固定名字 + 每轮先清：残留封顶在"测试二进制个数"，而且全在
+/// `gld-test-homes/` 这一个父目录下，`rm -rf` 一条就清干净。
 #[cfg(test)]
-fn shared_test_home() -> std::path::PathBuf {
+fn test_root() -> PathBuf {
     use std::sync::OnceLock;
-    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    HOME.get_or_init(|| tempfile::tempdir().expect("temp GLD_HOME"))
-        .path()
-        .to_path_buf()
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let dir = std::env::temp_dir()
+            .join("gld-test-homes")
+            .join(test_binary_name());
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("测试临时目录");
+        dir
+    })
+    .clone()
+}
+
+/// 整个测试二进制共用的那一个数据目录。
+#[cfg(test)]
+fn shared_test_home() -> PathBuf {
+    let dir = test_root().join("home");
+    std::fs::create_dir_all(&dir).expect("temp GLD_HOME");
+    dir
+}
+
+/// 给单元测试用的一次性目录（工作区、harness 根之类），每次调用给一个新的。
+///
+/// 用它代替 `tempfile::tempdir().keep()`：后者建出来的目录没人删，见 [`test_root`]。
+#[cfg(test)]
+pub(crate) fn test_scratch_dir(tag: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let dir = test_root().join(format!("{tag}-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).expect("测试临时目录");
+    dir
+}
+
+/// 当前测试二进制的名字，去掉 cargo 加的哈希后缀（`home-36476fa50fbac134` → `home`）。
+/// 带着哈希的话源码一改名字就变，残留目录又开始一轮一轮累积。
+#[cfg(test)]
+fn test_binary_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .map(|name| match name.rsplit_once('-') {
+            Some((head, _hash)) if !head.is_empty() => head.to_string(),
+            _ => name,
+        })
+        .unwrap_or_else(|| "unknown".into())
 }
 
 #[cfg(test)]

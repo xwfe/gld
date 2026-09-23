@@ -412,9 +412,11 @@ mod tests {
 
     #[test]
     fn context_audit_records_only_sizes_hashes_and_repetition() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let harness = tempfile::tempdir().expect("harness");
-        let context = ToolContext::for_test(workspace.keep(), harness.keep()).expect("context");
+        let context = ToolContext::for_test(
+            crate::home::test_scratch_dir("workspace"),
+            crate::home::test_scratch_dir("harness"),
+        )
+        .expect("context");
         context.record_context_block("test", &serde_json::json!({"value": "bounded"}));
         context.record_context_block("test", &serde_json::json!({"value": "bounded"}));
 

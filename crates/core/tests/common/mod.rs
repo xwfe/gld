@@ -137,12 +137,33 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// 于是 `cargo test` 会在用户主目录里留下一堆 workspace 状态目录（踩过一次）。
 ///
 /// 已经设了 `GLD_HOME` 就不动它——CI 和冒烟脚本会自己指目录。
+///
+/// 这里不用 `tempfile::TempDir`，理由和 `core/src/home.rs` 里那份一样：它得存在
+/// `static` 里（`GLD_HOME` 是进程级的），而 Rust 不跑 `static` 的析构函数，
+/// 目录就永远留在 `$TMPDIR` 下。按测试二进制取固定名字、每次先清上一轮的，
+/// 残留才不会一轮一轮堆上去。
 pub fn isolate_data_home() {
     use std::sync::OnceLock;
-    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let dir = HOME.get_or_init(|| tempfile::tempdir().expect("temp GLD_HOME"));
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    let dir = HOME.get_or_init(|| {
+        let name = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .map(|name| match name.rsplit_once('-') {
+                Some((head, _hash)) if !head.is_empty() => head.to_string(),
+                _ => name,
+            })
+            .unwrap_or_else(|| "unknown".into());
+        let dir = std::env::temp_dir().join("gld-test-homes").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp GLD_HOME");
+        dir
+    });
     if std::env::var_os("GLD_HOME").is_none() {
-        std::env::set_var("GLD_HOME", dir.path());
+        std::env::set_var("GLD_HOME", dir);
     }
 }
 
