@@ -100,6 +100,12 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 来自谁能连上这个服务（凭据、工具集、项目表），模型自己就能填这个字段。
 所以 `.github` 的这道门挡的是"顺手改了没人注意到"，不是"恶意调用方"。
 
+真人确认只能发生在客户端：ChatGPT 这类客户端看工具标注（`readOnlyHint`、
+`destructiveHint`）决定改文件、跑命令前要不要问你。gld 的标注照实给——能写能执行的
+工具在任何工具集下都不标只读，以前唯一会这么标的 `compat-readonly-all` 已经退役
+（见 [concepts.md](concepts.md#compat-readonly-all-已退役)）。客户端里点了"总是允许"，
+这一道也就没了。
+
 子进程那一层更保守：命令文本里出现删除或递归清空 `.git` / `.github` 一律拒，
 因为从命令文本里分不清"改一行 workflow"和"把 `.github` 删掉"。
 
@@ -279,10 +285,6 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 （Unix socket 的路径长度限制）。`gld daemon status` 里能看到实际路径。
 
 ## 已知的边界，明说
-
-`compat-readonly-all` **不是安全配置**：它保留可写、可执行工具，却把客户端标注改成只读。
-不要把它用作只读接入或授权依据；实际收权用 `read-only`。这项历史兼容行为的后续处理见
-[本次审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)。
 
 - **静态策略 ≠ 沙箱。** `exec_command` 允许 `python`，`python` 能做的它都能做。
   `mcp.confine-reads` 只管文件类工具，管不住子进程。

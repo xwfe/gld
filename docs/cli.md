@@ -1956,30 +1956,30 @@ Options:
 ## gld set 支持的字段
 
 ```text
-字段                      取值                                                         说明
-name                      文本                                                         显示名称
-path                      已存在的目录                                                 项目根目录；换目录后服务会重启到新目录（旧目录里的历史档案留在原地）
-tool-profile              compact | core | advanced | read-only | compat-readonly-all  暴露给客户端的工具集（compact 为稳定聚合 API；core / advanced 保留兼容旧工具名）
-permission-mode           trusted | dangerous                                          工具权限模式；两个值现在行为完全一样（留着是为了老配置照样能读），见 docs/concepts.md
-history-recording         true | false                                                 是否允许把会话检查点写入 docs/history-session
-history-context           逗号分隔的编号，或空                                         新会话注入哪些历史档案（有界快照）
-allowed-commands          逗号分隔                                                     在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md
-confine-reads             true | false                                                 读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
-executable-paths          路径列表（换行或分号分隔）                                   额外的可执行文件搜索路径
-ai-instructions           文本                                                         注入 Agent 的工作区级说明
-actions.port              1-65535                                                      Actions 本地监听端口
-actions.auth              api_key | oauth | none                                       Actions 认证方式
-actions.oauth-client-id   文本                                                         Actions OAuth Client ID
-actions.shared-secrets    true | false                                                 Actions 使用共享密钥池
-actions.confine-reads     true | false                                                 Actions 侧同上（默认 true）
-actions.allowed-commands  逗号分隔                                                     Actions 侧同上（追加；only: 前缀表示只允许这些）
-actions.tunnel            frp | cf | none                                              Actions 公网隧道类型（cf 即 cloudflare）
-actions.frp-profile       FRP 配置的名称或 id，或空                                    Actions 使用的 FRP 服务器配置
-actions.frp-subdomain     子域名（小写字母 / 数字 / 连字符）                           Actions FRP 子域名
-actions.cloudflare-mode   quick | named                                                Actions Cloudflare 隧道模式
-actions.public-url        https:// 开头的 URL，或空                                    Actions 手动公网地址
-actions.use-proxy         true | false                                                 Actions 隧道是否套用全局代理
-actions.global-gateway    true | false                                                 Actions 通过全局共享入口暴露
+字段                      取值                                   说明
+name                      文本                                   显示名称
+path                      已存在的目录                           项目根目录；换目录后服务会重启到新目录（旧目录里的历史档案留在原地）
+tool-profile              compact | core | advanced | read-only  暴露给客户端的工具集（compact 为稳定聚合 API；core / advanced 保留兼容旧工具名）
+permission-mode           trusted | dangerous                    工具权限模式；两个值现在行为完全一样（留着是为了老配置照样能读），见 docs/concepts.md
+history-recording         true | false                           是否允许把会话检查点写入 docs/history-session
+history-context           逗号分隔的编号，或空                   新会话注入哪些历史档案（有界快照）
+allowed-commands          逗号分隔                               在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md
+confine-reads             true | false                           读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
+executable-paths          路径列表（换行或分号分隔）             额外的可执行文件搜索路径
+ai-instructions           文本                                   注入 Agent 的工作区级说明
+actions.port              1-65535                                Actions 本地监听端口
+actions.auth              api_key | oauth | none                 Actions 认证方式
+actions.oauth-client-id   文本                                   Actions OAuth Client ID
+actions.shared-secrets    true | false                           Actions 使用共享密钥池
+actions.confine-reads     true | false                           Actions 侧同上（默认 true）
+actions.allowed-commands  逗号分隔                               Actions 侧同上（追加；only: 前缀表示只允许这些）
+actions.tunnel            frp | cf | none                        Actions 公网隧道类型（cf 即 cloudflare）
+actions.frp-profile       FRP 配置的名称或 id，或空              Actions 使用的 FRP 服务器配置
+actions.frp-subdomain     子域名（小写字母 / 数字 / 连字符）     Actions FRP 子域名
+actions.cloudflare-mode   quick | named                          Actions Cloudflare 隧道模式
+actions.public-url        https:// 开头的 URL，或空              Actions 手动公网地址
+actions.use-proxy         true | false                           Actions 隧道是否套用全局代理
+actions.global-gateway    true | false                           Actions 通过全局共享入口暴露
 
 用法：gld set <项目> tool-profile=read-only allowed-commands=rg,gh
 服务本身的端口、认证、公网入口不在这里：gld upgrade --port / --auth，gld share --tunnel

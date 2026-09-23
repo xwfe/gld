@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 use crate::settings::FrpProfile;
+use crate::tools::registry::RETIRED_COMPAT_PROFILE;
 use crate::workspace::WorkspaceProfile;
 
 /// 单个可设置字段的说明。
@@ -63,13 +64,19 @@ pub(super) const MCP_AUTH_CHOICES: &[&str] = &["oauth", "bearer", "noauth"];
 
 /// 工具集的可选值。`normalize_tool_profile` 会把认不出的值悄悄当成 core，
 /// 所以写入配置前必须在这里拦下拼写错误。
-pub(super) const TOOL_PROFILE_CHOICES: &[&str] = &[
-    "compact",
-    "core",
-    "advanced",
-    "read-only",
-    "compat-readonly-all",
-];
+const TOOL_PROFILE_CHOICES: &[&str] = &["compact", "core", "advanced", "read-only"];
+
+/// 项目和服务的工具集共用这一个入口。退役的 compat-readonly-all 单独说清楚为什么
+/// 不收，不然只看到"取值无效"的人会以为是拼错了。
+pub(super) fn parse_tool_profile(value: &str) -> AppResult<String> {
+    if value.trim().eq_ignore_ascii_case(RETIRED_COMPAT_PROFILE) {
+        return Err(AppError::Message(format!(
+            "{RETIRED_COMPAT_PROFILE} 已经退役：它把能写、能执行的工具标成只读，客户端就不再弹确认框。\
+             要全部工具用 advanced（标注照实给），只让 AI 看不让它动用 read-only"
+        )));
+    }
+    parse_choice(value, TOOL_PROFILE_CHOICES)
+}
 
 const FIELDS: &[Field] = &[
     field!("name", "文本", "显示名称", |p, v| {
@@ -88,10 +95,10 @@ const FIELDS: &[Field] = &[
     ),
     field!(
         "mcp.tool-profile",
-        "compact | core | advanced | read-only | compat-readonly-all",
+        "compact | core | advanced | read-only",
         "暴露给客户端的工具集（compact 为稳定聚合 API；core / advanced 保留兼容旧工具名）",
         |p, v| {
-            p.runtime.tool_profile = parse_choice(v, TOOL_PROFILE_CHOICES)?;
+            p.runtime.tool_profile = parse_tool_profile(v)?;
             Ok(())
         }
     ),
@@ -657,6 +664,25 @@ mod tests {
         assert!(error.to_string().contains("未知字段"));
         assert!(set(&mut profile, "actions.port", "0").is_err());
         assert!(set(&mut profile, "mcp.tool-profile", "magic").is_err());
+    }
+
+    /// 退役的工具集不收，报错说清楚为什么、换成什么，别让人以为是拼错了。
+    #[test]
+    fn the_retired_compat_profile_is_refused_with_a_reason() {
+        let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
+        let error = set(&mut profile, "tool-profile", "compat-readonly-all")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("退役"), "{error}");
+        assert!(
+            error.contains("advanced") && error.contains("read-only"),
+            "{error}"
+        );
+        assert_eq!(
+            profile.runtime.tool_profile, "compact",
+            "拒收时不能改动配置"
+        );
+        assert!(parse_tool_profile(" Compat-ReadOnly-All ").is_err());
     }
 
     /// 不写前缀就是改 MCP 那一半。写全的老写法必须继续能用。

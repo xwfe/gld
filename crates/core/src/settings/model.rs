@@ -92,7 +92,10 @@ pub struct HubConfig {
     pub auth_type: String,
     /// hub 列给客户端的工具集。成员自己的工具集照样生效，两边取交集——
     /// 这里写 advanced 也放不开一个 read-only 的成员。
-    #[serde(default = "default_hub_tool_profile")]
+    #[serde(
+        default = "default_hub_tool_profile",
+        deserialize_with = "crate::tools::registry::deserialize_tool_profile"
+    )]
     pub tool_profile: String,
     /// 公网基地址（不带 `/mcp`）。`tunnel_type` 是 none 时它就是入口（自建反代）；
     /// Cloudflare 固定域名时它是那个域名。临时地址和 FRP 的地址是起隧道时现算的，

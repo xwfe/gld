@@ -52,7 +52,10 @@ pub struct AuthConfig {
 pub struct RuntimeConfig {
     #[serde(default = "default_mcp_port")]
     pub local_port: u16,
-    #[serde(default = "default_tool_profile")]
+    #[serde(
+        default = "default_tool_profile",
+        deserialize_with = "crate::tools::registry::deserialize_tool_profile"
+    )]
     pub tool_profile: String,
     /// Persist the current MCP conversation through explicit checkpoint calls.
     #[serde(default = "default_history_recording")]

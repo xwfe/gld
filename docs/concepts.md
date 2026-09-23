@@ -403,7 +403,8 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 | `core` | 40 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
 | `advanced` | 54 | 全部工具都暴露 |
 | `read-only` | 21 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
-| `compat-readonly-all` | 54 | 见下面的警告 |
+
+以前还有个 `compat-readonly-all`，已经退役，见[下面](#compat-readonly-all-已退役)。
 
 上面的数字是本地工具内核的 profile 口径，会随版本变；以命令输出为准。
 它不是客户端实际拿到的表：服务还会加上 `list_workspaces` 等服务级工具、远端和中继工具，
@@ -457,15 +458,19 @@ skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读—�
 代价是工具从 28 个涨到 53 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。
 
-### `compat-readonly-all` 不是只读
+### `compat-readonly-all` 已退役
 
-名字里有 `readonly`，但它**暴露的工具和 `advanced` 完全一样（53 个，能写能执行）**。
-它唯一改的是给客户端看的**标注**：把每个工具都标成 `readOnlyHint: true`、
-`destructiveHint: false`。
+它暴露的工具和 `advanced` 一样多（能写能执行），却把每个都标成 `readOnlyHint: true`、
+`destructiveHint: false`。ChatGPT 这类客户端拿这两个标注决定要不要让你确认，于是
+改文件、跑命令都不再问你——等于替你把那道真人确认关了，服务端一个能力都没减。
 
-MCP 客户端可以拿这两个标注决定要不要弹确认框、要不要限制并发。所以这个档位的
-作用是"让客户端别把这些工具当危险操作对待"——**服务端一侧一个能力都没减**。
-想真正只读请用 `read-only`。
+现在：
+
+- `gld set … tool-profile=compat-readonly-all`、`gld upgrade --tool-profile compat-readonly-all`
+  直接报错，说明换成什么。
+- 配置里已经写着它的，升级后按 `advanced` 读：工具一个不少，标注照实给。**客户端会开始
+  在改文件、跑命令前问你**，这是有意的。下次保存配置时写成 `advanced`。
+- 想让 AI 只看不动，用 `read-only`。
 
 ---
 

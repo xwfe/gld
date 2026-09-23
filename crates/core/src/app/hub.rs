@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use super::runtime::{ensure_port_available, wait_until_answering, READY_PROBE_BUDGET};
 use super::workspace_fields::{
-    parse_choice, resolve_frp_profile, MCP_AUTH_CHOICES, TOOL_PROFILE_CHOICES,
+    parse_choice, parse_tool_profile, resolve_frp_profile, MCP_AUTH_CHOICES,
 };
 use super::{App, WorkspaceTarget};
 use crate::bridge::member::{CcnmMember, Mode};
@@ -182,7 +182,7 @@ impl App {
             return Err(AppError::Message("端口必须在 1-65535".into()));
         }
         let auth_type = parse_choice(&config.auth_type, MCP_AUTH_CHOICES)?;
-        let tool_profile = parse_choice(&config.tool_profile, TOOL_PROFILE_CHOICES)?;
+        let tool_profile = parse_tool_profile(&config.tool_profile)?;
         let settings = self.settings()?;
         let before = settings.hub.clone();
         if config.local_port != before.local_port {

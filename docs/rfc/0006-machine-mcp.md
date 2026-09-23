@@ -38,7 +38,7 @@ gld mcp off context7              # 关（--all 全关）
 
 **来源配置里的"关"只提示、不拦。** Codex 的 `enabled = false`、`~/.claude.json` 里的 `disabled: true`，`gld mcp ls` 会写出来，但开不开看 gld 自己的名单：你在 gld 里点名开了就是开了。
 
-**工具集 read-only 的服务一个都不转。** 转过去的工具能做什么由 server 决定，只读管不住它；`compat-readonly-all` 照它的本意把这三个的标注也改成只读。
+**工具集 read-only 的服务一个都不转。** 转过去的工具能做什么由 server 决定，只读管不住它。（当时 `compat-readonly-all` 会把这三个的标注也改成只读；那个工具集已在审查 D08 退役。）
 
 **连接按"server + 调用方"分，用到才开，闲 5 分钟收（每分钟看一次），停服务全收。** 和远端项目的 bridge 同一套规矩：playwright 这种有状态的 server，两个 OAuth 客户端共用一条就能看到对方的页面；`noauth` 和共用一条 bearer 令牌的算同一个调用方。stdio server 起在自己的进程组里，关的时候先关 stdin 等 3 秒，再连同它起的子进程一起杀（`npx` 起的 server，干活的是它下面那个 `node`）。
 

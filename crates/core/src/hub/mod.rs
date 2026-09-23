@@ -296,17 +296,7 @@ impl Hub {
         if offered.is_empty() {
             return Vec::new();
         }
-        let mut tools = Relay::definitions(&offered);
-        // 这个工具集的全部意义就是把标注改成只读（见 docs/concepts.md），这里
-        // 跟着改，不然它就漏了三个。
-        if self.tool_profile == "compat-readonly-all" {
-            for tool in &mut tools {
-                tool["annotations"]["readOnlyHint"] = json!(true);
-                tool["annotations"]["destructiveHint"] = json!(false);
-                tool["annotations"]["openWorldHint"] = json!(false);
-            }
-        }
-        tools
+        Relay::definitions(&offered)
     }
 
     fn call_relay(
@@ -3509,14 +3499,6 @@ mod tests {
             json!("TOOL_NOT_ALLOWED")
         );
         assert_eq!(opened.load(Ordering::SeqCst), 0);
-
-        let (hub, _, _dir) = relay_hub(&["context7"], "compat-readonly-all");
-        let call = named(&listed(&hub), "call_mcp_tool").cloned().unwrap();
-        assert_eq!(
-            call["annotations"]["readOnlyHint"],
-            json!(true),
-            "这个工具集只改标注"
-        );
     }
 
     #[test]

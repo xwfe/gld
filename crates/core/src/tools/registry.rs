@@ -810,16 +810,38 @@ pub fn normalize_tool_profile(profile: &str) -> &'static str {
         "compact" => "compact",
         "advanced" => "advanced",
         "read-only" => "read-only",
-        "compat-readonly-all" => "compat-readonly-all",
         _ => "core",
     }
+}
+
+/// 已退役的工具集。它暴露的工具和 advanced 一样多（能写能执行），却把每个都标成
+/// `readOnlyHint: true`——客户端据此不再弹确认框，等于替用户把那道真人确认关了
+/// （审查 D08）。
+pub const RETIRED_COMPAT_PROFILE: &str = "compat-readonly-all";
+
+/// 读配置时把退役的 [`RETIRED_COMPAT_PROFILE`] 换成 advanced：工具一个不少，
+/// 标注改回实话。不换的话 [`normalize_tool_profile`] 会把它当成认不出的值、
+/// 悄悄降成 core，老配置升级后就少了一半工具。
+///
+/// 放在反序列化这一层，是因为配置只从这里进来（文件、命令行经 IPC 发回的整份配置），
+/// 换过之后内存里就不再有这个值，下次保存也写成 advanced。
+pub fn deserialize_tool_profile<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(if value.trim() == RETIRED_COMPAT_PROFILE {
+        "advanced".into()
+    } else {
+        value
+    })
 }
 
 pub fn exposed_tool_names(tool_profile: &str) -> Vec<&'static str> {
     let names = match normalize_tool_profile(tool_profile) {
         "compact" => COMPACT_TOOLS.to_vec(),
         "read-only" => CORE_READ_ONLY_TOOLS.to_vec(),
-        "advanced" | "compat-readonly-all" => P0_TOOLS.iter().map(|(name, ..)| *name).collect(),
+        "advanced" => P0_TOOLS.iter().map(|(name, ..)| *name).collect(),
         _ => CORE_TOOLS.to_vec(),
     };
 
@@ -895,17 +917,11 @@ pub fn surface_digest(tools: &[Value]) -> Value {
 }
 
 pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
-    let compat = tool_profile == "compat-readonly-all";
     exposed_tool_names(tool_profile)
         .into_iter()
         .filter_map(|name| {
             P0_TOOLS.iter().find(|(n, ..)| *n == name).map(|entry| {
                 let (name, title, description, read_only, destructive, open_world) = *entry;
-                let (read_only, destructive, open_world) = if compat {
-                    (true, false, false)
-                } else {
-                    (read_only, destructive, open_world)
-                };
                 json!({
                     "name": name,
                     "title": title,
@@ -1591,6 +1607,51 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{input_schema, list_tools_for_profile, tool_api_descriptor};
+
+    /// 能写能执行的工具，在任何工具集里都不能标成只读：客户端拿这个标注决定要不要
+    /// 让用户确认（审查 D08）。
+    #[test]
+    fn no_profile_marks_a_writing_tool_read_only() {
+        for profile in [
+            "compact",
+            "core",
+            "advanced",
+            "read-only",
+            "compat-readonly-all",
+        ] {
+            for tool in list_tools_for_profile(profile) {
+                let name = tool["name"].as_str().unwrap_or_default();
+                if ["exec_command", "apply_patch", "write_stdin", "kill_session"].contains(&name) {
+                    assert_eq!(
+                        tool["annotations"]["readOnlyHint"],
+                        serde_json::json!(false),
+                        "{profile} 把 {name} 标成了只读"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 老配置里的 compat-readonly-all 读进来是 advanced：工具一个不少，标注改回实话。
+    /// 不换的话它会被当成认不出的值降成 core，升级后少一半工具。
+    #[test]
+    fn the_retired_compat_profile_loads_as_advanced() {
+        let runtime: crate::workspace::RuntimeConfig =
+            serde_json::from_value(serde_json::json!({ "tool_profile": "compat-readonly-all" }))
+                .unwrap();
+        assert_eq!(runtime.tool_profile, "advanced");
+        let hub: crate::settings::HubConfig =
+            serde_json::from_value(serde_json::json!({ "toolProfile": "compat-readonly-all" }))
+                .unwrap();
+        assert_eq!(hub.tool_profile, "advanced");
+
+        let untouched: crate::workspace::RuntimeConfig =
+            serde_json::from_value(serde_json::json!({ "tool_profile": "read-only" })).unwrap();
+        assert_eq!(untouched.tool_profile, "read-only");
+        let defaulted: crate::workspace::RuntimeConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(defaulted.tool_profile, "compact");
+    }
 
     #[test]
     fn core_catalog_excludes_non_persistent_permission_tool() {
