@@ -52,6 +52,27 @@ fn tool_list_and_call_run_against_the_real_kernel() {
     assert!(stderr.contains("gld tool list"), "{stderr}");
 }
 
+/// 命令自己失败（退出非零）不是工具失败：退出码仍是 0，结果里 command_ok=false。
+///
+/// 2026-09-23 审查讨论过改成非零，决定不改：已有脚本按"ok=false 才非零"写的，
+/// 改了会把"命令跑了但失败"和"调用根本没成"混成一种退出码。脚本读 command_ok。
+#[test]
+fn a_failing_command_is_not_a_failed_tool_call() {
+    let env = probe_env();
+    let output = env.gld(&[
+        "--json",
+        "tool",
+        "call",
+        "exec_command",
+        r#"argv:=["git","rev-parse","--verify","refs/heads/no-such-branch-for-gld-test"]"#,
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["command_ok"], false, "{result}");
+    assert_ne!(result["exit_code"], 0, "{result}");
+}
+
 #[test]
 fn tool_call_parses_the_three_argument_forms() {
     let env = probe_env();
