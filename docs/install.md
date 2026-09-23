@@ -66,8 +66,9 @@ gld --version
 | ChatGPT 自己注册的客户端（日志里 `auth=oauth:hub:dcr-…` 那个） | `data/oauth-clients/hub.json` | 删掉数据目录 |
 | 公网地址 | 服务配置 | 用 `--tunnel cf` 临时地址时，每次重启都换，连接器只能删了重建 |
 
-实测（2026-09-23，两次都是 0.6.0 的构建之间）：上表各项升级前后逐项比对指纹，全部一致；
-守护进程重启 0.3 秒，公网 `/mcp` 和 OAuth 元数据照常，服务自己回来。
+实测（2026-09-23 本机两次升级：0.6.0 的两次构建之间、0.6.0 → 0.7.0）：上表各项升级前后逐项比对
+指纹，全部一致；守护进程重启 0.3 秒，公网 `/mcp` 和 OAuth 元数据照常，服务自己回来；ChatGPT 用原来
+注册的客户端直接连上，没有要求重新授权。
 
 ### 步骤
 
@@ -116,11 +117,22 @@ gld health                         # 本地、公网 /mcp，OAuth 元数据都�
 换完都 `gld daemon restart`，再看上面那行构建提交。版本号变了的时候，命令行会直接拒绝并提示
 重启（退出码 4）。
 
-**ChatGPT 那边**：授权不用动。新版加了工具或参数时，ChatGPT 可能还拿着旧的工具表——服务声明了
-`listChanged: false`，不会通知它重拉。在 ChatGPT 里让它调一次 `server_info`：`build_commit`
-应该和上面那行一样；`connection.tools_fingerprint` 和 `gld tool list --served` 的指纹对不上，
-按[核对客户端拿到的工具表](troubleshooting.md#核对客户端拿到的工具表)让它重拉。只核对 `0.6.0`
-这样的版本号不够，源码、构建、运行的服务、客户端拿到的工具表是四层不同的证据，见
+**ChatGPT 那边：授权不用动，但新版加了工具或参数时，要手动刷新一次工具表。** ChatGPT 只在建连接器和
+点 Refresh 的时候拉工具表（`tools/list`）：本机的连接器 9-18 建好，到 9-23 点 Refresh 之前，gld 日志里
+一次 `tools/list` 都没有，其间开新对话、gld 重启都没让它重拉。新版没改工具表时（`gld tool list --served`
+的指纹和升级前一样）可以跳过这一步。
+
+1. 打开 <https://chatgpt.com/plugins>（要先开开发者模式：设置 → Security and login → Developer mode），
+   点进 gld 这条连接，点 **Refresh**。**不用删连接器。**
+2. 开一个新对话（OpenAI 的说明要求这么做，旧对话继续用旧表）。
+3. 核对刷新真的到了 gld：`gld logs -n 50` 里依次有 `method=server/discover`（回 Method not found，正常，
+   见[排障](troubleshooting.md#客户端连不上)）、`method=initialize`、`method=tools/list`，`auth=` 后面还是
+   原来那个 `oauth:hub:dcr-…`。
+4. 核对 ChatGPT 手上的表：在新对话里问它**它自己看到的**工具定义里有没有这次新加的参数（比如 0.7.0 的
+   `task_manage` 有 `evidence_session_ids`），要它逐条答有或没有。别拿 `server_info` 里的
+   `connection.tools_fingerprint` 当证据：那是 gld 按自己发出去的表算的，ChatGPT 用旧表时它照样对得上。
+
+只核对 `0.6.0` 这样的版本号不够，源码、构建、运行的服务、客户端拿到的工具表是四层不同的证据，见
 [生命周期指南](project-lifecycle.md#接入前先确认四层能力)。
 
 **回滚**：把备份的二进制按同样的"写新文件再改名"放回去，再 `gld daemon restart`。数据目录一般
