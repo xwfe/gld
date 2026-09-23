@@ -146,7 +146,7 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Add(AddArgs),
 
-    /// 删项目：从服务里拿掉，并删掉它在 gld 这边的配置和记账（项目文件一个字节都不动）
+    /// 删项目：从服务里拿掉，并删掉它在 gld 这边的配置和凭据（项目文件一个字节都不动）
     ///
     ///   gld rm api              按名称 / 路径 / id 指定，可以一次给多个
     ///   gld rm                  当前目录对应的项目

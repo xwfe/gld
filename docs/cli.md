@@ -91,7 +91,7 @@ Commands:
   status       服务、公网入口和项目的一览
   list         客户端要填的地址、凭据，和所有项目；给项目名就看这个项目的配置 [alias: ls]
   add          加项目：登记目录并加入服务（服务在跑就立即生效，不用重启）
-  remove       删项目：从服务里拿掉，并删掉它在 gld 这边的配置和记账（项目文件一个字节都不动） [alias: rm]
+  remove       删项目：从服务里拿掉，并删掉它在 gld 这边的配置和凭据（项目文件一个字节都不动） [alias: rm]
   set          改项目配置：gld set api tool-profile=read-only（字段见 gld fields）
   fields       列出 set 支持的项目字段及取值（--all 连 GPT Actions 那条线路一起列）
   share        给服务拿一个公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
@@ -448,7 +448,7 @@ Options:
 ## gld remove
 
 ```text
-删项目：从服务里拿掉，并删掉它在 gld 这边的配置和记账（项目文件一个字节都不动）
+删项目：从服务里拿掉，并删掉它在 gld 这边的配置和凭据（项目文件一个字节都不动）
 
   gld rm api              按名称 / 路径 / id 指定，可以一次给多个
   gld rm                  当前目录对应的项目
