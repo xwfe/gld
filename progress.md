@@ -14,3 +14,12 @@
   补 `server_info.connection`、`gld tool list --served`、hub 与注册表逐项等价的测试。
 - 验证：新增 19 条测试；隔离全量 788 passed / 0 failed；fmt、clippy 通过；真实二进制隔离复跑反例全部翻转。
 - 未碰真实服务和 `~/.config/gld`；生成 `docs/cli.md` 时把 HOME 指到临时目录。
+
+## 第三轮
+
+- 用户决定 `gld tool call` 退出码不改：写进帮助，`a_failing_command_is_not_a_failed_tool_call` 钉住。
+- D14：文件清单改为 `--name-status -z` / `--numstat -z`；真实仓库测试覆盖增删改名、二进制、带空格路径、截断。
+- D06：生成脚本隔离 HOME、失败即停、临时文件替换、查空表；新增生成失败路径测试和全文档链接检查（23 个文件、204 个链接）。
+- D05：gld 侧过期提示改为"已执行、输出取不回、先核对"；toexec-mcp 0.2.1 本地提交 `bfa809d`，
+  path 依赖联调通过、换回 0.2.0 新测试失败；tag 未推送，等批准。
+- 中途磁盘满（ENOSPC，剩 159 MiB）：删了我在 scratchpad 里建的 3.4 GB 验证用 target，没动项目 `target/`。

@@ -223,3 +223,25 @@ core 单测加三个相关集成测试 541 passed。另用真实 `target/debug/g
 - 后台命令结束时不自动把它写的文件记上账：它改过文件的话，下一次写入会报外部修改，要先
   `refresh_baseline`。
 - D05 结果保真、D06 文档生成门禁、D07 授权及其后各项未动。
+
+### 第三轮：D05、D06、D14
+
+| 编号 | 结论 | 做了什么 |
+| --- | --- | --- |
+| — | 按决定不改 | `gld tool call` 在命令退出非零时仍退出 0（调用本身成功）。写进它的帮助，并用 `a_failing_command_is_not_a_failed_tool_call` 钉住，免得以后被"顺手修"掉 |
+| D05 | gld 侧已修；toexec 侧已改、**未发布** | `SESSION_EXPIRED`、`MCP_RESULT_GONE` 不再叫人直接重跑：说明命令 / 调用已经执行、只是输出取不回来，会改东西的先核对现状；`details.output_recoverable=false`。结构化结果保真改在 toexec-mcp 的 `shape`：只在"某段文字解析出来就是它"或"FastMCP `{"result": 正文}` 包装"时省掉，其余转成文字跟在后面、太长照样分段。实测 deepwiki 三个工具的 `outputSchema` 都带 `x-fastmcp-wrap-result`。toexec 本地提交 `bfa809d`（toexec-mcp 0.2.1），**tag 没推送**，gld 仍钉 0.2.0 |
+| D06 | 已修 | `gen-cli-docs.sh` 在一次性 `HOME` 里跑、先写临时文件；任何一条 `gld` 失败、帮助段数不对或两张表像空表，就退出 1、原文件不动（`docs_generation.rs` 用假 `gld` 钉住）。新增 `docs_links_resolve.rs`：README 加 `docs/` 下全部 Markdown（含 rfc、reviews）的相对链接和锚点 |
+| D14 | 已修 | `git_diff` / `git_show` 的文件清单改为直接问 git（`--name-status -z`、`--numstat -z`，带 `-M`）：每个文件一条、真实状态、改名带 `old_path`、二进制、是否 staged；diff 文本被截断时清单仍完整 |
+
+D05 的 toexec 部分已用 path 依赖联调过：gld 的转发测试 15 条全过、原有断言一条没改；换回
+0.2.0 时新写的契约测试失败（多出的结构化数据被丢），证明它测到了这个修复。要进 gld 还差三步：
+推送 `toexec-mcp-v0.2.1` tag（对外发布，需要批准）→ gld 的 `Cargo.toml` 改到新 tag、更新锁文件、
+跑全量 → 提交契约测试和文档。
+
+另外修正了 troubleshooting 里一处过时说法：命令结束后输出保留 5 分钟，不是 30 秒。
+
+提交：`be8a1da`（退出码说明）、`4920c26`（D14）、`e315b9f`（D06）、`893aa4e`（D05 gld 侧）。
+验证：隔离 `GLD_HOME` 下全量 795 passed、0 failed、0 ignored（本轮新增 7 条）；fmt、clippy
+`-D warnings` 通过；toexec 按它自己的规矩跑了 fmt、clippy、`cargo test`（122 passed）和
+`cargo +1.89 check`。等发布的契约测试和 relay 模块说明存在 gld 的 `git stash` 里
+（`D05: relay 契约测试`）。

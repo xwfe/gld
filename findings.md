@@ -11,3 +11,12 @@
   list_workspaces / workspace_context / 远端 / 中继，去掉 get/set_default_cwd，加 workspace 参数。
 - 服务端声明 `listChanged: false`；客户端缓存旧表时服务端无从通知，只能靠核对。
 - zsh 里 `$SID:stdout` 会被当成变量修饰符，复跑脚本要写 `${SID}`。
+
+## 第三轮
+
+- deepwiki 三个工具的 `outputSchema` 都是 FastMCP 包装：`{"result": string}` 加 `x-fastmcp-wrap-result: true`。
+  判"副本"用这个精确规则就够，不必猜。
+- toexec 规矩：产品原有断言要改才能过就是行为变更；tag 推送后不能移动；产品不能提交 path 依赖。
+- `MCP_RESULT_GONE` 对别人的、编造的 ref 也会报，不能说"调用已执行"，只能有条件地说。
+- 命令会话输出保留 5 分钟（`SESSION_RETENTION`），troubleshooting 里原来写的 30 秒是错的。
+- 本机磁盘接近满（926 GiB 用了约 902 GiB）；另建完整 target 目录会把盘写满。
