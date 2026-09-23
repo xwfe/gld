@@ -64,15 +64,17 @@ README 只保留定位、安装、使用、关键边界和导航；产品行为�
 | 阶段完成 | 当前状态入口指向验收证据；旧 RFC 保留当时结论，注明后续决定，不能仍作为当前待办 |
 | 验证 | 记录日期、源码提交、平台、命令、退出码、是否真实执行；源码审查、fixture、真实二进制、SSH、公网客户端分别标明 |
 
-`docs_commands_exist.rs` 当前只扫描 README 和顶层 `docs/*.md`（不含生成的 `cli.md`），
-**不递归检查 reviews / RFC，也不检查链接**。这些内容要另查，不能以这条测试通过代替。
+`docs_commands_exist.rs` 只扫描 README 和顶层 `docs/*.md` 里的命令（不含生成的 `cli.md`，
+也不进 reviews / RFC：那里记的是当时的命令）。相对链接和 `#锚点` 由
+`docs_links_resolve.rs` 查，范围是 README 加 `docs/` 下全部 Markdown；改标题或挪文件时
+它会点名哪一处断了。锚点按 GitHub 的规则算。
 `ccnm_background_lifecycle` 在没有 ccnm 二进制时会打印跳过后直接返回，测试框架仍可能显示
 passed；需要核对实际依赖和 `--nocapture` 日志，不能用 `0 ignored` 证明全都执行。
 
-`scripts/gen-cli-docs.sh` 当前仍有两项风险：直接覆盖输出文件，以及对字段表 / 密钥名表
-命令使用 `|| true` 吞错。它还会 unset `GLD_HOME`，只设置该变量不能保证生成过程隔离。
-在隔离 HOME 中使用当前构建生成后检查非空章节和 diff；未来应改成失败即停、临时文件成功后
-替换、显式隔离后端。源码修复前不能把脚本退出 0 当作完整文档生成成功。
+`scripts/gen-cli-docs.sh` 在一次性的 `HOME` 里跑（不读你真实的 `~/.config/gld`），先写
+临时文件；任何一条 `gld` 失败、或帮助段数不对、字段表 / 密钥名表像是空的，就退出 1 并
+说清是哪一条，原来的 `docs/cli.md` 一个字不动。这些行为由 `docs_generation.rs` 用假的
+`gld` 钉住。
 
 ## 提交前
 
