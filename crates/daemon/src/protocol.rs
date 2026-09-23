@@ -30,7 +30,9 @@ use serde_json::Value;
 ///    "请 gld daemon restart"。
 ///    同一版（还没发布过）里又加了 `mcp_servers`、`switch_mcp_servers`、
 ///    `test_mcp_server`（RFC-0006），没再递增。
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 4：加了 `served_tools`（`gld tool list --served`）。当时漏了递增，2026-09-23 真机
+///    升级时新命令行连着旧守护进程，`--served` 报的是 `unknown variant`，不是"请重启"。
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
