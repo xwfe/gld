@@ -132,10 +132,6 @@ impl PolicySettings {
     pub fn network_allowed(&self) -> bool {
         self.permission_mode == "trusted" || self.permission_mode == "dangerous"
     }
-
-    pub fn skip_permission_gates(&self) -> bool {
-        self.permission_mode == "dangerous"
-    }
 }
 
 /// 策略为什么不让这一步过。
@@ -454,10 +450,7 @@ pub fn validate_command_for_workspace(
             "dangerous command requires confirm=true",
         ));
     }
-    if !policy.skip_permission_gates()
-        && network_command_pattern().is_match(command)
-        && !policy.network_allowed()
-    {
+    if network_command_pattern().is_match(command) && !policy.network_allowed() {
         return Err(PolicyError::new(
             PolicyReason::NetworkBlocked,
             "Network-looking commands are blocked in safe permission mode",

@@ -188,9 +188,12 @@ fn request_permissions_is_unsupported_not_silent_grant() {
         .contains("Do not retry request_permissions"));
 }
 
+/// `dangerous` 模式下它以前回 `granted`，还说"需要许可的操作都自动放行"。
+/// 实际一个门都没放：危险命令照样要 `confirm=true`。模型信了那句话，就会以为
+/// 自己拿到了授权（审查 D08）。所以这里把"它说的"和"实际挡不挡"绑在一起。
 #[test]
-fn request_permissions_is_hidden_from_clients_but_keeps_legacy_dangerous_mode_compatibility() {
-    for profile in ["core", "read-only", "advanced", "compat-readonly-all"] {
+fn request_permissions_grants_nothing_even_in_dangerous_mode() {
+    for profile in ["core", "read-only", "advanced"] {
         let tools = list_tools_for_profile(profile);
         assert!(
             tools
@@ -201,20 +204,27 @@ fn request_permissions_is_hidden_from_clients_but_keeps_legacy_dangerous_mode_co
     }
 
     let fx = tiny_js_fixture();
-    let mut ctx = ctx_for(&fx.root);
-    ctx.permission_mode = "dangerous".into();
-    ctx.policy.permission_mode = "dangerous".into();
-    let args = json!({
-        "tool_name": "exec_command",
-        "permission": "network",
-        "reason": "verify dangerous-mode compatibility",
-        "arguments": {"cmd": "curl https://example.com"}
-    });
-    let out = invoke(&ctx, "request_permissions", args.clone());
-    let payload = assert_ok(&out);
-    assert_eq!(payload["status"], "granted");
-    assert_eq!(payload["constraints"]["mode"], "dangerous");
-    assert_eq!(payload["constraints"]["requested"], args);
+    let ctx = common::ctx_for_dangerous_mode(&fx.root);
+    let out = invoke(
+        &ctx,
+        "request_permissions",
+        json!({
+            "tool_name": "exec_command",
+            "permission": "destructive_command",
+            "reason": "verify dangerous mode grants nothing",
+            "arguments": {"cmd": "rm -rf build"}
+        }),
+    );
+    assert_err(&out);
+    assert_eq!(out["status"], "unsupported", "{out}");
+    assert_eq!(out["error"]["code"], "ELICITATION_UNSUPPORTED");
+    assert!(out["grant_id"].is_null(), "{out}");
+
+    let refused = invoke(&ctx, "exec_command", json!({ "cmd": "rm -rf build" }));
+    assert_eq!(
+        refused["error"]["code"], "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION",
+        "dangerous 模式从来不跳过确认：{refused}"
+    );
 }
 
 #[test]

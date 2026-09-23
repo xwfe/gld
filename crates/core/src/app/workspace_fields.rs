@@ -98,7 +98,7 @@ const FIELDS: &[Field] = &[
     field!(
         "mcp.permission-mode",
         "trusted | dangerous",
-        "工具权限模式；两者的写入边界完全一样（都只能写工作区内），见 docs/concepts.md",
+        "工具权限模式；两个值现在行为完全一样（留着是为了老配置照样能读），见 docs/concepts.md",
         |p, v| {
             p.runtime.permission_mode = parse_choice(v, &["trusted", "dangerous"])?;
             Ok(())

@@ -650,42 +650,25 @@ fn dispatch_tool(
         "git_show" => git::git_show(ws, &effective_args),
         "git_blame" => git::git_blame(ws, &effective_args),
         "view_image" => image_tool::view_image(ws, &effective_args),
-        "request_permissions" => {
-            if ctx.policy.skip_permission_gates() {
-                Ok(tool_ok(json!({
-                    "ok": true,
-                    "status": "granted",
-                    "grant_id": "dangerously-skip-all-permissions",
-                    "expires_at": null,
-                    "constraints": {
-                        "mode": "dangerous",
-                        "workspace": ctx.workspace.root_display(),
-                        "requested": effective_args
-                    },
-                    "warnings": [
-                        "dangerous permission mode is enabled; permission-gated operations are auto-granted"
-                    ]
-                })))
-            } else {
-                Ok(tool_ok(json!({
-                    "ok": false,
-                    "status": "unsupported",
-                    "grant_id": null,
-                    "expires_at": null,
-                    "next_actions": [
-                        "Do not retry request_permissions.",
-                        "If the original operation returned DANGEROUS_OPERATION_REQUIRES_CONFIRMATION and the user already explicitly authorized it, retry the original tool with confirm=true."
-                    ],
-                    "error": {
-                        "code": "ELICITATION_UNSUPPORTED",
-                        "message": "Permission elicitation is not available for this client. Do not retry request_permissions; it cannot create a persistent grant.",
-                        "category": "permission",
-                        "retryable": false,
-                        "details": { "requested": effective_args }
-                    }
-                })))
+        // 不管什么模式都不发授权：服务端没有能记下"用户批准了"的地方。dangerous 模式
+        // 以前回 granted、说"需要许可的操作都自动放行"，实际确认门一个都没放（审查 D08）。
+        "request_permissions" => Ok(tool_ok(json!({
+            "ok": false,
+            "status": "unsupported",
+            "grant_id": null,
+            "expires_at": null,
+            "next_actions": [
+                "Do not retry request_permissions.",
+                "If the original operation returned DANGEROUS_OPERATION_REQUIRES_CONFIRMATION and the user already explicitly authorized it, retry the original tool with confirm=true."
+            ],
+            "error": {
+                "code": "ELICITATION_UNSUPPORTED",
+                "message": "Permission elicitation is not available for this client. Do not retry request_permissions; it cannot create a persistent grant.",
+                "category": "permission",
+                "retryable": false,
+                "details": { "requested": effective_args }
             }
-        }
+        }))),
         _ => {
             let mut output = tool_err_code(
                 "INVALID_ARGUMENT",

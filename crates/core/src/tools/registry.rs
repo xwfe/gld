@@ -430,7 +430,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "request_permissions",
         "Request permissions",
-        "Request a scoped permission grant for dangerous runtime operations.",
+        "Legacy: always answers that no grant can be created. Approval for a dangerous operation is confirm=true on that operation after the user approved it.",
         true,
         false,
         false,

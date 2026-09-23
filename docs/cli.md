@@ -1960,7 +1960,7 @@ Options:
 name                      文本                                                         显示名称
 path                      已存在的目录                                                 项目根目录；换目录后服务会重启到新目录（旧目录里的历史档案留在原地）
 tool-profile              compact | core | advanced | read-only | compat-readonly-all  暴露给客户端的工具集（compact 为稳定聚合 API；core / advanced 保留兼容旧工具名）
-permission-mode           trusted | dangerous                                          工具权限模式；两者的写入边界完全一样（都只能写工作区内），见 docs/concepts.md
+permission-mode           trusted | dangerous                                          工具权限模式；两个值现在行为完全一样（留着是为了老配置照样能读），见 docs/concepts.md
 history-recording         true | false                                                 是否允许把会话检查点写入 docs/history-session
 history-context           逗号分隔的编号，或空                                         新会话注入哪些历史档案（有界快照）
 allowed-commands          逗号分隔                                                     在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md
