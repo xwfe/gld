@@ -23,3 +23,5 @@
 - D05：gld 侧过期提示改为"已执行、输出取不回、先核对"；toexec-mcp 0.2.1 本地提交 `bfa809d`，
   path 依赖联调通过、换回 0.2.0 新测试失败；tag 未推送，等批准。
 - 中途磁盘满（ENOSPC，剩 159 MiB）：删了我在 scratchpad 里建的 3.4 GB 验证用 target，没动项目 `target/`。
+- 用户批准发布：toexec 推送 main 与 tag `toexec-mcp-v0.2.1`，README 当前 tag 更新并推送（`2f22741`）；
+  gld 改到新 tag，`cargo update -p toexec-mcp` 只动了这一个包和它自带的 toexec-text；取回 stash 里的契约测试。
