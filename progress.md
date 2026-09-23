@@ -25,3 +25,14 @@
 - 中途磁盘满（ENOSPC，剩 159 MiB）：删了我在 scratchpad 里建的 3.4 GB 验证用 target，没动项目 `target/`。
 - 用户批准发布：toexec 推送 main 与 tag `toexec-mcp-v0.2.1`，README 当前 tag 更新并推送（`2f22741`）；
   gld 改到新 tag，`cargo update -p toexec-mcp` 只动了这一个包和它自带的 toexec-text；取回 stash 里的契约测试。
+
+## 第四轮
+
+- 磁盘又只剩 435 MiB：删了项目 `target/debug/incremental`（9.9 GB，纯增量编译缓存，已安装的
+  `~/.local/bin/gld` 是独立副本不受影响），腾出约 10 GiB。
+- D11：先写 8 条故障注入测试走 `call_tool`，旧代码 7 条失败（8 个并发 start 开成 4–7 个任务；
+  坏任务文件后 `apply_patch` 照改、能再开任务；坏行后证据丢失）。
+- 修：`HarnessStore::lock`（flock）只在 Harness 对外入口拿；`atomic_write_json` 临时名带 pid+序号并
+  sync；`append_line` 一次写完、先隔开半行；`read_log` 按字节读、坏行报行号；dispatch 写前检查读任务
+  出错即拒写。
+- 验证：全量 804 passed / 0 failed；新测试连跑 20 次全过；真实二进制经守护进程复跑全部符合。

@@ -20,3 +20,11 @@
 - `MCP_RESULT_GONE` 对别人的、编造的 ref 也会报，不能说"调用已执行"，只能有条件地说。
 - 命令会话输出保留 5 分钟（`SESSION_RETENTION`），troubleshooting 里原来写的 30 秒是错的。
 - 本机磁盘接近满（926 GiB 用了约 902 GiB）；另建完整 target 目录会把盘写满。
+
+## 第四轮
+
+- 旧 Harness 写任务文件用固定的 `x.json.tmp`：并发写者一个改名走了，另一个改名时 ENOENT。
+- 写前检查是 `current_task().ok().flatten()`：任何读错误都等于"没有任务"，门禁静默失效。
+- `BufRead::lines()` 遇到非 UTF-8 行返回 Err，旧代码会让整次读取失败；要按字节 `read_until`。
+- flock 按打开的文件描述符算：同进程两个线程各开一次也互斥；同一线程套着拿会自己等自己。
+- `task_context` 的回包有 `max_bytes` 预算，坏行明细不能不计预算地塞进去，只回个数。

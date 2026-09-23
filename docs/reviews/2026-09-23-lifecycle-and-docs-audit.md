@@ -244,3 +244,51 @@ toexec-text；toexec README 的当前 tag 同步更新（`2f22741`）。ccnm 仍
 验证：隔离 `GLD_HOME` 下全量 795 passed、0 failed、0 ignored（本轮新增 7 条）；fmt、clippy
 `-D warnings` 通过；toexec 按它自己的规矩跑了 fmt、clippy、`cargo test`（122 passed）和
 `cargo +1.89 check`。
+
+### 第四轮：D11 任务存储的并发与损坏
+
+| 编号 | 结论 | 做了什么 |
+| --- | --- | --- |
+| D11 | 已修（`5a10f8a`） | 读改写任务（start / update / pause / resume / finish / 写后记账 / refresh_baseline）前拿工作区级文件锁；临时文件名带进程号和序号、写完 sync 再改名。任务文件读不出来、又找不到没结束的任务时报 `STORE_CORRUPT`，写入和开任务停下、原文件不动；另有没结束的任务时不挡路，`status` 列 `unreadable_task_files`。日志坏行跳过并逐行报出，追加前发现半行先补换行隔开。`state.json`、`expected/` 坏了按任务文件重算 |
+
+先写测试、在旧代码上跑，确认问题真实存在（故障注入，不代表线上已经出过事）：
+
+- 8 个连接同时 `start`，连跑 5 次，每次 4–7 个都开成了任务，其余报
+  `STORE_IO_FAILED: No such file or directory`：所有写者共用固定名字的 `x.json.tmp`，一个改名
+  走了，另一个就扑空。两个连接交替 `update` 同样报这个错。
+- 任务文件被写坏后，`status` 回"没有任务、可写"，`apply_patch` 直接改了文件，还能再开一个
+  任务——写前检查整个没了。
+- 事件日志中间一行坏了，后面的验收证据全读不到，`finish` 失败；一行不是 UTF-8 时整次读取
+  报 IO 错误；半行之后再追加，新记录和半行粘成一行一起丢。
+
+新增 8 条测试（`harness_storage.rs`）在旧代码上 7 条失败；剩下那条（写到一半的临时文件、
+重启后任务完好）旧代码本来就对，留作回归。修复后 8 条全过，单独连跑 20 次 20 次过。
+
+**行为变化，升级时要知道：**
+
+- 没有没结束的任务、却有任务文件读不出来时，`status`、`exec_command`、`apply_patch`、`start`
+  报 `STORE_CORRUPT`（以前悄悄当成没有任务）。写前检查读任务出错也一律拒写，不再放行。
+- `events`、`operation_log` 的 `next_cursor` 按文件行数算（没有坏行时和以前一样），有坏行时多
+  `unreadable_lines`；`context` 多 `unreadable_line_count`，它的 `max_bytes` 预算为这个字段预留
+  约 45 字节；`status` 多 `unreadable_task_files`。
+- 每个工作区的数据目录多一个 `lock` 文件。任务写入多一次 sync：新增 8 条测试（含 30 轮
+  并发 update）合计 0.5 秒。
+- Rust 接口：`Harness::list_events` / `list_operations` 返回 `LogPage`，`verification_records`
+  改成按事件列表算的函数。
+
+**验证：**隔离 `GLD_HOME` 下 `cargo test --workspace --all-targets --locked` 804 passed、0 failed、
+0 ignored；fmt、clippy `-D warnings`、`git diff --check` 通过；文档链接检查通过。另用真实
+`target/debug/gld` 在隔离数据目录经守护进程复跑：8 个 CLI 同时 `start` 得 1 个成功、7 个
+`TASK_ALREADY_ACTIVE`，盘上 1 个任务文件；写坏任务文件后 `status` / `exec_command` / `start`
+都报 `STORE_CORRUPT`、文件原样；挪开后能重新开任务；事件日志末尾留半行，之后的证据照样
+验收成 `completed`，回包说 1 行读不出来。
+
+**仍未验证或未做：**
+
+- 没做真实断电。只 sync 了文件没 sync 目录：断电后改名可能没生效，留下的是旧的一整份，
+  不是坏文件。
+- 锁是劝告锁（advisory），只管 gld 自己；人手改、别的程序写照样能写。用不同 `GLD_HOME` 的两个
+  gld 各拿各的锁，和写锁的边界一样。
+- 锁没有超时：一次 `refresh_baseline` 或写后记账要扫整个工作区（有 511 MB 大文件时约 1.8 秒），
+  这期间同一项目的其他任务操作排队等。
+- 写到一半留下的 `*.json.tmp.*` 不自动清理（不算任务，只占一点空间）。
