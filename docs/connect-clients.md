@@ -187,6 +187,8 @@ gld share --off            # 停隧道、清掉公网地址，本地地址照常
 - `gld add` / `gld rm`、改项目配置（`gld set`）——服务每次调用都重新读项目表
 - 重复敲 `gld start` / `gld share`（跑着就不碰它）
 - `gld restart`、`gld stop` + `gld start`、重启电脑、守护进程重启——固定地址下没影响
+- 升级 gld（换二进制 + `gld daemon restart`）——Client ID、口令、ChatGPT 注册的客户端都不动，
+  步骤和核对见[安装 · 升级](install.md#升级)；新版加了工具的话让 ChatGPT 重拉一次工具表
 - 长时间不用：访问令牌 30 天有效，刷新令牌 90 天，期间用过一次就自动续上
 
 **要重新授权，但连接器留着**——ChatGPT 会自己提示重新连接，输一次授权口令即可：

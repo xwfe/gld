@@ -56,13 +56,37 @@ gld --version
 
 ## 升级
 
-换掉二进制，然后重启守护进程：
+**ChatGPT 连接器不用删，也不用重新授权。** 升级只是换二进制、重启守护进程；连接器靠的东西都在
+数据目录 `~/.config/gld` 里，换二进制碰不到它们：
+
+| 连接器靠的 | 存在哪 | 什么操作才会动它 |
+| --- | --- | --- |
+| Client ID、授权口令 | 数据目录里的服务凭据 | 只有 `gld secret set` / `gld secret regen` |
+| 令牌签名密钥：已经发给 ChatGPT 的令牌靠它验 | 同上 | `gld secret regen oauth_token_secret`，之后要重新授权 |
+| ChatGPT 自己注册的客户端（日志里 `auth=oauth:hub:dcr-…` 那个） | `data/oauth-clients/hub.json` | 删掉数据目录 |
+| 公网地址 | 服务配置 | 用 `--tunnel cf` 临时地址时，每次重启都换，连接器只能删了重建 |
+
+实测（2026-09-23，两次都是 0.6.0 的构建之间）：上表各项升级前后逐项比对指纹，全部一致；
+守护进程重启 0.3 秒，公网 `/mcp` 和 OAuth 元数据照常，服务自己回来。
+
+### 步骤
 
 ```bash
-mkdir -p "$HOME/.local/opt"
-cp ~/.local/bin/gld ~/.local/opt/gld-$(gld --version | awk '{print $2}')  # 留一份好回滚
-install -m 755 target/release/gld ~/.local/bin/gld.new                    # 先写成新文件
-mv ~/.local/bin/gld.new ~/.local/bin/gld                                  # 再改名盖上去
+# 1. 拿到新二进制。从源码：
+cd gld && git pull && cargo build --release --locked -p gld   # 产物 target/release/gld
+#    用发行包的，解压出来的 gld-*/gld 就是，下面第 3 步换成它
+
+# 2. 记下现在的样子（凭据是脱敏的，可以放心存），再留两份备份好回滚
+gld ls > /tmp/gld-before.txt
+mkdir -p ~/.local/opt
+cp -p "$(command -v gld)" ~/.local/opt/gld-$(date +%Y%m%d-%H%M)
+tar -czf ~/.local/opt/gld-config-$(date +%Y%m%d-%H%M).tgz -C ~/.config --exclude gld/daemon.sock gld
+
+# 3. 换二进制：先写成新文件，再改名盖上去
+GLD="$(command -v gld)"
+install -m 755 target/release/gld "$GLD.new" && mv "$GLD.new" "$GLD"
+
+# 4. 重启守护进程。版本号没变也要做，见下面
 gld daemon restart
 ```
 
@@ -71,31 +95,36 @@ Mach-O 里写东西会让它的代码签名失效，之后每次 exec 都被 SIG
 而还在跑的老进程一切正常——症状是 `gld --version` 变成 `Killed: 9`。写新文件再
 改名换的是 inode，跑着的进程留着自己那份，下一次 exec 拿到的是完整、签名正确的。
 
-MCP 服务会跟着守护进程自己回来；项目的 GPT Actions 要各自再 `gld start -s actions`，见[守护进程 · 升级](daemon.md#升级)。
-
 **中断有多久**：`gld daemon restart` 就是顺序的 stop + start，没有 fd 交接，所以新旧进程
 不会并存（单实例靠 `daemon.lock` 的 flock）。在途请求最多有 3 秒宽限，之后强断；服务起来
 就恢复。隧道是 gld 起的话跟着一起重起；自建反代 / 自己跑的 cloudflared 不受影响，只是那几秒
-回源会 502。
+回源会 502。MCP 服务会跟着守护进程自己回来；项目的 GPT Actions 要各自再
+`gld start -s actions`，见[守护进程 · 升级](daemon.md#升级)。
 
-**地址与凭据通常可沿用，但仍需重新核对客户端能力**：OAuth 动态注册等状态落盘，
-换二进制不直接删除它们；客户端可能仍缓存旧工具表或参数。公网地址变化的处理见
-[连接客户端](connect-clients.md#什么时候要重新授权什么时候要删了重建)。
-
-换完先核对服务：
+### 换完核对
 
 ```bash
-gld daemon status    # 版本、协议号是新的，"运行中的服务" ≥ 1
-gld ls               # 公网地址、Client ID、项目表和升级前一样
-gld doctor --probe   # 隧道此刻在不在，本地 / 公网端点和 OAuth 元数据通不通
+gld daemon status                  # pid 变了，运行时长从头算
+gld tool list --served | head -2   # "构建提交"要等于你编译的那个：git rev-parse --short=12 HEAD
+gld ls | diff /tmp/gld-before.txt -   # Client ID、口令（脱敏后的前后几位）、公网地址、项目表都不该变
+gld health                         # 本地、公网 /mcp，OAuth 元数据都是 ✓
 ```
 
-再在实际 AI 客户端重新发现工具，检查本次新增的工具名与参数，并做一次无副作用调用。
-源码、构建、运行服务与客户端 schema 是四层不同证据；只核对 `0.6.0` 这样的版本号不够。
-构建提交号由原生 `check_command` 的 `server.build_commit` 报告；客户端看不到该工具时，
-不能据此猜运行构建。详见 [生命周期指南](project-lifecycle.md#接入前先确认四层能力)。
+**版本号没变时，命令行不会提醒你重启。** 命令行只比版本号和协议号：同样叫 0.6.0 的新构建，
+换完二进制不重启，守护进程接着跑旧代码，**不报任何错**，只有新加的命令会报一句
+`` unknown variant `served_tools` ``（2026-09-23 升级时实际碰到的）。所以不管版本号变没变，
+换完都 `gld daemon restart`，再看上面那行构建提交。版本号变了的时候，命令行会直接拒绝并提示
+重启（退出码 4）。
 
-回滚就是把备份的那个二进制按同样的"改名"方式放回去，再 `gld daemon restart`。
+**ChatGPT 那边**：授权不用动。新版加了工具或参数时，ChatGPT 可能还拿着旧的工具表——服务声明了
+`listChanged: false`，不会通知它重拉。在 ChatGPT 里让它调一次 `server_info`：`build_commit`
+应该和上面那行一样；`connection.tools_fingerprint` 和 `gld tool list --served` 的指纹对不上，
+按[核对客户端拿到的工具表](troubleshooting.md#核对客户端拿到的工具表)让它重拉。只核对 `0.6.0`
+这样的版本号不够，源码、构建、运行的服务、客户端拿到的工具表是四层不同的证据，见
+[生命周期指南](project-lifecycle.md#接入前先确认四层能力)。
+
+**回滚**：把备份的二进制按同样的"写新文件再改名"放回去，再 `gld daemon restart`。数据目录一般
+不用回滚；真要回，先 `gld daemon stop`，再把备份的 `tgz` 解回 `~/.config`。
 
 > 注意别和 `gld upgrade` 搞混：那条命令改的是**服务和项目的配置**（端口、认证、公网入口、
 > 项目目录），不升级 gld 自己。升级 gld 只有"换二进制 + `gld daemon restart`"这一条路。
@@ -112,10 +141,6 @@ gld ls                     # 项目应该都回来了
 ```
 
 密钥没有第二份副本，搬之前别删旧目录。
-
-**这一步不能省。** 服务住在一个常驻的守护进程里，换了二进制它还在跑旧代码。
-命令行会核对版本，不一致时直接报错并提示重启，而不是发一个对方不认识的请求
-（退出码 4）。
 
 ## 平台支持的实际情况
 
