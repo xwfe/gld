@@ -11,6 +11,7 @@ pub mod history;
 mod image_tool;
 pub mod manage;
 mod notebook;
+pub mod outcome;
 pub mod patch;
 mod patch_diag;
 pub mod planning;

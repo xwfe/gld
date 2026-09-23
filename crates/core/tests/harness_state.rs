@@ -55,10 +55,11 @@ fn 同一工作区只允许一个可写任务且拒绝非法迁移() {
         .expect_err("应拒绝第二个任务");
     assert_eq!(duplicate.code(), "TASK_ALREADY_ACTIVE");
 
+    // 进 completed 只能 finish 带证据，transition 从哪个状态都不放行。
     let invalid = harness
         .transition(&task.id, TaskStatus::Completed)
         .expect_err("active 不应直接完成");
-    assert_eq!(invalid.code(), "INVALID_TASK_TRANSITION");
+    assert_eq!(invalid.code(), "VERIFICATION_REQUIRED");
 
     let paused = harness
         .transition(&task.id, TaskStatus::Paused)

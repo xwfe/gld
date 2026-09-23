@@ -495,28 +495,35 @@ impl ExecSession {
         }
     }
 
+    /// 命令此刻怎样了：(termination_reason, exit_code, command_ok)。不碰输出缓冲。
+    pub fn termination(&self) -> (String, Option<i32>, Option<bool>) {
+        let exit_code = *self.exit_code.lock().expect("exit_code lock");
+        let reason = self
+            .termination_reason
+            .lock()
+            .expect("termination lock")
+            .clone()
+            .unwrap_or_else(|| "running".into());
+        let command_ok = match reason.as_str() {
+            "exited" => Some(exit_code.is_some_and(|code| code == 0)),
+            "running" => None,
+            _ => Some(false),
+        };
+        (reason, exit_code, command_ok)
+    }
+
     pub fn snapshot(&self, max_output_bytes: usize) -> Value {
         let stdout_bytes = self.stdout.lock().expect("stdout lock").clone();
         let stderr_bytes = self.stderr.lock().expect("stderr lock").clone();
         let stdout = truncate_tail(&stdout_bytes, max_output_bytes);
         let stderr = truncate_tail(&stderr_bytes, max_output_bytes);
-        let exit_code = *self.exit_code.lock().expect("exit_code lock");
-        let termination_reason = self
-            .termination_reason
-            .lock()
-            .expect("termination lock")
-            .clone();
         let status = if self.has_exited() {
             "exited"
         } else {
             "running"
         };
-        let reason = termination_reason.as_deref().unwrap_or("running");
-        let command_ok = match reason {
-            "exited" => Some(exit_code.is_some_and(|code| code == 0)),
-            "running" => None,
-            _ => Some(false),
-        };
+        let (reason, exit_code, command_ok) = self.termination();
+        let reason = reason.as_str();
         json!({
             "session_id": self.session_id,
             "interactive": self.interactive,
@@ -655,8 +662,16 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     // next_offset 是空——不是"读完了"，而是"现在没有更多"，`complete`
     // 那一格说的才是流有没有结束。
     let next_offset = (next < total_stream_bytes).then_some(next as u64);
+    // 命令怎么结束的，和 exec_command 同一套字段。转后台的命令，这是调用方（和台账、
+    // 任务验收）知道它退出码的唯一途径；以前这里只说 running 与否（审查 D03）。
+    let (termination_reason, exit_code, command_ok) = session.termination();
 
     Ok(tool_ok(json!({
+        "session_id": session_id,
+        "termination_reason": termination_reason,
+        "exit_code": exit_code,
+        "command_ok": command_ok,
+        "workspace_writes_since_start": session.workspace_writes_since_start(),
         "output_ref": output_ref,
         "stream_output_ref": format!("session:{session_id}:{stream}"),
         "stream": stream,

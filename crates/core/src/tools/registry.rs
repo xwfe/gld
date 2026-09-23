@@ -198,7 +198,15 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "finish_task",
         "Finish task",
-        "Finish a task with verification status and change summary.",
+        "Finish a task. With evidence_session_ids (exec_command sessions from this task that exited 0 on the current files) it becomes completed; without them it waits in verifying; allow_unverified=true closes it as completed_unverified.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "refresh_baseline",
+        "Refresh baseline",
+        "After FILE_CHANGED_EXTERNALLY or BASELINE_STALE: list the files that changed since the task last recorded the workspace. Call again with accept_fingerprint and reason to adopt the current workspace as the new baseline.",
         false,
         false,
         false,
@@ -519,17 +527,31 @@ fn planning_manage_schema() -> Value {
     })
 }
 
+/// finish 的验收证据。task_manage 和 finish_task 两处一字不差。
+static EVIDENCE_SESSION_IDS_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "description": "finish: session_id of exec_command runs from this task that are the acceptance evidence (tests, build, lint). Each must have exited 0, with no workspace writes during the run and no changes since. All accepted -> completed; any rejected -> error with the reasons, task unchanged."
+    })
+});
+
+const ACCEPT_FINGERPRINT_DESCRIPTION: &str = "refresh_baseline: current.fingerprint from a previous refresh_baseline call you reviewed. Adopts the current workspace as the task baseline; refused if the workspace changed again since. Requires reason.";
+
 fn task_manage_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "action": { "type": "string", "enum": ["status", "operation_log", "project_state", "start", "update", "pause", "resume", "finish", "context", "events", "change_summary"] },
+            "action": { "type": "string", "enum": ["status", "operation_log", "project_state", "start", "update", "pause", "resume", "finish", "context", "events", "change_summary", "refresh_baseline"] },
             "task_id": { "type": "string", "minLength": 1 },
             "objective": { "type": "string", "minLength": 1 },
             "completed_steps": { "type": "array", "items": { "type": "string" } },
             "pending_steps": { "type": "array", "items": { "type": "string" } },
             "summary": { "type": "string" },
             "allow_unverified": { "type": "boolean", "default": false },
+            "evidence_session_ids": EVIDENCE_SESSION_IDS_SCHEMA.clone(),
+            "accept_fingerprint": { "type": "string", "minLength": 1, "description": ACCEPT_FINGERPRINT_DESCRIPTION },
+            "reason": { "type": "string", "description": "refresh_baseline: who made the reviewed changes and why they belong to this task." },
             "cursor": { "type": "integer", "minimum": 0, "default": 0 },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
             "max_files": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 200 },
@@ -704,6 +726,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "task_context",
     "list_task_events",
     "change_summary",
+    "refresh_baseline",
     "request_permissions",
     "view_image",
 ];
@@ -731,6 +754,9 @@ pub const MUTATING_TOOLS: &[&str] = &[
     "pause_task",
     "resume_task",
     "finish_task",
+    // 只看的那一种不改东西，dispatch 按参数区分（manage::action_is_mutating）；
+    // 这张表给 Actions 标 isConsequential，按会改的那一种算。
+    "refresh_baseline",
 ];
 
 pub const READ_ONLY_TOOLS: &[&str] = &[
@@ -1165,7 +1191,18 @@ pub fn input_schema(name: &str) -> Value {
             "properties": {
                 "task_id": { "type": "string", "minLength": 1 },
                 "summary": { "type": "string" },
-                "allow_unverified": { "type": "boolean", "default": false }
+                "allow_unverified": { "type": "boolean", "default": false },
+                "evidence_session_ids": EVIDENCE_SESSION_IDS_SCHEMA.clone()
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "refresh_baseline" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "minLength": 1 },
+                "accept_fingerprint": { "type": "string", "minLength": 1, "description": ACCEPT_FINGERPRINT_DESCRIPTION },
+                "reason": { "type": "string", "description": "Who made the reviewed changes and why they belong to this task." }
             },
             "required": ["task_id"],
             "additionalProperties": false

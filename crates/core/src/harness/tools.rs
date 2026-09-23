@@ -18,6 +18,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "task_context",
     "list_task_events",
     "change_summary",
+    "refresh_baseline",
 ];
 
 pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, WorkspaceError> {
@@ -33,6 +34,7 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
         "task_context" => task_context(ctx, args),
         "list_task_events" => list_task_events(ctx, args),
         "change_summary" => change_summary(ctx, args),
+        "refresh_baseline" => refresh_baseline(ctx, args),
         _ => return Err(tool_error("INVALID_ARGUMENT", "未知 Harness 工具")),
     }?;
     Ok(tool_ok(value))
@@ -104,14 +106,63 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
         .get("allow_unverified")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let status = if allow_unverified {
-        TaskStatus::CompletedUnverified
-    } else {
-        TaskStatus::Verifying
-    };
-    let task = ctx.harness.transition(task_id, status).map_err(map_error)?;
+    let evidence = string_list(args.get("evidence_session_ids"))?.unwrap_or_default();
+    let result = ctx
+        .harness
+        .finish_task(task_id, &evidence, allow_unverified)
+        .map_err(map_error)?;
+    if !result.rejected.is_empty() {
+        return Err(WorkspaceError::ToolDetails {
+            code: "VERIFICATION_REJECTED",
+            message: format!(
+                "{} 条证据不能接受，任务状态没动（仍是 {:?}）；逐条看 details.rejected",
+                result.rejected.len(),
+                result.task.status
+            ),
+            category: "validation",
+            retryable: false,
+            details: json!({
+                "task_id": task_id,
+                "task_status": result.task.status,
+                "rejected": result.rejected,
+                "evidence_candidates": result.candidates
+            }),
+        });
+    }
     let summary = change_summary(ctx, &json!({"task_id": task_id}))?;
-    Ok(json!({"task": task_view(&task)?, "change_summary": summary}))
+    let mut value = json!({"task": task_view(&result.task)?, "change_summary": summary});
+    if result.task.status == TaskStatus::Verifying {
+        value["verification_required"] = json!(true);
+        value["evidence_candidates"] = json!(result.candidates);
+        value["next"] = json!(
+            "任务等待验收。用 exec_command 跑测试（任务期间起的、退出 0、跑完之后没再改文件），再 finish 带 evidence_session_ids=[它的 session_id]；确认放弃正式验收才用 allow_unverified=true"
+        );
+    }
+    if !result.warnings.is_empty() {
+        value["warnings"] = json!(result.warnings);
+    }
+    Ok(value)
+}
+
+fn refresh_baseline(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    let review = ctx
+        .harness
+        .refresh_baseline(
+            task_id(args)?,
+            args.get("accept_fingerprint").and_then(Value::as_str),
+            args.get("reason").and_then(Value::as_str),
+        )
+        .map_err(map_error)?;
+    let mut value =
+        serde_json::to_value(&review).map_err(|e| tool_error("SERIALIZE_FAILED", e.to_string()))?;
+    if !review.accepted {
+        value["next"] = json!(if review.baseline_matches {
+            "工作区和任务记账一致，不需要接纳"
+        } else {
+            "逐个看 changes 里的文件（read_file / git_diff），弄清是谁改的；确认可以算进这个任务时，带 accept_fingerprint=current.fingerprint 和 reason 再调一次。不能算的先恢复原样"
+        });
+    }
+    Ok(value)
 }
 
 fn task_context(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -212,13 +263,42 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
     };
     // 先对这个任务自己的基线算出全部改动再截，不是先截全部文件再挑改动——
     // 后者在大仓库里会把排在后面的改动整个漏掉。
-    let changed = ctx.harness.task_changes(&task);
-    let total_changed_files = changed.len();
-    let files = changed.into_iter().take(SUMMARY_FILES).collect::<Vec<_>>();
+    let changes = ctx.harness.task_changes(&task);
+    let total_changed_files = changes.files.len();
+    let files = changes
+        .files
+        .into_iter()
+        .take(SUMMARY_FILES)
+        .collect::<Vec<_>>();
     let events = ctx
         .harness
         .list_events(&task.id, 0, 100)
         .map_err(map_error)?;
+    let verification = ctx
+        .harness
+        .verification_records(&task.id)
+        .map_err(map_error)?;
+    let mut risks = Vec::new();
+    match verification.last() {
+        None if task.status == TaskStatus::CompletedUnverified => {
+            risks.push("任务以 completed_unverified 收尾：没有被接受的验收证据".to_string())
+        }
+        None => risks.push("还没有被接受的验收证据".to_string()),
+        Some(last) if last.fingerprint != changes.position.fingerprint => {
+            risks.push("最后一次验收之后工作区又变了，现在的内容没有被验证".to_string())
+        }
+        Some(last) if !last.changed_during_run.is_empty() => risks.push(format!(
+            "验收命令运行期间改了 {} 个文件，它测的是改之前的内容",
+            last.changed_during_run.len()
+        )),
+        Some(_) => {}
+    }
+    if !changes.unreadable.is_empty() {
+        risks.push(format!(
+            "{} 个文件没读到，它们有没有变不知道",
+            changes.unreadable.len()
+        ));
+    }
     Ok(json!({
         "task_id": task.id,
         "objective": task.objective,
@@ -226,8 +306,8 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         "files": files,
         "total_changed_files": total_changed_files,
         "evidence": events,
-        "verification": [],
-        "risks": [],
+        "verification": verification,
+        "risks": risks,
         "rollback_capability": "not_available_in_foundation"
     }))
 }
@@ -263,9 +343,7 @@ fn tool_error(code: &'static str, message: impl Into<String>) -> WorkspaceError 
         code,
         message: message.into(),
         category: "permission",
-        retryable: matches!(
-            code,
-            "TASK_ALREADY_ACTIVE" | "FILE_CHANGED_EXTERNALLY" | "BASELINE_STALE"
-        ),
+        // BASELINE_STALE（finish 时工作区有没认领的改动）原样重试没用，得先 refresh_baseline。
+        retryable: code == "TASK_ALREADY_ACTIVE",
     }
 }

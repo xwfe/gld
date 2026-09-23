@@ -29,7 +29,35 @@ pub const TASK_ACTIONS: &[&str] = &[
     "context",
     "events",
     "change_summary",
+    "refresh_baseline",
 ];
+
+/// task_manage 的动作和它背后的 Harness 工具，一一对应。
+const TASK_ACTION_TOOLS: &[(&str, &str)] = &[
+    ("status", "harness_status"),
+    ("operation_log", "operation_log"),
+    ("project_state", "project_state"),
+    ("start", "start_task"),
+    ("update", "update_task"),
+    ("pause", "pause_task"),
+    ("resume", "resume_task"),
+    ("finish", "finish_task"),
+    ("context", "task_context"),
+    ("events", "list_task_events"),
+    ("change_summary", "change_summary"),
+    ("refresh_baseline", "refresh_baseline"),
+];
+
+/// Harness 工具在 task_manage 里叫什么动作。
+///
+/// compact / core 档不单独暴露 `resume_task`、`refresh_baseline` 这些名字，只有
+/// `task_manage`；状态里的"下一步"照原名写，客户端就找不到能调的东西（审查 D02）。
+pub fn task_action_for_tool(tool: &str) -> Option<&'static str> {
+    TASK_ACTION_TOOLS
+        .iter()
+        .find(|(_, name)| *name == tool)
+        .map(|(action, _)| *action)
+}
 
 fn action<'a>(args: &'a Value, label: &str, allowed: &[&str]) -> Result<&'a str, WorkspaceError> {
     args.get("action")
@@ -80,32 +108,27 @@ pub fn planning_manage(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
 }
 
 pub fn task_manage(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
-    let tool_name = match action(args, "task", TASK_ACTIONS)? {
-        "status" => "harness_status",
-        "operation_log" => "operation_log",
-        "project_state" => "project_state",
-        "start" => "start_task",
-        "update" => "update_task",
-        "pause" => "pause_task",
-        "resume" => "resume_task",
-        "finish" => "finish_task",
-        "context" => "task_context",
-        "events" => "list_task_events",
-        "change_summary" => "change_summary",
-        other => return Err(unknown_action("task", other, TASK_ACTIONS)),
+    let action = action(args, "task", TASK_ACTIONS)?;
+    let Some((_, tool_name)) = TASK_ACTION_TOOLS.iter().find(|(name, _)| *name == action) else {
+        return Err(unknown_action("task", action, TASK_ACTIONS));
     };
     crate::harness::tools::call(ctx, tool_name, args)
 }
 
 pub fn action_is_mutating(name: &str, args: &Value) -> Option<bool> {
+    // refresh_baseline 不带 accept_fingerprint 只是看，带了才改任务记账。
+    let accepts_baseline = || args.get("accept_fingerprint").is_some();
+    if name == "refresh_baseline" {
+        return Some(accepts_baseline());
+    }
     let action = args.get("action").and_then(Value::as_str)?;
     match name {
         "history_manage" => Some(matches!(action, "bootstrap" | "checkpoint" | "validate")),
         "planning_manage" => Some(!matches!(action, "state")),
-        "task_manage" => Some(matches!(
-            action,
-            "start" | "update" | "pause" | "resume" | "finish"
-        )),
+        "task_manage" => Some(
+            matches!(action, "start" | "update" | "pause" | "resume" | "finish")
+                || (action == "refresh_baseline" && accepts_baseline()),
+        ),
         _ => None,
     }
 }

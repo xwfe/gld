@@ -123,8 +123,17 @@ pub struct ExecutionLedger {
     pub step_id: Option<String>,
     pub task_id: Option<String>,
     pub last_tool: Option<String>,
+    /// 最近一次被记账的调用结果如何：completed / failed / running / timed_out /
+    /// cancelled / unknown。命令类工具按命令终态算，不按调用的顶层 ok 算。
     #[serde(default)]
     pub state: String,
+    /// 调用本身（参数、策略、传输）成没成。和 `state` 分开：命令退出非零时
+    /// 它是 true、`state` 是 failed。
+    #[serde(default)]
+    pub call_ok: Option<bool>,
+    /// 最近一条碰过的命令会话。后续 read_output 看到它结束了会补上终态。
+    #[serde(default)]
+    pub command: Option<CommandLedger>,
     pub last_error: Option<String>,
     #[serde(default)]
     pub changed_files: Vec<String>,
@@ -133,6 +142,16 @@ pub struct ExecutionLedger {
     pub verification: Vec<String>,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// 台账里记的那条命令会话。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandLedger {
+    pub session_id: Option<String>,
+    /// running / exited / timeout / killed / spawn_failed ……
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub command_ok: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

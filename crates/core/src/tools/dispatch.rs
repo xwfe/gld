@@ -7,16 +7,19 @@ use std::path::Path;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::harness::model::{CommandOutcome, WorktreePosition};
+use crate::harness::CommandEvidence;
 use crate::planning::{
-    ExecutionLedgerUpdate, GoalStatus, PlanStatus, PlanningMode, PlanningService, PlanningState,
-    PLANNING_RELATIVE_PATH,
+    CommandLedger, ExecutionLedgerUpdate, GoalStatus, PlanStatus, PlanningMode, PlanningService,
+    PlanningState, PLANNING_RELATIVE_PATH,
 };
 use crate::tools::caller::Caller;
 use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
 use crate::tools::{
-    exec, file, git, history, image_tool, manage, notebook, patch, planning, session, skill,
+    exec, file, git, history, image_tool, manage, notebook, outcome, patch, planning, session,
+    skill,
 };
 
 /// 策略拒绝变成工具响应。
@@ -100,12 +103,18 @@ fn record_execution_ledger(
     if !mutating_tool_call(name, args)
         && !matches!(
             name,
-            "start_task" | "update_task" | "pause_task" | "resume_task" | "finish_task"
+            "start_task"
+                | "update_task"
+                | "pause_task"
+                | "resume_task"
+                | "finish_task"
+                | "refresh_baseline"
         )
     {
         return;
     }
-    let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+    // 按命令终态记，不按顶层 ok：退出 7 的命令 ok 也是 true（审查 D03）。
+    let outcome = outcome::classify(output);
     let task_id = tracked_task_id
         .map(str::to_string)
         .or_else(|| {
@@ -120,11 +129,6 @@ fn record_execution_ledger(
                 .and_then(Value::as_str)
                 .map(str::to_string)
         });
-    let last_error = output
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
     let changed_files = output
         .get("affected_files")
         .and_then(Value::as_array)
@@ -170,13 +174,113 @@ fn record_execution_ledger(
     let _ = PlanningService::new(ctx.workspace.root()).record_execution(ExecutionLedgerUpdate {
         task_id,
         last_tool: Some(last_tool),
-        state: Some(if succeeded { "completed" } else { "failed" }.into()),
-        last_error,
+        state: Some(outcome.state.into()),
+        call_ok: Some(outcome.call_ok),
+        command: outcome.command.as_ref().map(command_ledger),
+        last_error: outcome.error,
         changed_files,
         history_checkpoint_ref,
         verification,
     });
 }
+
+fn command_ledger(command: &CommandOutcome) -> CommandLedger {
+    CommandLedger {
+        session_id: command.session_id.clone(),
+        status: command.status.clone(),
+        exit_code: command.exit_code,
+        command_ok: command.command_ok,
+    }
+}
+
+/// read_output / write_stdin / kill_session 看到的命令状态补回两本账。
+///
+/// 命令转了后台，exec_command 那次记下的是 running；它后来怎么结束的，只有这几个
+/// 工具看得见。不补的话，Planning 台账永远停在 running，任务也拿不到这条命令的
+/// 终态当验收证据（审查 D01、D03）。
+///
+/// write_stdin / kill_session 是写操作，Planning 那本由 `record_execution_ledger`
+/// 照常记；read_output 是读操作不进那里，单独补。
+fn observe_command_session(ctx: &ToolContext, name: &str, output: &Value) {
+    if !matches!(name, "read_output" | "write_stdin" | "kill_session") {
+        return;
+    }
+    let outcome = outcome::classify(output);
+    let Some(command) = outcome.command.as_ref() else {
+        return;
+    };
+    if name == "read_output" {
+        let _ = PlanningService::new(ctx.workspace.root()).record_command_observation(
+            command_ledger(command),
+            outcome.state,
+            outcome.error.clone(),
+        );
+    }
+    let _ = ctx.harness.observe_command(name, command, outcome.state);
+}
+
+/// 任务里一次写类调用结束：记事件（命令类带上验收证据），把 gld 自己的写入记上账。
+///
+/// `start` 是写前检查通过时任务记账的位置——检查保证工作区当时就是它。
+fn record_tracked_operation(
+    ctx: &ToolContext,
+    task_id: &str,
+    start: WorktreePosition,
+    name: &str,
+    args: &Value,
+    output: &Value,
+) {
+    let outcome = outcome::classify(output);
+    // 调用本身成了（命令哪怕退出非零）就说明是 gld 让它跑的，它写的东西记上账；
+    // 调用都没成（参数、策略、起不来）就什么也没写。
+    let refreshed = outcome
+        .call_ok
+        .then(|| ctx.harness.refresh_expected_state(task_id).ok())
+        .flatten();
+    let evidence = (name == "exec_command")
+        .then_some(outcome.command.as_ref())
+        .flatten()
+        .filter(|command| command.session_id.is_some())
+        .map(|command| {
+            let finished = !command.is_running();
+            let mut text = output
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(COMMAND_TEXT_CHARS)
+                .collect::<String>();
+            crate::tools::history::redact_text(&mut text);
+            CommandEvidence {
+                command: command.clone(),
+                command_text: Some(text),
+                start: Some(start),
+                end: refreshed
+                    .as_ref()
+                    .filter(|_| finished)
+                    .map(|refresh| refresh.position.clone()),
+                changed_during_run: refreshed
+                    .filter(|_| finished)
+                    .map(|refresh| refresh.changed)
+                    .unwrap_or_default(),
+            }
+        });
+    let _ = ctx.harness.record_event(
+        task_id,
+        "operation_finished",
+        Some(name),
+        operation_input(args),
+        json!({
+            "ok": outcome.call_ok,
+            "tool": name,
+            "state": outcome.state,
+            "evidence": evidence
+        }),
+    );
+}
+
+/// 验收证据里命令原文最多留多少字符。
+const COMMAND_TEXT_CHARS: usize = 500;
 
 fn capability_health_check(ctx: &ToolContext) -> Value {
     let tools = crate::tools::registry::exposed_tool_names(&ctx.tool_profile);
@@ -442,7 +546,7 @@ fn dispatch_tool(
             .unwrap_or(output);
     }
 
-    let task_id = if requires_write_baseline(name, &effective_args) {
+    let tracked = if requires_write_baseline(name, &effective_args) {
         let task = ctx.harness.current_task().ok().flatten();
         if let Some(task) = task {
             if let Err(error) = ctx.harness.check_baseline(&task.id) {
@@ -461,13 +565,15 @@ fn dispatch_tool(
                 operation_input(args),
                 json!({"ok": true, "tracking": "task"}),
             );
-            Some(task.id)
+            let start = ctx.harness.expected_position(&task);
+            Some((task.id, start))
         } else {
             None
         }
     } else {
         None
     };
+    let task_id = tracked.as_ref().map(|(id, _)| id.clone());
 
     let operation = if should_log_operation(name) {
         ctx.harness
@@ -611,18 +717,8 @@ fn dispatch_tool(
         output = attach_harness_status(ctx, output, task_id.is_none());
         output = attach_recovery_guidance(output);
     }
-    if let Some(task_id) = task_id.as_deref() {
-        let succeeded = output.get("ok").and_then(Value::as_bool) == Some(true);
-        let _ = ctx.harness.record_event(
-            task_id,
-            "operation_finished",
-            Some(name),
-            operation_input(args),
-            json!({"ok": succeeded, "tool": name}),
-        );
-        if succeeded {
-            let _ = ctx.harness.refresh_expected_state(task_id);
-        }
+    if let Some((task_id, start)) = tracked {
+        record_tracked_operation(ctx, &task_id, start, name, args, &output);
     } else if writes_workspace_archives(name)
         && output.get("ok").and_then(Value::as_bool) == Some(true)
     {
@@ -635,21 +731,25 @@ fn dispatch_tool(
         }
     }
     if let Some(operation) = operation {
-        let succeeded = output.get("ok").and_then(Value::as_bool) == Some(true);
+        let outcome = outcome::classify(&output);
         let _ = ctx.harness.record_operation(
             Some(&operation.id),
             task_id.as_deref(),
             name,
-            if succeeded { "completed" } else { "failed" },
+            outcome.state,
             operation_input(args),
             json!({
-                "ok": succeeded,
+                "ok": outcome.call_ok,
                 "tool": name,
+                "command": outcome.command,
+                // 只记码不记消息，和 record_rejection 一样：消息里可能带文件内容。
+                "error_code": output.pointer("/error/code"),
                 "affected_files": output.get("affected_files")
             }),
         );
     }
     record_execution_ledger(ctx, name, &effective_args, &output, task_id.as_deref());
+    observe_command_session(ctx, name, &output);
     if should_attach_planning_context(ctx, name, &output) {
         if let Ok(latest) = PlanningService::new(ctx.workspace.root()).state() {
             output = attach_planning_context(output, &latest);
@@ -852,7 +952,7 @@ fn prefix_patch_paths(base: &str, patch: &str) -> String {
 /// 不该被基线拦住，但它们确实改了工作区文件，所以事后必须刷新。
 ///
 /// Planning 不在这里：它的状态在 `.gld/` 下，那个目录整个不进指纹
-/// （见 `harness::state::should_skip`）。
+/// （见 `harness::scan::is_skipped_dir`）。
 ///
 /// 代价说清楚：如果用户正好在这次调用之前手工改了别的文件，这次刷新会把那笔
 /// 变化一起吸收掉，后面就不再报 FILE_CHANGED_EXTERNALLY 了。相比"存个检查点就
@@ -963,11 +1063,21 @@ fn attach_standalone_metadata(output: &mut Value, recovery_hint: &str) {
     }
 }
 
+/// 只留客户端这一档调得到的下一步。Harness 工具没单独暴露、但有 task_manage 时，
+/// 换成 `task_manage:<action>`——以前直接滤掉，compact 档下基线不符时连恢复入口
+/// `refresh_baseline` 都不提（审查 D02）。
 fn filter_exposed_actions(ctx: &ToolContext, actions: Vec<String>) -> Vec<String> {
     let exposed = crate::tools::registry::exposed_tool_names(&ctx.tool_profile);
+    let has_task_manage = exposed.contains(&"task_manage");
     actions
         .into_iter()
-        .filter(|action| exposed.contains(&action.as_str()))
+        .filter_map(|action| {
+            if exposed.contains(&action.as_str()) {
+                return Some(action);
+            }
+            let task_action = manage::task_action_for_tool(&action).filter(|_| has_task_manage)?;
+            Some(format!("task_manage:{task_action}"))
+        })
         .collect()
 }
 

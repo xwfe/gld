@@ -4,8 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::{AppError, AppResult};
 
 use super::model::{
-    ExecutionCheckpoint, Goal, GoalStatus, Plan, PlanStatus, PlanStep, PlanStepStatus,
-    PlanningMode, PlanningProposal, PlanningState, ProposalStatus, SuccessCriterion,
+    CommandLedger, ExecutionCheckpoint, Goal, GoalStatus, Plan, PlanStatus, PlanStep,
+    PlanStepStatus, PlanningMode, PlanningProposal, PlanningState, ProposalStatus,
+    SuccessCriterion,
 };
 use super::store::PlanningStore;
 
@@ -19,6 +20,9 @@ pub struct ExecutionLedgerUpdate {
     pub task_id: Option<String>,
     pub last_tool: Option<String>,
     pub state: Option<String>,
+    pub call_ok: Option<bool>,
+    /// 这次调用碰到的命令会话；`None` 表示这次不是命令类调用，原来记的那条保持不动。
+    pub command: Option<CommandLedger>,
     pub last_error: Option<String>,
     pub changed_files: Vec<String>,
     pub history_checkpoint_ref: Option<String>,
@@ -281,6 +285,12 @@ impl PlanningService {
             if let Some(value) = update.state {
                 state.execution.state = value;
             }
+            if update.call_ok.is_some() {
+                state.execution.call_ok = update.call_ok;
+            }
+            if update.command.is_some() {
+                state.execution.command = update.command;
+            }
             state.execution.last_error = update.last_error.clone();
             if !update.changed_files.is_empty() {
                 state.execution.changed_files = update.changed_files;
@@ -305,6 +315,44 @@ impl PlanningService {
                 }
             }
             Ok(state.clone())
+        })
+    }
+
+    /// 后来读到的命令终态补回台账。只认台账里记着的那一条会话。
+    ///
+    /// read_output 不是写操作，不走 `record_execution`；可"exec_command 返回 running、
+    /// 之后读到退出 7"时台账得跟着变，否则它永远停在 running（审查 D03）。
+    /// `state` 只在它说的正是这条命令（还停在 running）时才改——之后又有别的调用被
+    /// 记了账，`state` 说的就是那一次，不能被这条旧命令覆盖。
+    ///
+    /// 返回有没有改。没改就不写盘：每次写都会递增 revision。
+    pub fn record_command_observation(
+        &self,
+        command: CommandLedger,
+        state: &str,
+        error: Option<String>,
+    ) -> AppResult<bool> {
+        let tracks = |planning: &PlanningState| {
+            planning.execution.command.as_ref().is_some_and(|current| {
+                current.session_id.is_some()
+                    && current.session_id == command.session_id
+                    && *current != command
+            })
+        };
+        if !tracks(&self.store.load()?) {
+            return Ok(false);
+        }
+        self.store.update(|planning| {
+            if !tracks(planning) {
+                return Ok(false);
+            }
+            if planning.execution.state == "running" {
+                planning.execution.state = state.to_string();
+                planning.execution.last_error = error;
+            }
+            planning.execution.command = Some(command.clone());
+            planning.execution.updated_at = timestamp();
+            Ok(true)
         })
     }
 

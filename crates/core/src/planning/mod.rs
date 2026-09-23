@@ -3,8 +3,8 @@ mod service;
 mod store;
 
 pub use model::{
-    ExecutionLedger, Goal, GoalStatus, Plan, PlanStatus, PlanStep, PlanStepStatus, PlanningMode,
-    PlanningProposal, PlanningState, ProposalStatus, SuccessCriterion,
+    CommandLedger, ExecutionLedger, Goal, GoalStatus, Plan, PlanStatus, PlanStep, PlanStepStatus,
+    PlanningMode, PlanningProposal, PlanningState, ProposalStatus, SuccessCriterion,
 };
 pub use service::{ExecutionLedgerUpdate, PlanningService};
 
