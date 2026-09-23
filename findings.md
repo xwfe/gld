@@ -31,3 +31,11 @@
 - MCP 2026-07-28 去掉 initialize；支持它的官方 SDK 客户端先发 `server/discover`，除 -32022 外的错误
   （含 200 + -32601）都判为旧服务器并退回 initialize。405 / 5xx / id 对不上 / 假的成功结果会连不上。
 - gld 的指令只在 initialize 结果里，客户端不握手就拿不到——所以"让新客户端退回握手"比"答上它的请求"重要。
+
+## 真机
+
+- ChatGPT 连接器只在建连接和点 Refresh 时拉 `tools/list`；新对话、服务重启都不触发。
+- `server_info.connection.tools_fingerprint` 是服务端按发出去的表算的，证明不了客户端手上是哪张表。
+- ChatGPT 连接器的探测请求 id 是 `openai-mcp-discover`，拿到 -32601 后退回 initialize。
+- 命令行只比版本号和协议号；同版本号的新构建不重启不会有任何提示。
+- 本机 `ls` 是 eza 的别名，`ls -t` 会报参数错误，脚本里用 `command ls`。

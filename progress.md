@@ -38,3 +38,14 @@
 - 验证：全量 804 passed / 0 failed；新测试连跑 20 次全过；真实二进制经守护进程复跑全部符合。
 - D13 核对：读 2026-07-28 变更与兼容表；实测 gld 对新版请求的回法；子 agent 读四个官方 SDK 的探测
   判定；装官方 TS SDK 2.0 到 scratchpad 实连隔离 gld，退回 initialize 后一切正常。只加测试和排障说明。
+
+## 真机
+
+- 本机升级：先 0.6.0 新构建（`ac0100e`），发现同版本号不提醒重启、D04 漏递增协议号；提到协议 4、
+  版本 0.7.0 再升一次，换完未重启时命令行报版本不一致（退出码 4）。两次都备份了二进制和数据目录，
+  凭据与 OAuth 注册数据逐项比对指纹一致。
+- ChatGPT：未刷新前日志里自 9-18 起没有 `tools/list`；chatgpt.com/plugins 点 Refresh 后拿到新表。
+- 真机验收项目 `~/xdw/gld-realtest`（已加进服务）：step 2、step 3 全部符合预期，核对都来自 gld 的
+  任务事件、操作记录、Planning 台账和项目文件。
+- 途中磁盘又满（119 MiB）：删了 scratchpad 里子 agent 克隆的 SDK、`cargo clean -p` gld 自己的三个
+  crate（18.3 GiB 陈旧产物）。

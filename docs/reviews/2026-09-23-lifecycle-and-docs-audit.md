@@ -322,3 +322,41 @@ toexec-text；toexec README 的当前 tag 同步更新（`2f22741`）。ccnm 仍
 - 顺带看到两处和 2025-06-18 不完全一致、但实测不影响连接的地方，没改：`notifications/initialized`
   回 200（规范写 202）；`GET /mcp` 回一段 JSON 说明（规范是开 SSE 流或回 405，只在退到已废弃的
   HTTP+SSE 传输时才会用到）。
+
+### 真机升级与 ChatGPT 验收（0.7.0）
+
+本机常驻的 gld（公网固定域名、OAuth、ChatGPT 连接器 9-18 建好）按
+[安装 · 升级](../install.md#升级)升了两次：先是同为 0.6.0 的新构建，再是 0.7.0（`706f50f`）。
+
+- **连接器不用动**：两次都逐项比对了 Client ID、授权口令、5 项凭据、ChatGPT 动态注册的客户端
+  （`data/oauth-clients/hub.json`）、项目配置的指纹，全部一致；守护进程重启 0.3 秒，服务自己
+  回来；ChatGPT 用原来的 `dcr-63f3…` 直接连上，没要求重新授权。
+- **同版本号不提醒重启**：第一次升级时新命令行连着旧守护进程，`--served` 报 `unknown variant`。
+  原因是 D04 加 `served_tools` 时漏了递增协议号（`d70503e` 提到 4），加上版本号没变
+  （`706f50f` 提到 0.7.0）。第二次升级时换完二进制、没重启，命令行按预期报"版本不一致"、退出码 4。
+- **ChatGPT 要手动刷新工具表**：它只在建连接器和点 Refresh 时拉 `tools/list`。9-18 到 9-23
+  之间日志里一次都没有，开新对话、gld 重启都不触发。到 chatgpt.com/plugins 点 Refresh 之后，
+  日志依次是 `server/discover` → `initialize` → `tools/list`，新参数就有了。原先文档让人拿
+  `server_info` 的 `connection.tools_fingerprint` 核对，那是 gld 按自己发出去的表算的，客户端用旧
+  缓存时照样对得上，已改成问 AI 它自己的工具定义（`b5b5472`）。
+- **D13 补上 ChatGPT 的实证**：日志里 ChatGPT 连接器先发 `server/discover`（请求 id
+  `openai-mcp-discover`），拿到 `-32601` 后退回 `initialize`，和四个官方 SDK 的行为一致。
+
+在 `~/xdw/gld-realtest`（一个 Python 小项目，`sub` 故意写错）上让 ChatGPT 按提示词操作，结果全部
+从 gld 自己的记录核对：
+
+| 步骤 | 核对到的 |
+| --- | --- |
+| 同一工作区 8 个 CLI 同时 `start`（我在本机跑） | 1 个成功、7 个 `TASK_ALREADY_ACTIVE`，盘上 1 个任务文件 |
+| 测试失败（退出 1）的会话当证据 `finish` | 拒收，任务状态不动 |
+| `apply_patch` 修 `sub` | 第一次 `PATCH_AMBIGUOUS`（`add`、`sub` 那一行一模一样，gld 不猜），ChatGPT 补上下文后改对 |
+| 测试通过（退出 0）后 `finish` | `verification_recorded` → `completed`；Planning 台账 `state: completed`、`changed_files: [calc.py]` |
+| 任务开始后在 gld 之外改 `README.md`，再 `git mv` | `FILE_CHANGED_EXTERNALLY`；`refresh_baseline` 列出 `README.md:modified`，带指纹和 reason 接纳后放行 |
+| `git_diff`（staged + unstaged） | `README.md`、`calc.py` 未暂存的 modified；`notes/new-name.md` 已暂存的 renamed、`old_path` 正确；和 `git status` 一致 |
+| 再跑测试、`finish` | `completed` |
+
+验收中发现、已修：被写前检查拒掉的那次 `git mv` 在操作记录里 `task_id` 是空的，按任务翻不到
+（`0f66795`，有没结束的任务就记在它名下）。
+
+**仍未验证：**ChatGPT 看不到 gld 发的 `listChanged`（服务声明 `false`、也没有长连接推送），
+新版加了工具或参数后只能靠人去点 Refresh。Claude 等其他客户端没做这一轮真机验收。
