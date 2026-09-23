@@ -139,17 +139,21 @@ impl SessionStore {
             }
             _ => "it was removed".to_string(),
         };
+        // 以前这里说"重跑命令"。输出没了不等于命令没跑：它可能已经改了文件、发了
+        // 请求、跑完了迁移。原样重跑有副作用的命令就是做第二遍（审查 D05）。
         Some(WorkspaceError::ToolDetails {
             code: "SESSION_EXPIRED",
             message: format!(
-                "Session {session_id} existed but {why} ({seconds}s ago). Re-run the command; the output cannot be recovered."
+                "Session {session_id} existed but {why} ({seconds}s ago). The command already ran; only its output cannot be recovered. If it changes anything (files, services, data), check the current state before running it again; re-run only commands that are safe to repeat."
             ),
             category: "not_found",
             retryable: false,
             details: json!({
                 "reason": stone.reason,
                 "retention_seconds": self.retention.as_secs(),
-                "released_seconds_ago": seconds
+                "released_seconds_ago": seconds,
+                "executed": true,
+                "output_recoverable": false
             }),
         })
     }
@@ -955,7 +959,11 @@ mod tests {
         session.session_id.clone()
     }
 
-    /// 过期的句柄和瞎编的句柄不是一回事：前者重跑命令，后者是自己记错了。
+    /// 过期的句柄和瞎编的句柄不是一回事：前者命令确实跑过、只是输出没了，
+    /// 后者是自己记错了。
+    ///
+    /// 过期时不能一句"重跑"了事：命令已经执行过，有副作用的原样重跑就是做第二遍
+    /// （审查 D05）。下一步要先核对现状。
     ///
     /// 保留期设成 0，所以不用真的等 5 分钟，也没有 sleep（验收 A16）。
     #[test]
@@ -968,10 +976,14 @@ mod tests {
         };
         assert_eq!(expired.code(), "SESSION_EXPIRED", "{}", expired.message());
         assert!(
-            expired.message().contains("Re-run"),
-            "要说清下一步：{}",
+            expired.message().contains("already ran")
+                && expired.message().contains("check the current state"),
+            "要说清命令已经跑过、先核对现状再决定重跑：{}",
             expired.message()
         );
+        let details = &expired.to_error_value()["details"];
+        assert_eq!(details["executed"], true);
+        assert_eq!(details["output_recoverable"], false);
 
         let Err(unknown) = store.get("00000000-0000-0000-0000-000000000000") else {
             panic!("这个 id 从来没存在过");

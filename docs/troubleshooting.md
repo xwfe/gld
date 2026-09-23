@@ -143,7 +143,7 @@ gld tool call exec_command cmd='cargo test'
 | 后台命令跑出来的结果对不上代码（测试挂在一个你已经改掉的地方） | 后台那段没有写互斥，命令测的可能是改之前的代码 | 看那条会话结果里的 `workspace_writes_since_start`：不是 0 就说明它跑的这段时间工作区被改过，那条结果不作数，重跑一次 |
 | 起后台命令（`yield_time_ms: 0`）报 `WORKSPACE_BUSY` | 0.4.0 改了：命令起来之前也要拿到写权，免得它看到别人写了一半的文件树 | 是 `retryable` 的，重试即可。占着的多半是另一条同步等结果的命令（最多 30 秒），或者一次正在落盘的补丁（毫秒级） |
 | 换了个客户端连上来，`read_output` / `kill_session` 报 `SESSION_NOT_FOUND`，`session_id` 是刚抄过来的 | 命令会话按"项目 + 谁在调"分表，不是同一个主体就看不见。换的是另一个 OAuth 客户端就是另一个主体 | 有意如此：别人的命令输出不该摊开。用起这条命令的那个客户端去读。真要几个客户端共用一批会话，让它们用同一份凭据 |
-| 同一个客户端重连之后 `session_id` 就失效了 | 不是分表的事：会话本身有寿命，命令结束或超时 30 秒后会被回收；`gld stop`、项目被删掉也会停掉经服务起的命令 | 结束的命令在那 30 秒里还读得到输出，过了就只能重跑。长命令别靠重连接着读，让它把结果写文件 |
+| 同一个客户端重连之后 `session_id` 就失效了（`SESSION_EXPIRED`） | 不是分表的事：会话本身有寿命，命令结束 5 分钟后输出被回收（`read_output` 的 `expires_in_ms` 说还剩多久）；`gld stop`、项目被删掉也会停掉经服务起的命令 | 过期只说明输出没了，**命令已经跑过**：会改东西的命令先核对现状，别原样重跑。长命令别靠重连接着读，让它把结果写文件 |
 | 远端项目（`remote_*` 那组工具）的后台命令忽然没了，`remote_read_output` 说不认识那个 `output_ref` | 后台命令活不过它那条 coding 会话。会话可能是被这几样结束的：一条跑过头的**前台**命令（服务对一次远端调用最多等 60 秒，超了就丢连接）、`remote_coding_end`、或者没人调用被回收——挂着后台命令时是十分钟，没挂着是两分钟 | 长命令一律 `run_in_background`；前台命令的期限服务会替你压到 50 秒以内，要更久它会拒，照着它说的改。起了后台任务就隔一会儿 `remote_read_output` 看一眼，既拿到进度也把空闲计时清零。真要长活的服务（dev server 之类）交给那台机器上的 systemd / launchd，别让它挂在一条 MCP 连接上 |
 | `FILE_CHANGED_EXTERNALLY` / `BASELINE_STALE`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹和 HEAD，发现有它没记账的变化 | 让 AI 先 `task_manage action=refresh_baseline` 看是哪些文件变了，确认是你改的、可以算进任务，再带 `accept_fingerprint` 和 `reason` 接纳。步骤见 [concepts.md](concepts.md#durable-task-的工作区基线)。要是你什么都没改却一直报，看下一行 |
 | `TASK_PAUSED` | 任务暂停了，暂停期间不放行写入和执行 | `task_manage action=resume task_id=<id>` |

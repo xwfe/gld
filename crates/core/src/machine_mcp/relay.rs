@@ -371,15 +371,17 @@ impl Relay {
     fn read(&self, args: &Value, scope: &Scope) -> Result<Value, Value> {
         accepts(READ, args, &["ref", "offset", "max_bytes"])?;
         let reference = required(args, "ref")?;
+        // 留着的全文没了，不等于那次调用没做：它已经做完、只是后半截结果取不回来。
+        // 以前这里直接说"再调一次"，对会改东西的工具就是做第二遍（审查 D05）。
         let Some(text) = self.results.get(scope.caller, &reference) else {
             return Err(refuse(
                 "MCP_RESULT_GONE",
                 format!(
-                    "No kept result {reference}: results are kept for {} minutes and only for the client that made the call. Call the tool again.",
+                    "No kept result {reference}: results are kept for {} minutes and only for the client that made the call. If this ref came from your own call, that call already ran; only the rest of its output cannot be read. Calling again is safe only for tools that just read; for one that changes anything, check the current state first instead of repeating it.",
                     KEEP_FOR.as_secs() / 60
                 ),
                 "validation",
-                json!({ "ref": reference }),
+                json!({ "ref": reference, "output_recoverable": false }),
             ));
         };
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -943,6 +945,11 @@ pub(crate) mod tests {
 
         let stranger = call_as(&relay, "bob", READ, json!({ "ref": reference }));
         assert_eq!(code(&stranger), "MCP_RESULT_GONE", "别人的结果读不到");
+        // 读不到了不等于没做过：不能一句"再调一次"，要先核对（审查 D05）。
+        let error = &stranger["structuredContent"]["error"];
+        assert_eq!(error["details"]["output_recoverable"], false);
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(message.contains("check the current state"), "{message}");
     }
 
     #[test]
