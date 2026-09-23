@@ -9,7 +9,7 @@
 # 用法：
 #   scripts/package.sh                          当前平台
 #   scripts/package.sh x86_64-apple-darwin      指定目标（需先 rustup target add）
-#   VERSION=v0.3.0 scripts/package.sh           覆盖版本号（CI 传 tag 名）
+#   VERSION=v0.7.0 scripts/package.sh           CI 传 tag 名；必须等于 v + Cargo.toml 的版本
 #   scripts/package.sh --checksums              给 dist/ 里已有的包生成 SHA256SUMS
 #
 # 产物：dist/gld-<版本>-<目标>.tar.gz（Windows 目标为 .zip）
@@ -52,21 +52,28 @@ fi
 TARGET="${1:-$(rustc -vV | awk '/^host:/ {print $2}')}"
 [[ -n "$TARGET" ]] || { echo "取不到目标三元组（rustc -vV 没有 host 行？）" >&2; exit 1; }
 
+# 只读 [workspace.package] 那一段的 version，避免撞上依赖里的同名键。
+CARGO_VERSION="$(awk '
+  /^\[workspace\.package\]/ { in_section = 1; next }
+  /^\[/                     { in_section = 0 }
+  in_section && /^version[[:space:]]*=/ {
+    # 按引号切而不是 gsub：`.*"` 是贪婪的，会一路吃到行尾那个引号，
+    # 结果拿到空串——脚本随后报"没找到版本号"，看着像 Cargo.toml 有问题。
+    split($0, parts, "\"")
+    print parts[2]
+    exit
+  }
+' Cargo.toml)"
+[[ -n "$CARGO_VERSION" ]] || { echo "Cargo.toml 里没找到 [workspace.package].version" >&2; exit 1; }
+
 # CI 传 tag 名进来；本地没有 tag，就用 Cargo.toml 里的版本号加个 v。
-if [[ -z "${VERSION:-}" ]]; then
-  # 只读 [workspace.package] 那一段的 version，避免撞上依赖里的同名键。
-  VERSION="v$(awk '
-    /^\[workspace\.package\]/ { in_section = 1; next }
-    /^\[/                     { in_section = 0 }
-    in_section && /^version[[:space:]]*=/ {
-      # 按引号切而不是 gsub：`.*"` 是贪婪的，会一路吃到行尾那个引号，
-      # 结果拿到空串——脚本随后报"没找到版本号"，看着像 Cargo.toml 有问题。
-      split($0, parts, "\"")
-      print parts[2]
-      exit
-    }
-  ' Cargo.toml)"
-  [[ "$VERSION" != "v" ]] || { echo "Cargo.toml 里没找到 [workspace.package].version" >&2; exit 1; }
+#
+# 传进来的必须和 Cargo.toml 对得上。以前不查：在 0.6.0 的提交上打 v0.7.0，包名写着
+# v0.7.0，里面的 gld --version 报 0.6.0，Release 页和实际二进制各说各的（审查 D12）。
+VERSION="${VERSION:-v${CARGO_VERSION}}"
+if [[ "$VERSION" != "v${CARGO_VERSION}" ]]; then
+  echo "版本对不上：要打的是 ${VERSION}，Cargo.toml 是 ${CARGO_VERSION}。先改 Cargo.toml 再打 tag" >&2
+  exit 1
 fi
 
 NAME="${BIN}-${VERSION}-${TARGET}"
@@ -79,6 +86,17 @@ cargo build --release --locked --target "$TARGET" -p "$BIN"
 BUILT="target/${TARGET}/release/${BIN}"
 [[ -f "${BUILT}.exe" ]] && BUILT="${BUILT}.exe"
 [[ -f "$BUILT" ]] || { echo "构建产物不在 $BUILT" >&2; exit 1; }
+
+# 能在这台机器上跑的（目标就是本机），再问一次二进制自己报的版本。交叉编译的目标
+# 跑不起来，只靠上面的 tag 与 Cargo.toml 核对。
+HOST="$(rustc -vV | awk '/^host:/ {print $2}')"
+if [[ "$TARGET" == "$HOST" ]]; then
+  REPORTED="$("$BUILT" --version)"
+  if [[ "$REPORTED" != "${BIN} ${CARGO_VERSION}" ]]; then
+    echo "版本对不上：二进制报的是「${REPORTED}」，应为「${BIN} ${CARGO_VERSION}」" >&2
+    exit 1
+  fi
+fi
 
 # ---------------------------------------------------------------- 打包
 

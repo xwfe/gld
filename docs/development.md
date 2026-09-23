@@ -162,22 +162,25 @@ scripts/package.sh --checksums              # 给 dist/ 里已有的包生成 SH
 
 产物是 `dist/gld-<版本>-<目标三元组>.tar.gz`（Windows 目标为 `.zip`），
 里面是二进制 + README.md。版本号默认取 `Cargo.toml` 的 `[workspace.package].version`
-加个 `v` 前缀，CI 用 `VERSION` 环境变量传 tag 名覆盖。
+加个 `v` 前缀；CI 打 tag 时用 `VERSION` 传 tag 名，必须和它一致。
 
-正式发版由操作者确认后打并推送 `v<workspace.package.version>` 的 tag。
-不要复用文档里的旧版本号；先确认 tag、Cargo.toml、实际二进制版本和构件摘要一致。
-当前 workflow 尚没有替操作者完成全部一致性与供应链验收，文档要求不能写成已经实现的门禁。
+正式发版由操作者确认后打并推送 `v<workspace.package.version>` 的 tag。发版前：
+
+1. 写好发布说明 `docs/releases/v<版本>.md`，和版本号改动一起进 main。有这个文件 Release 就用它；
+   没有才退回 `--generate-notes`——这个仓库直接往 main 提交、不走 PR，自动生成的只有一行
+   Full Changelog。说明里的链接写成 `https://github.com/xwfe/gld/blob/main/…` 的绝对地址：
+   它显示在 Release 页上，相对链接会指到错的地方。
+2. 本机打一次包：`scripts/package.sh`，再按安装文档的做法校验、解压、`--version`、起一次服务。
+3. 在 Actions 里手动跑一次 Release（workflow_dispatch）：走完测试、五个目标的构建打包、上传构件，
+   但不建 Release（`publish` 只在 tag 上跑）。全绿再打 tag。
+
+`scripts/package.sh` 会核对版本：CI 传进来的 tag 必须等于 `v` 加 `Cargo.toml` 的版本，否则
+直接失败；目标就是本机时，还会跑一次打出来的二进制，`--version` 必须报同一个版本。签名和
+构建来源证明（provenance）还没有做。
 
 `.github/workflows/release.yml` 会跑一遍全量测试（tag 不触发 ci.yml，
-所以这里补一道，没测过的不往外发），然后并行构建五个目标、生成 `SHA256SUMS`、
-用 `gh release create --generate-notes` 建 Release。
-
-**第一次别拿真 tag 试。** 先用 `workflow_dispatch` 手动跑一次：它会走完构建打包
-和上传构件，但 `publish` job 有 `if: startsWith(github.ref, 'refs/tags/v')`，
-不会建 Release。跑通了再打 tag。
-
-`x86_64-unknown-linux-musl` 目前标着 `optional`，编不过不影响其他目标发版——
-它在 Ubuntu runner 上要靠 `musl-tools` 提供的 musl-gcc 接管 `cc`，这一环还没实跑验证过。
-空跑那次通了就把 `optional: true` 去掉。
+所以这里补一道，没测过的不往外发），然后并行构建五个目标、生成 `SHA256SUMS`、建 Release。
+五个目标都必须编过：`x86_64-unknown-linux-musl` 以前标着 `optional`，v0.4.0 发版时真跑通了，
+已经去掉。
 
 用户升级后执行 `gld daemon restart` 让守护进程换到新二进制。

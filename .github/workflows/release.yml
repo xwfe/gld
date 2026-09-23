@@ -47,15 +47,12 @@ jobs:
             os: ubuntu-22.04
           # musl 静态链接版：不挑发行版和 glibc 版本，Alpine 上也能跑。
           #
-          # 依赖里带 C 代码的那几个（ring、zstd-sys、bzip2-sys）能不能在 musl 下
-          # 编过，已经在 rust:alpine 容器里实测过：编得过，产物是纯静态的，能运行。
-          # 这里仍标成 optional，是因为还差一环没验：Ubuntu 上 cc 默认指向 glibc 的
-          # gcc，musl 目标要靠 musl-tools 提供的 musl-gcc 接管。这一环出问题时
-          # 不该把整次发版卡住——上面那个 gnu 版本仍然会正常产出。
-          # 跑通一次之后可以把 optional 去掉。
+          # 依赖里带 C 代码的那几个（ring、zstd-sys、bzip2-sys）在 musl 下能编过、产物
+          # 纯静态能运行，rust:alpine 容器里实测过；Ubuntu runner 上靠 musl-tools 的
+          # musl-gcc 接管 cc 这一环，v0.4.0 发版时真跑通了（Release 页上有这个包）。
+          # 所以不再标 optional：编不过就是发版失败，不能悄悄少一个包。
           - target: x86_64-unknown-linux-musl
             os: ubuntu-22.04
-            optional: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
@@ -75,9 +72,13 @@ jobs:
       # 构建和打包都在 scripts/package.sh 里，本地跑的是同一份。
       # 打包逻辑分成两份的话，本地打出来的包和 Release 页上的包会慢慢分家，
       # 而两边都"看起来正常"。
+      # 只有打 tag 时才把 tag 名当版本传进去（脚本会核对它和 Cargo.toml 一致）。手动空跑
+      # 时 GITHUB_REF_NAME 是分支名 main，传进去会被当成"版本对不上"拒掉。
       - name: 构建并打包
         shell: bash
-        run: VERSION="${GITHUB_REF_NAME}" scripts/package.sh "${{ matrix.target }}"
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then export VERSION="$GITHUB_REF_NAME"; fi
+          scripts/package.sh "${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -107,11 +108,21 @@ jobs:
         run: scripts/package.sh --checksums
 
       # 用 gh CLI 而不是第三方 action：它是 runner 自带的，少一层供应链依赖。
+      #
+      # 有 docs/releases/<tag>.md 就用它当发布说明。这个仓库直接往 main 提交、不走 PR，
+      # 自动生成的说明只有一行 Full Changelog（v0.4.0 就是这样），升级要注意什么一个字
+      # 都没有。
       - name: 创建 Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ -f "$notes" ]]; then
+            notes_args=(--notes-file "$notes")
+          else
+            notes_args=(--generate-notes)
+          fi
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --title "gld ${GITHUB_REF_NAME}" \
-            --generate-notes
+            "${notes_args[@]}"
