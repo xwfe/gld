@@ -172,11 +172,21 @@ scripts/package.sh --checksums              # 给 dist/ 里已有的包生成 SH
    它显示在 Release 页上，相对链接会指到错的地方。
 2. 本机打一次包：`scripts/package.sh`，再按安装文档的做法校验、解压、`--version`、起一次服务。
 3. 在 Actions 里手动跑一次 Release（workflow_dispatch）：走完测试、五个目标的构建打包、上传构件，
-   但不建 Release（`publish` 只在 tag 上跑）。全绿再打 tag。
+   但不建 Release（`publish` 只在 tag 上跑，空跑时它显示 skipped 是对的）。全绿再打 tag。
+
+发版后（推 tag 到 Release 出来 8–10 分钟），从 Release 页下载全部包和 `SHA256SUMS`，
+`shasum -a 256 -c SHA256SUMS` 要全部 OK，再把能跑的包解压跑 `--version`。Apple Silicon 上
+`arch -x86_64` 能跑 Intel 版；musl 版是静态链接的，随便一个 Linux 容器都能跑。这一步补的是
+CI 核对不到的地方：见下一段，交叉编译的两个目标 CI 跑不起来。
 
 `scripts/package.sh` 会核对版本：CI 传进来的 tag 必须等于 `v` 加 `Cargo.toml` 的版本，否则
-直接失败；目标就是本机时，还会跑一次打出来的二进制，`--version` 必须报同一个版本。签名和
-构建来源证明（provenance）还没有做。
+直接失败；目标就是本机时，还会跑一次打出来的二进制，`--version` 必须报同一个版本。按 runner
+的架构，CI 里 `aarch64-apple-darwin`、`x86_64-unknown-linux-gnu`、`x86_64-pc-windows-msvc` 会跑到
+这一步，交叉编译的 `x86_64-apple-darwin`、`x86_64-unknown-linux-musl` 跑不到。
+
+签名和构建来源证明（provenance）还没有做。`SHA256SUMS` 只证明下载到的和 CI 产出的是同一份；
+同一个提交本机和 CI 打出来的包哈希不一样（构建不是逐字节可复现的），所以它证明不了包是从
+这份源码编出来的。
 
 `.github/workflows/release.yml` 会跑一遍全量测试（tag 不触发 ci.yml，
 所以这里补一道，没测过的不往外发），然后并行构建五个目标、生成 `SHA256SUMS`、建 Release。
