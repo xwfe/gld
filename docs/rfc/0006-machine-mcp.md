@@ -55,17 +55,17 @@ gld mcp off context7              # 关（--all 全关）
 | server 的说明 | 4 KiB | DeepWiki 3 KB | 截断并写明 |
 | 一次调用直接交回的文字 | 64 KiB | deepwiki `read_wiki_contents` 407 KB | 交前 64 KiB（尽量断在换行），末尾写明用 `read_mcp_result` 从哪接着读 |
 | 留着分段读的全文 | 单条 16 MiB，共 64 MiB，10 分钟 | — | 单条超 16 MiB 的只留前面，并写明后面没了；总量超了先扔最早的 |
-| `structuredContent` | 当前整理规则为有文字时不带，并非先证明重复 | deepwiki 那次 420 KB 恰好与正文相同 | 只有它没有文字时转成文字；独立字段的保真仍需补契约测试 |
+| `structuredContent` | 确定是正文副本时不带（文字解析出来就是它，或 FastMCP `{"result": 正文}` 包装）；2026-09-23 前是"有文字就不带" | deepwiki 那次 420 KB 是 FastMCP 包装的正文副本 | 不是副本、或没有文字时转成 JSON 文字交出，计入分段；契约测试见 `relay.rs` 的 `structured_results_reach_the_model_unless_they_repeat_the_text` |
 | 图片、音频 | 单个 5 MiB（base64） | — | 换成一句"放不下，多大" |
 | 一条消息 | 32 MiB | — | 这次调用报错，不交半截 |
 
 实测经 gld 调 deepwiki 那次：客户端第一次收到 67.9 KB，再调两次 `read_mcp_result` 拿回全部 406,840 字节，一个字节不少。
 
 **已明确的限制**：超过 16 MiB 的结果后半截、超过 5 MiB 的单张图片、过期或配额淘汰的段；
-老 SSE 传输和需要 OAuth 登录的 server 不支持。2026-09-23 审查另指出：上述文本续读实测
-不能证明独立 `structuredContent` 不丢，不能再概括为“会丢的都已说明”。结果过期也不表示
-上游操作未执行，带副作用的调用不可据此自动重试。详见
-[审查 D05](../reviews/2026-09-23-lifecycle-and-docs-audit.md)。
+老 SSE 传输和需要 OAuth 登录的 server 不支持。2026-09-23 审查（D05）指出旧的整理规则会
+丢掉独立的 `structuredContent`，同日改在 toexec-mcp 0.2.1、gld 升级依赖后生效。结果过期
+也不表示上游操作未执行，`MCP_RESULT_GONE` 的提示现在会这样说，带副作用的调用不可据此自动
+重试。详见[审查 §7](../reviews/2026-09-23-lifecycle-and-docs-audit.md#7-处理进展)。
 
 ## 5. 不要了怎么删
 

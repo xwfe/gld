@@ -14,10 +14,12 @@
 //! ## 结果多大算大
 //!
 //! 实测 deepwiki 的 `read_wiki_contents` 一次回 839 KB：407 KB 正文，外加一份
-//! 内容相同的 `structuredContent`。所以：
+//! 内容相同的 `structuredContent`（FastMCP 的 `{"result": 正文}` 包装）。所以：
 //!
-//! - 有文字内容时**不带** `structuredContent`（这三个工具没有 `outputSchema`，
-//!   按协议客户端本来就不看它），只有它、没有文字时把它转成文字；
+//! - `structuredContent` 是正文的副本时**不带**（这三个工具没有 `outputSchema`，
+//!   按协议客户端本来就不看它）；不是副本、或者只有它没有文字时，转成一段文字交出去。
+//!   怎么判副本见 `toexec_mcp::shape`——toexec-mcp 0.2.0 之前只要有文字就整个丢掉，
+//!   上游只放在结构化结果里的字段模型就看不到（审查 D05）；
 //! - 文字超过 [`INLINE_BYTES`] 就先交这么多，全文留在内存里
 //!   （[`KEEP_FOR`]、单条最多 [`MAX_KEPT_BYTES`]、总共 [`KEEP_TOTAL_BYTES`]），
 //!   末尾写明用 `read_mcp_result` 从哪接着读——**不静默截断**；
@@ -711,10 +713,34 @@ pub(crate) mod tests {
                             "pic" => json!({ "content": [
                                 { "type": "image", "data": "a".repeat(args["bytes"].as_u64().unwrap_or(8) as usize), "mimeType": "image/png" }
                             ] }),
-                            "structured" => json!({
-                                "content": [{ "type": "text", "text": "{\"n\":1}" }],
-                                "structuredContent": { "n": 1 }
-                            }),
+                            // kind 不给：文字和结构化是同一份。其余几种见
+                            // `structured_results_reach_the_model_unless_they_repeat_the_text`。
+                            "structured" => match args["kind"].as_str().unwrap_or("") {
+                                "wrapped" => json!({
+                                    "content": [{ "type": "text", "text": "# Page" }],
+                                    "structuredContent": { "result": "# Page" }
+                                }),
+                                "richer" => json!({
+                                    "content": [{ "type": "text", "text": "2 hits" }],
+                                    "structuredContent": { "hits": ["a.rs", "b.rs"], "total": 2 }
+                                }),
+                                "mixed" => json!({
+                                    "content": [
+                                        { "type": "text", "text": "see" },
+                                        { "type": "image", "data": "abc", "mimeType": "image/png" },
+                                        { "type": "resource_link", "uri": "file:///a.txt", "name": "a.txt" }
+                                    ],
+                                    "structuredContent": { "path": "/a.txt" }
+                                }),
+                                "huge" => json!({
+                                    "content": [{ "type": "text", "text": "summary" }],
+                                    "structuredContent": { "rows": "r".repeat(100_000), "total": 1 }
+                                }),
+                                _ => json!({
+                                    "content": [{ "type": "text", "text": "{\"n\":1}" }],
+                                    "structuredContent": { "n": 1 }
+                                }),
+                            },
                             _ => {
                                 json!({ "content": [{ "type": "text", "text": "nope" }], "isError": true })
                             }
@@ -898,6 +924,78 @@ pub(crate) mod tests {
         );
         assert!(result.get("structuredContent").is_none(), "{result}");
         assert_eq!(result["content"][0]["text"], json!("{\"n\":1}"));
+    }
+
+    /// 结构化结果只有是正文的副本时才省掉；多出来的信息、图、资源链接一样都不能丢，
+    /// 太长的照样分段、读得回来（审查 D05：以前只要有文字就整个丢掉结构化结果）。
+    #[test]
+    fn structured_results_reach_the_model_unless_they_repeat_the_text() {
+        let relay = relay();
+        let run = |kind: &str| {
+            call(
+                &relay,
+                CALL,
+                json!({ "server": "demo", "tool": "structured", "arguments": { "kind": kind } }),
+            )
+        };
+        let texts = |result: &Value| -> Vec<String> {
+            result["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|item| item["text"].as_str().map(str::to_string))
+                .collect()
+        };
+
+        // deepwiki 那种 FastMCP 包装：同一份正文，不发两遍。
+        assert_eq!(texts(&run("wrapped")), ["# Page"]);
+
+        // 文字是摘要、结构化是数据：数据得到得了模型那里。
+        let richer = texts(&run("richer"));
+        assert_eq!(richer.len(), 2, "{richer:?}");
+        let data: Value = serde_json::from_str(&richer[1]).expect("json");
+        assert_eq!(data["hits"], json!(["a.rs", "b.rs"]));
+
+        let mixed = run("mixed");
+        let kinds: Vec<&str> = mixed["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["text", "image", "resource_link", "text"], "{mixed}");
+
+        let huge = run("huge");
+        let note = huge["content"][1]["text"].as_str().unwrap();
+        let reference = note
+            .split("ref=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap()
+            .to_string();
+        let mut whole = huge["content"][0]["text"].as_str().unwrap().to_string();
+        let mut offset = whole.len();
+        loop {
+            let next = call(
+                &relay,
+                READ,
+                json!({ "ref": reference, "offset": offset, "max_bytes": 256 * 1024 }),
+            );
+            let text = next["content"][0]["text"].as_str().unwrap();
+            whole.push_str(text);
+            offset += text.len();
+            if next["content"][1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("that is the end")
+            {
+                break;
+            }
+        }
+        let (summary, structured) = whole.split_once('\n').expect("summary then data");
+        assert_eq!(summary, "summary");
+        let data: Value = serde_json::from_str(structured).expect("json");
+        assert_eq!(data["rows"].as_str().map(str::len), Some(100_000));
     }
 
     #[test]
