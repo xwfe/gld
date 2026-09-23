@@ -31,6 +31,10 @@ pub struct HarnessStatus {
     pub baseline_complete: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreadable_paths: Vec<String>,
+    /// Harness 数据目录里读不出来的任务文件（最多列 20 个）。找到了没结束的任务时它们
+    /// 不挡路，只列在这里；没找到时 status 直接报 `STORE_CORRUPT`。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable_task_files: Vec<String>,
     pub capabilities: HashMap<String, CapabilityStatus>,
     pub next_actions: Vec<String>,
 }

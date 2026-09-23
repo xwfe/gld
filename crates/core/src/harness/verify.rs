@@ -81,6 +81,7 @@ impl Harness {
         evidence_session_ids: &[String],
         allow_unverified: bool,
     ) -> HarnessResult<FinishResult> {
+        let _lock = self.store.lock(&self.workspace_id)?;
         let task = self.task(task_id)?;
         if !matches!(task.status, TaskStatus::Active | TaskStatus::Verifying) {
             return Err(HarnessError::new(
@@ -108,7 +109,9 @@ impl Harness {
             });
         }
 
-        let events = self.list_events(&task.id, 0, usize::MAX)?;
+        let log = self.list_events(&task.id, 0, usize::MAX)?;
+        let unreadable_lines = log.unreadable.len();
+        let events = log.into_items();
         let scan = scan_worktree(&self.workspace_root);
         let (branch, head) = git_position(&self.workspace_root);
         let current = WorktreePosition {
@@ -191,6 +194,13 @@ impl Harness {
                     .join(", ")
             ));
         }
+        if unreadable_lines > 0 {
+            // 坏行只会让证据变少（找不到、看不到终态都是拒收），不会让不该过的过；
+            // 但看记录的人得知道记录不全。
+            warnings.push(format!(
+                "任务事件里有 {unreadable_lines} 行读不出来，那几行记的是什么已经不知道；行号见 task_manage action=events 的 unreadable_lines"
+            ));
+        }
         let mut task = if task.status == TaskStatus::Active {
             self.set_status(task, TaskStatus::Verifying)?
         } else {
@@ -226,7 +236,7 @@ impl Harness {
         let Some(task) = self.active_task()? else {
             return Ok(false);
         };
-        let events = self.list_events(&task.id, 0, usize::MAX)?;
+        let events = self.list_events(&task.id, 0, usize::MAX)?.into_items();
         match find_evidence(&events, session_id) {
             Some(known) if known.end.is_none() => {}
             _ => return Ok(false),
@@ -257,18 +267,17 @@ impl Harness {
         )?;
         Ok(true)
     }
+}
 
-    /// 这个任务被接受的验收记录，按时间先后。
-    pub fn verification_records(&self, task_id: &str) -> HarnessResult<Vec<VerificationRecord>> {
-        Ok(self
-            .list_events(task_id, 0, usize::MAX)?
-            .into_iter()
-            .filter(|event| event.kind == "verification_recorded")
-            .filter_map(|event| {
-                serde_json::from_value(event.result_summary.get("verification")?.clone()).ok()
-            })
-            .collect())
-    }
+/// 任务事件里被接受的验收记录，按时间先后。
+pub fn verification_records(events: &[HarnessEvent]) -> Vec<VerificationRecord> {
+    events
+        .iter()
+        .filter(|event| event.kind == "verification_recorded")
+        .filter_map(|event| {
+            serde_json::from_value(event.result_summary.get("verification")?.clone()).ok()
+        })
+        .collect()
 }
 
 /// 一条会话在这个任务里留下的证据，合并成最新的样子。

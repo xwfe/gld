@@ -547,9 +547,17 @@ fn dispatch_tool(
     }
 
     let tracked = if requires_write_baseline(name, &effective_args) {
-        let task = ctx.harness.current_task().ok().flatten();
-        if let Some(task) = task {
-            if let Err(error) = ctx.harness.check_baseline(&task.id) {
+        // 读不出任务就不写。以前读失败当成"没有任务"放行，任务文件一坏，写前检查就
+        // 悄悄没了（审查 D11）。
+        let checked = ctx.harness.current_task().and_then(|task| {
+            if let Some(task) = &task {
+                ctx.harness.check_baseline(&task.id)?;
+            }
+            Ok(task)
+        });
+        let task = match checked {
+            Ok(task) => task,
+            Err(error) => {
                 let output = attach_harness_status(
                     ctx,
                     tool_err_code(error.code(), error.to_string(), "permission"),
@@ -558,6 +566,8 @@ fn dispatch_tool(
                 record_rejection(ctx, operation_id, name, &effective_args, &output);
                 return output;
             }
+        };
+        if let Some(task) = task {
             let _ = ctx.harness.record_event(
                 &task.id,
                 "operation_started",

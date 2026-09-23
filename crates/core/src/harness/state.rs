@@ -12,7 +12,7 @@ use super::model::{
 };
 pub use super::scan::capture_baseline;
 use super::scan::{changed_files, file_states, git_position, scan_worktree, timestamp};
-use super::store::{HarnessError, HarnessResult, HarnessStore};
+use super::store::{HarnessError, HarnessResult, HarnessStore, LogPage, Unreadable};
 
 /// 状态、错误里最多列几个没读到的文件。完整名单在 `project_state` / `refresh_baseline`。
 const UNREADABLE_SAMPLE: usize = 20;
@@ -71,6 +71,7 @@ impl Harness {
         if objective.trim().is_empty() {
             return Err(HarnessError::new("INVALID_ARGUMENT", "任务目标不能为空"));
         }
+        let _lock = self.store.lock(&self.workspace_id)?;
         if let Some(task) = self.current_task()? {
             return Err(HarnessError::new(
                 "TASK_ALREADY_ACTIVE",
@@ -109,12 +110,31 @@ impl Harness {
     }
 
     /// 占着这个工作区任务位的任务（还没结束的那个）。
+    ///
+    /// 有任务文件读不出来、又没找到没结束的任务时报 `STORE_CORRUPT`：读不出来的那个
+    /// 可能就是没结束的。以前是跳过它，工作区就成了"没有任务"——写入不再查基线，
+    /// 还能再开一个任务。
     pub fn current_task(&self) -> HarnessResult<Option<TaskSession>> {
-        Ok(self
-            .store
-            .list_tasks(&self.workspace_id)?
-            .into_iter()
-            .find(|task| task.status.is_open()))
+        Ok(self.scan_tasks()?.0)
+    }
+
+    /// 没结束的任务，以及读不出来的任务文件（找到了没结束的任务时它们不挡路）。
+    fn scan_tasks(&self) -> HarnessResult<(Option<TaskSession>, Vec<Unreadable>)> {
+        let listing = self.store.list_tasks(&self.workspace_id)?;
+        let open = listing.tasks.into_iter().find(|task| task.status.is_open());
+        if open.is_none() {
+            if let Some(first) = listing.unreadable.first() {
+                return Err(HarnessError::new(
+                    "STORE_CORRUPT",
+                    format!(
+                        "{} 个任务文件读不出来，说不准这个工作区有没有没结束的任务，写入和开新任务先停下。第一个：{}",
+                        listing.unreadable.len(),
+                        first.error
+                    ),
+                ));
+            }
+        }
+        Ok((open, listing.unreadable))
     }
 
     /// 同 `current_task`，但先看工作区状态文件里记的 id，只读那一个任务文件。
@@ -122,7 +142,8 @@ impl Harness {
     /// `current_task` 要把这个工作区所有任务文件读一遍（每个都带逐文件基线），
     /// 给 read_output 这种会被反复调的读工具用太重。
     pub fn active_task(&self) -> HarnessResult<Option<TaskSession>> {
-        let Some(state) = self.store.load_workspace_state(&self.workspace_id)? else {
+        // 状态文件只是个索引，坏了就按任务文件本身算；下次开任务、结束任务时重写。
+        let Ok(Some(state)) = self.store.load_workspace_state(&self.workspace_id) else {
             return self.current_task();
         };
         let Some(task_id) = state.active_task_id else {
@@ -147,11 +168,12 @@ impl Harness {
                 "completed 只能经 finish 带验收证据（evidence_session_ids）进入",
             ));
         }
+        let _lock = self.store.lock(&self.workspace_id)?;
         let task = self.task(task_id)?;
         self.set_status(task, next)
     }
 
-    /// 改状态、落盘、记事件。迁移合不合法在这里查；证据由调用方负责。
+    /// 改状态、落盘、记事件。迁移合不合法在这里查；证据和锁由调用方负责。
     pub(super) fn set_status(
         &self,
         mut task: TaskSession,
@@ -185,6 +207,7 @@ impl Harness {
         completed_steps: Option<Vec<String>>,
         pending_steps: Option<Vec<String>>,
     ) -> HarnessResult<TaskSession> {
+        let _lock = self.store.lock(&self.workspace_id)?;
         let mut task = self.task(task_id)?;
         if let Some(steps) = completed_steps {
             task.completed_steps = steps;
@@ -237,6 +260,7 @@ impl Harness {
 
     /// 把当前工作区记成任务的预期状态。gld 自己写完文件、跑完命令之后调。
     pub fn refresh_expected_state(&self, task_id: &str) -> HarnessResult<ExpectedRefresh> {
+        let _lock = self.store.lock(&self.workspace_id)?;
         let mut task = self.task(task_id)?;
         let previous = self.expected_entries(&task)?.0;
         let scan = scan_worktree(&self.workspace_root);
@@ -268,6 +292,9 @@ impl Harness {
     }
 
     /// 任务上次记账时的逐文件清单，以及它是哪一份。
+    ///
+    /// 清单是记账时顺手存的快照，坏了就退回任务开始时的基线：比出来的改动多一些
+    /// （连任务自己改的也算上），`compared_with` 会说是 `task_start`。下次记账重写。
     pub(super) fn expected_entries(
         &self,
         task: &TaskSession,
@@ -275,10 +302,14 @@ impl Harness {
         Ok(
             match self
                 .store
-                .load_expected_entries(&self.workspace_id, &task.id)?
+                .load_expected_entries(&self.workspace_id, &task.id)
             {
-                Some(entries) => (entries, "last_recorded_state"),
-                None => (task.baseline.entries.clone(), "task_start"),
+                Ok(Some(entries)) => (entries, "last_recorded_state"),
+                Ok(None) => (task.baseline.entries.clone(), "task_start"),
+                Err(error) if error.code() == "STORE_CORRUPT" => {
+                    (task.baseline.entries.clone(), "task_start")
+                }
+                Err(error) => return Err(error),
             },
         )
     }
@@ -295,6 +326,7 @@ impl Harness {
         accept_fingerprint: Option<&str>,
         reason: Option<&str>,
     ) -> HarnessResult<BaselineReview> {
+        let _lock = self.store.lock(&self.workspace_id)?;
         let mut task = self.task(task_id)?;
         if !task.status.is_open() {
             return Err(HarnessError::new(
@@ -398,7 +430,7 @@ impl Harness {
         task_id: &str,
         offset: usize,
         limit: usize,
-    ) -> HarnessResult<Vec<HarnessEvent>> {
+    ) -> HarnessResult<LogPage<HarnessEvent>> {
         self.store
             .list_events(&self.workspace_id, task_id, offset, limit)
     }
@@ -440,7 +472,7 @@ impl Harness {
         &self,
         offset: usize,
         limit: usize,
-    ) -> HarnessResult<Vec<OperationRecord>> {
+    ) -> HarnessResult<LogPage<OperationRecord>> {
         self.store
             .list_operations(&self.workspace_id, offset, limit)
     }
@@ -461,7 +493,7 @@ impl Harness {
         let recent_events = task
             .as_ref()
             .and_then(|t| self.list_events(&t.id, 0, 100).ok())
-            .map(|events| events.len())
+            .map(|page| page.records.len())
             .unwrap_or(0);
         Ok(ProjectState {
             schema_version: SCHEMA_VERSION,
@@ -501,7 +533,7 @@ impl Harness {
         // 而 status 挂在每一次失败的工具调用后面——以前工作区里有个 511 MB 的文件，
         // 读一个不存在的路径就要多等 2 秒。没有任务时指纹根本没人用。
         let (branch, head) = git_position(&self.workspace_root);
-        let task = self.current_task()?;
+        let (task, unreadable_tasks) = self.scan_tasks()?;
         let mut baseline_complete = None;
         let mut unreadable_paths = Vec::new();
         let (task_id, task_state, task_updated_at, writable, baseline_matches, reason) = match task
@@ -644,6 +676,11 @@ impl Harness {
             baseline_matches,
             baseline_complete,
             unreadable_paths,
+            unreadable_task_files: unreadable_tasks
+                .into_iter()
+                .take(UNREADABLE_SAMPLE)
+                .map(|file| file.path)
+                .collect(),
             capabilities,
             next_actions,
         })
@@ -662,6 +699,7 @@ impl Harness {
                 recent_task_ids: self
                     .store
                     .list_tasks(&self.workspace_id)?
+                    .tasks
                     .into_iter()
                     .take(20)
                     .map(|t| t.id)
@@ -825,7 +863,10 @@ mod tests {
             .expect("accept");
         assert!(accepted.accepted && accepted.baseline_matches);
         harness.check_baseline(&task.id).expect("接纳之后可以写");
-        let events = harness.list_events(&task.id, 0, 100).expect("events");
+        let events = harness
+            .list_events(&task.id, 0, 100)
+            .expect("events")
+            .into_items();
         let refreshed = events
             .iter()
             .find(|event| event.kind == "baseline_refreshed")

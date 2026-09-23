@@ -92,7 +92,10 @@ fn 外部文件变化会被识别且操作会留下事件() {
             json!({"ok": true}),
         )
         .expect("记录事件");
-    let events = harness.list_events(&task.id, 0, 10).expect("读取事件");
+    let events = harness
+        .list_events(&task.id, 0, 10)
+        .expect("读取事件")
+        .into_items();
     assert!(events.len() >= 2);
     assert!(events
         .iter()

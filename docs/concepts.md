@@ -637,6 +637,28 @@ task_manage action=refresh_baseline task_id=<id> accept_fingerprint=<current.fin
 > 这两条都是 0.3.0 修的。之前它们都算进指纹，而工具自己就会写它们——
 > 结果是一开任务，第一次写操作就被判成"外部修改"，任务模式整个用不了。
 
+### 任务数据坏了会怎样
+
+任务数据在 `GLD_HOME/harness/workspaces/<id>/`（默认 `~/.config/gld/harness/…`）。正常使用不会坏：
+任务文件是先写临时文件、落盘、再改名换上去的，写到一半被杀只会留下不算数的 `*.json.tmp.*`；
+同一个项目上开任务、改任务、收尾是排队的，两个客户端同时 `start`，只有一个开成，
+另一个报 `TASK_ALREADY_ACTIVE`。
+
+真坏了（手改过、磁盘出错），gld 不删也不改写读不出来的文件，按下表处理：
+
+| 坏的是 | gld 怎么做 | 你怎么办 |
+| --- | --- | --- |
+| `tasks/<任务>.json`，而且没有别的没结束的任务 | `status`、写工具（`exec_command`、`apply_patch`）、`start` 都报 `STORE_CORRUPT`，消息里带文件路径；读文件的工具照常 | 修好；或者 `mv <文件> <文件>.corrupt` 挪开（不是 `.json` 就不当任务读），等于放弃这个任务的记账 |
+| 同上，但另有一个没结束的任务 | 不挡路，`status` 的 `unreadable_task_files` 列出来 | 同上，不急 |
+| `events/<任务>.jsonl`、`operations.jsonl` 里的某几行 | 跳过坏行，后面的照读；`events`、`operation_log` 回 `unreadable_lines`（行号从 1 数，带解析错误），`context` 回 `unreadable_line_count`，`finish` 的 `warnings`、`change_summary.risks` 会提 | 不处理也能继续。坏行只会让证据变少（找不到就拒收），不会让不该过的验收通过 |
+| `state.json`、`expected/<任务>.json` | 这两个是从任务文件推出来的索引，坏了就按任务文件重算；`refresh_baseline` 退回到和任务开始时比（`compared_with: task_start`） | 不用管，下次记账时重写 |
+
+日志最后一行写到一半（进程被杀、磁盘满）不会连累下一条：下次追加先补一个换行把它隔开，
+它成了一条报得出行号的坏行。
+
+为什么任务文件坏了要停写：以前读不出来的任务文件被悄悄跳过，项目就成了"没有任务"，
+写入不再查基线，还能再开一个任务——任务模式本来要守的东西悄悄没了。
+
 ---
 
 ## 命令的输出能读多久，stdin 怎么关

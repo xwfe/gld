@@ -4,7 +4,8 @@ use crate::tools::workspace::{tool_ok, WorkspaceError};
 use crate::tools::ToolContext;
 
 use super::model::{TaskSession, TaskStatus};
-use super::store::HarnessError;
+use super::store::{HarnessError, LogPage};
+use super::verify::verification_records;
 
 pub const TOOL_NAMES: &[&str] = &[
     "harness_status",
@@ -48,14 +49,22 @@ fn harness_status(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
 fn operation_log(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let offset = args.get("cursor").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = crate::tools::args::bounded(args, "operation_log", "limit") as usize;
-    let operations = ctx
+    let page = ctx
         .harness
         .list_operations(offset, limit)
         .map_err(map_error)?;
-    Ok(json!({
-        "operations": operations,
-        "next_cursor": offset + operations.len()
-    }))
+    Ok(log_view("operations", page))
+}
+
+/// 一页日志回给客户端的样子。`next_cursor` 按文件行算，坏行也占一行；坏行只在有的时候
+/// 列在 `unreadable_lines`，带行号和解析错误。
+fn log_view<T: serde::Serialize>(key: &str, page: LogPage<T>) -> Value {
+    let mut value = json!({"next_cursor": page.next_offset});
+    if !page.unreadable.is_empty() {
+        value["unreadable_lines"] = json!(page.unreadable);
+    }
+    value[key] = json!(page.into_items());
+    value
 }
 
 fn project_state(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -176,36 +185,52 @@ fn task_context(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError
     };
     let max_bytes = crate::tools::args::bounded(args, "task_context", "max_bytes") as usize;
     let view = task_view(&task)?;
-    // 预算按客户端最终收到的整个对象算，含 tool_ok 补上的 "ok"。truncated 和
-    // next_cursor 先占最长的写法，装完填真值只会变短。任务本身不截：目标和步骤
-    // 是调用方自己写的，正常离 8 KB 的下限很远。
+    // 预算按客户端最终收到的整个对象算，含 tool_ok 补上的 "ok"。truncated、
+    // next_cursor、unreadable_line_count 先占最长的写法，装完填真值只会变短。任务本身
+    // 不截：目标和步骤是调用方自己写的，正常离 8 KB 的下限很远。坏行只回个数不列明细：
+    // 整个文件都坏了时明细能把回包撑爆，要看行号用 action=events（按 limit 分页）。
     let skeleton = json!({
-        "ok": true, "task": view, "events": [], "truncated": false, "next_cursor": usize::MAX
+        "ok": true, "task": view, "events": [], "truncated": false, "next_cursor": usize::MAX,
+        "unreadable_line_count": usize::MAX
     });
     let mut used = json_len(&skeleton)?;
     let mut events = Vec::new();
+    let mut unreadable = 0;
     let mut truncated = false;
+    let mut next_cursor = 0;
     'fill: loop {
         let page = ctx
             .harness
-            .list_events(&task.id, events.len(), EVENT_PAGE)
+            .list_events(&task.id, next_cursor, EVENT_PAGE)
             .map_err(map_error)?;
-        let last_page = page.len() < EVENT_PAGE;
-        for event in page {
+        for (line, event) in page.records {
             let cost = json_len(&event)? + usize::from(!events.is_empty());
             if used + cost > max_bytes {
                 truncated = true;
+                next_cursor = line;
+                // 坏行的行号从 1 数，截断点 line 从 0 数：之前的坏行是 <= line 的那些。
+                unreadable += page
+                    .unreadable
+                    .iter()
+                    .filter(|bad| bad.line.is_some_and(|bad| bad <= line))
+                    .count();
                 break 'fill;
             }
             used += cost;
             events.push(event);
         }
-        if last_page {
+        unreadable += page.unreadable.len();
+        next_cursor = page.next_offset;
+        if page.exhausted {
             break;
         }
     }
-    let next_cursor = events.len();
-    Ok(json!({"task": view, "events": events, "truncated": truncated, "next_cursor": next_cursor}))
+    let mut value =
+        json!({"task": view, "events": events, "truncated": truncated, "next_cursor": next_cursor});
+    if unreadable > 0 {
+        value["unreadable_line_count"] = json!(unreadable);
+    }
+    Ok(value)
 }
 
 /// 装事件时一次向存储要几条。只决定读几次文件，装多少由 max_bytes 决定。
@@ -242,15 +267,18 @@ fn list_task_events(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
     let task_id = task_id(args)?;
     let offset = args.get("cursor").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = crate::tools::args::bounded(args, "list_task_events", "limit") as usize;
-    let events = ctx
+    let page = ctx
         .harness
         .list_events(task_id, offset, limit)
         .map_err(map_error)?;
-    Ok(json!({"events": events, "next_cursor": offset + events.len()}))
+    Ok(log_view("events", page))
 }
 
 /// 摘要最多列几个改动文件，和改之前一样是 200；超过时看 total_changed_files。
 const SUMMARY_FILES: usize = 200;
+
+/// 摘要里的 evidence 列前几条事件。验收记录从全部事件里找，不受这个限制。
+const SUMMARY_EVENTS: usize = 100;
 
 fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let task = if let Some(task_id) = args.get("task_id").and_then(Value::as_str) {
@@ -270,14 +298,14 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         .into_iter()
         .take(SUMMARY_FILES)
         .collect::<Vec<_>>();
-    let events = ctx
+    let log = ctx
         .harness
-        .list_events(&task.id, 0, 100)
+        .list_events(&task.id, 0, usize::MAX)
         .map_err(map_error)?;
-    let verification = ctx
-        .harness
-        .verification_records(&task.id)
-        .map_err(map_error)?;
+    let unreadable_lines = log.unreadable.len();
+    let mut events = log.into_items();
+    let verification = verification_records(&events);
+    events.truncate(SUMMARY_EVENTS);
     let mut risks = Vec::new();
     match verification.last() {
         None if task.status == TaskStatus::CompletedUnverified => {
@@ -297,6 +325,11 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         risks.push(format!(
             "{} 个文件没读到，它们有没有变不知道",
             changes.unreadable.len()
+        ));
+    }
+    if unreadable_lines > 0 {
+        risks.push(format!(
+            "任务事件里有 {unreadable_lines} 行读不出来，记录不全；行号见 task_manage action=events"
         ));
     }
     Ok(json!({
