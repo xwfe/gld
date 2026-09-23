@@ -17,14 +17,18 @@ use serde::{Deserialize, Serialize};
 
 use super::App;
 use crate::error::AppResult;
-use crate::hub::{self, runtime::HubState, HUB_SCOPE};
+use crate::hub::{
+    self,
+    runtime::{HubState, TunnelSnapshot},
+    HUB_SCOPE,
+};
 use crate::platform::platform;
 use crate::runtime::{is_own_process, ServiceKind};
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, HubConfig};
 use crate::workspace::WorkspaceProfile;
 
 /// 服务那几条检查的归属。
-const SERVICE_SCOPE: &str = "MCP 服务";
+pub const SERVICE_SCOPE: &str = "MCP 服务";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -133,6 +137,10 @@ impl App {
             &profiles,
             &settings,
             &service_secret_present,
+        ));
+        checks.push(tunnel_check(
+            &settings.hub,
+            hub::runtime::tunnel_snapshot().await.as_ref(),
         ));
         checks.extend(config_checks(&profiles, &settings, &secret_present));
         checks.extend(self.port_checks(&profiles, &settings).await?);
@@ -499,6 +507,71 @@ pub fn service_checks(
     }
 
     checks
+}
+
+/// 隧道此刻在不在：配置对不对由 [`service_checks`] 的"公网入口"那条管，这里只看
+/// 运行时——隧道进程还在不在、这次实际用的是哪个地址、起隧道时报了什么错。
+///
+/// 为什么要单独一条：配置全对、服务也在跑，而 cloudflared 自己退了（token 失效、
+/// 被 kill、放弃重连）时，本机客户端一切正常，只有公网那一头没了。这种情况以前
+/// 只在 `gld ls` 的一行地址里看不出来，体检也一个字不说。
+///
+/// 纯函数：`snapshot` 是 `None` 表示服务没在跑。
+pub fn tunnel_check(hub: &HubConfig, snapshot: Option<&TunnelSnapshot>) -> DoctorCheck {
+    const TUNNEL: &str = "隧道";
+    let configured = hub.public_url.trim().trim_end_matches('/');
+    let Some(snapshot) = snapshot else {
+        return DoctorCheck::ok(SERVICE_SCOPE, TUNNEL, "服务没在跑，隧道也没起");
+    };
+    if !snapshot.error.is_empty() {
+        return DoctorCheck::fail(
+            SERVICE_SCOPE,
+            TUNNEL,
+            format!(
+                "隧道没起来：{}。服务本身在跑，本机客户端不受影响",
+                snapshot.error.trim()
+            ),
+            "修好上面那个原因后 gld restart；只用本机就 gld share --off",
+        );
+    }
+    let effective = snapshot.public_base.trim().trim_end_matches('/');
+    if snapshot.managed {
+        let pid = snapshot
+            .pid
+            .map(|pid| format!("pid {pid}"))
+            .unwrap_or_else(|| "拿不到 pid".to_string());
+        if snapshot.alive == Some(false) {
+            return DoctorCheck::fail(
+                SERVICE_SCOPE,
+                TUNNEL,
+                format!(
+                    "隧道进程（{pid}）已经退出，公网地址现在不通；服务还在本地跑，所以本机客户端看不出异常"
+                ),
+                "gld restart（服务和隧道一起重起）；反复退出看它自己的日志：gld logs",
+            );
+        }
+        let temporary = hub.tunnel_type == "cloudflare" && hub.cloudflare_mode != "named";
+        let detail = if effective.is_empty() {
+            format!("{} 隧道在跑（{pid}），但还没拿到公网地址", hub.tunnel_type)
+        } else if temporary {
+            format!(
+                "{} 临时地址 {effective}（{pid}）；每次重启都会变",
+                hub.tunnel_type
+            )
+        } else {
+            format!("{} 隧道在跑（{pid}）：{effective}", hub.tunnel_type)
+        };
+        return DoctorCheck::ok(SERVICE_SCOPE, TUNNEL, detail);
+    }
+    if effective.is_empty() {
+        return DoctorCheck::ok(SERVICE_SCOPE, TUNNEL, "没有公网入口，服务只在本机地址上");
+    }
+    // 自建反代、已有公网地址：进程不是 gld 起的，gld 只知道这个地址被登记了。
+    let mut detail = format!("{effective}：这条链路不是 gld 起的（自建入口），它通不通 gld 看不到");
+    if !configured.is_empty() && configured != effective {
+        detail = format!("{detail}；配置里写的是 {configured}，服务这次用的是 {effective}");
+    }
+    DoctorCheck::ok(SERVICE_SCOPE, TUNNEL, detail)
 }
 
 /// 纯配置检查：不碰磁盘、不碰端口，只看配置之间是否自洽。
@@ -1159,5 +1232,105 @@ mod tests {
         let entry = find(&checks, "项目目录").expect("directory check");
         assert_eq!(entry.level, DoctorLevel::Fail);
         assert!(entry.fix.contains("--path"), "{}", entry.fix);
+    }
+
+    fn snapshot(
+        public_base: &str,
+        error: &str,
+        managed: bool,
+        alive: Option<bool>,
+    ) -> TunnelSnapshot {
+        TunnelSnapshot {
+            public_base: public_base.into(),
+            error: error.into(),
+            managed,
+            pid: managed.then_some(4242),
+            alive,
+        }
+    }
+
+    /// 这条检查存在的理由：配置全对、服务在跑，而隧道进程自己退了。
+    /// 本机客户端一切正常，公网那一头已经没了。
+    #[test]
+    fn a_tunnel_process_that_died_is_a_failure() {
+        let hub = HubConfig {
+            tunnel_type: "cloudflare".into(),
+            cloudflare_mode: "named".into(),
+            public_url: "https://mcp.example.com".into(),
+            ..Default::default()
+        };
+
+        let check = tunnel_check(
+            &hub,
+            Some(&snapshot("https://mcp.example.com", "", true, Some(false))),
+        );
+        assert_eq!(check.level, DoctorLevel::Fail);
+        assert!(check.detail.contains("pid 4242"), "{}", check.detail);
+        assert!(check.fix.contains("gld restart"), "{}", check.fix);
+
+        let alive = tunnel_check(
+            &hub,
+            Some(&snapshot("https://mcp.example.com", "", true, Some(true))),
+        );
+        assert_eq!(alive.level, DoctorLevel::Ok);
+        assert!(alive.detail.contains("mcp.example.com"), "{}", alive.detail);
+    }
+
+    /// 隧道起不来时服务照样在本地跑，所以得说清"哪半边坏了"。
+    #[test]
+    fn a_tunnel_that_never_started_says_why() {
+        let hub = HubConfig {
+            tunnel_type: "frp".into(),
+            ..Default::default()
+        };
+        let check = tunnel_check(&hub, Some(&snapshot("", "frpc 退出码 1", false, None)));
+        assert_eq!(check.level, DoctorLevel::Fail);
+        assert!(check.detail.contains("frpc 退出码 1"), "{}", check.detail);
+        assert!(check.detail.contains("本机客户端"), "{}", check.detail);
+    }
+
+    /// 临时地址要点名"会变"：这是唯一一种逼人删了重建连接器的配置。
+    #[test]
+    fn a_quick_address_is_named_as_temporary() {
+        let hub = HubConfig {
+            tunnel_type: "cloudflare".into(),
+            cloudflare_mode: "quick".into(),
+            ..Default::default()
+        };
+        let check = tunnel_check(
+            &hub,
+            Some(&snapshot(
+                "https://ab-cd.trycloudflare.com",
+                "",
+                true,
+                Some(true),
+            )),
+        );
+        assert_eq!(check.level, DoctorLevel::Ok);
+        assert!(check.detail.contains("每次重启都会变"), "{}", check.detail);
+        assert!(check.detail.contains("trycloudflare"), "{}", check.detail);
+    }
+
+    /// 自建入口：进程不是 gld 起的，体检不能假装知道它通不通。
+    #[test]
+    fn a_self_hosted_entry_says_gld_cannot_see_it() {
+        let hub = HubConfig {
+            tunnel_type: "none".into(),
+            public_url: "https://ai.example.top".into(),
+            ..Default::default()
+        };
+        let check = tunnel_check(
+            &hub,
+            Some(&snapshot("https://ai.example.top", "", false, None)),
+        );
+        assert_eq!(check.level, DoctorLevel::Ok);
+        assert!(check.detail.contains("不是 gld 起的"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_stopped_service_has_no_tunnel_to_report() {
+        let check = tunnel_check(&HubConfig::default(), None);
+        assert_eq!(check.level, DoctorLevel::Ok);
+        assert!(check.detail.contains("没在跑"), "{}", check.detail);
     }
 }

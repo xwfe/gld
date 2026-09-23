@@ -1004,6 +1004,7 @@ Options:
 Usage: gld doctor [OPTIONS]
 
 Options:
+      --probe           再实地探一次本地 / 公网端点和 OAuth 元数据（同 gld health）；不加它一个网络请求都不发
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）

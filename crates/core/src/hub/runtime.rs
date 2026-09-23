@@ -106,6 +106,37 @@ pub async fn public_base() -> Option<(String, String)> {
         .map(|runtime| (runtime.public_base.clone(), runtime.tunnel_error.clone()))
 }
 
+/// 此刻公网那一头是什么样，给体检用；服务没在跑是 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelSnapshot {
+    /// 这次起来实际用的公网基地址（Cloudflare 临时地址只有这里有）。
+    pub public_base: String,
+    /// 起隧道时的报错，空串表示没有。
+    pub error: String,
+    /// gld 自己起着一个隧道进程（cloudflared / frpc）吗。自建反代、
+    /// 手填地址、没有公网入口时都是 false。
+    pub managed: bool,
+    pub pid: Option<u32>,
+    /// 那个进程还在不在；不是 gld 起的隧道时是 `None`。
+    pub alive: Option<bool>,
+}
+
+pub async fn tunnel_snapshot() -> Option<TunnelSnapshot> {
+    let mut guard = RUNTIME.lock().await;
+    let runtime = guard.as_mut()?;
+    let (managed, pid, alive) = match runtime.tunnel.as_mut() {
+        Some(tunnel) => (true, tunnel.pid(), Some(tunnel.still_running())),
+        None => (false, None, None),
+    };
+    Some(TunnelSnapshot {
+        public_base: runtime.public_base.clone(),
+        error: runtime.tunnel_error.clone(),
+        managed,
+        pid,
+        alive,
+    })
+}
+
 /// 服务这次运行期间的请求统计（所有项目合计）。没在跑是 `None`。
 pub async fn usage() -> Option<crate::usage::ServiceUsageStats> {
     RUNTIME

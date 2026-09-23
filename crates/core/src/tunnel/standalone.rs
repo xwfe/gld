@@ -24,6 +24,20 @@ impl StandaloneTunnel {
     pub async fn stop(self) {
         let _ = cloudflare::stop_child(self.child, self.pid).await;
     }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// 这个进程还在不在。cloudflared 自己退了（token 失效、被 kill、边缘断了
+    /// 之后放弃重连）时，监听器照常跑着，只有公网那一头没了——体检要说得出
+    /// 这件事，否则用户看到的是"配置全对，ChatGPT 就是连不上"。
+    ///
+    /// `try_wait` 不阻塞：还在跑是 `Ok(None)`。拿不准（拿不到状态）算它还在，
+    /// 免得把正常的隧道报成挂了。
+    pub fn still_running(&mut self) -> bool {
+        !matches!(self.child.try_wait(), Ok(Some(_)))
+    }
 }
 
 /// Cloudflare 的两种写法共用这一份参数。

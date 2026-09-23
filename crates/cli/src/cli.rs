@@ -224,7 +224,11 @@ pub enum Command {
     Health(HealthArgs),
 
     /// 体检：检查配置是否自洽，并给出每个问题的修复命令
-    Doctor,
+    Doctor {
+        /// 再实地探一次本地 / 公网端点和 OAuth 元数据（同 gld health）；不加它一个网络请求都不发
+        #[arg(long)]
+        probe: bool,
+    },
 
     /// 直接调用工具内核：不接 AI 客户端也能验证 Agent 会看到什么
     #[command(subcommand)]

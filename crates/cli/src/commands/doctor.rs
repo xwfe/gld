@@ -3,14 +3,33 @@
 //! 输出按归属分组，每个有问题的项下面直接给出该跑的命令。
 //! 有任何 ✗ 时退出码为 1，方便 CI / 脚本判断。
 
-use gld_core::app::{Diagnosis, DoctorLevel};
+use gld_core::app::{Diagnosis, DoctorCheck, DoctorLevel, SERVICE_SCOPE};
+use gld_core::health::HealthItem;
 use gld_daemon::Request;
 
 use super::Ctx;
 use crate::error::{CliError, CliResult};
 
-pub async fn run(ctx: &mut Ctx) -> CliResult {
-    let diagnosis: Diagnosis = ctx.backend.call_typed(Request::Doctor).await?;
+pub async fn run(ctx: &mut Ctx, probe: bool) -> CliResult {
+    let mut diagnosis: Diagnosis = ctx.backend.call_typed(Request::Doctor).await?;
+    if probe {
+        // 和 `gld health` 同一个请求：探活的判断只有一处实现。体检这边只是把
+        // 结果并进同一张表，好让"配置对不对"和"此刻通不通"一起看、一起算退出码。
+        let items: Vec<HealthItem> = ctx.backend.call_typed(Request::HubHealth).await?;
+        diagnosis
+            .checks
+            .extend(items.into_iter().map(|item| DoctorCheck {
+                scope: SERVICE_SCOPE.to_string(),
+                label: format!("探活 {}", item.label),
+                level: if item.ok {
+                    DoctorLevel::Ok
+                } else {
+                    DoctorLevel::Fail
+                },
+                detail: item.detail,
+                fix: if item.ok { String::new() } else { item.hint },
+            }));
+    }
     if ctx.out.json_or(&diagnosis) {
         return if diagnosis.is_healthy() {
             Ok(())
@@ -60,6 +79,12 @@ pub async fn run(ctx: &mut Ctx) -> CliResult {
     let failures = diagnosis.count(DoctorLevel::Fail);
     let warnings = diagnosis.count(DoctorLevel::Warn);
     ctx.out.line("");
+    if !probe {
+        // 体检不发网络请求，所以"公网地址此刻通不通"它答不了——尤其是自建反代
+        // 那种 gld 看不到的链路。把这句话放在这里，而不是等用户去翻文档。
+        ctx.out
+            .line(ctx.out.dim("公网那一头此刻通不通：gld doctor --probe"));
+    }
     if failures == 0 && warnings == 0 {
         ctx.out.line(ctx.out.green("全部正常。"));
         return Ok(());
