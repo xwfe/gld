@@ -56,3 +56,5 @@
   `dist/`（9-11 的 0.3.0 包）、`~/.local/opt` 里两份中间备份、scratchpad。
 - 改：`gld rm` 帮助与 concepts.md 的说法、`docs/cli.md` 重新生成（只变这一行）。
 - 全量测试通过后推送。
+- 推送后 macOS CI 挂在 `a_failing_subcommand_fails_the_run_and_keeps_the_old_file`：先加诊断输出（`446cb3d`）
+  拿到 stderr，定位到 bash 3.2 + UTF-8 把中文读进变量名、EXIT trap 把崩溃报成 0；修复 `9007348`，CI 全绿。

@@ -40,3 +40,7 @@
 - 命令行只比版本号和协议号；同版本号的新构建不重启不会有任何提示。
 - 本机 `ls` 是 eza 的别名，`ls -t` 会报参数错误，脚本里用 `command ls`。
 - `gld rm` 只删配置、凭据、OAuth 客户端注册；任务记录按目录存在 `harness/`，日志按项目 id 存在 `logs/`，都留着。
+- macOS 自带 bash 3.2 在 UTF-8 locale 下会把紧跟 `$var` 的中文字节读进变量名；本机 shell 没设 LANG，
+  CI runner 是 en_US.UTF-8。脚本里变量紧跟中文一律写 `${var}`，测试固定 LC_ALL=en_US.UTF-8。
+- bash 3.2 在 set -u 等致命错误后运行 EXIT trap 时 `$?` 为 0，`rc=$?; …; exit $rc` 也救不回；用完成标记兜底。
+- CI 日志要登录才能看（API 要 admin 权限），`gh` 没登录时只能请用户贴；断言消息里要带上子进程的 stdout/stderr。
