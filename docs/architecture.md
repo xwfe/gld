@@ -9,8 +9,10 @@ crates/
 └── cli/     gld          唯一的二进制：clap 解析、后端选择、终端渲染
 ```
 
-依赖方向只有一个：`cli → daemon → core`。core 里没有任何 `clap`、socket、进程管理的代码；
-daemon 里没有任何终端输出；cli 里没有任何业务规则。
+依赖向内指向 core，core 不反向依赖 cli 或 daemon。core 不负责 clap 命令行解析，
+但**确实包含 HTTP 监听、命令执行、隧道和 MCP 子进程管理**；daemon 负责守护进程自身的
+IPC 与生命周期，cli 负责参数解析、请求组装和终端展示。不能把“core 不依赖 daemon”
+写成“core 没有网络或进程代码”。业务规则应尽量留在 core，由契约测试约束入口一致性。
 
 ```text
 用户
@@ -26,14 +28,14 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
                                                                  core::runtime / tunnel / mcp / actions …
 ```
 
-两条路径在 `dispatch` 汇合，所以命令行直连和经守护进程转发执行的是同一段代码，
-行为不可能不一致。
+两条路径在 `dispatch` 汇合，复用应用用例；但身份、配置、进程寿命和内存会话可能不同。
+特别是 CLI 直连模式不能让下一次新进程继承命令会话，不能仅凭共用代码断言端到端行为相同。
 
 ## core：内核与服务层
 
 | 模块 | 职责 |
 | --- | --- |
-| `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。两个唯一入口：`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文——MCP 监听器和 `gld tool call` 都走它，所以命令行里试出来的行为就是 AI 看到的行为 |
+| `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文。MCP 与 CLI 复用内核，但还需验证各自身份、配置、schema 和结果传递 |
 | `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务 hub 和单个工作区（`Endpoint` 二选一；后者是 RFC-0004 之前单项目服务的路径，命令行已经起不了它），认证、OAuth 路由、请求日志只有一份 |
 | `machine_mcp/` | 本机装好的 MCP server 经服务转给 AI（RFC-0006）。读配置、握手调用、子进程通道、连接池、结果整理在共享库 `toexec-mcp`（ccnm 同用）；这里是 gld 自己的：怎么起进程和怎么杀、HTTP 通道、`list_mcp_tools` 等三个工具。自成一块，hub 只在列工具、分发、关服务三处调它 |
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |
@@ -47,8 +49,8 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | `async_rt.rs` | tokio 运行时垫片：工具内核是同步 API，内部需要 `spawn` / `block_on` |
 | **`app/`** | **应用服务层**：`App` 持有 `DataStore`、`RuntimeSupervisor` 和命令行工具调用的 `ToolContext` 缓存，每个子模块是一组用例；`app/doctor.rs` 的纯配置检查不依赖磁盘，可直接单测 |
 
-`app` 是 core 对外的唯一门面。桌面版里这一层是 Tauri command，
-这里改成普通的 `impl App` 方法，方便任何调用方（命令行、守护进程、测试）直接用。
+`app` 是应用用例门面；工具传输另经上表中的工具分发入口。桌面版里的 Tauri command
+在这里改成普通的 `impl App` 方法，供命令行、守护进程和测试复用。
 
 `app::workspace_fields` 是一张“可设置字段”表：命令行帮助、`gld fields` 输出和实际写入
 都从同一张表来，加字段只改一处。三个约定：

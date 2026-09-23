@@ -6,7 +6,8 @@
 
 用户的话："gld 或 ccnm 都可以使用 agent 和 runtime 机器上的已经安装的 skills 和 mcp……最好为 gld 完善一套合理的 mcp/skills 工具来专门操作它们……runtime 传递过程是否会丢信息，数据量是否过大……代码模块化，解耦，如果后期这块功能不需要，能简单的删除"。
 
-ChatGPT 这类 Web AI 只能连一个公网 MCP 地址，用不上本机 Claude Code、Codex 里装好的 context7、deepwiki、exa。gld 本来就是那个地址，这次让它把这些 server 也转过去。
+远端 Web AI 不能直接访问开发机的本地 stdio server。gld 提供一个共同的可达 MCP 入口，
+把本机已安装且明确启用的 context7、deepwiki、exa 等能力转过去；不以客户端“只能连接一个地址”为前提。
 
 ## 2. 怎么用
 
@@ -22,7 +23,7 @@ gld mcp off context7              # 关（--all 全关）
 | 工具 | 做什么 |
 | --- | --- |
 | `list_mcp_tools` | 不带参数：开着的 server 和状态（没起 / 在跑 / 配置有问题）；带 `server`：它的工具、参数表和它自己的说明；再带 `tool`：一个工具的完整定义 |
-| `call_mcp_tool` | `server`、`tool`、`arguments`，结果原样交回 |
+| `call_mcp_tool` | `server`、`tool`、`arguments`，结果经过有界整理与分页返回；不是任意结果类型的无损透传 |
 | `read_mcp_result` | 一个结果太大、分段交的，用它读后面的段 |
 
 三个都不带 `workspace`：这些 server 属于这台机器，不属于哪个项目。
@@ -54,13 +55,17 @@ gld mcp off context7              # 关（--all 全关）
 | server 的说明 | 4 KiB | DeepWiki 3 KB | 截断并写明 |
 | 一次调用直接交回的文字 | 64 KiB | deepwiki `read_wiki_contents` 407 KB | 交前 64 KiB（尽量断在换行），末尾写明用 `read_mcp_result` 从哪接着读 |
 | 留着分段读的全文 | 单条 16 MiB，共 64 MiB，10 分钟 | — | 单条超 16 MiB 的只留前面，并写明后面没了；总量超了先扔最早的 |
-| 重复的 `structuredContent` | 有文字时不带 | deepwiki 那次 420 KB 和正文一模一样 | 只有它没有文字时，转成文字交 |
+| `structuredContent` | 当前整理规则为有文字时不带，并非先证明重复 | deepwiki 那次 420 KB 恰好与正文相同 | 只有它没有文字时转成文字；独立字段的保真仍需补契约测试 |
 | 图片、音频 | 单个 5 MiB（base64） | — | 换成一句"放不下，多大" |
 | 一条消息 | 32 MiB | — | 这次调用报错，不交半截 |
 
 实测经 gld 调 deepwiki 那次：客户端第一次收到 67.9 KB，再调两次 `read_mcp_result` 拿回全部 406,840 字节，一个字节不少。
 
-**会丢的，都说出来**：超过 16 MiB 的结果的后半截；超过 5 MiB 的单张图片；10 分钟没读完的段；老 SSE 传输的 server、要 OAuth 登录的 server 整个用不了。
+**已明确的限制**：超过 16 MiB 的结果后半截、超过 5 MiB 的单张图片、过期或配额淘汰的段；
+老 SSE 传输和需要 OAuth 登录的 server 不支持。2026-09-23 审查另指出：上述文本续读实测
+不能证明独立 `structuredContent` 不丢，不能再概括为“会丢的都已说明”。结果过期也不表示
+上游操作未执行，带副作用的调用不可据此自动重试。详见
+[审查 D05](../reviews/2026-09-23-lifecycle-and-docs-audit.md)。
 
 ## 5. 不要了怎么删
 

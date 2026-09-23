@@ -21,7 +21,7 @@ cargo +1.89 check --workspace --all-targets --locked
 ## 测试
 
 ```bash
-GLD_HOME=$(mktemp -d) cargo test --workspace
+GLD_HOME=$(mktemp -d) cargo test --workspace --all-targets --locked
 ```
 
 `GLD_HOME` 指向临时目录是为了不碰你真实的 `~/.config/gld`：core 里有少数测试会写数据文件，
@@ -40,7 +40,7 @@ GLD_HOME=$(mktemp -d) cargo test --workspace
 | 一步到位的入口 | `crates/cli/tests/start_and_upgrade.rs` | `gld start <目录>` 的自动登记与归属判断（非项目目录不登记）、`gld ls` 的服务 / 项目视图、`gld upgrade` 换目录换地址 |
 | 公网入口 | `crates/cli/tests/share_one_command.rs`、`named_tunnel_start.rs` | 服务的 `--tunnel` 各种走法（假 cloudflared / 假 frpc）、沿用已配好的入口、缺隧道程序时的报错、固定域名的公网探测 |
 | 收摊 | `crates/cli/tests/destroy_and_stop_all.rs` | `gld stop` 不删东西、`gld rm` 删干净且必须确认 |
-| 文档与提示 | `docs_commands_exist.rs`、`messages_name_real_commands.rs`、`doctor_fixes_are_real_commands.rs` | 文档示例、源码里的提示、doctor 的修复命令必须都是真命令 |
+| 文档与提示 | `docs_commands_exist.rs`、`messages_name_real_commands.rs`、`doctor_fixes_are_real_commands.rs` | 校验提取出的 CLI 命令；不等于所有参数、执行效果、链接或客户端 schema 已验证 |
 
 只跑某一块：
 
@@ -50,12 +50,36 @@ cargo test -p gld-daemon
 cargo test -p gld --test daemon_lifecycle
 ```
 
+## 文档与完成声明的契约
+
+README 只保留定位、安装、使用、关键边界和导航；产品行为写在 `docs/`，设计取舍与历史
+证据写在 `docs/rfc/`、`docs/reviews/`。本次对账入口是
+[2026-09-23 审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)，它是有日期的快照，不是另一套任务数据库。
+
+| 改了什么 | 必须一起核对 |
+| --- | --- |
+| 工具或参数 | registry / 运行时 / 契约测试 / 当前用户文档，以及真实客户端发现的 schema |
+| 权限、身份或锁 | security / concepts；区分文件工具、子进程、本机 MCP、远端 ccnm 的边界 |
+| CLI | `cli.rs` 帮助、生成的 `cli.md`、README 示例；不能手改生成文档掩盖源帮助错误 |
+| 阶段完成 | 当前状态入口指向验收证据；旧 RFC 保留当时结论，注明后续决定，不能仍作为当前待办 |
+| 验证 | 记录日期、源码提交、平台、命令、退出码、是否真实执行；源码审查、fixture、真实二进制、SSH、公网客户端分别标明 |
+
+`docs_commands_exist.rs` 当前只扫描 README 和顶层 `docs/*.md`（不含生成的 `cli.md`），
+**不递归检查 reviews / RFC，也不检查链接**。这些内容要另查，不能以这条测试通过代替。
+`ccnm_background_lifecycle` 在没有 ccnm 二进制时会打印跳过后直接返回，测试框架仍可能显示
+passed；需要核对实际依赖和 `--nocapture` 日志，不能用 `0 ignored` 证明全都执行。
+
+`scripts/gen-cli-docs.sh` 当前仍有两项风险：直接覆盖输出文件，以及对字段表 / 密钥名表
+命令使用 `|| true` 吞错。它还会 unset `GLD_HOME`，只设置该变量不能保证生成过程隔离。
+在隔离 HOME 中使用当前构建生成后检查非空章节和 diff；未来应改成失败即停、临时文件成功后
+替换、显式隔离后端。源码修复前不能把脚本退出 0 当作完整文档生成成功。
+
 ## 提交前
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-GLD_HOME=$(mktemp -d) cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+GLD_HOME=$(mktemp -d) cargo test --workspace --all-targets --locked
 scripts/gen-cli-docs.sh          # 改了帮助文本就重新生成 docs/cli.md
 ```
 
@@ -138,11 +162,9 @@ scripts/package.sh --checksums              # 给 dist/ 里已有的包生成 SH
 里面是二进制 + README.md。版本号默认取 `Cargo.toml` 的 `[workspace.package].version`
 加个 `v` 前缀，CI 用 `VERSION` 环境变量传 tag 名覆盖。
 
-正式发版靠打 tag：
-
-```bash
-git tag v0.3.0 && git push origin v0.3.0
-```
+正式发版由操作者确认后打并推送 `v<workspace.package.version>` 的 tag。
+不要复用文档里的旧版本号；先确认 tag、Cargo.toml、实际二进制版本和构件摘要一致。
+当前 workflow 尚没有替操作者完成全部一致性与供应链验收，文档要求不能写成已经实现的门禁。
 
 `.github/workflows/release.yml` 会跑一遍全量测试（tag 不触发 ci.yml，
 所以这里补一道，没测过的不往外发），然后并行构建五个目标、生成 `SHA256SUMS`、

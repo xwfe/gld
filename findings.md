@@ -1,5 +1,8 @@
 # 事实与边界
 
+> 以下是固定隧道启动任务的历史发现；本轮项目级审查见
+> [2026-09-23 完成度与生命周期对账](docs/reviews/2026-09-23-lifecycle-and-docs-audit.md)。
+
 - 本地服务端口与 Cloudflare 下发回源端口不一致，隧道注册成功仍返回 502。
 - start 已有 --port；named 模式仅运行 cloudflared tunnel run --token。
 - start/share/upgrade 共用 ensure_tunnel_up，可以在此补 named 公网检查。

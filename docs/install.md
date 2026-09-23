@@ -1,6 +1,7 @@
 # 安装
 
-`gld` 是单个可执行文件，没有运行时依赖，放进 PATH 就能用。
+`gld` 主程序是单个可执行文件，不需要 Node 或 Tauri 运行时。
+Git、项目构建工具、隧道程序和启用的外部 MCP server 仍需按实际用途另行安装。
 
 ## 下载现成的（不需要装 Rust）
 
@@ -16,18 +17,23 @@
 
 ```bash
 tar xzf gld-*-aarch64-apple-darwin.tar.gz
-sudo mv gld-*/gld /usr/local/bin/
+mkdir -p "$HOME/.local/bin"
+install -m 755 gld-*/gld "$HOME/.local/bin/gld"
+export PATH="$HOME/.local/bin:$PATH"
 gld --version
 ```
 
-**Linux 选哪个：** `gnu` 那个需要 glibc 2.35+（Ubuntu 22.04 / Debian 12 / RHEL 9 起）；
-`musl` 那个是静态链接，不挑发行版，Alpine 和老系统上也能跑。拿不准就选 musl。
+上例应在只解压了一份目标安装包的目录执行；后续终端也需配置相同的 PATH。
 
-**macOS 第一次运行会被 Gatekeeper 拦**（二进制没有 Apple 签名），报的是
-“无法打开，因为无法验证开发者”。执行一次就好：
+**Linux 选哪个：** `gnu` 构建基线是 glibc 2.35；`musl` 是静态链接目标，减少对发行版
+glibc 的依赖，但发行包仍以该次 Release 实际产物和验收平台为准。musl 构建目前是可选
+目标，不保证每次 Release 都有，不能把构建目标列表当成已验证的兼容矩阵。
+
+**macOS 首次运行可能被 Gatekeeper 拦。** 核对发布来源和校验和后，确认信任该文件，
+再决定是否移除下载隔离属性；这不是安全验证的替代：
 
 ```bash
-xattr -d com.apple.quarantine /usr/local/bin/gld
+xattr -d com.apple.quarantine "$HOME/.local/bin/gld"
 ```
 
 **核对下载没被掉包**（可选）：每个 Release 旁边有 `SHA256SUMS`。
@@ -53,6 +59,7 @@ gld --version
 换掉二进制，然后重启守护进程：
 
 ```bash
+mkdir -p "$HOME/.local/opt"
 cp ~/.local/bin/gld ~/.local/opt/gld-$(gld --version | awk '{print $2}')  # 留一份好回滚
 install -m 755 target/release/gld ~/.local/bin/gld.new                    # 先写成新文件
 mv ~/.local/bin/gld.new ~/.local/bin/gld                                  # 再改名盖上去
@@ -71,17 +78,22 @@ MCP 服务会跟着守护进程自己回来；项目的 GPT Actions 要各自再
 就恢复。隧道是 gld 起的话跟着一起重起；自建反代 / 自己跑的 cloudflared 不受影响，只是那几秒
 回源会 502。
 
-**客户端那边不用动**：地址、凭据、OAuth 动态注册（`data/oauth-clients/hub.json`）都在磁盘上，
-换二进制不碰它们。唯一会逼你删掉 ChatGPT 连接器重建的是**公网地址变了**，而那只发生在用
-Cloudflare 临时地址（`--tunnel cf`）的时候，见[连接客户端](connect-clients.md#什么时候要重新授权什么时候要删了重建)。
+**地址与凭据通常可沿用，但仍需重新核对客户端能力**：OAuth 动态注册等状态落盘，
+换二进制不直接删除它们；客户端可能仍缓存旧工具表或参数。公网地址变化的处理见
+[连接客户端](connect-clients.md#什么时候要重新授权什么时候要删了重建)。
 
-换完核对三件事：
+换完先核对服务：
 
 ```bash
 gld daemon status    # 版本、协议号是新的，"运行中的服务" ≥ 1
 gld ls               # 公网地址、Client ID、项目表和升级前一样
 gld doctor --probe   # 隧道此刻在不在，本地 / 公网端点和 OAuth 元数据通不通
 ```
+
+再在实际 AI 客户端重新发现工具，检查本次新增的工具名与参数，并做一次无副作用调用。
+源码、构建、运行服务与客户端 schema 是四层不同证据；只核对 `0.6.0` 这样的版本号不够。
+构建提交号由原生 `check_command` 的 `server.build_commit` 报告；客户端看不到该工具时，
+不能据此猜运行构建。详见 [生命周期指南](project-lifecycle.md#接入前先确认四层能力)。
 
 回滚就是把备份的那个二进制按同样的"改名"方式放回去，再 `gld daemon restart`。
 
@@ -109,9 +121,9 @@ gld ls                     # 项目应该都回来了
 
 | 平台 | 状态 |
 | --- | --- |
-| macOS（Apple 芯片 / Intel） | 实机验证过 |
-| Linux x86_64（gnu / musl） | 实机验证过 |
-| Windows x86_64 | 每次发版都构建，CI 也做编译检查，但**没有在真机上跑过** |
+| macOS（Apple 芯片 / Intel） | 有历史实机证据与 CI 测试配置；本次审查仅在当前 macOS 开发机重跑，不外推到所有构件 |
+| Linux x86_64（gnu / musl） | 有历史实机证据，CI 配置包含 Linux 测试；musl 发布构建为可选目标 |
+| Windows x86_64 | CI 配置包含编译及部分补丁 / 写锁测试；尚不能据此宣称完整命名管道、服务、MCP 与进程生命周期已实机验收 |
 
 Windows 上守护进程走的是命名管道，和 Unix domain socket 是两套独立实现。
 遇到问题请提 issue，带上 `gld daemon status` 的输出。
@@ -120,7 +132,7 @@ Windows 上守护进程走的是命名管道，和 Unix domain socket 是两套�
 
 ```bash
 gld daemon stop            # 先停掉后台进程和它持有的服务、隧道
-rm /usr/local/bin/gld      # 或 cargo uninstall gld
+rm "$HOME/.local/bin/gld" # 按实际安装位置调整；源码安装可用 cargo uninstall gld
 rm -rf ~/.config/gld              # 配置和密钥，删了就找不回来了
 ```
 

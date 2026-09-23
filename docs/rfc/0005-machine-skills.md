@@ -22,7 +22,8 @@ gld 跑在它服务的项目所在的机器上，没有单独的 Agent 机器：
 
 - 按项目分别藏：只有全局一份。
 - 远端装好的 skill 经 hub 读附件没跑端到端（只有 ccnm 那边的中立客户端测试和这边的参数表测试）。
-- MCP server 的聚合（v4 第 2 步）。
+- MCP server 的聚合在本 RFC 初稿时未做；同日已由 [RFC-0006](0006-machine-mcp.md) 实施，
+  不再作为 Skills 阶段待办。当前边界见[2026-09-23 审查](../reviews/2026-09-23-lifecycle-and-docs-audit.md)。
 
 ## 4. 验证
 

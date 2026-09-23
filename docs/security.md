@@ -24,7 +24,7 @@ gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
 
 | 能力 | 范围 | 说明 |
 | --- | --- | --- |
-| 执行命令 | 每个项目自己的目录内 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码**。命令可以写成一行 `cmd`，也可以写成 `argv` 逐格给（参数里带 `\|`、引号、换行时用它）；两种形式**权限完全一样**，只是 `argv` 不必猜引号 |
+| 执行命令 | 工作目录选在项目内；子进程访问范围由操作系统账号决定 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码，不限于这个目录**。原生 API 支持 `cmd` 或 `argv`；两种形式权限一样，只是参数编码不同，客户端是否支持须看它实际发现的 schema |
 | 读文件 | 项目目录内 | 0.3.0 起默认收紧，见下 |
 | 写文件 | 项目目录内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
 | 读 Git 历史 | 项目目录内 | status / diff / log / show / blame |
@@ -33,7 +33,9 @@ gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
 自己决定，不受任何项目的读写限制：开了 Filesystem 就是它配的那些目录，开了
 desktop-commander 就是以你的身份跑任意命令。默认一个都不开；只放 context7、deepwiki
 这种只查资料的就够用。工具集是 `read-only` 的服务一个都不转。详见
-[concepts.md](concepts.md#本机装好的-mcp-server)。
+[concepts.md](concepts.md#本机装好的-mcp-server)。**项目的 `read-only` 或 Planning 不是本机 MCP
+的权限边界**：这三个服务级工具没有 `workspace`，必须单独评估。服务整体的 `read-only`
+会关闭转发，不能把某个项目只读误认为整台机器只读。
 
 **服务的凭据管的是它的全部项目。** 上表对服务里的**每一个项目**都成立——每个项目
 自己的工具集、白名单、读限制照样生效，但能进哪几个项目只看项目表。按客户端分范围
@@ -157,8 +159,9 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 默认白名单里的 `python` / `node` / `ruby` / `powershell` 都是通用解释器，
 留着任何一个，"命令白名单"这层就形同虚设。
 
-基础诊断命令（`pwd` `ls` `cat` `grep` `find` `echo` 等）两种写法下都保留：
-没有它们连"这个项目长什么样"都问不出来，而它们本身改不了东西。
+基础诊断命令（`pwd` `ls` `cat` `grep` `find` `echo` 等）两种写法下都保留。
+这仍不是系统级只读保证：部分命令由内建实现处理，部分会启动子进程，具体参数仍受策略检查。
+要禁止代码执行，应使用 `read-only` 工具集，而不是根据命令名字推断它绝无副作用。
 
 `only:` 后面**写空就是"一个都不加"**（只剩基础诊断命令），不是退回默认白名单——
 写 `only:` 的人是想收紧，把它理解成"没配"等于把一个收权的配置放到最大。
@@ -276,6 +279,10 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 （Unix socket 的路径长度限制）。`gld daemon status` 里能看到实际路径。
 
 ## 已知的边界，明说
+
+`compat-readonly-all` **不是安全配置**：它保留可写、可执行工具，却把客户端标注改成只读。
+不要把它用作只读接入或授权依据；实际收权用 `read-only`。这项历史兼容行为的后续处理见
+[本次审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)。
 
 - **静态策略 ≠ 沙箱。** `exec_command` 允许 `python`，`python` 能做的它都能做。
   `mcp.confine-reads` 只管文件类工具，管不住子进程。

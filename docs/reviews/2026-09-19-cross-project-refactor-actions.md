@@ -4,7 +4,15 @@
 
 主评审：`toexec/docs/plan/2026-09-19-cross-project-refactor-review.md`。本文件只记录 gld 的归属、依赖和验收，不复制主评审。现有入口：[工具审查 U 系列](2026-09-19-gld-tooling-review-and-plan.md)、[hub 路线 L0–L6](2026-09-19-hub-development-roadmap.md)、[RFC-0003](../rfc/0003-native-parity-sync.md)。
 
-## 1. 当前判断
+## 2026-09-23 对账
+
+下文“当前”“未开工”均按各节当时日期理解。G3.2 Notebook 已完成（本地编辑使用
+`apply_patch notebook_edits`）；Skills、本机 MCP、构建提交与锁定依赖修订的诊断也已落地。
+单服务主入口以 [RFC-0004](../rfc/0004-one-service-many-projects.md) 为准；仍未完成的是
+项目级 grant、正式任务验收和完整生命周期证据，不是重新实现上述功能。
+当前证据分级与优先级见[本次审查](2026-09-23-lifecycle-and-docs-audit.md)。
+
+## 1. 原始判断（2026-09-19）
 
 **方向正确：以 hub 为默认入口、单项目为窄授权视图；统一执行资源所有权，而不是删除单项目操作方式。** gld 服务外部模型的开发执行，不加入自己的模型循环，不复制 ccnm 的远端身份/SSH 控制面。
 

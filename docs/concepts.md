@@ -16,7 +16,8 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 ## 服务和项目
 
 **gld 只有一个 MCP 服务，你的项目都挂在它下面。** 客户端里只配这一条连接；AI 每次调用
-带一个 `workspace` 参数（项目名或 id）选项目，项目之间互不串。
+带一个 `workspace` 参数（项目名或 id）选项目，不共享可变的当前项目。
+这里的分离指路由、配置与部分状态，不代表进程沙箱或按客户端授权。
 
 ```bash
 gld start ~/code/api         # 起服务，并把这个目录加进来（服务起在 http://127.0.0.1:28764/mcp）
@@ -36,7 +37,8 @@ gld stop                     # 停服务；项目、配置、凭据都留着
 > （MCP 回报的 `serverInfo.name` 仍是 `gld-hub`，日志目录是 `logs/hub/`）。
 
 **一个项目 = 一个本地目录 + 它自己的一套规矩**：工具集、命令白名单、读限制、Planning、
-历史档案。AI 在一个项目里**能读能写的范围就是这个目录**。
+历史档案。文件工具默认只读写这个目录；读限制可显式放宽。
+**执行命令的工作目录在项目内，不代表子进程只能访问项目内**，详见 [security.md](security.md)。
 
 **登记就是加入。** `gld add <目录>` 或 `gld start <目录>` 把目录登记进来，AI 立刻就能用。
 没有"登记了但 AI 看不见"这种状态——老版本留下的例外会在 `gld ls` 里标成"不在服务里"，
@@ -65,7 +67,8 @@ gld stop                     # 停服务；项目、配置、凭据都留着
 ### AI 那边看到什么
 
 - `list_workspaces`：列出服务里的项目（名称、id、路径、工具集）。
-- 其余每个工具都多一个**必填**参数 `workspace`，填项目的名称或 id：
+- 工作区工具都有**必填**参数 `workspace`，填项目的名称或 id；服务级的
+  `list_mcp_tools` / `call_mcp_tool` / `read_mcp_result` 不带它：
 
   ```text
   read_file  workspace=api  path=src/main.rs    读的是 api 项目的 src/main.rs
@@ -164,7 +167,8 @@ remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
 
 删掉用 `gld rm prod`（`gld remote rm prod` 也行）。远端项目除了这份配置没有别的东西。
 
-连接是**用到才建**：第一次调用才起 `ccnm mcp bridge`，之后复用，闲 5 分钟收掉，
+连接是**用到才建**：第一次调用才起 `ccnm mcp bridge`，之后复用；只读连接闲 5 分钟收掉，
+coding 会话采用前述 2 分钟 / 挂后台命令 10 分钟的规则。
 `gld stop` 时正常关闭（让对面读到 EOF 而不是直接杀，否则远端的写锁会留下
 标记要人工恢复）。
 
@@ -177,7 +181,7 @@ remote_read_file  workspace=api   → TOOL_IS_FOR_REMOTE_WORKSPACES
 | "当前在哪个项目" | 没有这回事：AI 写的路径就是相对父目录的，`proj-a/src/x.rs` | **服务端不记**，每次调用自己带 `workspace`；两个对话同时各干各的也不会串 |
 | 边界 | 父目录，兄弟项目互相读得到 | 每个项目自己的根目录，`..` 和绝对路径的规则和单独一个项目一样 |
 | 命令会话 | 共用一张表 | 按"项目 + 谁在调"分：api 里起的命令，拿它的 `session_id` 去 web 读报 `SESSION_NOT_FOUND`；**另一个客户端在 api 里读也一样报它**，见下面第四条 |
-| Planning / History / Durable Task | 全堆在父目录 | 在各自项目里（本来就存在每个项目的 `.gld/`、`docs/history-session/`） |
+| Planning / History / Durable Task | 都以父目录作为同一个项目 | Planning 在项目 `.gld/`，History 在项目 `docs/history-session/`；Durable Task 在 `GLD_HOME/harness/workspaces/<id>/`，按项目分开 |
 | 说明文件、Skill | 只读父目录那份 | 按项目单独取，api 的 `AGENTS.md` 不会拿去指导 web |
 | 工具集、命令白名单、读限制 | 父目录一套 | 用每个项目自己的。服务的工具集只收紧不放宽：web 是 `read-only`，经服务也写不了（报 `TOOL_NOT_ALLOWED_IN_WORKSPACE`） |
 
@@ -259,10 +263,12 @@ read_mcp_result ref=r1a2…  offset=65520     读一个大结果的后面部分
 不把每个 server 的工具直接列进工具表，是因为那样每次列工具都得把它们全起起来，工具表
 也会胀（playwright 一家就 25 个工具、21 KB），ChatGPT 每开一个新的还得重建连接。
 
-**大结果分段给，不静默截断。** 一次最多交 64 KiB 文字，多的留在服务里 10 分钟，末尾
-写明从哪接着读。实测 deepwiki 一次回 407 KB，AI 分三次读全。有文字时不再附一份内容相同
-的 `structuredContent`（deepwiki 那次正是这样翻了一倍）。单张图片超过 5 MiB 的换成一句
-说明。
+**大段文字可续读，但转发不等于结果无损。** 一次最多交 64 KiB 文字，多的有界保留
+10 分钟，单条最多 16 MiB、总计 64 MiB；超限和续读位置会说明。历史实测 deepwiki 的
+407 KB 文字分三次读全。当前结果整理在有文字时省略 `structuredContent`，不能据此假定
+二者总是重复；上游把独立字段仅放在结构化结果里时存在信息丢失风险，见
+[本次审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)。单张图片超过 5 MiB 换成说明。
+结果过期不能证明上游操作没执行；有副作用的调用应先核对实际状态，不能自动重发。
 
 **什么时候生效。** 开关不用重启服务，下一次调用就按新名单来；但 ChatGPT 只在连上时读
 一次工具表，**开第一个的时候要在它的连接器设置里刷新一下**，才看得见这三个工具。
@@ -396,7 +402,9 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 | `read-only` | 21 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
 | `compat-readonly-all` | 53 | 见下面的警告 |
 
-上面的数字是当前版本 `gld tool list` 实测出来的，会随版本变；以命令输出为准。
+上面的数字是本地工具内核的 profile 口径，会随版本变；以命令输出为准。
+它不是客户端工具数量承诺：hub 有自己的服务级工具、远端工具与过滤规则，客户端还可能缓存
+旧 schema。需要同时核对实际发现的工具和参数；源码可用不等于当前连接可调。
 
 ### compact 还会砍掉注入给 AI 的说明，Skill 目录只给一段
 
@@ -550,6 +558,16 @@ gld set history-context=           # 清空，恢复"什么都不注入"
 
 ## Durable Task 的工作区基线
 
+**Durable 指任务元数据持久化，不是命令进程和输出持久化。** 任务、事件存于
+`GLD_HOME/harness/`，Planning 存于项目 `.gld/`，历史档案存于项目 `docs/history-session/`。
+它们不能互相代替，也没有因为用了 Task 就自动得到验证证据、任务回滚或发布审批。
+
+当前 `task_manage action=finish` 默认把任务转成 `verifying`，**不会自动跑测试或变成
+`completed`**；`allow_unverified=true` 可明确收为 `completed_unverified`。该状态表示没有
+Harness 的正式验收记录，不应抹去另行记录的真实测试结果。`change_summary.verification`
+当前仍为空。`pause` 也是进度状态，不是停进程或冻结写权限的保证。
+完整使用边界见 [项目开发生命周期](project-lifecycle.md)。
+
 开了 Durable Task（`task_manage action=start`）之后，写类工具（`exec_command`、
 `apply_patch`）每次执行前会比一次**工作区指纹**：任务开始时记一份，之后每次工具
 自己写完再记一份。对不上就拒绝执行并报 `FILE_CHANGED_EXTERNALLY`——意思是
@@ -560,6 +578,12 @@ gld set history-context=           # 清空，恢复"什么都不注入"
 碰到的 `Library/`、`AppData/`，以及 **gld 自己在项目里的状态目录 `.gld/`**（Planning
 状态存在这儿，而它每次工具调用都可能被写）。这些目录里的改动任务发现不了。
 History 档案（`docs/history-session/`）计入指纹，但 history 工具写完会自动把指纹记上账。
+
+**当前实现比上述“目录”说法更宽**：按名字在任意层级排除，文件也算，因此
+`scripts/build`、`docs/Library/` 也会被跳过。遍历或读文件失败也没有完整性标记，
+不能把一次指纹匹配解释成所有源文件都已检查。外部变更后的状态提示虽会提到
+`refresh_baseline`，目前没有对应公开工具；应先读 diff、核实归属，不要盲试该名称或直接
+编辑内部状态文件。显式的基线复核与接纳流程仍待实现。
 
 指纹要把剩下的每个文件完整读一遍算 SHA-256。实测工作区里有一个 511 MB 的文件时，
 每次写操作前多等约 1.8 秒（内存不涨）。大文件放进上面哪个目录里，或者这种工作区别开
@@ -580,9 +604,10 @@ History 档案（`docs/history-session/`）计入指纹，但 history 工具写�
 同一个项目最多留 **32 条已经结束**的会话，超了就把结束得最早的那条收掉
 （还在跑的一条都不动）。每条会话的 stdout / stderr 各留最后 1 MiB。
 
-到期之后再拿那个 `session_id`，报的是 `SESSION_EXPIRED` 而不是
-`SESSION_NOT_FOUND`——**这两个不是一回事**：前者是"确实有过，输出已经放掉了，
-重跑一次"，后者是"这个 id 从来没存在过，你记错了"。`details.reason` 说清是哪种：
+已知回收记录仍在时，再拿那个 `session_id` 报 `SESSION_EXPIRED`；它表示输出已释放，
+**不表示命令没执行、失败或可以安全重跑**。有副作用的命令必须先核对实际结果。
+`SESSION_NOT_FOUND` 只表示当前主体找不到该引用，也可能是服务重启、回收记录淘汰或主体
+不同，不能断言它从未存在。已知的回收原因由 `details.reason` 区分：
 
 | `reason` | 意思 |
 | --- | --- |
@@ -713,15 +738,16 @@ apply_patch patch=… expected_versions={"notes.md": "412-18d6b0…"}
 `version` 是**文件大小 + 修改时间**，不是内容 hash。`read_file` 是流式的，
 读 2 GB 文件的前 200 行不必碰后面；要算 hash 就得每次把整个文件读一遍。
 代价：文件从备份恢复、或者连时间戳一起复制过来，内容没变也会报成变了——
-虚惊一场，是安全的那一侧。
+虚惊一场。反过来，内容被等长替换且修改时间被保留时也可能漏检，因此不能把这个版本令牌
+称为内容身份或强 CAS；验收证据应另外绑定被测内容的摘要。
 
 ### 三道门，和它们各自管不到的地方
 
 | 门 | 管什么 | 管不到什么 |
 | --- | --- | --- |
 | `expected_versions` | 你读文件到提交补丁之间，别人写过它 | 调用方不传就没有这道门（它是可选参数，不传时行为和以前一样） |
-| 落盘前复核（自动，不用传任何参数） | 这一次调用里，算完补丁到写下去之间文件变了 | 复核到 rename 之间还有几微秒 |
-| 进程内写锁（自动） | 同一个 gld 进程里两个会话同时打补丁 | 别的进程 |
+| 落盘前复核（自动，不用传任何参数） | 这一次调用里，算完补丁到写下去之间文件变了 | 复核到 rename 之间仍有竞态窗口；不承诺跨编辑器的原子 CAS |
+| 工作区写协调（自动） | 同进程共用写锁；同一 `GLD_HOME` 下的 gld 进程还经文件锁协调 | 不同 `GLD_HOME`、编辑器等未参与的写者；命令转后台之后也不持续持锁 |
 
 **这不是跨编辑器的强 CAS。** 三道门合起来把窗口压到很小，并且任何一道发现
 不对都是拒绝、不是覆盖；但操作系统层面没有"比对通过就锁住直到我写完"这种
