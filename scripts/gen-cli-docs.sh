@@ -7,6 +7,10 @@
 # 脚本照样退出 0，留下两张空表（RFC-0005 记过一次），CI 的比对也拦不住提交进去的空表。
 #
 # 环境变量：GLD 换要用的二进制；GLD_CLI_DOC_OUT 换输出位置（测试用）。
+#
+# 变量后面紧跟中文时一律写 `${var}`：macOS 自带的 bash 3.2 在 UTF-8 locale 下会把中文
+# 标点的字节当成变量名的一部分，`$status，` 读的是一个叫 `status\xef` 的变量，set -u
+# 当场报 unbound variable（2026-09-23 macOS CI 上就是这么挂的）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,7 +18,7 @@ GLD="${GLD:-$ROOT/target/debug/gld}"
 OUT="${GLD_CLI_DOC_OUT:-$ROOT/docs/cli.md}"
 
 if [[ ! -x "$GLD" ]]; then
-  echo "找不到 $GLD，先执行 cargo build" >&2
+  echo "找不到 ${GLD}，先执行 cargo build" >&2
   exit 1
 fi
 
@@ -23,7 +27,10 @@ fi
 SANDBOX="$(mktemp -d)"
 # 临时文件和目标放同一个目录，最后一步 mv 才是原子的替换。
 TMP_OUT="$(mktemp "$OUT.XXXXXX")"
-trap 'rm -rf "$SANDBOX"; rm -f "$TMP_OUT"' EXIT
+# 走到最后才置 1。bash 3.2 在 set -u 这类致命错误之后跑 EXIT trap 时，$? 已经是 0，
+# 脚本会以 0 退出——崩溃被报成成功，CI 和调用方都看不出来。trap 按这个标记兜底退出 1。
+finished=0
+trap 'rm -rf "$SANDBOX"; rm -f "$TMP_OUT"; [[ $finished == 1 ]] || exit 1' EXIT
 export HOME="$SANDBOX"
 export NO_COLOR=1
 export COLUMNS=100
@@ -54,7 +61,7 @@ run() {
   local status=0
   "$GLD" "$@" || status=$?
   if [[ $status -ne 0 ]]; then
-    echo "生成失败：gld $* 退出 $status，docs 没有改动" >&2
+    echo "生成失败：gld $* 退出 ${status}，docs 没有改动" >&2
     exit 1
   fi
 }
@@ -136,4 +143,5 @@ done
 
 chmod 644 "$TMP_OUT"
 mv "$TMP_OUT" "$OUT"
+finished=1
 echo "已生成 $OUT"

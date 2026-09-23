@@ -28,9 +28,13 @@ fn fake_gld(dir: &Path, first_arg: &str, behaviour: &str) -> PathBuf {
     path
 }
 
+/// 固定用 UTF-8 locale 跑：macOS 的 bash 3.2 只有在 UTF-8 下才会把紧跟变量的中文字节
+/// 读进变量名。本机没设 LANG（C locale）时这类错误跑不出来，CI 的 runner 是 en_US.UTF-8，
+/// 2026-09-23 就是只在 CI 上挂。
 fn generate(gld: &Path, out: &Path) -> Output {
     Command::new("bash")
         .arg(script())
+        .env("LC_ALL", "en_US.UTF-8")
         .env("GLD", gld)
         .env("GLD_CLI_DOC_OUT", out)
         .output()
