@@ -6,10 +6,11 @@
 //! | --- | --- |
 //! | `daemon.sock` | IPC 入口（Windows 用命名管道，此路径只作为名字来源） |
 //! | `daemon.lock` | `flock` 排他锁，保证同一数据目录只有一个守护进程 |
-//! | `daemon.json` | pid / 版本 / 启动时间，socket 没响应时靠它判断“僵尸还是没跑” |
+//! | `daemon.json` | pid / 版本 / 启动时间 / 可执行文件路径，socket 没响应时靠它判断“僵尸还是没跑” |
 //!
 //! 判断“守护进程是否在跑”只信 socket：能连上并回应 `ping` 才算活。
-//! pid 文件只用于给用户看和在 socket 失联时补充信息。
+//! pid 文件只用于给用户看和在 socket 失联时补充信息，而且 pid 本身不作数——
+//! 系统会回收再发给别的程序，按它动手之前先核对身份，见 [`record_owns_pid`]。
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -89,6 +90,10 @@ pub struct DaemonRecord {
     pub started_at_unix: u64,
     pub socket: PathBuf,
     pub log: PathBuf,
+    /// 守护进程自己的可执行文件路径，用来在按 pid 动手之前确认"这个 pid 还是它"。
+    /// 0.6.0 之前的记录没有这个字段，读到的是 `None`，见 [`record_owns_pid`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<PathBuf>,
 }
 
 impl DaemonRecord {
@@ -104,6 +109,39 @@ impl DaemonRecord {
     pub fn read(path: &Path) -> Option<Self> {
         let raw = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&raw).ok()
+    }
+}
+
+/// `daemon.json` 里记的 pid，现在是不是还是当初那个守护进程。
+///
+/// **光看 pid 活着不够。** 操作系统的 pid 会回收再发：守护进程异常退出（`kill -9`、
+/// 断电、测试跑到一半被打断）时 `daemon.json` 留在盘上，过一阵这个号被分给别的程序，
+/// 于是 `gld daemon status` 把一个毫不相干的进程报成"守护进程存在但不响应"，
+/// `gld daemon stop --force` 直接把它连同它的子进程一起杀掉。2026-09-23 实测过：
+/// 手写一份 `daemon.json` 指向一个 `sleep`，一条 `stop --force` 就把它杀了。
+/// 集成测试一轮要起几百个进程，pid 绕回来只是时间问题。
+///
+/// 所以动手之前对一次可执行文件路径。老记录（0.6.0 之前）没有这个字段，退而认文件名：
+/// 认不出来也比误杀强，代价只是它当真是僵尸时要手动清一下 `daemon.json`。
+pub fn record_owns_pid(record: &DaemonRecord) -> bool {
+    let Ok(Some(actual)) = platform().process_image_path(record.pid) else {
+        return false;
+    };
+    let actual = Path::new(&actual);
+    match &record.exe {
+        Some(expected) => same_file(expected, actual),
+        None => actual
+            .file_stem()
+            .is_some_and(|name| name.eq_ignore_ascii_case("gld")),
+    }
+}
+
+/// 两个路径指不指向同一个文件。先按 inode 比，符号链接和 `/tmp` 这种
+/// 软链目录才不会被判成两个东西；比不了（文件已被替换或删除）再退回比路径。
+fn same_file(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -131,9 +169,9 @@ pub async fn probe(paths: &DaemonPaths) -> DaemonProbe {
         return DaemonProbe::Running(info);
     }
     match DaemonRecord::read(&paths.record) {
-        Some(record) if platform().is_process_alive(record.pid) => {
-            DaemonProbe::Unresponsive(record)
-        }
+        // 认不出那个 pid 就当记录已经失效：宁可说"没在跑"，也不要把一个
+        // 碰巧拿到同一个号的无关进程当成守护进程去报告、去杀。见 [`record_owns_pid`]。
+        Some(record) if record_owns_pid(&record) => DaemonProbe::Unresponsive(record),
         Some(record) => DaemonProbe::Stale(record),
         None => DaemonProbe::NotRunning,
     }
@@ -253,9 +291,14 @@ pub async fn request_stop(
     force: bool,
 ) -> AppResult<StopOutcome> {
     let probe = probe(paths).await;
-    let pid = match &probe {
-        DaemonProbe::Running(info) => info.pid,
-        DaemonProbe::Unresponsive(record) => record.pid,
+    let was_running = probe.is_running();
+    let (pid, record) = match probe {
+        DaemonProbe::Running(info) => {
+            let pid = info.pid;
+            let record = DaemonRecord::read(&paths.record).filter(|record| record.pid == pid);
+            (pid, record)
+        }
+        DaemonProbe::Unresponsive(record) => (record.pid, Some(record)),
         DaemonProbe::Stale(record) => {
             cleanup_stale(paths);
             return Ok(StopOutcome::WasStale(record.pid));
@@ -263,14 +306,14 @@ pub async fn request_stop(
         DaemonProbe::NotRunning => return Ok(StopOutcome::NotRunning),
     };
 
-    if probe.is_running() {
+    if was_running {
         let client = Client::new(paths.clone()).with_timeout(Duration::from_secs(5));
         let _ = client.call(&Request::Shutdown).await;
     }
 
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !platform().is_process_alive(pid) {
+        if !still_that_daemon(record.as_ref(), pid) {
             cleanup_stale(paths);
             return Ok(StopOutcome::Stopped(pid));
         }
@@ -278,6 +321,12 @@ pub async fn request_stop(
     }
 
     if force {
+        // 等了这么久，它可能刚好在最后一轮检查之后退出、号又被别人接走。
+        // 强杀之前再认一次，这一刀才落在该落的进程上。
+        if !still_that_daemon(record.as_ref(), pid) {
+            cleanup_stale(paths);
+            return Ok(StopOutcome::Stopped(pid));
+        }
         platform().terminate_process_tree(pid)?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         cleanup_stale(paths);
@@ -287,6 +336,17 @@ pub async fn request_stop(
         "守护进程（pid {pid}）在 {} 秒内没有退出。可加 --force 强制结束。",
         timeout.as_secs()
     )))
+}
+
+/// 这个 pid 上跑的还是我们要停的那个守护进程吗。
+///
+/// 有记录可对照就核对身份（[`record_owns_pid`]）；没有记录时只剩 pid 这一条信息，
+/// 那就按 pid 判断——宁可多等一会儿，也不要提前宣布它停了而去启动第二个实例。
+fn still_that_daemon(record: Option<&DaemonRecord>, pid: u32) -> bool {
+    match record {
+        Some(record) if record.pid == pid => record_owns_pid(record),
+        _ => platform().is_process_alive(pid),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

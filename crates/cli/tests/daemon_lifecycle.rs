@@ -73,6 +73,55 @@ fn full_lifecycle_through_the_real_binary() {
     assert!(!env.home.path().join("daemon.json").exists());
 }
 
+/// pid 被系统回收再发给别人时，别把那个无辜进程当成守护进程去报告、去杀。
+///
+/// 复现的是真事：守护进程异常退出后 `daemon.json` 留在盘上，过一阵这个号被分给
+/// 别的程序，`daemon status` 就说"守护进程存在但不响应"，`daemon stop --force`
+/// 直接把它连同子进程一起 SIGTERM + SIGKILL。集成测试一轮起几百个进程，
+/// 号绕回来只是时间问题。这里用一个 `sleep` 当受害者，它必须活到测试结束。
+#[test]
+fn a_recycled_pid_is_not_mistaken_for_the_daemon() {
+    // 记录里带 exe（0.6.0 起）时按路径认，不带（更早的记录）时退回按文件名认。
+    // 两种记录都要挡住，升级上来的用户才不会在换版本的那几天里踩到。
+    for exe in [Some(env!("CARGO_BIN_EXE_gld")), None] {
+        let env = Env::new();
+        let mut victim = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn 一个无辜进程");
+        let record = env.home.path().join("daemon.json");
+        std::fs::create_dir_all(env.home.path()).unwrap();
+        let mut fields = serde_json::json!({
+            "pid": victim.id(),
+            "version": "0.6.0",
+            "protocol": 3,
+            "started_at_unix": 1,
+            "socket": env.home.path().join("daemon.sock"),
+            "log": env.home.path().join("logs/daemon.log"),
+        });
+        if let Some(exe) = exe {
+            fields["exe"] = serde_json::json!(exe);
+        }
+        std::fs::write(&record, fields.to_string()).unwrap();
+
+        // 认不出来就当记录已经失效：报"没在跑"（退出码 3），而不是"存在但不响应"。
+        let status = env.gld(&["daemon", "status"]);
+        assert_eq!(status.status.code(), Some(3), "exe={exe:?}");
+
+        let stop = env.gld(&["daemon", "stop", "--force", "--wait", "1"]);
+        assert!(stop.status.success(), "exe={exe:?} {:?}", stop.status);
+        assert!(
+            !record.exists(),
+            "exe={exe:?}：失效的记录应当被清掉，否则下一条命令还会撞上同一个 pid"
+        );
+
+        let survived = victim.try_wait().expect("查无辜进程").is_none();
+        let _ = victim.kill();
+        let _ = victim.wait();
+        assert!(survived, "exe={exe:?}：只因为 pid 对上了就把无关进程杀了");
+    }
+}
+
 #[test]
 fn no_autostart_reports_exit_code_3() {
     let env = Env::new();

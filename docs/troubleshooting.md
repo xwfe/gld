@@ -43,7 +43,7 @@ gld tool call exec_command cmd='cargo test'
 | `数据目录 … 不是目录` | `GLD_HOME` 指到了一个文件上（典型：`GLD_HOME=$(mktemp)` 忘了 `-d`） | 指向一个目录，没有会自动建 |
 | `建不了数据目录 …：Permission denied` | `GLD_HOME` 指的位置或它的上级目录不可写 | 换个位置，或修上级目录权限 |
 | `已有另一个守护进程持有 …/daemon.lock` | 同一数据目录已有实例（可能是别的用户 / 别的 shell 起的） | `gld daemon status` 看 pid；确认它已死才可删 lock 文件 |
-| `守护进程（pid N）存在但不响应` | 进程活着但 socket 没在听：正在启动、或卡死 | 等几秒重试；仍不行 `gld daemon stop --force` |
+| `守护进程（pid N）存在但不响应` | 那个 pid 上确实跑着 gld，只是 socket 没在听：正在启动、或卡死 | 等几秒重试；仍不行 `gld daemon stop --force`。这句话只在 pid 对应的进程真是 gld 时才出现，所以 `--force` 不会误伤别的程序 |
 | `守护进程版本 x 与命令行版本 y 不一致`（退出码 4） | 升级了 `gld`，旧进程还在跑 | `gld daemon restart` |
 | `gld start` 后 `gld status` 显示 error | 端口被占、或监听器起来后立刻退出 | 错误信息里有占用者的路径与 pid；`gld upgrade --port <其他端口>`（会自动重启） |
 | `MCP 服务端口 28764 已被占用：/path/to/other` | 别的程序占了服务的端口 | `gld upgrade --port <其他端口>`；第一次启动就撞上可以直接 `gld start --port <端口>` |

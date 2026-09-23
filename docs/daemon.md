@@ -71,13 +71,19 @@ printf '{"op":"ping"}\n' | nc -U ~/.config/gld/daemon.sock
 | --- | --- | --- |
 | `daemon.sock` | IPC 入口，权限 600 | 数据目录路径超过约 100 字节时 Unix socket 放不下，会改用 `$TMPDIR/gld-<hash>.sock`，`daemon status` 里能看到实际位置 |
 | `daemon.lock` | `flock` 排他锁，同一数据目录只允许一个守护进程 | 文件本身一直存在，靠锁而不是靠文件有无判断；不要手动删除正在被持有的锁 |
-| `daemon.json` | pid、版本、协议版本、启动时间、socket 与日志路径 | socket 连不上时靠它判断“僵尸还是没跑”；异常退出会残留，`gld daemon start` 自动清理 |
+| `daemon.json` | pid、版本、协议版本、启动时间、socket 与日志路径，以及守护进程自己的可执行文件路径 | socket 连不上时靠它判断“僵尸还是没跑”；异常退出会残留，`gld daemon start` 自动清理 |
 | `logs/daemon.log` | stdout / stderr 重定向到这里 | 超过 4 MiB 会在下次 `daemon start` 时轮转为 `daemon.log.1`；只保留一代 |
 
 “是否在运行”只信 socket：能连上并回应 `daemon_info` 才算活着。
 pid 文件只用于展示和补充判断。"运行中的服务"数的是 MCP 服务本身（起了没停算一个）加上
 项目自己的线路（GPT Actions，以及旧版本起的单项目服务）。它只回答"有没有在跑"；地址、
 隧道、认证这些看 `gld ls`，监听任务自己退了这种情况看 `gld doctor`。
+
+**pid 不会被当成身份。** 守护进程异常退出（`kill -9`、断电）时 `daemon.json` 留在盘上，
+而操作系统过一阵会把这个号发给别的程序。只看号的话，`gld daemon status` 会把一个毫不相干的
+进程报成“守护进程存在但不响应”，`gld daemon stop --force` 会连它的子进程一起杀掉。所以按 pid
+动手之前先比一次可执行文件路径（记录里那个 `exe`）：对不上就当记录已经失效，报“没在跑”、
+顺手把 `daemon.json` 清掉。0.6.0 之前写的记录没有 `exe`，这时退一步认文件名是不是 `gld`。
 
 ## 日志有多大
 

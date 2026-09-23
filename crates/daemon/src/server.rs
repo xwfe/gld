@@ -60,6 +60,9 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
         started_at_unix: started_at,
         socket: paths.socket.clone(),
         log: paths.log.clone(),
+        // 留下自己的可执行文件路径：以后要按 pid 停它、杀它之前，先对一次这个，
+        // 免得 pid 被回收后动到别人头上（`lifecycle::record_owns_pid`）。
+        exe: std::env::current_exe().ok(),
     };
     record.write(&paths.record)?;
     logging::info(format!(
