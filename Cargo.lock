@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "gld"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "clap",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "gld-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "gld-daemon"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fs2",
  "gld-core",
