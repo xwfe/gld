@@ -146,7 +146,23 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     } else {
         combined
     };
-    let files = parse_diff_files(&diff_text);
+    let mut files = Vec::new();
+    if unstaged {
+        files.extend(diff_files(
+            ws.root(),
+            &["diff"],
+            &path_filters,
+            Some(false),
+        )?);
+    }
+    if staged {
+        files.extend(diff_files(
+            ws.root(),
+            &["diff", "--cached"],
+            &path_filters,
+            Some(true),
+        )?);
+    }
     Ok(tool_ok(json!({
         "diff": diff_text,
         "files": files,
@@ -283,7 +299,7 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     } else {
         completed.stdout.clone()
     };
-    let files = parse_diff_files(&content);
+    let files = diff_files(ws.root(), &["show", "--format=", rev], &path_filters, None)?;
     Ok(tool_ok(json!({
         "is_repo": true,
         "rev": rev,
@@ -629,28 +645,107 @@ fn parse_branch_line(line: &str) -> (String, String, i64, i64) {
     (branch, upstream, ahead, behind)
 }
 
-fn parse_diff_files(diff: &str) -> Vec<Value> {
-    let mut files = Vec::new();
-    for line in diff.lines() {
-        if let Some(path) = line.strip_prefix("+++ b/") {
-            files.push(json!({
+/// 改了哪些文件：直接问 git，不从补丁文本里认。
+///
+/// 以前是从 `--- a/` / `+++ b/` 两行里抠路径：同一个文件两行各记一次（6 个文件报
+/// 12 条），状态一律写 modified，二进制一律 false（审查 D14）。从文本里认本身也靠不住：
+/// 路径带空格时那两行有歧义，文本被 `max_bytes` 截断后，后面的文件整个不在清单里。
+/// 这里用 `-z`：NUL 分隔、路径原样不加引号；清单总是完整的，和文本截没截断无关。
+///
+/// `staged`：`git_diff` 两边都要时用来区分（同一个文件可以两边都有改动）；`git_show`
+/// 不分，传 `None`。合并提交 `git show` 默认不列文件，这里也是空的。
+fn diff_files(
+    root: &std::path::Path,
+    base: &[&str],
+    path_filters: &[String],
+    staged: Option<bool>,
+) -> Result<Vec<Value>, WorkspaceError> {
+    let run = |listing: &str| -> Result<String, WorkspaceError> {
+        let mut args: Vec<&str> = base.to_vec();
+        // -M：改名识别不受个人 git 配置（diff.renames=false）影响，结果在谁机器上都一样。
+        args.extend([listing, "-z", "-M", "--no-ext-diff"]);
+        if !path_filters.is_empty() {
+            args.push("--");
+            args.extend(path_filters.iter().map(String::as_str));
+        }
+        let completed = run_git(root, &args, Duration::from_secs(10))?;
+        if completed.exit_code != 0 && completed.exit_code != 1 {
+            return Err(git_error(&completed.stderr));
+        }
+        Ok(completed.stdout)
+    };
+    let binary = binary_paths(&run("--numstat")?);
+    Ok(name_status(&run("--name-status")?)
+        .into_iter()
+        .map(|(status, path, old_path)| {
+            let mut file = json!({
                 "path": path,
-                "status": "modified",
-                "binary": false
-            }));
-        } else if line.starts_with("--- /dev/null") {
-            continue;
-        } else if let Some(path) = line.strip_prefix("--- a/") {
-            if !files.iter().any(|f| f["path"] == path) {
-                files.push(json!({
-                    "path": path,
-                    "status": "modified",
-                    "binary": false
-                }));
+                "status": status,
+                "binary": binary.contains(&path),
+            });
+            if let Some(old_path) = old_path {
+                file["old_path"] = json!(old_path);
             }
+            if let Some(staged) = staged {
+                file["staged"] = json!(staged);
+            }
+            file
+        })
+        .collect())
+}
+
+/// `--name-status -z`：`状态\0路径\0`，改名和复制是 `R100\0旧\0新\0`。
+fn name_status(raw: &str) -> Vec<(&'static str, String, Option<String>)> {
+    let mut tokens = raw.split('\0').filter(|token| !token.is_empty());
+    let mut files = Vec::new();
+    while let Some(code) = tokens.next() {
+        let status = match code.chars().next() {
+            Some('A') => "added",
+            Some('D') => "deleted",
+            Some('M') => "modified",
+            Some('R') => "renamed",
+            Some('C') => "copied",
+            Some('T') => "type_changed",
+            Some('U') => "unmerged",
+            _ => "unknown",
+        };
+        let two_paths = matches!(status, "renamed" | "copied");
+        let first = tokens.next().map(str::to_string);
+        let (path, old_path) = if two_paths {
+            (tokens.next().map(str::to_string), first)
+        } else {
+            (first, None)
+        };
+        if let Some(path) = path {
+            files.push((status, path, old_path));
         }
     }
     files
+}
+
+/// `--numstat -z` 里增删行数是 `-\t-` 的那些：git 认定的二进制文件。
+/// 格式是 `增\t删\t路径\0`，改名时路径那格为空，后面跟 `旧\0新\0`。
+fn binary_paths(raw: &str) -> std::collections::HashSet<String> {
+    let mut tokens = raw.split('\0');
+    let mut binary = std::collections::HashSet::new();
+    while let Some(token) = tokens.next() {
+        let mut fields = token.splitn(3, '\t');
+        let (Some(added), Some(deleted), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            tokens.next();
+            tokens.next().unwrap_or_default().to_string()
+        } else {
+            path.to_string()
+        };
+        if added == "-" && deleted == "-" {
+            binary.insert(path);
+        }
+    }
+    binary
 }
 
 fn git_error(message: &str) -> WorkspaceError {
@@ -735,6 +830,98 @@ mod tests {
         assert_eq!(
             parse_branch_line("HEAD (no branch)"),
             ("HEAD".into(), String::new(), 0, 0)
+        );
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// 审查 D14：6 个文件报 12 条、状态一律 modified、二进制一律 false。
+    /// 这里每种改动各来一个，外加带空格的路径和被截断的文本。
+    #[test]
+    fn the_file_list_names_each_file_once_with_its_real_status() {
+        use super::{git_diff, git_show};
+        use crate::tools::workspace::Workspace;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        std::fs::write(root.join("edit.txt"), "a\n".repeat(2000)).unwrap();
+        std::fs::write(root.join("old.txt"), "moved content\n".repeat(20)).unwrap();
+        std::fs::write(root.join("gone.txt"), "x\n").unwrap();
+        std::fs::write(root.join("with space.txt"), "x\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "init"]);
+
+        std::fs::write(root.join("edit.txt"), "b\n".repeat(2000)).unwrap();
+        std::fs::write(root.join("with space.txt"), "y\n").unwrap();
+        git(root, &["mv", "old.txt", "new.txt"]);
+        git(root, &["rm", "-q", "gone.txt"]);
+        std::fs::write(root.join("blob.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+        std::fs::write(root.join("added.txt"), "new\n").unwrap();
+        git(root, &["add", "blob.bin", "added.txt"]);
+
+        let ws = Workspace::new(root.to_path_buf()).expect("workspace");
+        // 文本只要 1 KiB：edit.txt 一个文件的补丁就超了，后面的文件都不在文本里。
+        let out = git_diff(&ws, &json!({"staged": true, "max_bytes": 1024})).expect("diff");
+        assert_eq!(out["truncated"], true, "{out}");
+        let mut files: Vec<(String, String, bool, bool, String)> = out["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .map(|f| {
+                (
+                    f["path"].as_str().unwrap().to_string(),
+                    f["status"].as_str().unwrap().to_string(),
+                    f["binary"].as_bool().unwrap(),
+                    f["staged"].as_bool().unwrap(),
+                    f["old_path"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        files.sort();
+        let expected: Vec<(String, String, bool, bool, String)> = [
+            ("added.txt", "added", false, true, ""),
+            ("blob.bin", "added", true, true, ""),
+            ("edit.txt", "modified", false, false, ""),
+            ("gone.txt", "deleted", false, true, ""),
+            ("new.txt", "renamed", false, true, "old.txt"),
+            ("with space.txt", "modified", false, false, ""),
+        ]
+        .into_iter()
+        .map(|(p, s, b, st, o)| (p.into(), s.into(), b, st, o.into()))
+        .collect();
+        assert_eq!(files, expected);
+
+        git(root, &["commit", "-qam", "second"]);
+        let shown = git_show(&ws, &json!({"max_bytes": 1})).expect("show");
+        let mut paths: Vec<&str> = shown["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "added.txt",
+                "blob.bin",
+                "edit.txt",
+                "gone.txt",
+                "new.txt",
+                "with space.txt"
+            ],
+            "{shown}"
         );
     }
 }
