@@ -58,3 +58,13 @@
 - 全量测试通过后推送。
 - 推送后 macOS CI 挂在 `a_failing_subcommand_fails_the_run_and_keeps_the_old_file`：先加诊断输出（`446cb3d`）
   拿到 stderr，定位到 bash 3.2 + UTF-8 把中文读进变量名、EXIT trap 把崩溃报成 0；修复 `9007348`，CI 全绿。
+
+## 发布（D12）
+
+- 流水线：`296cc29` 版本核对、手写说明、musl 必须编过；`42643a3` 0.7.0 发布说明。本机打包和回滚演练
+  （0.7.0 → 0.6.0 → 0.7.0，隔离数据目录）通过。
+- gh 在我的进程和 app 内终端里读不到 keychain 里的 token（`gh auth token` 为空），空跑由用户触发；
+  状态和构件走公开 API 看，tag 走 git SSH 推。
+- 空跑 run 35863249989 全绿 → 推 `v0.7.0` → run 35872551750 全绿，Release 有 5 个包 + `SHA256SUMS`。
+- 下载包：校验和 5 个全 OK；aarch64、x86_64（Rosetta）macOS 版和 musl 版（Oracle Linux 9 容器）实跑报
+  0.7.0；glibc、Windows 版没实跑。下载的包在 scratchpad，验完删掉。

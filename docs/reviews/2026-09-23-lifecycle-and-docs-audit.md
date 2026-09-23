@@ -1,6 +1,7 @@
 # gld 完成度、生命周期与文档审查（2026-09-23）
 
-状态：**D01–D06、D11、D14 已修，D13 已核对，0.7.0 已在本机真机验收；D07–D10、D12 未做。**
+状态：**D01–D06、D11、D14 已修，D13 已核对，0.7.0 已在本机真机验收并发布（D12 做了发布门禁和
+下载包验收，签名与来源证明未做）；D07–D10 未做。**
 §1–§6 是审查当时（0.6.0）的原始发现，保留原样；每项怎么修的、怎么验证的、还剩什么，看
 [§7 处理进展](#7-处理进展)，末尾"收尾"一节列出没做的项和各自的时机。
 本页是有日期的证据快照与下一步入口，不取代项目的 Planning / Task 或再维护一份进度数据库。
@@ -364,9 +365,49 @@ toexec-text；toexec README 的当前 tag 同步更新（`2f22741`）。ccnm 仍
 **仍未验证：**ChatGPT 看不到 gld 发的 `listChanged`（服务声明 `false`、也没有长连接推送），
 新版加了工具或参数后只能靠人去点 Refresh。Claude 等其他客户端没做这一轮真机验收。
 
+### D12：发布 0.7.0
+
+流水线先补了三处（`296cc29`）：tag 和 `Cargo.toml` 版本对不上就不打包，目标是 runner 本机时再跑
+一次 `--version` 核对；Release 说明用 `docs/releases/<tag>.md`；musl 不再标 optional。发版步骤
+和核对方法写在 [development.md · 打包与发布](../development.md#打包与发布)。
+
+发版前：
+
+- 本机：错的 tag 在构建前被拒；打出 aarch64 包，校验和、解压、`--version`、隔离数据目录里起服务
+  读文件都正常。
+- 回滚演练（隔离数据目录）：0.7.0 开任务、跑命令 → 换 0.6.0 二进制、`daemon restart`，`gld ls` 和
+  凭据指纹与 0.7.0 时一致，0.6.0 照样读得到那个没结束的任务 → 换回 0.7.0，没重启时命令行退出码 4，
+  重启后一致，任务照常走到 `completed`。
+- Release 手动空跑（run 35863249989，`42643a3`）：测试和 5 个目标全绿，5 个构件；"建 Release"
+  skipped，它只在 tag 上跑。
+
+发布：经用户批准推送 tag `v0.7.0`（指向 `42643a3`，run 35872551750 全绿）。
+[Release 页](https://github.com/xwfe/gld/releases/tag/v0.7.0)有 5 个包和 `SHA256SUMS`，说明取自
+`docs/releases/v0.7.0.md`，标为 latest。下载包验收全部从公开下载地址取：
+
+| 包 | 核对到的 |
+| --- | --- |
+| `aarch64-apple-darwin` | 校验和 OK；本机运行报 `gld 0.7.0` |
+| `x86_64-apple-darwin` | 校验和 OK；`arch -x86_64`（Rosetta）运行报 `gld 0.7.0` |
+| `x86_64-unknown-linux-musl` | 校验和 OK；static-pie；Oracle Linux 9 容器里（OrbStack 转译 x86_64）报 `gld 0.7.0`，隔离 HOME 下 `gld ls` 正常 |
+| `x86_64-unknown-linux-gnu` | 校验和 OK；x86-64 动态链接 ELF；**没实跑** |
+| `x86_64-pc-windows-msvc` | 校验和 OK；PE32+ 控制台程序，二进制里有 `0.7.0`；**没实跑** |
+
+每个包里都是二进制和 README.md，README 与 main 上的一致。
+
+**仍未验证或未做：**
+
+- 签名和来源证明没做。同一提交本机和 CI 打的 aarch64 包哈希不同（`8a6e5f54…` / `e082d540…`），
+  `SHA256SUMS` 只证明下载到的是 CI 产出的那份。
+- glibc 版和 Windows 版的下载包没实跑：本机只有 arm64 的 Linux 镜像，没为此另拉 amd64 镜像；没有
+  Windows 机器。按脚本逻辑，这两个在 CI 打包时是 runner 本机目标，跑过 `--version` 核对（步骤成功），
+  但 CI 日志要登录才能看，我没看到那一行输出。
+- 审查原先列的 Linux / Windows 上 IPC、命令清理的真机记录，GitHub / SSH / 浏览器真实链路单列，都没做；
+  平台证据目前只有 CI 的 ubuntu / macOS 全量测试和 Windows 的编译与补丁落盘测试。
+
 ### 收尾
 
-- 全部提交已推送到 GitHub；0.7.0 只是版本号，**没有打 tag、没有发 Release**。
+- 全部提交已推送到 GitHub。0.7.0 当时只是版本号，发布见上一节。
 - 推送后 macOS CI 挂了：D06 的生成脚本测试里，假 gld 让命令失败，脚本却退出 0。原因两层：
   macOS 自带 bash 3.2 在 UTF-8 locale 下把 `$status，` 里中文逗号的字节读进变量名，`set -u`
   报错；而 bash 3.2 在这类致命错误后跑 EXIT trap 时 `$?` 已是 0，崩溃被报成成功。本机没设
@@ -385,6 +426,6 @@ toexec-text；toexec README 的当前 tag 同步更新（`2f22741`）。ccnm 仍
 | 编号 | 什么时候 |
 | --- | --- |
 | D07 项目级授权、D08 安全语义 | 给别人用、多客户端接入或上生产之前，硬前置 |
-| D12 发布与平台证据 | 正式发 0.7.0 Release 之前 |
+| D12 剩下的：签名与来源证明、glibc / Windows 包真机跑、各平台 IPC 与命令清理记录 | 给别人分发之前，或有人报平台问题时 |
 | D09 持久 Job、D10 浏览器证据 | 真实项目需要时 |
 | D13 实现 2026-07-28 | 出现只讲新版、不会退回的客户端时 |
