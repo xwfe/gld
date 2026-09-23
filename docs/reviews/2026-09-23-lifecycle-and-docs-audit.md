@@ -292,3 +292,33 @@ toexec-text；toexec README 的当前 tag 同步更新（`2f22741`）。ccnm 仍
 - 锁没有超时：一次 `refresh_baseline` 或写后记账要扫整个工作区（有 511 MB 大文件时约 1.8 秒），
   这期间同一项目的其他任务操作排队等。
 - 写到一半留下的 `*.json.tmp.*` 不自动清理（不算任务，只占一点空间）。
+
+### D13 核对：支持 2026-07-28 的客户端能不能连上
+
+结论：**现在能连上，服务端不用改**；用 `a_new_protocol_probe_falls_back_to_initialize` 把现在的
+回法钉住（`220c286`）。这只回答"新客户端连旧服务器"这一格，不是 gld 支持了 2026-07-28。
+
+背景：[2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog) 去掉了
+`initialize` 握手和会话，每个请求自带版本。gld 只讲 2025-06-18，而 hub 规则、Skill 目录这些指令
+只在 `initialize` 里给；客户端要是认定 gld 是新服务器、不再握手，模型就拿不到这些指令。
+
+- 实测 gld 现在的回法（真实二进制、隔离数据目录）：新版 `server/discover` 回 HTTP 200 +
+  `-32601`、id 原样回；新版 `tools/list` 不握手也回 200 和整张工具表；`initialize` 不管客户端要
+  2025-06-18 还是 2025-11-25 都回 2025-06-18。
+- 子 agent 读了四个官方 SDK 的源码（TS 2.0.0、Python 2.x、Go ≥1.7、C# ≥2.0）：支持新版的客户端
+  第一个请求都是 `server/discover`，不是 `tools/list`；200 + `-32601` 四个都判为旧服务器、退回
+  `initialize`。会让连接失败的回法：405（C#）、5xx（TS、C#）、不回应或 id 对不上（TS）、
+  `-32020`～`-32022`、给 `server/discover` 一个像样的成功结果。我核对了 TS 判定代码的那几行。
+- 用官方 TS SDK 2.0.0 客户端（`versionNegotiation: { mode: 'auto' }`，装在临时目录）实连隔离的 gld：
+  `server/discover`（2026-07-28）→ 200 → `initialize` → 协商到 2025-06-18，拿到 1649 字指令、
+  28 个工具，`list_workspaces` 调用正常。Claude Code 的 v2 运行时用的就是这个 SDK。
+
+**仍未验证或未做：**
+
+- ChatGPT 连接器、claude.ai 连接器实际怎么探测，没有权威来源，没测。Python / Go / C# 只读了源码，
+  没实跑。
+- gld 没有实现 2026-07-28。只支持新版、不带退回的客户端连不上 gld，规范的兼容表也写明
+  这种组合会失败；等真有这样的客户端再做"两代都讲"的服务端。
+- 顺带看到两处和 2025-06-18 不完全一致、但实测不影响连接的地方，没改：`notifications/initialized`
+  回 200（规范写 202）；`GET /mcp` 回一段 JSON 说明（规范是开 SSE 流或回 405，只在退到已废弃的
+  HTTP+SSE 传输时才会用到）。

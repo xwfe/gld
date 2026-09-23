@@ -36,3 +36,5 @@
   sync；`append_line` 一次写完、先隔开半行；`read_log` 按字节读、坏行报行号；dispatch 写前检查读任务
   出错即拒写。
 - 验证：全量 804 passed / 0 failed；新测试连跑 20 次全过；真实二进制经守护进程复跑全部符合。
+- D13 核对：读 2026-07-28 变更与兼容表；实测 gld 对新版请求的回法；子 agent 读四个官方 SDK 的探测
+  判定；装官方 TS SDK 2.0 到 scratchpad 实连隔离 gld，退回 initialize 后一切正常。只加测试和排障说明。
