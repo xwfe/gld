@@ -38,6 +38,18 @@ pub struct TunnelOutcome {
 
 static RUNTIME: LazyLock<Mutex<Option<HubRuntime>>> = LazyLock::new(|| Mutex::new(None));
 
+/// 监听器起过、还没停。给**同步**上下文用：守护进程回 `daemon status` 的那段
+/// 代码不是异步的，拿不到上面那把 tokio 锁，而它要是数不到这个服务，
+/// `gld daemon status` 就会在服务跑着的时候说"运行中的服务 0"。
+///
+/// 只反映"起了没停"：监听任务自己退了（[`HubState::Exited`]）这里看不出来，
+/// 那种情况 `gld ls` 和 `gld doctor` 会说。
+static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn started_hint() -> bool {
+    STARTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 此刻的监听器状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubState {
@@ -79,6 +91,7 @@ pub async fn start(
             return Err(AppError::Message(error));
         }
     };
+    STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
     *guard = Some(HubRuntime {
         port: config.local_port,
         shutdown: Some(shutdown),
@@ -155,6 +168,7 @@ pub async fn state() -> HubState {
 }
 
 async fn stop_runtime(mut runtime: HubRuntime) {
+    STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
     if let Some(shutdown) = runtime.shutdown.take() {
         let _ = shutdown.send(());
     }

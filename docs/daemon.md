@@ -13,7 +13,7 @@ gld daemon status
 pid           9363
 版本          0.6.0（协议 3）
 运行时长      2h 13m
-运行中的服务  0
+运行中的服务  1
 数据目录      /Users/you/.config/gld
 socket        /Users/you/.config/gld/daemon.sock
 日志          /Users/you/.config/gld/logs/daemon.log
@@ -75,8 +75,9 @@ printf '{"op":"ping"}\n' | nc -U ~/.config/gld/daemon.sock
 | `logs/daemon.log` | stdout / stderr 重定向到这里 | 超过 4 MiB 会在下次 `daemon start` 时轮转为 `daemon.log.1`；只保留一代 |
 
 “是否在运行”只信 socket：能连上并回应 `daemon_info` 才算活着。
-pid 文件只用于展示和补充判断。"运行中的服务"数的是项目自己的线路（GPT Actions，以及
-旧版本起的单项目服务），MCP 服务本身在 `gld status` 里看。
+pid 文件只用于展示和补充判断。"运行中的服务"数的是 MCP 服务本身（起了没停算一个）加上
+项目自己的线路（GPT Actions，以及旧版本起的单项目服务）。它只回答"有没有在跑"；地址、
+隧道、认证这些看 `gld ls`，监听任务自己退了这种情况看 `gld doctor`。
 
 ## 日志有多大
 

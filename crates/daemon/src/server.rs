@@ -88,7 +88,12 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
                 data_home: paths.home.clone(),
                 socket: paths.socket.clone(),
                 log_file: paths.log.clone(),
-                running_services: app.running_services().map(|s| s.len()).unwrap_or(0),
+                // 项目自己那些监听器（Actions，以及还没停的旧单项目 MCP）**加上**
+                // 服务本身。不加后面那一项的话，服务跑得好好的时候
+                // `gld daemon status` 也说"运行中的服务 0"——升级完想确认服务
+                // 回来没有的人，第一眼看到的就是这个数。
+                running_services: app.running_services().map(|s| s.len()).unwrap_or(0)
+                    + usize::from(gld_core::hub::runtime::started_hint()),
             })
         },
         request_shutdown: {
