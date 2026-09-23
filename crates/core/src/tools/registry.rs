@@ -944,6 +944,18 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
         .collect()
 }
 
+/// `exec_command` / `check_command` / `apply_patch` / `patch_check` 的 `confirm`。
+///
+/// 这个字段是调用方自己填的，服务端看不到用户有没有点头，只拿它开危险操作那道门。
+/// 真人确认靠客户端按工具标注弹的确认框，所以标注必须照实给（审查 D08）。
+static CONFIRM_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "type": "boolean",
+        "default": false,
+        "description": "Set true only after the user explicitly approved this specific operation. The server cannot see or verify that approval; it only uses this flag to let an operation that needs confirmation through."
+    })
+});
+
 /// `apply_patch` / `patch_check` 的版本前置条件。两处一字不差，写两遍迟早
 /// 会只改一处。
 static EXPECTED_VERSIONS_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
@@ -1388,7 +1400,7 @@ pub fn input_schema(name: &str) -> Value {
                 "patch": { "type": "string", "minLength": 1 },
                 "notebook_edits": NOTEBOOK_EDITS_SCHEMA.clone(),
                 "dry_run": { "type": "boolean", "default": false },
-                "confirm": { "type": "boolean", "default": false },
+                "confirm": CONFIRM_SCHEMA.clone(),
                 "expected_versions": EXPECTED_VERSIONS_SCHEMA.clone(),
                 "reason": { "type": "string", "default": "" }
             },
@@ -1401,7 +1413,7 @@ pub fn input_schema(name: &str) -> Value {
             "properties": {
                 "patch": { "type": "string", "minLength": 1 },
                 "notebook_edits": NOTEBOOK_EDITS_SCHEMA.clone(),
-                "confirm": { "type": "boolean", "default": false },
+                "confirm": CONFIRM_SCHEMA.clone(),
                 "expected_versions": EXPECTED_VERSIONS_SCHEMA.clone()
             },
             "description": "Runs apply_patch without writing. Pass the arguments you intend to apply — including confirm — or the preflight answers a different question than the real call. Either patch or notebook_edits is required.",
@@ -1417,7 +1429,7 @@ pub fn input_schema(name: &str) -> Value {
                 "workdir": { "type": "string", "default": "." },
                 "cwd": { "type": "string", "description": WORKDIR_ALIAS_DESCRIPTION },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
-                "confirm": { "type": "boolean", "default": false },
+                "confirm": CONFIRM_SCHEMA.clone(),
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" }
             },
             "description": "ok=true 只表示预检做完了；能不能跑看 decision（allow / deny / needs_approval）。不会启动进程、不联网。给 cmd 或 argv，二选一。",
@@ -1440,7 +1452,7 @@ pub fn input_schema(name: &str) -> Value {
                     "enum": ["close", "once", "interactive"],
                     "description": "close (default when no stdin is given): stdin is closed right away, so a command that reads it gets EOF instead of hanging until timeout. once (default when stdin is given): write it, then close. interactive: write it and keep stdin open for write_stdin. Applied before the call returns, so yield_time_ms=0 keeps the initial input."
                 },
-                "confirm": { "type": "boolean", "default": false },
+                "confirm": CONFIRM_SCHEMA.clone(),
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" },
                 "reason": { "type": "string", "default": "" }
             },
