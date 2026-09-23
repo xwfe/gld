@@ -68,3 +68,13 @@
 - 空跑 run 35863249989 全绿 → 推 `v0.7.0` → run 35872551750 全绿，Release 有 5 个包 + `SHA256SUMS`。
 - 下载包：校验和 5 个全 OK；aarch64、x86_64（Rosetta）macOS 版和 musl 版（Oracle Linux 9 容器）实跑报
   0.7.0；glibc、Windows 版没实跑。下载的包在 scratchpad，验完删掉。
+
+## D08（2026-09-24）
+
+- 本机服务是 compact、7 个项目共用一把 OAuth 凭据挂公网，没用 `compat-readonly-all`，退役它不影响现有连接器。
+- 新测试先在旧实现上跑：dangerous 模式那条失败（`status=granted`）；stash 恢复后全过。
+- 拆成三个提交：`d7f71fc`（request_permissions）、`cacde65`（退役兼容档）、`e9fe757`（confirm 说明）。
+  第一个提交里的 `docs/cli.md` 只改权限模式那一行（最后一列，不影响对齐），第二个提交带完整重新生成的版本。
+- 验证：全量 808 passed / 0 failed；fmt、clippy 通过；真实二进制在隔离数据目录核对迁移、拒收、落盘。
+- `request_permissions` 经 CLI、hub 调不到（不在对客户端公开的表里），只有 GPT Actions 按名字放行；
+  真实二进制核对不了它，覆盖靠 dispatch 层的契约测试。

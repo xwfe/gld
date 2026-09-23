@@ -1,7 +1,7 @@
 # gld 完成度、生命周期与文档审查（2026-09-23）
 
-状态：**D01–D06、D11、D14 已修，D13 已核对，0.7.0 已在本机真机验收并发布（D12 做了发布门禁和
-下载包验收，签名与来源证明未做）；D07–D10 未做。**
+状态：**D01–D06、D08、D11、D14 已修，D13 已核对，0.7.0 已在本机真机验收并发布（D12 做了发布门禁和
+下载包验收，签名与来源证明未做）；D07、D09、D10 未做。**
 §1–§6 是审查当时（0.6.0）的原始发现，保留原样；每项怎么修的、怎么验证的、还剩什么，看
 [§7 处理进展](#7-处理进展)，末尾"收尾"一节列出没做的项和各自的时机。
 本页是有日期的证据快照与下一步入口，不取代项目的 Planning / Task 或再维护一份进度数据库。
@@ -405,6 +405,33 @@ toexec-text；toexec README 的当前 tag 同步更新（`2f22741`）。ccnm 仍
 - 审查原先列的 Linux / Windows 上 IPC、命令清理的真机记录，GitHub / SSH / 浏览器真实链路单列，都没做；
   平台证据目前只有 CI 的 ubuntu / macOS 全量测试和 Windows 的编译与补丁落盘测试。
 
+### D08：安全说法照实（2026-09-24）
+
+| 问题 | 结论 | 做了什么 |
+| --- | --- | --- |
+| `compat-readonly-all` 把能写能执行的工具标成只读 | 已退役（`cacde65`） | `gld set` / `gld upgrade` 给这个值报错并说明换成什么；配置里已有的读成 `advanced`（工具一个不少、标注照实），下次保存写成 `advanced`。不换的话会被当成认不出的值降成 core |
+| `request_permissions` 在 `dangerous` 下回 `granted`、说"需要许可的操作都自动放行" | 已修（`d7f71fc`） | 任何模式都回 `ELICITATION_UNSUPPORTED`。那句话本来就是假的：`rm -rf` 在 dangerous 下照样要 `confirm=true`。它只有 GPT Actions 那条线路调得到（MCP、CLI 都不列也不放行）。`trusted` 和 `dangerous` 现在行为完全一样 |
+| `confirm=true` 不是用户真实批准 | 写明（`e9fe757`） | 四个工具的 `confirm` 参数带上说明：服务端核实不了，只拿它开门。真人确认只能在客户端按标注弹框，文档写清楚标注照实给、点了"总是允许"这道也就没了 |
+| 静态策略不是 OS 沙箱 | 不用改 | `check_exec_environment` 早就报 `execution_boundary=policy_only`、`sandbox_enforced=false`，security.md 也写着 |
+
+**行为变化，升级时要知道：**
+
+- 配置里写着 `compat-readonly-all` 的，升级后客户端会开始在改文件、跑命令前问用户。
+- 工具表变了（`exec_command`、`apply_patch`、`patch_check`、`check_command` 的 `confirm` 多了说明）：
+  ChatGPT 要到 chatgpt.com/plugins 点 Refresh 才看得到，不刷新照样能用。
+- GPT Actions 线路上调 `request_permissions` 不再有 `granted`。
+
+**验证：**新测试先在旧实现上跑：dangerous 模式的那条失败（`ok=true`、`status=granted`）。隔离 `GLD_HOME`
+下全量 808 passed、0 failed、0 ignored；fmt、clippy `-D warnings`、`git diff --check` 通过；`docs/cli.md`
+重新生成。真实 `target/debug/gld`、隔离数据目录：`profiles.json` 里手写 `compat-readonly-all`（服务和项目各一处）
+后 `gld tool list` 出 54 个工具、`exec_command` / `apply_patch` 的 `readOnlyHint=false`，`gld ls` 显示
+`advanced`；`gld set` / `gld upgrade` 给这个值都退出 1、报退役原因；随便改一项后文件里两处都写成了 `advanced`；
+dangerous 模式下 `rm -rf build` 不带 confirm 报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`。
+
+**没做：**真正的"审批绑定具体动作与真实主体"（服务端发审批单、用户在本机 `gld approve`，或 MCP 的
+elicitation）。gld 的 HTTP 服务不开 SSE 流，elicitation 发不出去；ChatGPT 是否支持也没有权威来源。
+客户端按标注弹的确认框是现在唯一的真人确认，所以先保证标注不说谎。
+
 ### 收尾
 
 - 全部提交已推送到 GitHub。0.7.0 当时只是版本号，发布见上一节。
@@ -425,7 +452,7 @@ toexec-text；toexec README 的当前 tag 同步更新（`2f22741`）。ccnm 仍
 
 | 编号 | 什么时候 |
 | --- | --- |
-| D07 项目级授权、D08 安全语义 | 给别人用、多客户端接入或上生产之前，硬前置 |
+| D07 项目级授权 | 给别人用、多客户端接入或上生产之前，硬前置 |
 | D12 剩下的：签名与来源证明、glibc / Windows 包真机跑、各平台 IPC 与命令清理记录 | 给别人分发之前，或有人报平台问题时 |
 | D09 持久 Job、D10 浏览器证据 | 真实项目需要时 |
 | D13 实现 2026-07-28 | 出现只讲新版、不会退回的客户端时 |
