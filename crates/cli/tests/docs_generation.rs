@@ -37,6 +37,17 @@ fn generate(gld: &Path, out: &Path) -> Output {
         .expect("run gen-cli-docs.sh")
 }
 
+/// 断言失败时把脚本的退出码、stdout、stderr 都印出来：只说"退出 0 了"看不出脚本走的是哪条路
+/// （2026-09-23 macOS CI 上这里失败过一次，本机和 Linux 都复现不了，当时的输出里什么都没有）。
+fn describe(run: &Output) -> String {
+    format!(
+        "status={:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    )
+}
+
 fn leftovers(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir)
         .expect("read dir")
@@ -54,7 +65,11 @@ fn a_failing_subcommand_fails_the_run_and_keeps_the_old_file() {
     let gld = fake_gld(dir.path(), "secret", "echo boom >&2; exit 4");
 
     let run = generate(&gld, &out);
-    assert!(!run.status.success(), "命令失败了脚本还退出 0");
+    assert!(
+        !run.status.success(),
+        "命令失败了脚本还退出 0：{}",
+        describe(&run)
+    );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(stderr.contains("gld secret"), "要说清是哪一条：{stderr}");
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "旧的\n");
@@ -74,7 +89,11 @@ fn an_empty_table_fails_the_run_even_when_every_command_exits_zero() {
     let gld = fake_gld(dir.path(), "fields", "[ \"$2\" = --all ] && exit 0");
 
     let run = generate(&gld, &out);
-    assert!(!run.status.success(), "空表也生成成功了");
+    assert!(
+        !run.status.success(),
+        "空表也生成成功了：{}",
+        describe(&run)
+    );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(stderr.contains("空表"), "{stderr}");
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "旧的\n");
@@ -85,11 +104,7 @@ fn a_good_run_writes_every_section() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = dir.path().join("cli.md");
     let run = generate(Path::new(env!("CARGO_BIN_EXE_gld")), &out);
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert!(run.status.success(), "{}", describe(&run));
     let text = std::fs::read_to_string(&out).expect("generated");
     for needle in [
         "## gld tool call",
