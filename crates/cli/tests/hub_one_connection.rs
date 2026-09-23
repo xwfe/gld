@@ -399,3 +399,42 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
     let shown = hub.env.json(&["--json", "ls"]);
     assert_eq!(shown["service"]["config"]["authType"], "oauth", "{shown}");
 }
+
+/// `gld tool list --served` 拿到的就是客户端 tools/list 拿到的那张表，server_info
+/// 报的是同一个指纹（审查 D04：客户端说"没有这个工具"时，先分清是服务没给还是
+/// 客户端缓存了旧表）。服务没在跑时直说，不拿本地算的表冒充。
+#[test]
+fn tool_list_served_is_the_list_clients_get_and_server_info_agrees() {
+    let hub = hub_with_two_members();
+    let (status, listed) = rpc(
+        hub.port,
+        "/mcp",
+        Some(&hub.token),
+        1,
+        "tools/list",
+        json!({}),
+    );
+    assert_eq!(status, 200, "{listed}");
+    let over_http = listed["result"]["tools"].clone();
+
+    let served = hub.env.json(&["--json", "tool", "list", "--served"]);
+    assert_eq!(
+        served["tools"], over_http,
+        "CLI 看到的和客户端拿到的不是同一张表"
+    );
+    let fingerprint = served["surface"]["tools_fingerprint"].clone();
+    assert!(fingerprint.is_string(), "{served}");
+    assert!(served["build"]["version"].is_string(), "{served}");
+
+    let info = call(&hub, 2, "server_info", json!({ "workspace": "api" }));
+    assert_eq!(
+        info["connection"]["tools_fingerprint"], fingerprint,
+        "{info}"
+    );
+
+    hub.env.ok(&["stop"]);
+    let stopped = hub.env.gld(&["tool", "list", "--served"]);
+    assert!(!stopped.status.success(), "服务停了还给出一张表");
+    let stderr = String::from_utf8_lossy(&stopped.stderr);
+    assert!(stderr.contains("服务没在跑"), "{stderr}");
+}

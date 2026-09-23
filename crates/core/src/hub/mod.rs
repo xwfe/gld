@@ -495,6 +495,22 @@ impl Hub {
         tools
     }
 
+    /// server_info 里补上**这条连接**的 tools/list 实际给出的工具表（审查 D04）。
+    ///
+    /// 成员自己的 server_info 报的是成员工具集那一份：含 hub 隐藏掉的
+    /// get/set_default_cwd，不含 list_workspaces、远端和中继工具，也没有参数。
+    /// 拿它跟客户端看到的表对，对不上也说明不了问题。
+    fn with_connection_surface(&self, mut info: Value) -> Value {
+        if let Some(object) = info.as_object_mut() {
+            let mut surface = crate::tools::registry::surface_digest(&self.list_tools());
+            surface["note"] = json!(
+                "The tool list this connection's tools/list returns right now. If your own tool list lacks any of these tools or parameters, the client is using a cached older list: refresh the connector's tools (ChatGPT: connector settings → refresh) instead of guessing arguments or asking for permissions."
+            );
+            object.insert("connection".into(), surface);
+        }
+        info
+    }
+
     fn exposes(&self, name: &str) -> bool {
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
@@ -662,6 +678,13 @@ impl Hub {
             self.workspace_context(member, &context)
         } else if !exposed_tool_names(&context.tool_profile).contains(&canonical) {
             tool_not_in_workspace(canonical, member, &context.tool_profile)
+        } else if canonical == "server_info" {
+            self.with_connection_surface(call_tool_as(
+                &context,
+                &Caller::from_auth(auth),
+                canonical,
+                args,
+            ))
         } else {
             call_tool_as(&context, &Caller::from_auth(auth), canonical, args)
         };
@@ -1567,6 +1590,66 @@ mod tests {
                 tool["name"]
             );
         }
+    }
+
+    /// 客户端拿到的工具表 = 注册表那一档，去掉 hub 隐藏的、每个加上 workspace，
+    /// 逐个工具、逐个参数对得上；server_info 报的指纹就是这一份（审查 D04）。
+    ///
+    /// 审查时客户端看不到 check_command 等四个工具和几个参数，查下来服务端每一层
+    /// 都给了——是客户端缓存了旧表。这条把"服务端确实给了"钉住，再出现同样的
+    /// 现象，先怀疑客户端。
+    #[test]
+    fn the_served_tool_list_matches_the_registry_and_server_info_reports_it() {
+        let fixture = fixture();
+        let served = fixture.hub.list_tools();
+        let params = |tool: &Value| {
+            let mut names: Vec<String> = tool["inputSchema"]["properties"]
+                .as_object()
+                .map(|properties| properties.keys().cloned().collect())
+                .unwrap_or_default();
+            names.sort();
+            names
+        };
+        for tool in list_tools_for_profile(&fixture.hub.tool_profile) {
+            let name = tool["name"].as_str().expect("name");
+            let offered = served.iter().find(|offered| offered["name"] == name);
+            if HIDDEN_TOOLS.contains(&name) {
+                assert!(offered.is_none(), "{name} 应该被 hub 隐藏");
+                continue;
+            }
+            let offered = offered.unwrap_or_else(|| panic!("hub 没给 {name}"));
+            let mut expected = params(&tool);
+            expected.push("workspace".into());
+            expected.sort();
+            assert_eq!(params(offered), expected, "{name} 的参数和注册表对不上");
+        }
+
+        let digest = crate::tools::registry::surface_digest(&served);
+        for (tool, param) in [
+            ("check_command", "cmd"),
+            ("list_skills", "workspace"),
+            ("get_skill", "name"),
+            ("read_notebook", "path"),
+            ("read_file", "start_byte"),
+            ("apply_patch", "expected_versions"),
+            ("apply_patch", "notebook_edits"),
+            ("exec_command", "argv"),
+            ("exec_command", "stdin_mode"),
+        ] {
+            let listed = digest["tools"][tool]
+                .as_array()
+                .unwrap_or_else(|| panic!("服务端没给 {tool}"));
+            assert!(listed.contains(&json!(param)), "{tool} 没有 {param}");
+        }
+
+        let info = call(&fixture.hub, "server_info", json!({ "workspace": "api" }));
+        assert_eq!(info["ok"], true, "{info}");
+        assert_eq!(
+            info["connection"]["tools_fingerprint"], digest["tools_fingerprint"],
+            "{info}"
+        );
+        assert_eq!(info["connection"]["tool_count"], served.len());
+        assert!(info.get("build_commit").is_some(), "{info}");
     }
 
     /// 没带 workspace 就拒绝，并把能选的列出来——模型按报错重试一次就能对。

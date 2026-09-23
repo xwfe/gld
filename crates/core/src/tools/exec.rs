@@ -549,7 +549,7 @@ pub(crate) fn policy_snapshot(ctx: &ToolContext) -> Value {
     })
 }
 
-fn server_snapshot() -> Value {
+pub fn server_snapshot() -> Value {
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_version": "2025-06-18",

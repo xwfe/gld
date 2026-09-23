@@ -110,6 +110,18 @@ pub async fn stop() {
     }
 }
 
+/// 跑着的服务此刻对客户端 tools/list 给出的工具表；没在跑是 `None`。
+///
+/// 和监听器用的是同一个 `Hub`，所以就是客户端拿到的那一份——不是按当前 CLI 的
+/// 代码重新算的（审查 D04：客户端看不到的工具，要分清是服务没给还是客户端缓存了旧表）。
+pub async fn served_tools() -> Option<Vec<serde_json::Value>> {
+    let hub = RUNTIME.lock().await.as_ref()?.hub.clone();
+    // 列远端成员要读配置，别在 async worker 上做同步 IO。
+    tokio::task::spawn_blocking(move || hub.list_tools())
+        .await
+        .ok()
+}
+
 /// 跑着的服务实际用的公网基地址和隧道报错；没在跑是 `None`。
 pub async fn public_base() -> Option<(String, String)> {
     RUNTIME

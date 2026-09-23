@@ -1046,6 +1046,7 @@ Options:
 Usage: gld tool list [OPTIONS]
 
 Options:
+      --served          改看正在跑的服务此刻给客户端的 tools/list（参数、指纹、构建提交），用来查客户端是否缓存了旧表
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）

@@ -315,6 +315,8 @@ pub enum Request {
     ListTools {
         target: WorkspaceTarget,
     },
+    /// 正在跑的服务给客户端的 tools/list（服务级，和项目无关）。
+    ServedTools,
     CallTool {
         target: WorkspaceTarget,
         name: String,

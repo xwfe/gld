@@ -12,7 +12,8 @@ use crate::error::{CliError, CliResult};
 
 pub async fn run(ctx: &mut Ctx, command: ToolCmd) -> CliResult {
     match command {
-        ToolCmd::List => list(ctx).await,
+        ToolCmd::List { served: true } => served(ctx).await,
+        ToolCmd::List { served: false } => list(ctx).await,
         ToolCmd::Schema { name } => schema(ctx, &name).await,
         ToolCmd::Call {
             name,
@@ -47,6 +48,59 @@ async fn list(ctx: &mut Ctx) -> CliResult {
         ctx.out
             .dim("参数：gld tool schema <工具名>；调用：gld tool call <工具名> key=value"),
     );
+    Ok(())
+}
+
+/// 正在跑的服务此刻对客户端 tools/list 给出的那张表。
+///
+/// 和不带 `--served` 的区别：那张是按这个项目的工具集、用当前这个 gld 的代码算的；
+/// 这张是问正在跑的服务要的——服务端没升级、hub 自己加减的工具、参数，都只在这张里
+/// 看得出来。客户端（ChatGPT 连接器之类）看到的比这张少，就是它缓存了旧表。
+async fn served(ctx: &mut Ctx) -> CliResult {
+    let served: Value = ctx.backend.call_typed(Request::ServedTools).await?;
+    if ctx.out.json_or(&served) {
+        return Ok(());
+    }
+    let build = &served["build"];
+    let surface = &served["surface"];
+    ctx.out.line(format!(
+        "服务：{}  构建提交 {}",
+        field(build, "version"),
+        build["build_commit"].as_str().unwrap_or("未知")
+    ));
+    ctx.out.line(format!(
+        "tools/list：{} 个工具  指纹 {}",
+        surface["tool_count"],
+        field(surface, "tools_fingerprint")
+    ));
+    ctx.out.line("");
+    let rows: Vec<Vec<String>> = surface["tools"]
+        .as_object()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|(name, params)| {
+                    let params = params
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                    vec![name.clone(), params]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ctx.out.table(&["工具", "参数"], &rows);
+    ctx.out.line("");
+    ctx.out.line(ctx.out.dim(
+        "客户端里少了哪个工具或参数，就是它缓存了旧表：在客户端刷新工具（ChatGPT 在连接器设置里刷新），不用改权限。\n\
+         AI 那边调 server_info，connection.tools_fingerprint 和上面一致才说明它拿到的是这一份。",
+    ));
     Ok(())
 }
 

@@ -1084,10 +1084,16 @@ fn filter_exposed_actions(ctx: &ToolContext, actions: Vec<String>) -> Vec<String
 pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
     let tools = crate::tools::registry::exposed_tool_names(&ctx.tool_profile);
     let history_context = crate::tools::history::context_snapshot(ctx).ok().flatten();
+    let build = exec::server_snapshot();
     Ok(tool_ok(json!({
         "server": ctx.server_name(),
         "title": ctx.server_title(),
         "version": env!("CARGO_PKG_VERSION"),
+        // 版本号相同的两次构建可以差几十个提交；核对"跑的是不是这份代码"看这两格。
+        // 以前只有 check_command 报它们，而客户端缓存了旧工具表时恰恰看不见
+        // check_command（审查 D04）；server_info 哪个版本的客户端都有。
+        "build_commit": build["build_commit"],
+        "shared_crates": build["shared_crates"],
         "protocol_version": "2025-06-18",
         "workspace": ctx.workspace.root_display(),
         "permission_mode": ctx.permission_mode,

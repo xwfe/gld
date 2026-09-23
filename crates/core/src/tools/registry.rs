@@ -860,6 +860,40 @@ fn compact_description<'a>(name: &str, fallback: &'a str) -> &'a str {
     }
 }
 
+/// 一份 tools/list 的摘要：每个工具收哪些参数、整份的指纹。
+///
+/// 给"客户端看到的工具表是不是服务端现在给的这份"做对照（审查 D04）。客户端会缓存
+/// 工具表，服务端又声明 `listChanged: false`、不会通知它刷新；升级之后客户端还拿着
+/// 旧表的话，新工具、新参数它都看不见，而源码和版本号都说"有"。只对工具个数或
+/// 版本号查不出来：参数少了个数不变，同一个版本号能对应几十个提交。
+///
+/// 指纹是整份 tools/list（名字、说明、schema、标注）的 SHA-256 前 16 位，两边
+/// 任何一个字不同就不同。
+pub fn surface_digest(tools: &[Value]) -> Value {
+    use sha2::{Digest, Sha256};
+
+    let bytes = serde_json::to_vec(tools).unwrap_or_default();
+    let fingerprint = format!("{:x}", Sha256::digest(&bytes));
+    let params: serde_json::Map<String, Value> = tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.get("name")?.as_str()?.to_string();
+            let mut names: Vec<&String> = tool
+                .pointer("/inputSchema/properties")
+                .and_then(Value::as_object)
+                .map(|properties| properties.keys().collect())
+                .unwrap_or_default();
+            names.sort();
+            Some((name, json!(names)))
+        })
+        .collect();
+    json!({
+        "tool_count": tools.len(),
+        "tools_fingerprint": &fingerprint[..16],
+        "tools": params
+    })
+}
+
 pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
     let compat = tool_profile == "compat-readonly-all";
     exposed_tool_names(tool_profile)
@@ -1624,5 +1658,28 @@ mod tests {
         assert!(names.contains(&"get_skill"));
         assert!(!names.contains(&"request_permissions"));
         assert_eq!(tool_api_descriptor()["version"], "2");
+    }
+
+    /// 少一个参数，工具个数不变，指纹得变——只对个数查不出旧表。
+    #[test]
+    fn surface_digest_lists_parameters_and_changes_when_one_goes_missing() {
+        let tools = list_tools_for_profile("compact");
+        let digest = super::surface_digest(&tools);
+        assert_eq!(digest["tool_count"], tools.len());
+        let read_file = digest["tools"]["read_file"].as_array().expect("read_file");
+        assert!(read_file.contains(&serde_json::json!("start_byte")));
+
+        let mut older = tools.clone();
+        let read_file = older
+            .iter_mut()
+            .find(|tool| tool["name"] == "read_file")
+            .expect("read_file");
+        read_file["inputSchema"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .remove("start_byte");
+        let stale = super::surface_digest(&older);
+        assert_eq!(stale["tool_count"], digest["tool_count"]);
+        assert_ne!(stale["tools_fingerprint"], digest["tools_fingerprint"]);
     }
 }

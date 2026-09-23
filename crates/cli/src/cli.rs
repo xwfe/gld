@@ -694,7 +694,11 @@ pub struct ContextArgs {
 pub enum ToolCmd {
     /// 列出当前项目暴露给 AI 的工具（取决于它的 tool-profile）
     #[command(visible_alias = "ls")]
-    List,
+    List {
+        /// 改看正在跑的服务此刻给客户端的 tools/list（参数、指纹、构建提交），用来查客户端是否缓存了旧表
+        #[arg(long)]
+        served: bool,
+    },
     /// 显示某个工具的完整定义与参数 Schema
     Schema {
         /// 工具名，例如 read_file

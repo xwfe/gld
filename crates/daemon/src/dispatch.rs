@@ -308,6 +308,18 @@ pub async fn dispatch(
             let profile = resolve(app, &target)?;
             ok(&app.list_tools(&profile.id)?)
         }
+        R::ServedTools => {
+            let Some(tools) = gld_core::hub::runtime::served_tools().await else {
+                return Err(RpcError::from(gld_core::AppError::Message(
+                    "服务没在跑，没有正在给客户端的工具表；`gld start` 之后再查".into(),
+                )));
+            };
+            Ok(serde_json::json!({
+                "build": gld_core::tools::exec::server_snapshot(),
+                "surface": gld_core::tools::registry::surface_digest(&tools),
+                "tools": tools
+            }))
+        }
         R::CallTool { target, name, args } => {
             let profile = resolve(app, &target)?;
             // 工具内核是同步 API，内部用 block_on 驱动子进程，不能占用异步 worker 线程。
