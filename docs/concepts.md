@@ -398,13 +398,15 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 | --- | --- | --- |
 | `compact` | 28 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
 | `core` | 40 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
-| `advanced` | 53 | 全部工具都暴露 |
+| `advanced` | 54 | 全部工具都暴露 |
 | `read-only` | 21 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
-| `compat-readonly-all` | 53 | 见下面的警告 |
+| `compat-readonly-all` | 54 | 见下面的警告 |
 
 上面的数字是本地工具内核的 profile 口径，会随版本变；以命令输出为准。
-它不是客户端工具数量承诺：hub 有自己的服务级工具、远端工具与过滤规则，客户端还可能缓存
-旧 schema。需要同时核对实际发现的工具和参数；源码可用不等于当前连接可调。
+它不是客户端实际拿到的表：服务还会加上 `list_workspaces` 等服务级工具、远端和中继工具，
+去掉 `get/set_default_cwd`，每个工具多一个 `workspace` 参数；客户端还可能缓存旧表。
+客户端实际拿到的那张用 `gld tool list --served` 看，核对办法见
+[troubleshooting.md 工具列表是旧的](troubleshooting.md#客户端连不上)。
 
 ### compact 还会砍掉注入给 AI 的说明，Skill 目录只给一段
 
@@ -562,11 +564,40 @@ gld set history-context=           # 清空，恢复"什么都不注入"
 `GLD_HOME/harness/`，Planning 存于项目 `.gld/`，历史档案存于项目 `docs/history-session/`。
 它们不能互相代替，也没有因为用了 Task 就自动得到验证证据、任务回滚或发布审批。
 
-当前 `task_manage action=finish` 默认把任务转成 `verifying`，**不会自动跑测试或变成
-`completed`**；`allow_unverified=true` 可明确收为 `completed_unverified`。该状态表示没有
-Harness 的正式验收记录，不应抹去另行记录的真实测试结果。`change_summary.verification`
-当前仍为空。`pause` 也是进度状态，不是停进程或冻结写权限的保证。
+### 任务怎么收尾：带证据才算 completed
+
+```text
+exec_command cmd='cargo test'                         → 记下它回的 session_id
+task_manage action=finish task_id=<id> evidence_session_ids=["<session_id>"]
+```
+
+`finish` 不会替你跑测试。它只收**这个任务期间用 `exec_command` 起的、退出 0 的命令**当证据，
+而且要求：命令跑的时候 gld 没往工作区写过东西，跑完之后工作区也没再变（比的是逐文件
+SHA-256 指纹和 HEAD）。全部满足才进 `completed`，证据记进 `change_summary.verification`
+（命令原文、退出码、当时的指纹）。有一条不满足就整个拒收，报 `VERIFICATION_REJECTED`，
+任务状态不动，`details.rejected` 逐条说原因：
+
+| `code` | 意思 | 怎么办 |
+| --- | --- | --- |
+| `EVIDENCE_FAILED` | 退出非零、超时、被杀 | 修好再跑 |
+| `EVIDENCE_NOT_FINISHED` | 命令还在后台跑，或结束后还没人读到 | `read_output` 读到它结束（读到那一刻才记终态） |
+| `EVIDENCE_STALE` | 跑的时候或跑完之后文件变了，测的不是现在的内容 | 重跑一次 |
+| `EVIDENCE_NOT_FOUND` | 不是这个任务期间起的命令，或 id 写错 | 用 `details.evidence_candidates` 里列的 |
+
+不带证据调 `finish` 进 `verifying`，回包的 `evidence_candidates` 列出现在就能用的命令；
+`verifying` 里仍可跑测试、改文件（改了之前的证据自然作废）。确认放弃正式验收才用
+`allow_unverified=true`，收成 `completed_unverified`——它只说明没有被接受的证据，
+不代表没测过。
+
+证据能证明"这条命令在现在这份文件上跑过、退出 0"，证明不了这条命令测到了该测的东西：
+`true` 也退出 0。所以记录里留着命令原文，给看的人判断。命令运行时自己改了文件
+（测试缓存、快照）照样收，但回包 `warnings` 和 `change_summary.risks` 会点名是哪些文件。
+
+**暂停就是停写**：`pause` 之后 `exec_command` / `apply_patch` 报 `TASK_PAUSED`，`resume` 之后
+恢复；暂停的任务仍占着任务位，开不了下一个。它不会替你停掉已经在跑的命令。
 完整使用边界见 [项目开发生命周期](project-lifecycle.md)。
+
+### 工作区指纹
 
 开了 Durable Task（`task_manage action=start`）之后，写类工具（`exec_command`、
 `apply_patch`）每次执行前会比一次**工作区指纹**：任务开始时记一份，之后每次工具
@@ -577,13 +608,26 @@ Harness 的正式验收记录，不应抹去另行记录的真实测试结果。
 `__pycache__/`、`.next/`、`coverage/` 这类构建产物和依赖缓存，工作区指到用户目录时才会
 碰到的 `Library/`、`AppData/`，以及 **gld 自己在项目里的状态目录 `.gld/`**（Planning
 状态存在这儿，而它每次工具调用都可能被写）。这些目录里的改动任务发现不了。
+名单只对**目录**生效，任意一层都算；叫 `build` 的脚本、叫 `dist` 的文件照样计入。
 History 档案（`docs/history-session/`）计入指纹，但 history 工具写完会自动把指纹记上账。
 
-**当前实现比上述“目录”说法更宽**：按名字在任意层级排除，文件也算，因此
-`scripts/build`、`docs/Library/` 也会被跳过。遍历或读文件失败也没有完整性标记，
-不能把一次指纹匹配解释成所有源文件都已检查。外部变更后的状态提示虽会提到
-`refresh_baseline`，目前没有对应公开工具；应先读 diff、核实归属，不要盲试该名称或直接
-编辑内部状态文件。显式的基线复核与接纳流程仍待实现。
+读不到的文件（没权限、遍历出错）不在指纹里，内容变了也看不出来。它们不会被当成
+"不存在"悄悄略过：`task_manage action=status` 回 `baseline_complete: false` 和
+`unreadable_paths`，验收时回包 `warnings` 也会点名。
+
+**报了 `FILE_CHANGED_EXTERNALLY` / `BASELINE_STALE` 之后怎么恢复**：先看，再接纳。
+
+```text
+task_manage action=refresh_baseline task_id=<id>
+    → changes：从任务上次记账到现在变了哪些文件；current.fingerprint：现在的指纹。什么都不改
+task_manage action=refresh_baseline task_id=<id> accept_fingerprint=<current.fingerprint> reason="用户手改了 README"
+    → 把现在的工作区接纳为新基线，记一条带 reason 的事件
+```
+
+看过之后工作区又变了，接纳会报 `BASELINE_CHANGED_SINCE_REVIEW`，得重新看——这是为了
+不把没看过的改动一起吞进去。不属于这个任务的改动，先恢复原样再接纳。
+升级前开的任务没存"上次记账时的逐文件清单"，第一次看到的是相对任务开始时的全部改动
+（`compared_with: task_start`），会比实际外部改动多。
 
 指纹要把剩下的每个文件完整读一遍算 SHA-256。实测工作区里有一个 511 MB 的文件时，
 每次写操作前多等约 1.8 秒（内存不涨）。大文件放进上面哪个目录里，或者这种工作区别开

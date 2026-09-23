@@ -60,9 +60,28 @@ gld tool call exec_command cmd='cargo test'
 | OAuth 授权失败 | 客户端里存的是旧口令 / 旧 Client ID | `gld ls --reveal` 重新核对（改凭据会自动重启服务，服务端一定是新值） |
 | 401 Unauthorized / 客户端只说连不上 | Bearer Token 不对、改了 token 客户端没更新、填的是某个项目自己的凭据；或者请求压根没到 gld | 先 `gld logs -n 20` 分清是哪种：有 `[auth] rejected credential=missing` / `credential=rejected` 说明请求到了、是凭据问题，`gld secret ls bearer_token --reveal` 核对（OAuth 就重新授权）；客户端一连日志里却什么都没有，说明请求没到，查公网地址和隧道（`gld health`）。日志只记带没带凭据，不记凭据本身 |
 | `gld health -s actions` 显示 `HTTP 404（这个端口上应答的不是 gld 的服务）` | 这个端口上跑着别的程序（Actions 默认端口 8787 很容易被撞） | `gld set <项目> actions.port=<其他端口>`（会自动重启）；`gld doctor` 会告诉你占用者是谁 |
-| 工具列表是旧的 | 客户端缓存 | 断开重连插件 / 新开对话；服务端 `/mcp` 已带 `Cache-Control: no-store` |
+| 工具列表是旧的：AI 说没有 `check_command`、`read_file` 不收 `start_byte` 这类，而你确定服务已经升级 | 客户端缓存了升级前的工具表。服务端声明 `listChanged: false`，不会通知客户端重拉 | 见下面"核对客户端拿到的工具表" |
 | ChatGPT 连接器突然要重新连接，配置看着没动过 | 多半是公网地址变了（临时 `cf` 隧道一重启就换地址） | 换固定地址，见 [connect-clients.md 什么时候要重新授权](connect-clients.md#什么时候要重新授权什么时候要删了重建)。重启服务本身不会掉授权 |
 | 局域网另一台机器连不上 | 默认只监听 127.0.0.1 | `gld cfg runtime --lan-access true` 后 `gld restart`，并确认认证不是 noauth |
+
+### 核对客户端拿到的工具表
+
+升级之后、或 AI 说某个工具 / 参数不存在时，按这个顺序分清是服务没给还是客户端没拿到。
+**不要**为此放宽权限，也不要让 AI 猜参数。
+
+1. 服务这边：`gld tool list --served`。它问正在跑的服务要**客户端 tools/list 拿到的那张表**，
+   打印构建提交、工具数、指纹（如 `c18992480bf6164f`）和每个工具的参数。报"服务没在跑"就先
+   `gld start`；报不认识这个请求，说明守护进程还是旧版本，`gld daemon restart`。
+   不带 `--served` 的 `gld tool list` 是按项目配置算的，不含服务自己加减的工具，不能拿来对。
+2. 客户端那边：让 AI 调一次 `server_info`（任何版本的客户端都有它），看回包：
+   `build_commit` 应该和第 1 步一样；`connection.tools_fingerprint` 应该和第 1 步的指纹一样；
+   `connection.tools` 列着每个工具的参数，让 AI 拿它和自己看到的工具表逐个对。
+3. 对不上就是客户端缓存了旧表：ChatGPT 在连接器设置里刷新（或删了重加），Claude Code /
+   Cursor 断开重连 MCP，再新开一个对话从第 2 步重来。
+   想确认客户端到底有没有重新拉过：`gld logs` 里看它重连之后有没有
+   `[rpc] request … method=tools/list` 那一行。
+4. 对上了之后再做一次实际调用：`check_command` 做只读预检，然后在一个无关紧要的项目里打一个
+   补丁、起一条后台命令用 `read_output` 续读到结束。工具名和指纹对上只说明看得见，能调通才算数。
 
 ## 隧道
 
@@ -126,9 +145,11 @@ gld tool call exec_command cmd='cargo test'
 | 换了个客户端连上来，`read_output` / `kill_session` 报 `SESSION_NOT_FOUND`，`session_id` 是刚抄过来的 | 命令会话按"项目 + 谁在调"分表，不是同一个主体就看不见。换的是另一个 OAuth 客户端就是另一个主体 | 有意如此：别人的命令输出不该摊开。用起这条命令的那个客户端去读。真要几个客户端共用一批会话，让它们用同一份凭据 |
 | 同一个客户端重连之后 `session_id` 就失效了 | 不是分表的事：会话本身有寿命，命令结束或超时 30 秒后会被回收；`gld stop`、项目被删掉也会停掉经服务起的命令 | 结束的命令在那 30 秒里还读得到输出，过了就只能重跑。长命令别靠重连接着读，让它把结果写文件 |
 | 远端项目（`remote_*` 那组工具）的后台命令忽然没了，`remote_read_output` 说不认识那个 `output_ref` | 后台命令活不过它那条 coding 会话。会话可能是被这几样结束的：一条跑过头的**前台**命令（服务对一次远端调用最多等 60 秒，超了就丢连接）、`remote_coding_end`、或者没人调用被回收——挂着后台命令时是十分钟，没挂着是两分钟 | 长命令一律 `run_in_background`；前台命令的期限服务会替你压到 50 秒以内，要更久它会拒，照着它说的改。起了后台任务就隔一会儿 `remote_read_output` 看一眼，既拿到进度也把空闲计时清零。真要长活的服务（dev server 之类）交给那台机器上的 systemd / launchd，别让它挂在一条 MCP 连接上 |
-| `FILE_CHANGED_EXTERNALLY`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹，发现任务开始后有它没记账的文件变化 | 确实是你在编辑器里改了文件的话，这是它该做的事——让 AI 重新读一遍再动手。要是你什么都没改却一直报，看下一行 |
+| `FILE_CHANGED_EXTERNALLY` / `BASELINE_STALE`（开了 Durable Task 之后） | 有活动任务时，写工具执行前会比对工作区指纹和 HEAD，发现有它没记账的变化 | 让 AI 先 `task_manage action=refresh_baseline` 看是哪些文件变了，确认是你改的、可以算进任务，再带 `accept_fingerprint` 和 `reason` 接纳。步骤见 [concepts.md](concepts.md#durable-task-的工作区基线)。要是你什么都没改却一直报，看下一行 |
+| `TASK_PAUSED` | 任务暂停了，暂停期间不放行写入和执行 | `task_manage action=resume task_id=<id>` |
+| `VERIFICATION_REJECTED`（`finish` 时） | 给的验收证据有不作数的：失败、还没结束、之后改过文件、不是这个任务起的 | `details.rejected` 逐条写了原因，对照表在 [concepts.md](concepts.md#任务怎么收尾带证据才算-completed)；任务状态没动，修好重跑再 `finish` |
 | 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
-| 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 跳过名单多了 `.venv/`、`coverage/`、`Library/` 等目录（[concepts.md](concepts.md#durable-task-的工作区基线)），工作区里有这些目录就跟升级前记下的指纹对不上 | 结束旧任务再开一个：`task_manage action=finish task_id=<id> allow_unverified=true`，然后 `action=start`。`<id>` 在 `action=status` 的 `task_id` 里 |
+| 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 指纹的计算范围变了：跳过名单多过 `.venv/`、`coverage/`、`Library/` 等目录；2026-09-23 起名单只跳目录，叫 `build`、`dist` 这类名字的**文件**开始计入（[concepts.md](concepts.md#durable-task-的工作区基线)）。跟升级前记下的指纹对不上 | `task_manage action=refresh_baseline task_id=<id>` 看一眼变化，确认只是这些文件，带 `accept_fingerprint` 和 `reason="升级 gld 后指纹范围变化"` 接纳。`<id>` 在 `action=status` 的 `task_id` 里 |
 
 ## 服务和项目
 
