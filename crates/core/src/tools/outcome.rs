@@ -100,8 +100,9 @@ fn command_state(command: &CommandOutcome) -> &'static str {
         "exited" if command.exit_code == Some(0) => "completed",
         "exited" => "failed",
         "timeout" => "timed_out",
-        "killed" => "cancelled",
-        // 服务重启丢了会话：进程后来怎样没人看见。
+        // interrupted：gld 退出时自己停掉的（运行记录，审查 D09）。结局是确定的——没跑完。
+        "killed" | "interrupted" => "cancelled",
+        // 服务重启丢了会话、或者 gld 没来得及记下结局：进程后来怎样没人看见。
         "server_restart" | "unknown" => "unknown",
         _ => "failed",
     }
@@ -113,6 +114,10 @@ fn describe_failure(command: &CommandOutcome) -> String {
         ("exited", None) => "command exited without an exit code (killed by a signal)".into(),
         ("timeout", _) => "command timed out and was killed".into(),
         ("killed", _) => "command was killed".into(),
+        ("interrupted", _) => "command was stopped because the service process running it exited".into(),
+        ("unknown", _) => {
+            "how the command ended was never recorded (the service process running it went away first); it may still be running".into()
+        }
         (status, _) => format!("command ended as {status}"),
     }
 }
@@ -165,6 +170,15 @@ mod tests {
             ),
             (
                 json!({"status": "exited", "termination_reason": "server_restart", "command_ok": false}),
+                "unknown",
+            ),
+            // 运行记录（审查 D09）：gld 退出时停掉的是 cancelled；没来得及记的是 unknown。
+            (
+                json!({"running": false, "termination_reason": "interrupted", "command_ok": false}),
+                "cancelled",
+            ),
+            (
+                json!({"running": false, "termination_reason": "unknown", "command_ok": null}),
                 "unknown",
             ),
             // read_output 只说 running 与否。

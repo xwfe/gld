@@ -102,7 +102,7 @@ pub async fn run(cli: Cli) -> CliResult {
     let stopped = ctx.backend.finish().await;
     if stopped > 0 {
         ctx.out.note(format!(
-            "没有守护进程，命令是在这个命令行进程里跑的：它要退出了，停掉了还在跑的 {stopped} 条命令（下一条命令读不到它们）。要让命令在后台接着跑，先 gld daemon start。"
+            "没有守护进程，命令是在这个命令行进程里跑的：它要退出了，停掉了还在跑的 {stopped} 条命令。停之前的输出和结局（interrupted）留在运行记录里，下一条命令用 read_output 读得到，但命令本身不会再跑。要让命令在后台接着跑，先 gld daemon start。"
         ));
     }
     result

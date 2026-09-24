@@ -184,6 +184,13 @@ impl App {
 
     /// 优雅退出：停掉所有服务、隧道和全局入口，但保留“下次恢复”记录。
     pub async fn shutdown_all(&self) {
+        // 先收命令，记成 interrupted。后面停服务那几步也会停经它们起的命令，但记的是 killed
+        // ——那条路 `gld stop` 也在用，那时确实是有人要停。守护进程退出不是谁要停这条命令，
+        // 重启之后读运行记录的人要分得清（审查 D09）。停命令要等子进程收尾，放到阻塞线程里。
+        let _ = tokio::task::spawn_blocking(
+            crate::tools::workspace_runtime::terminate_all_sessions_everywhere,
+        )
+        .await;
         for service in self.running_services().unwrap_or_default() {
             if let Err(error) = self.stop_inner(&service.workspace_id, service.kind).await {
                 eprintln!(
@@ -198,8 +205,7 @@ impl App {
         if let Err(error) = global_gateway::stop().await {
             eprintln!("停止全局入口失败：{error}");
         }
-        // 最后收掉不归任何服务的命令（`gld tool call` 起的）。停命令要等子进程收尾，
-        // 放到阻塞线程里做，别占着异步 worker。
+        // 最后再收一遍：停服务的这段时间里可能又有请求起了命令。
         let _ = tokio::task::spawn_blocking(
             crate::tools::workspace_runtime::terminate_all_sessions_everywhere,
         )

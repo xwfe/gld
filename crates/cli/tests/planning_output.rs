@@ -68,17 +68,14 @@ fn switching_to_plan_mode_stops_running_commands_through_the_daemon() {
         &format!("output_ref=session:{session}:stdout"),
     ]);
     let payload: serde_json::Value = serde_json::from_slice(&after.stdout).expect("json");
-    // 报的是 SESSION_EXPIRED 而不是 SESSION_NOT_FOUND：这个句柄**确实存在过**，
-    // 是切 plan 模式把它停掉的。"没见过这个 id"是另一回事（自己记错了句柄），
-    // 两者的下一步不同，所以 U4 把它们分开了。
+    // 停掉之后读的是运行记录（审查 D09）：说清它是被停掉的，不是自己结束的，也不是
+    // "没见过这个 id"。以前这里报 SESSION_EXPIRED，停之前的输出跟着没了。
     assert_eq!(
-        payload["error"]["code"], "SESSION_EXPIRED",
-        "切到 plan 之后会话还在：{payload:#}"
+        payload["termination_reason"], "killed",
+        "切到 plan 之后会话没被停掉：{payload:#}"
     );
-    assert_eq!(
-        payload["error"]["details"]["reason"], "terminated",
-        "被停掉和过期不是一回事：{payload:#}"
-    );
+    assert_eq!(payload["running"], false, "{payload:#}");
+    assert_eq!(payload["source"], "run_record", "{payload:#}");
     // 守护进程还得活着，别是处理请求时整个挂掉了。
     env.ok(&["daemon", "status"]);
 }

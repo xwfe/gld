@@ -130,6 +130,8 @@ pub struct WorkspaceRuntime {
     /// [`WorkspaceRuntime::lock_commits`] 会记一条 warn——为什么是降级而不是
     /// 拒绝写，说明在那里。
     lock_file: Option<PathBuf>,
+    /// 运行记录的位置：(`GLD_HOME/runs`, 项目 id)。`None` 是找不到数据目录，命令只留在内存里。
+    runs: Option<(PathBuf, String)>,
 }
 
 /// 排障时想知道的就这两件：跨进程那把锁落在哪个文件，以及这个目录上有几个
@@ -338,7 +340,15 @@ impl WorkspaceRuntime {
         // 它"——取表时的 `Arc::clone` 和这里的清理都在同一把锁里，所以看到的
         // 计数是准的。
         sessions.retain(|_, store| Arc::strong_count(store) > 1 || !store.is_empty());
-        Arc::clone(sessions.entry(caller.clone()).or_default())
+        Arc::clone(sessions.entry(caller.clone()).or_insert_with(|| {
+            Arc::new(match &self.runs {
+                Some((root, project)) => SessionStore::with_runs(
+                    crate::tools::runs::RunLog::new(root.clone(), project, caller.key()),
+                    Arc::clone(&self.writes),
+                ),
+                None => SessionStore::new(),
+            })
+        }))
     }
 
     /// 还留着的会话表张数（顺手清掉空的）。测试用。
@@ -357,7 +367,7 @@ impl WorkspaceRuntime {
     /// 切到 plan 模式时用：那时说好了"只看不动手"，还在跑的命令得停——
     /// 不分是谁起的，因为模式是整个目录的。
     pub fn terminate_all_sessions(&self) -> usize {
-        self.terminate_sessions(|_| true)
+        self.terminate_sessions(|_| true, "killed")
     }
 
     /// 只停掉某一个入口在这个目录上起的命令，返回停掉的条数。
@@ -365,10 +375,11 @@ impl WorkspaceRuntime {
     /// hub 停掉、成员被移出 hub 时用：收回的是"经这个入口访问"的权限，
     /// 命令行和工作区自己的监听器起的命令不该被连累。
     pub fn terminate_sessions_in_scope(&self, scope: &str) -> usize {
-        self.terminate_sessions(|caller| caller.scope() == scope)
+        self.terminate_sessions(|caller| caller.scope() == scope, "killed")
     }
 
-    fn terminate_sessions(&self, matches: impl Fn(&Caller) -> bool) -> usize {
+    /// `reason` 进命令的终态和运行记录：有人要停是 `killed`，gld 自己要退出是 `interrupted`。
+    fn terminate_sessions(&self, matches: impl Fn(&Caller) -> bool, reason: &str) -> usize {
         let stores: Vec<Arc<SessionStore>> = {
             let sessions = self
                 .sessions
@@ -382,7 +393,10 @@ impl WorkspaceRuntime {
         };
         // 锁在这里就放开了：停命令要等子进程收尾（每个最多 1.5 秒），攥着锁会
         // 把同目录上正要取表的调用一起堵住。
-        stores.into_iter().map(|store| store.terminate_all()).sum()
+        stores
+            .into_iter()
+            .map(|store| store.terminate_all(reason))
+            .sum()
     }
 }
 
@@ -507,18 +521,22 @@ static RUNTIMES: LazyLock<Mutex<HashMap<PathBuf, Arc<WorkspaceRuntime>>>> =
 /// 撤销之后它的令牌下一次请求就 401，可已经起来的后台命令（`npm run dev` 这种）
 /// 不会自己停：没人再能读它、停它，它就一直以你的身份跑着。
 pub fn terminate_grant_sessions(grant_id: &str) -> usize {
-    terminate_sessions_everywhere(|caller| caller.grant_id() == Some(grant_id))
+    terminate_sessions_everywhere(|caller| caller.grant_id() == Some(grant_id), "killed")
 }
 
-/// 停掉这个进程里所有目录上还在跑的命令，返回停掉的条数。守护进程退出时用。
+/// 停掉这个进程里所有目录上还在跑的命令，返回停掉的条数。守护进程退出、直连模式下命令行
+/// 退出时用。
 ///
 /// 服务停的时候只收它自己入口起的；`gld tool call` 起的（本机主体）不归任何服务，以前守护
 /// 进程退出也没人收，一直以你的身份跑到自己的 timeout——守护进程都没了，谁也读不到、停不掉。
+///
+/// 终态记 `interrupted`，不是 `killed`：不是谁要停它，是 gld 自己要走了。重启之后读运行
+/// 记录的人靠这个分清两者（审查 D09）。
 pub fn terminate_all_sessions_everywhere() -> usize {
-    terminate_sessions_everywhere(|_| true)
+    terminate_sessions_everywhere(|_| true, "interrupted")
 }
 
-fn terminate_sessions_everywhere(matches: impl Fn(&Caller) -> bool + Copy) -> usize {
+fn terminate_sessions_everywhere(matches: impl Fn(&Caller) -> bool + Copy, reason: &str) -> usize {
     let runtimes: Vec<Arc<WorkspaceRuntime>> = RUNTIMES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -527,7 +545,7 @@ fn terminate_sessions_everywhere(matches: impl Fn(&Caller) -> bool + Copy) -> us
         .collect();
     runtimes
         .iter()
-        .map(|runtime| runtime.terminate_sessions(matches))
+        .map(|runtime| runtime.terminate_sessions(matches, reason))
         .sum()
 }
 
@@ -551,6 +569,9 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
             sessions: Mutex::new(HashMap::new()),
             writes: Arc::new(AtomicU64::new(0)),
             lock_file: lock_path_for(key),
+            runs: crate::home::data_home()
+                .ok()
+                .map(|home| (home.join("runs"), crate::tools::runs::project_id(key))),
         })
     }))
 }

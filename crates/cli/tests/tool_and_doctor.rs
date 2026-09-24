@@ -115,7 +115,8 @@ fn tool_call_parses_the_three_argument_forms() {
 }
 
 /// 守护进程模式下，两次独立的命令行调用共享同一个 exec 会话；
-/// 直连模式下每次都是新进程，会话必然找不到。
+/// 直连模式下每次都是新进程：命令随上一条命令行退出被停掉，下一次调用读到的只是
+/// 它的运行记录（`interrupted`，审查 D09），不是还在跑的会话。
 ///
 /// 这是 `gld tool` 的行为契约，也是 `App` 缓存 ToolContext 的唯一理由。
 /// 需要一个能长时间运行且在命令白名单里的程序，用 node；没有就跳过。
@@ -135,7 +136,7 @@ fn exec_sessions_survive_between_calls_only_through_the_daemon() {
     let env = probe_env();
     let long_running = r#"cmd=node -e "console.log(String.fromCharCode(111,107)); setTimeout(function(){},60000)""#;
 
-    // 直连模式：会话随进程一起消失。
+    // 直连模式：命令随进程一起停掉，只剩运行记录。
     let started = env.json(&[
         "--json",
         "tool",
@@ -157,7 +158,9 @@ fn exec_sessions_survive_between_calls_only_through_the_daemon() {
         &format!("output_ref=session:{local_session}:stdout"),
     ]);
     let payload: serde_json::Value = serde_json::from_slice(&orphan.stdout).expect("json");
-    assert_eq!(payload["error"]["code"], "SESSION_NOT_FOUND");
+    assert_eq!(payload["source"], "run_record", "{payload}");
+    assert_eq!(payload["termination_reason"], "interrupted", "{payload}");
+    assert_eq!(payload["running"], false, "{payload}");
 
     // 守护进程模式：第二次调用能读到第一次留下的输出。
     env.ok(&["daemon", "start"]);

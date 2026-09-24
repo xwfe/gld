@@ -8,6 +8,7 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+use crate::tools::runs::{RunLog, RunRecord, RunWriter};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 use serde_json::{json, Value};
 
@@ -43,6 +44,12 @@ pub struct SessionStore {
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
     graveyard: Mutex<VecDeque<Tombstone>>,
     retention: Duration,
+    /// 运行记录（审查 D09）。有它时每条命令在数据目录里留记录和日志，内存里找不到的
+    /// 会话从这里读。`None` 是只在内存里的老样子，单元测试用。
+    runs: Option<RunLog>,
+    /// 这个项目的落盘计数器（和会话里拿的是同一个）。从记录读结果时拿它现算"起跑到现在
+    /// gld 写过几次"，见 [`SessionStore::writes_since_start`]。
+    workspace_writes: Option<Arc<AtomicU64>>,
 }
 
 impl Default for SessionStore {
@@ -51,13 +58,50 @@ impl Default for SessionStore {
             sessions: Mutex::new(HashMap::new()),
             graveyard: Mutex::new(VecDeque::new()),
             retention: SESSION_RETENTION,
+            runs: None,
+            workspace_writes: None,
         }
     }
+}
+
+/// 按 `session_id` 找到的一条命令：还在这个进程的内存里，或者只剩运行记录。
+pub enum Found {
+    Live(Arc<ExecSession>),
+    Recorded(Box<RunRecord>),
 }
 
 impl SessionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 带运行记录的会话表。[`crate::tools::workspace_runtime`] 给每个主体建的都是这种。
+    /// `workspace_writes` 是这个项目的落盘计数器。
+    pub fn with_runs(runs: RunLog, workspace_writes: Arc<AtomicU64>) -> Self {
+        Self {
+            runs: Some(runs),
+            workspace_writes: Some(workspace_writes),
+            ..Self::default()
+        }
+    }
+
+    /// 从记录读到的命令，起跑之后 gld 往工作区写过几次。算不出来是 `None`。
+    ///
+    /// **不能用记录里结束那一刻的数**：命令跑完之后 gld 再改源文件，那个数还是 0，
+    /// 从记录读到的"退出 0、期间没写过"就会被任务验收当成现在这份代码的证据（独立审查
+    /// 发现）。所以按起跑时的计数器现算；那个计数器只在内存里，换了进程（gld 重启过）
+    /// 就算不出来，给 `None`——任务验收会拒收，要求重跑。
+    fn writes_since_start(&self, record: &RunRecord) -> Option<u64> {
+        if record.owner != crate::tools::runs::instance_id() {
+            return None;
+        }
+        let at_start = record.writes_at_start?;
+        let now = self.workspace_writes.as_ref()?.load(Ordering::Acquire);
+        Some(now.saturating_sub(at_start))
+    }
+
+    pub fn runs(&self) -> Option<&RunLog> {
+        self.runs.as_ref()
     }
 
     /// 自定义保留期。给测试用：把它设成 0 就不用真的等 5 分钟，也不用
@@ -139,6 +183,16 @@ impl SessionStore {
             }
             _ => "it was removed".to_string(),
         };
+        // 有运行记录时走到这里，说明盘上那份也没了：被配额或年龄清掉，或者当初就没写成。
+        let why = if self.runs.is_some() {
+            format!(
+                "{why}, and its run record is gone too (each project keeps its last {} finished commands for at most {} days)",
+                crate::tools::runs::MAX_FINISHED_RUNS,
+                crate::tools::runs::MAX_AGE.as_secs() / 86_400
+            )
+        } else {
+            why
+        };
         // 以前这里说"重跑命令"。输出没了不等于命令没跑：它可能已经改了文件、发了
         // 请求、跑完了迁移。原样重跑有副作用的命令就是做第二遍（审查 D05）。
         Some(WorkspaceError::ToolDetails {
@@ -158,8 +212,16 @@ impl SessionStore {
         })
     }
 
-    pub fn insert(&self, session: ExecSession) -> Arc<ExecSession> {
+    pub fn insert(&self, mut session: ExecSession) -> Arc<ExecSession> {
         self.sweep();
+        if let Some(runs) = &self.runs {
+            session.run = runs.start(
+                &session.session_id,
+                &session.command,
+                session.pid,
+                session.writes_at_start,
+            );
+        }
         let arc = Arc::new(session);
         self.sessions
             .lock()
@@ -190,6 +252,26 @@ impl SessionStore {
             category: "not_found",
             retryable: false,
         })
+    }
+
+    /// 先找内存，找不到再找运行记录（审查 D09）。
+    ///
+    /// 内存里没有的几种情况都会走到盘上：结束超过保留期、被 `kill_session` 停掉、
+    /// 守护进程重启过、直连模式下是上一条命令行起的。别的主体的记录照样找不到，
+    /// 报的和从来没有这个 id 一样。
+    pub fn lookup(&self, session_id: &str) -> Result<Found, WorkspaceError> {
+        match self.get(session_id) {
+            Ok(session) => Ok(Found::Live(session)),
+            // 内存里没有，那本进程起的也不是真在跑：用 load_detached。
+            Err(error) => match self
+                .runs
+                .as_ref()
+                .and_then(|runs| runs.load_detached(session_id))
+            {
+                Some(record) => Ok(Found::Recorded(Box::new(record))),
+                None => Err(error),
+            },
+        }
     }
 
     /// 保留期到了，把它从表里去掉。
@@ -259,24 +341,29 @@ impl SessionStore {
             .collect()
     }
 
-    /// 结束表里全部会话，返回成功结束的个数。
+    /// 结束表里全部会话，返回真正停掉的条数（早就跑完的不算）。`reason` 记进终态：
+    /// `killed`（有人要停），或 `interrupted`（gld 自己要退出，见运行记录的说明）。
     ///
-    /// 会阻塞等进程退出（每个最多 1.5 秒），内部用 `block_on`，
-    /// 不能在 tokio 异步 worker 线程里调。
-    pub fn terminate_all(&self) -> usize {
+    /// 先 TERM 等 1.5 秒，不走再 KILL 等 1 秒：拦着 TERM 的命令不能因此成了孤儿——gld 退出后
+    /// 它就没人管了，结局也只能记成 unknown。
+    ///
+    /// 会阻塞等进程退出，内部用 `block_on`，不能在 tokio 异步 worker 线程里调。
+    pub fn terminate_all(&self, reason: &str) -> usize {
         self.session_ids()
             .into_iter()
             .filter(|session_id| {
-                kill_session(
-                    self,
-                    &json!({
-                        "session_id": session_id,
-                        "signal": "TERM",
-                        "wait_ms": 1500,
-                        "max_output_bytes": 1024
-                    }),
-                )
-                .is_ok()
+                let Ok(session) = self.get(session_id) else {
+                    return false;
+                };
+                let (mut killed, mut status, mut evicted) =
+                    stop_session(&session, "TERM", 1500, reason);
+                if status == "terminating" {
+                    (killed, status, evicted) = stop_session(&session, "KILL", 1000, reason);
+                }
+                if evicted {
+                    self.remove_terminated(session_id);
+                }
+                killed || status == "terminating"
             })
             .count()
     }
@@ -287,6 +374,10 @@ pub struct ExecSession {
     /// 跑的是哪条命令。只给起它的那个主体看，见
     /// [`crate::tools::workspace_runtime::WorkspaceRuntime::running_commands`]。
     pub command: String,
+    /// 起来时的 pid，进运行记录。
+    pid: Option<u32>,
+    /// 运行记录的写入端。会话表建着运行记录时由 [`SessionStore::insert`] 装上。
+    run: Option<RunWriter>,
     pub(crate) child: AsyncMutex<Child>,
     pub stdin: AsyncMutex<Option<ChildStdin>>,
     stdin_open: Mutex<bool>,
@@ -333,6 +424,8 @@ impl ExecSession {
         Self {
             session_id,
             command,
+            pid: child.id(),
+            run: None,
             child: AsyncMutex::new(child),
             stdin: AsyncMutex::new(stdin),
             stdin_open: Mutex::new(stdin_open),
@@ -394,6 +487,9 @@ impl ExecSession {
                 Ok(0) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
+                    if let Some(run) = &self.run {
+                        run.append(is_stdout, chunk);
+                    }
                     if is_stdout {
                         let mut data = self.stdout.lock().expect("stdout lock");
                         data.extend_from_slice(chunk);
@@ -433,17 +529,29 @@ impl ExecSession {
     }
 
     fn record_exit_status(&self, status: std::process::ExitStatus) {
+        // 整段握着 termination 锁：[`ExecSession::mark_termination_reason`] 也拿它，
+        // 两边谁先谁后都看得到对方，内存和运行记录里的终态才对得上（独立审查发现：
+        // 以前 kill 判断"还在跑"之后进程自己退了，记录写 exited、内存却被改成 killed）。
+        let mut reason = self.termination_reason.lock().expect("termination lock");
         *self.exit_code.lock().expect("exit_code lock") = status.code();
         self.exited.store(true, Ordering::Release);
         let mut finished = self.finished_at.lock().expect("finished_at lock");
-        if finished.is_none() {
+        let first = finished.is_none();
+        if first {
             *finished = Some(Instant::now());
         }
         drop(finished);
         *self.stdin_open.lock().expect("stdin_open lock") = false;
-        let mut reason = self.termination_reason.lock().expect("termination lock");
         if reason.is_none() {
             *reason = Some("exited".into());
+        }
+        let reason = reason.clone().unwrap_or_else(|| "exited".into());
+        // 结束的那一刻就落盘，不等有人来读：之后 gld 重启了，这份记录就是唯一知道结局的地方。
+        // timeout / killed / interrupted 是停之前先标上的，所以这里拿到的已经是最终原因。
+        if first {
+            if let Some(run) = &self.run {
+                run.finish(&reason, status.code(), self.workspace_writes_since_start());
+            }
         }
     }
 
@@ -471,8 +579,13 @@ impl ExecSession {
             .saturating_sub(self.writes_at_start)
     }
 
+    /// 停它之前标上原因。**已经结束了就不改**：结局已经按实际情况记下（也写进了运行
+    /// 记录），再改成 killed 就和记录对不上。
     pub fn mark_termination_reason(&self, reason: &str) {
-        *self.termination_reason.lock().expect("termination lock") = Some(reason.to_string());
+        let mut current = self.termination_reason.lock().expect("termination lock");
+        if !self.has_exited() {
+            *current = Some(reason.to_string());
+        }
     }
 
     pub(crate) fn mark_stdin_closed(&self) {
@@ -508,62 +621,190 @@ impl ExecSession {
             .expect("termination lock")
             .clone()
             .unwrap_or_else(|| "running".into());
-        let command_ok = match reason.as_str() {
-            "exited" => Some(exit_code.is_some_and(|code| code == 0)),
-            "running" => None,
-            _ => Some(false),
-        };
+        let command_ok = command_ok(&reason, exit_code);
         (reason, exit_code, command_ok)
     }
 
-    pub fn snapshot(&self, max_output_bytes: usize) -> Value {
-        let stdout_bytes = self.stdout.lock().expect("stdout lock").clone();
-        let stderr_bytes = self.stderr.lock().expect("stderr lock").clone();
-        let stdout = truncate_tail(&stdout_bytes, max_output_bytes);
-        let stderr = truncate_tail(&stderr_bytes, max_output_bytes);
-        let status = if self.has_exited() {
-            "exited"
-        } else {
-            "running"
-        };
-        let (reason, exit_code, command_ok) = self.termination();
-        let reason = reason.as_str();
-        json!({
-            "session_id": self.session_id,
-            "interactive": self.interactive,
-            "stdin_open": *self.stdin_open.lock().expect("stdin_open lock"),
-            "status": status,
-            "termination_reason": reason,
-            "recoverable": matches!(reason, "timeout" | "killed" | "spawn_failed" | "server_restart"),
-            "suggestion": match reason {
-                "timeout" => "读取保留输出，调整 timeout_ms 后重试",
-                "killed" => "确认终止原因后重新执行命令",
-                "exited" => "检查 exit_code 和 stderr",
-                "crashed" => "检查 stderr 后重试或恢复工作区",
-                _ => "继续读取 session 或等待进程结束",
-            },
-            "exit_code": exit_code,
-            "transport_ok": true,
-            "command_ok": command_ok,
-            "stdout": stdout.content,
-            "stderr": stderr.content,
-            "stdout_truncated": stdout.truncated,
-            "stderr_truncated": stderr.truncated,
-            "elapsed_ms": self.started_at.elapsed().as_millis(),
-            // 进程结束多久了。还在跑就是 null。保留期还剩多少由 read_output
-            // 回（那里知道 store 的 retention），这里只给事实。
-            "finished_ms_ago": self.finished_ago().map(|ago| ago.as_millis() as u64),
-            // 这条命令起来之后，这个工作区落过几次盘（apply_patch 提交一次算
-            // 一次）。**不是 0 就说明命令读到的文件和现在的不一样**——它可能
-            // 编译了旧代码，也可能中途读到了改了一半的文件树。后台命令期间
-            // 没有写互斥，这个数就是事后判断结果可不可信的唯一依据。
-            "workspace_writes_since_start": self.workspace_writes_since_start(),
-            "output_refs": {
-                "stdout": format!("session:{}:stdout", self.session_id),
-                "stderr": format!("session:{}:stderr", self.session_id)
-            }
-        })
+    /// 这条会话有没有在写运行记录。
+    pub fn kept_on_disk(&self) -> bool {
+        self.run.is_some()
     }
+
+    pub fn snapshot(&self, max_output_bytes: usize) -> Value {
+        let stdout = self.stdout.lock().expect("stdout lock").clone();
+        let stderr = self.stderr.lock().expect("stderr lock").clone();
+        let (reason, exit_code, command_ok) = self.termination();
+        snapshot_value(
+            Snapshot {
+                session_id: &self.session_id,
+                interactive: self.interactive,
+                stdin_open: *self.stdin_open.lock().expect("stdin_open lock"),
+                running: !self.has_exited(),
+                reason: &reason,
+                exit_code,
+                command_ok,
+                stdout: &stdout,
+                stderr: &stderr,
+                elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+                finished_ms_ago: self.finished_ago().map(|ago| ago.as_millis() as u64),
+                workspace_writes_since_start: Some(self.workspace_writes_since_start()),
+                kept_on_disk: self.kept_on_disk(),
+            },
+            max_output_bytes,
+        )
+    }
+}
+
+/// 按终态算命令成没成。结局不知道（`unknown`）和还在跑一样，不说成也不说败。
+fn command_ok(reason: &str, exit_code: Option<i32>) -> Option<bool> {
+    match reason {
+        "exited" => Some(exit_code.is_some_and(|code| code == 0)),
+        "running" | "unknown" => None,
+        _ => Some(false),
+    }
+}
+
+/// 一条会话的快照要的那些事实。内存里的会话和运行记录各自填一份，拼出来的字段一样。
+struct Snapshot<'a> {
+    session_id: &'a str,
+    interactive: bool,
+    stdin_open: bool,
+    running: bool,
+    reason: &'a str,
+    exit_code: Option<i32>,
+    command_ok: Option<bool>,
+    stdout: &'a [u8],
+    stderr: &'a [u8],
+    elapsed_ms: u64,
+    finished_ms_ago: Option<u64>,
+    workspace_writes_since_start: Option<u64>,
+    kept_on_disk: bool,
+}
+
+fn snapshot_value(parts: Snapshot<'_>, max_output_bytes: usize) -> Value {
+    let stdout = truncate_tail(parts.stdout, max_output_bytes);
+    let stderr = truncate_tail(parts.stderr, max_output_bytes);
+    let reason = parts.reason;
+    json!({
+        "session_id": parts.session_id,
+        "interactive": parts.interactive,
+        "stdin_open": parts.stdin_open,
+        // 结局不知道的运行记录不说 exited：进程可能还作为孤儿在跑。
+        "status": match (parts.running, reason) {
+            (true, _) => "running",
+            (false, "unknown") => "unknown",
+            (false, _) => "exited",
+        },
+        "termination_reason": reason,
+        "recoverable": matches!(reason, "timeout" | "killed" | "interrupted" | "spawn_failed" | "server_restart"),
+        "suggestion": match reason {
+            "timeout" => "读取保留输出，调整 timeout_ms 后重试",
+            "killed" => "确认终止原因后重新执行命令",
+            "interrupted" => "gld 退出时停掉的：先核对它做到了哪一步，再决定要不要重跑",
+            "unknown" => "gld 没来得及记下结局：进程可能已经结束，也可能还在跑（看 pid）；先核对现状，别直接重跑",
+            "exited" => "检查 exit_code 和 stderr",
+            "crashed" => "检查 stderr 后重试或恢复工作区",
+            _ => "继续读取 session 或等待进程结束",
+        },
+        "exit_code": parts.exit_code,
+        "transport_ok": true,
+        "command_ok": parts.command_ok,
+        "stdout": stdout.content,
+        "stderr": stderr.content,
+        "stdout_truncated": stdout.truncated,
+        "stderr_truncated": stderr.truncated,
+        "elapsed_ms": parts.elapsed_ms,
+        // 进程结束多久了。还在跑就是 null。保留期还剩多少由 read_output
+        // 回（那里知道 store 的 retention），这里只给事实。
+        "finished_ms_ago": parts.finished_ms_ago,
+        // 这条命令起来之后，这个工作区落过几次盘（apply_patch 提交一次算
+        // 一次）。**不是 0 就说明命令读到的文件和现在的不一样**——它可能
+        // 编译了旧代码，也可能中途读到了改了一半的文件树。后台命令期间
+        // 没有写互斥，这个数就是事后判断结果可不可信的唯一依据。结局不知道的
+        // 运行记录没有这个数（null）。
+        "workspace_writes_since_start": parts.workspace_writes_since_start,
+        // 输出和结局有没有落进运行记录（审查 D09）。true 时进程结束、gld 重启之后
+        // read_output 照样读得到；false 是数据目录写不进去，只剩内存里那份。
+        "kept_on_disk": parts.kept_on_disk,
+        "output_refs": {
+            "stdout": format!("session:{}:stdout", parts.session_id),
+            "stderr": format!("session:{}:stderr", parts.session_id)
+        }
+    })
+}
+
+/// 只剩运行记录的会话的快照：和内存里的同一套字段，另加记录里才有的几格。
+fn recorded_snapshot(store: &SessionStore, record: &RunRecord, max_output_bytes: usize) -> Value {
+    let runs = store.runs().expect("只有带运行记录的会话表才找得到记录");
+    let (stdout, _) = runs.stream_bytes(record, "stdout");
+    let (stderr, _) = runs.stream_bytes(record, "stderr");
+    let now = crate::tools::runs::now_ms();
+    let reason = if record.is_running() {
+        "running"
+    } else {
+        record.status.as_str()
+    };
+    let mut value = snapshot_value(
+        Snapshot {
+            session_id: &record.session_id,
+            interactive: false,
+            stdin_open: false,
+            running: record.is_running(),
+            reason,
+            exit_code: record.exit_code,
+            command_ok: command_ok(reason, record.exit_code),
+            stdout: &stdout,
+            stderr: &stderr,
+            elapsed_ms: record
+                .finished_at_ms
+                .unwrap_or(now)
+                .saturating_sub(record.started_at_ms),
+            finished_ms_ago: record.finished_at_ms.map(|at| now.saturating_sub(at)),
+            workspace_writes_since_start: store.writes_since_start(record),
+            kept_on_disk: true,
+        },
+        max_output_bytes,
+    );
+    if let Some(object) = value.as_object_mut() {
+        for (key, field) in record_fields(record) {
+            object.insert(key.into(), field);
+        }
+    }
+    value
+}
+
+/// 运行记录才有的几格：从哪读到的、命令的 pid、起它的 gld 进程。
+///
+/// `unknown` 的另给 `pid_in_use`：那个进程组现在还在不在。在，可能是没收掉的孤儿，也可能
+/// 这个号已经给了别的进程——所以只报事实，gld 不去杀它。不在就说明孤儿也没了。
+fn record_fields(record: &RunRecord) -> Vec<(&'static str, Value)> {
+    let mut fields = vec![
+        ("source", json!("run_record")),
+        ("pid", json!(record.pid)),
+        ("started_by_gld_pid", json!(record.owner_pid)),
+    ];
+    if record.status == "unknown" {
+        fields.push((
+            "pid_in_use",
+            json!(record.pid.and_then(process_group_exists)),
+        ));
+    }
+    fields
+}
+
+/// 以这个 pid 为组号的进程组现在有没有进程。命令起来时自成一组（组号 = 它的 pid）。
+#[cfg(unix)]
+fn process_group_exists(pid: u32) -> Option<bool> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    // 发 0 号信号只查不发。EPERM 说明有这个组、只是不归我们管，也算在。
+    let alive = unsafe { libc::kill(-pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    Some(alive)
+}
+
+#[cfg(not(unix))]
+fn process_group_exists(_pid: u32) -> Option<bool> {
+    None
 }
 
 fn trim_buffer(buf: &mut Vec<u8>, limit: usize) {
@@ -605,8 +846,7 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
             "output_ref stream must be stdout, stderr, or full",
         ));
     }
-    let session = store.get(session_id)?;
-    crate::async_rt::block_on(session.refresh_status());
+    let found = store.lookup(session_id)?;
 
     let requested_stream = args.get("stream").and_then(Value::as_str).unwrap_or("");
     let stream = if ref_stream == "stdout" || ref_stream == "stderr" {
@@ -617,7 +857,60 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         "stdout"
     };
 
-    let (data, total_stream_bytes) = session.retained_stream_bytes(stream);
+    // 两个来源给出同一组事实，下面的分页一行不分叉。
+    let view = match &found {
+        Found::Live(session) => {
+            crate::async_rt::block_on(session.refresh_status());
+            let (data, total) = session.retained_stream_bytes(stream);
+            let (reason, exit_code, command_ok) = session.termination();
+            let kept_on_disk = session.kept_on_disk();
+            StreamView {
+                data,
+                total,
+                reason,
+                exit_code,
+                command_ok,
+                writes: Some(session.workspace_writes_since_start()),
+                running: !session.has_exited(),
+                kept_on_disk,
+                // 落了盘的输出不会在内存保留期到了之后消失，那个倒计时就不是"还能读多久"了。
+                expires_in_ms: (!kept_on_disk)
+                    .then(|| session.expires_in(store.retention()))
+                    .flatten()
+                    .map(|left| left.as_millis() as u64),
+                retention_ms: (!kept_on_disk).then(|| store.retention().as_millis() as u64),
+                record: None,
+            }
+        }
+        Found::Recorded(record) => {
+            let runs = store.runs().expect("只有带运行记录的会话表才找得到记录");
+            let (data, total) = runs.stream_bytes(record, stream);
+            let reason = if record.is_running() {
+                "running".to_string()
+            } else {
+                record.status.clone()
+            };
+            StreamView {
+                data,
+                total,
+                command_ok: command_ok(&reason, record.exit_code),
+                reason,
+                exit_code: record.exit_code,
+                writes: store.writes_since_start(record),
+                running: record.is_running(),
+                kept_on_disk: true,
+                expires_in_ms: None,
+                retention_ms: None,
+                record: Some(record.as_ref()),
+            }
+        }
+    };
+    let StreamView {
+        data,
+        total: total_stream_bytes,
+        ..
+    } = &view;
+    let (data, total_stream_bytes) = (data.as_slice(), *total_stream_bytes);
     let requested_offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = crate::tools::args::bounded(args, "read_output", "limit") as usize;
     let mut warnings: Vec<String> = Vec::new();
@@ -626,6 +919,14 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
             "legacy full output_ref defaults to stdout; use output_refs for stable stream paging"
                 .into(),
         );
+    }
+    if view
+        .record
+        .is_some_and(|record| record.incomplete_logs.iter().any(|name| name == stream))
+    {
+        warnings.push(format!(
+            "writing this stream's log failed (disk full?) after {total_stream_bytes} bytes; whatever the command printed after that is not in the run record"
+        ));
     }
 
     // **偏移是整条流里的绝对位置**，不是保留缓冲里的下标。缓冲只留最后
@@ -661,21 +962,20 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     }
     let chunk = &data[from..from + take];
     let next = start + chunk.len();
-    let running = !session.has_exited();
+    let running = view.running;
     // 还有留着的字节没给完才有下一页。命令还在跑、但此刻没有新字节时，
     // next_offset 是空——不是"读完了"，而是"现在没有更多"，`complete`
     // 那一格说的才是流有没有结束。
     let next_offset = (next < total_stream_bytes).then_some(next as u64);
-    // 命令怎么结束的，和 exec_command 同一套字段。转后台的命令，这是调用方（和台账、
-    // 任务验收）知道它退出码的唯一途径；以前这里只说 running 与否（审查 D03）。
-    let (termination_reason, exit_code, command_ok) = session.termination();
 
-    Ok(tool_ok(json!({
+    let mut result = json!({
         "session_id": session_id,
-        "termination_reason": termination_reason,
-        "exit_code": exit_code,
-        "command_ok": command_ok,
-        "workspace_writes_since_start": session.workspace_writes_since_start(),
+        // 命令怎么结束的，和 exec_command 同一套字段。转后台的命令，这是调用方（和台账、
+        // 任务验收）知道它退出码的唯一途径；以前这里只说 running 与否（审查 D03）。
+        "termination_reason": view.reason,
+        "exit_code": view.exit_code,
+        "command_ok": view.command_ok,
+        "workspace_writes_since_start": view.writes,
         "output_ref": output_ref,
         "stream_output_ref": format!("session:{session_id}:{stream}"),
         "stream": stream,
@@ -693,13 +993,37 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         // 这份输出还能读多久。**从进程结束那一刻算起**，和命令的 timeout 无关；
         // 还在跑的会话没有这个数（审查 X02）。到点之后再来读，拿到的是
         // SESSION_EXPIRED 而不是 SESSION_NOT_FOUND。
-        "expires_in_ms": session
-            .expires_in(store.retention())
-            .map(|left| left.as_millis() as u64),
-        "retention_ms": store.retention().as_millis() as u64,
+        //
+        // 落了盘（`kept_on_disk`）的两个都是 null：盘上那份按"每个项目最近 64 条、
+        // 最长 7 天"清，没有一个固定的倒计时（审查 D09）。
+        "expires_in_ms": view.expires_in_ms,
+        "retention_ms": view.retention_ms,
+        "kept_on_disk": view.kept_on_disk,
         "truncated": next_offset.is_some(),
         "warnings": warnings
-    })))
+    });
+    if let (Some(record), Some(object)) = (view.record, result.as_object_mut()) {
+        for (key, field) in record_fields(record) {
+            object.insert(key.into(), field);
+        }
+    }
+    Ok(tool_ok(result))
+}
+
+/// `read_output` 分页要的事实：留着的字节、整条流多长、命令怎样了。
+struct StreamView<'a> {
+    data: Vec<u8>,
+    total: usize,
+    reason: String,
+    exit_code: Option<i32>,
+    command_ok: Option<bool>,
+    writes: Option<u64>,
+    running: bool,
+    kept_on_disk: bool,
+    expires_in_ms: Option<u64>,
+    retention_ms: Option<u64>,
+    /// 从运行记录读到的才有。
+    record: Option<&'a RunRecord>,
 }
 
 /// 一次 `write_stdin` 最多等多久。
@@ -780,10 +1104,27 @@ pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         .get("session_id")
         .and_then(Value::as_str)
         .ok_or_else(|| WorkspaceError::invalid_argument("session_id is required"))?;
-    let session = store.get(session_id)?;
     let chars = args.get("chars").and_then(Value::as_str).unwrap_or("");
     let max_output_bytes =
         crate::tools::args::bounded(args, "write_stdin", "max_output_bytes") as usize;
+    let session = match store.lookup(session_id)? {
+        Found::Live(session) => session,
+        // 只剩运行记录的命令不在这个进程里，它的 stdin 早就接不上了。
+        Found::Recorded(record) => {
+            if !chars.is_empty() {
+                return Err(WorkspaceError::Tool {
+                    code: "SESSION_CLOSED",
+                    message: format!(
+                        "This command is no longer attached to this process ({}); nothing can be written to its stdin.",
+                        record.status
+                    ),
+                    category: "runtime",
+                    retryable: false,
+                });
+            }
+            return Ok(tool_ok(recorded_snapshot(store, &record, max_output_bytes)));
+        }
+    };
 
     let running = crate::async_rt::block_on(session.is_running());
     if !running {
@@ -822,45 +1163,18 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
         .get("session_id")
         .and_then(Value::as_str)
         .ok_or_else(|| WorkspaceError::invalid_argument("session_id is required"))?;
-    let session = store.get(session_id)?;
     let max_output_bytes =
         crate::tools::args::bounded(args, "kill_session", "max_output_bytes") as usize;
     let wait_ms = crate::tools::args::bounded(args, "kill_session", "wait_ms");
     let signal = args.get("signal").and_then(Value::as_str).unwrap_or("TERM");
-
-    let running = crate::async_rt::block_on(session.is_running());
-    let mut killed = false;
-    let mut status = "exited";
-    let mut evicted = true;
-
-    if running {
-        session.mark_termination_reason("killed");
-        crate::async_rt::block_on(async {
-            let pid = {
-                let child = session.child.lock().await;
-                child.id()
-            };
-            if let Some(pid) = pid {
-                signal_process_tree(pid, signal);
-            } else {
-                let mut child = session.child.lock().await;
-                let _ = child.start_kill();
-            }
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(wait_ms), async {
-                let mut child = session.child.lock().await;
-                let _ = child.wait().await;
-            })
-            .await;
-        });
-        crate::async_rt::block_on(session.refresh_status());
-        if crate::async_rt::block_on(session.is_running()) {
-            status = "terminating";
-            evicted = false;
-        } else {
-            killed = true;
-            status = "killed";
+    let session = match store.lookup(session_id)? {
+        Found::Live(session) => session,
+        Found::Recorded(record) => {
+            return Ok(tool_ok(recorded_kill(store, &record, max_output_bytes)));
         }
-    }
+    };
+
+    let (killed, status, evicted) = stop_session(&session, signal, wait_ms, "killed");
 
     let mut payload = session.snapshot(max_output_bytes);
     if let Some(obj) = payload.as_object_mut() {
@@ -880,6 +1194,81 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
     }
 
     Ok(tool_ok(payload))
+}
+
+/// 停一条会话：先标上原因，再发信号，最多等 `wait_ms`。返回 (killed, status, evicted)。
+///
+/// 原因要在发信号之前标：进程一退，[`ExecSession::record_exit_status`] 就把终态写进
+/// 运行记录，那时候拿到的必须已经是 `killed` / `interrupted`，而不是默认的 `exited`。
+fn stop_session(
+    session: &ExecSession,
+    signal: &str,
+    wait_ms: u64,
+    reason: &str,
+) -> (bool, &'static str, bool) {
+    if !crate::async_rt::block_on(session.is_running()) {
+        return (false, "exited", true);
+    }
+    session.mark_termination_reason(reason);
+    crate::async_rt::block_on(async {
+        let pid = {
+            let child = session.child.lock().await;
+            child.id()
+        };
+        if let Some(pid) = pid {
+            signal_process_tree(pid, signal);
+        } else {
+            let mut child = session.child.lock().await;
+            let _ = child.start_kill();
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(wait_ms), async {
+            let mut child = session.child.lock().await;
+            let _ = child.wait().await;
+        })
+        .await;
+    });
+    crate::async_rt::block_on(session.refresh_status());
+    if crate::async_rt::block_on(session.is_running()) {
+        return (false, "terminating", false);
+    }
+    // 判断"还在跑"和标原因之间进程自己结束了：原因没标上，结局是它自己的。
+    if session.termination().0 == reason {
+        (true, "killed", true)
+    } else {
+        (false, "exited", true)
+    }
+}
+
+/// 对只剩运行记录的命令 `kill_session`：这个进程停不了它，如实说清楚它现在怎样。
+///
+/// - 已经结束的：原样给出结局。
+/// - 另一个还活着的 gld 进程起的、还在跑：只有那个进程停得了。
+/// - `unknown`：gld 不去发信号——那个 pid 可能已经给了别的进程。`pid_in_use` 说那个进程组
+///   现在还在不在，要不要手动停由人判断。
+fn recorded_kill(store: &SessionStore, record: &RunRecord, max_output_bytes: usize) -> Value {
+    let mut payload = recorded_snapshot(store, record, max_output_bytes);
+    let pid = record
+        .pid
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "?".into());
+    let warning = match record.status.as_str() {
+        "running" => Some(format!(
+            "This command was started by another process of this service (pid {}) that is still running; only that process can stop it.",
+            record.owner_pid
+        )),
+        "unknown" => Some(format!(
+            "How this command ended was never recorded, and pid {pid} is not signalled: that id may belong to another process by now. pid_in_use says whether a process group with that id exists; look at it (pgrep -l -g {pid}) before stopping anything by hand."
+        )),
+        _ => None,
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("killed".into(), json!(false));
+        object.insert("evicted".into(), json!(!record.is_running()));
+        if let Some(warning) = warning {
+            object.insert("warnings".into(), json!([warning]));
+        }
+    }
+    payload
 }
 
 /// Signal the command and everything it started.
@@ -1077,6 +1466,48 @@ mod tests {
         crate::async_rt::block_on(async {
             let _ = child.kill().await;
         });
+    }
+
+    /// 从记录读结果时，"起跑之后 gld 写过几次"按计数器现算：同一个进程里算得出（命令结束后
+    /// 再写也算进去）；别的进程（gld 重启前）留下的算不出，给 null，不拿结束那一刻的 0 充数。
+    #[test]
+    fn a_record_from_another_process_does_not_claim_the_workspace_was_untouched() {
+        let home = tempfile::tempdir().expect("home");
+        let runs = RunLog::new(home.path().join("runs"), "p", "local");
+        let counter = Arc::new(AtomicU64::new(5));
+        let store = SessionStore::with_runs(runs.clone(), Arc::clone(&counter));
+        let id = Uuid::new_v4().to_string();
+        let writer = runs.start(&id, "true", None, 5).expect("建记录");
+        writer.finish("exited", Some(0), 0);
+        counter.fetch_add(2, Ordering::AcqRel);
+        let args = json!({ "output_ref": format!("session:{id}:stdout") });
+
+        let same = read_output(&store, &args).expect("read_output");
+        assert_eq!(same["source"], "run_record");
+        assert_eq!(same["workspace_writes_since_start"], 2, "{same}");
+
+        crate::tools::runs::orphan_record(&runs, &id);
+        let other = read_output(&store, &args).expect("read_output");
+        assert_eq!(other["termination_reason"], "exited", "{other}");
+        assert!(other["workspace_writes_since_start"].is_null(), "{other}");
+    }
+
+    /// 本进程起的、记录停在 running、内存里却没有：不是真在跑（结束时没记下来），按 unknown
+    /// 说，别说成"另一个进程还在跑它"——那个进程就是自己。
+    #[test]
+    fn my_own_running_record_that_is_not_in_memory_is_unknown() {
+        let home = tempfile::tempdir().expect("home");
+        let runs = RunLog::new(home.path().join("runs"), "p", "local");
+        let store = SessionStore::with_runs(runs.clone(), Arc::new(AtomicU64::new(0)));
+        let id = Uuid::new_v4().to_string();
+        let _writer = runs.start(&id, "sleep 30", Some(1), 0).expect("建记录");
+        let out = read_output(
+            &store,
+            &json!({ "output_ref": format!("session:{id}:stdout") }),
+        )
+        .expect("read_output");
+        assert_eq!(out["termination_reason"], "unknown", "{out}");
+        assert_eq!(out["running"], false, "{out}");
     }
 
     /// `read_output` 要说清这份输出还能读多久。

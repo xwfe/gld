@@ -810,7 +810,12 @@ async fn run_command(
     // `yield_time_ms: 0` 那一路把初始输入整个丢掉：命令拿到一个开着、却永远
     // 不会有数据的 stdin，于是挂到超时——而调用方明明传了 stdin（审查 X03、
     // 方案 E "先设置输入/EOF 语义，再进行 yield"）。
-    apply_stdin_plan(&session, stdin_plan).await?;
+    if let Err(error) = apply_stdin_plan(&session, stdin_plan).await {
+        // 命令已经起来了：不交给监视任务的话，没人在它结束时记下结局（运行记录一直停在
+        // running），到了 timeout_ms 也没人停它。
+        spawn_timeout_monitor(sessions.clone(), session.clone(), deadline);
+        return Err(error);
+    }
 
     if yield_time.is_zero() {
         let snapshot = session.snapshot(max_output);
@@ -860,20 +865,33 @@ async fn run_command(
     }
 }
 
+/// 隔多久问一次转了后台的命令结束没有。
+///
+/// 以前没人问：后台命令结束了，要等有人 `read_output` 或者到了 `timeout_ms` 才知道。
+/// 运行记录要在结束那一刻落终态——之后 gld 重启了，那份记录就是唯一知道结局的地方
+/// （审查 D09）。一次询问是一个不阻塞的 `try_wait`，200 毫秒一次不痛不痒。
+const EXIT_POLL: Duration = Duration::from_millis(200);
+
 fn spawn_timeout_monitor(
     sessions: Arc<SessionStore>,
     session: Arc<ExecSession>,
     deadline: Instant,
 ) {
     crate::async_rt::spawn(async move {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        tokio::time::sleep(remaining).await;
-        session.refresh_status().await;
-        if !session.has_exited() {
-            session.mark_termination_reason("timeout");
-            session.kill_and_wait().await;
+        loop {
             session.refresh_status().await;
-            session.wait_for_readers().await;
+            if session.has_exited() {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                session.mark_termination_reason("timeout");
+                session.kill_and_wait().await;
+                session.refresh_status().await;
+                session.wait_for_readers().await;
+                break;
+            }
+            tokio::time::sleep(remaining.min(EXIT_POLL)).await;
         }
         // Keep the session briefly so clients can still read_output / probe status.
         schedule_session_eviction(sessions, session.session_id.clone());

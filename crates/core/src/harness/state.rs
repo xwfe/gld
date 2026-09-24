@@ -710,7 +710,7 @@ impl Harness {
     }
 }
 
-fn workspace_id(root: &Path) -> String {
+pub(crate) fn workspace_id(root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(root.to_string_lossy().as_bytes());
     format!("{:x}", hasher.finalize())[..32].to_string()

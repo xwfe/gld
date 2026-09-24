@@ -17,6 +17,7 @@ mod patch_diag;
 pub mod planning;
 pub mod policy;
 pub mod registry;
+pub mod runs;
 pub mod session;
 pub mod setup;
 pub mod skill;

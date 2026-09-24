@@ -360,7 +360,7 @@ fn accept_evidence(
         None => {
             return Err(problem(
                 "EVIDENCE_STALE",
-                "没有记录命令运行期间工作区有没有被写过".into(),
+                "说不清命令起跑之后 gld 有没有往工作区写过（比如 gld 重启过，这条结局是从运行记录读到的）；重跑一次再验收".into(),
             ))
         }
     }

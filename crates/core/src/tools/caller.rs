@@ -73,6 +73,12 @@ impl Caller {
         self.grant.as_deref()
     }
 
+    /// 主体的标识，也写进运行记录（[`crate::tools::runs::RunRecord::caller`]）：重启之后
+    /// 同一个主体读得到自己的记录，别的主体读不到。不含令牌本身。
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
     /// 哪个入口：`hub`、某个工作区 id，或者 [`LOCAL_SCOPE`]。
     ///
     /// 停掉一个入口时按它清会话，见
