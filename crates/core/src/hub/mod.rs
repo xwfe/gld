@@ -49,7 +49,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::agent_context::render_skill_catalog_for_profile;
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, Grant};
 use crate::bridge::member::{CcnmMember, Mode};
 use crate::bridge::peer::PeerError;
 #[cfg(test)]
@@ -382,9 +382,9 @@ impl Hub {
 
         let mut routed = None;
         let result = match method {
-            "initialize" => Ok(self.initialize_result()),
+            "initialize" => Ok(self.initialize_result(auth.grant())),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": self.list_tools() })),
+            "tools/list" => Ok(json!({ "tools": self.list_tools_for(auth.grant()) })),
             "tools/call" => self.call(auth, &params, &mut routed),
             _ => Err(json!({
                 "code": -32601,
@@ -398,8 +398,11 @@ impl Hub {
         (response, routed)
     }
 
-    fn initialize_result(&self) -> Value {
-        let catalog = match self.snapshot() {
+    fn initialize_result(&self, grant: Option<&Grant>) -> Value {
+        let catalog = match self
+            .snapshot()
+            .map(|(members, settings)| (visible(members, grant), settings))
+        {
             Ok((members, _)) if members.is_empty() => {
                 "No workspaces are in this hub yet; the operator adds them from the gld CLI."
                     .to_string()
@@ -424,7 +427,7 @@ impl Hub {
             Err(error) => format!("The workspace list is unavailable right now: {error}"),
         };
         let relayed = match self.snapshot() {
-            Ok((_, settings)) if !self.relay_definitions(&settings).is_empty() => format!(
+            Ok((_, settings)) if grant.is_none() && !self.relay_definitions(&settings).is_empty() => format!(
                 "\n\nMCP servers installed on this machine are relayed too, outside any workspace: {} lists them and their tools, {} calls one.",
                 machine_mcp::relay::LIST,
                 machine_mcp::relay::CALL
@@ -446,7 +449,15 @@ impl Hub {
         })
     }
 
+    /// 服务凭据看到的工具表（全权）。
     pub fn list_tools(&self) -> Vec<Value> {
+        self.list_tools_for(None)
+    }
+
+    /// 这把凭据看到的工具表。grant 看不到本机 MCP 转发；只读 grant 只有读的工具，
+    /// 远端也只有读的那几个（RFC-0007）。
+    fn list_tools_for(&self, grant: Option<&Grant>) -> Vec<Value> {
+        let read_only = grant.is_some_and(|grant| grant.read_only);
         let mut tools = vec![list_workspaces_definition(), workspace_context_definition()];
         tools.extend(
             list_tools_for_profile(&self.tool_profile)
@@ -454,7 +465,9 @@ impl Hub {
                 .filter(|tool| {
                     tool.get("name")
                         .and_then(Value::as_str)
-                        .is_some_and(|name| !HIDDEN_TOOLS.contains(&name))
+                        .is_some_and(|name| {
+                            !HIDDEN_TOOLS.contains(&name) && (!read_only || read_only_allows(name))
+                        })
                 })
                 .map(|mut tool| {
                     require_workspace(&mut tool["inputSchema"]);
@@ -469,7 +482,10 @@ impl Hub {
         // 全是只读成员时列出 `remote_coding_begin`，模型只会得到一个必然
         // 失败的调用。
         if let Ok((members, settings)) = self.snapshot() {
-            tools.extend(self.relay_definitions(&settings));
+            if grant.is_none() {
+                tools.extend(self.relay_definitions(&settings));
+            }
+            let members = visible(members, grant);
             let remotes: Vec<&CcnmMember> = members
                 .iter()
                 .filter_map(|m| match m {
@@ -478,7 +494,9 @@ impl Hub {
                 })
                 .collect();
             if !remotes.is_empty() {
-                let any_coding = remotes.iter().any(|r| r.max_mode == Mode::Coding);
+                // grant 一律不开远端写会话，见 coding_session。
+                let any_coding =
+                    grant.is_none() && remotes.iter().any(|r| r.max_mode == Mode::Coding);
                 tools.extend(remote_tools::definitions(any_coding));
             }
         }
@@ -490,9 +508,9 @@ impl Hub {
     /// 成员自己的 server_info 报的是成员工具集那一份：含 hub 隐藏掉的
     /// get/set_default_cwd，不含 list_workspaces、远端和中继工具，也没有参数。
     /// 拿它跟客户端看到的表对，对不上也说明不了问题。
-    fn with_connection_surface(&self, mut info: Value) -> Value {
+    fn with_connection_surface(&self, mut info: Value, grant: Option<&Grant>) -> Value {
         if let Some(object) = info.as_object_mut() {
-            let mut surface = crate::tools::registry::surface_digest(&self.list_tools());
+            let mut surface = crate::tools::registry::surface_digest(&self.list_tools_for(grant));
             surface["note"] = json!(
                 "The tool list this connection's tools/list returns right now. If your own tool list lacks any of these tools or parameters, the client is using a cached older list: refresh the connector's tools (ChatGPT: connector settings → refresh) instead of guessing arguments or asking for permissions."
             );
@@ -501,14 +519,17 @@ impl Hub {
         info
     }
 
-    fn exposes(&self, name: &str) -> bool {
+    /// 和 [`Self::list_tools_for`] 一个口径：表里没有的，硬发 `tools/call` 也是 Unknown tool。
+    fn exposes(&self, name: &str, grant: Option<&Grant>) -> bool {
+        let read_only = grant.is_some_and(|grant| grant.read_only);
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
-            || machine_mcp::is_tool(name)
+            || (grant.is_none() && machine_mcp::is_tool(name))
             || remote_tools::find(name).is_some()
             || remote_tools::is_session_tool(name)
             || (!HIDDEN_TOOLS.contains(&name)
-                && exposed_tool_names(&self.tool_profile).contains(&name))
+                && exposed_tool_names(&self.tool_profile).contains(&name)
+                && (!read_only || read_only_allows(name)))
     }
 
     fn call(
@@ -522,7 +543,7 @@ impl Hub {
             .and_then(Value::as_str)
             .ok_or_else(|| json!({ "code": -32602, "message": "Missing tool name" }))?;
         let canonical = canonical_tool_name(name);
-        if !self.exposes(canonical) {
+        if !self.exposes(canonical, auth.grant()) {
             return Err(json!({
                 "code": -32602,
                 "message": format!("Unknown tool: {name}"),
@@ -541,8 +562,11 @@ impl Hub {
                 })))
             }
         };
+        // 用完整名单：按 grant 过滤之后再判"谁离开了"，就会把别的成员当成走了、
+        // 停掉它们的命令。
         self.forget_departed(&members);
         self.relay.retain(&settings.relayed_mcp_servers);
+        let members = visible(members, auth.grant());
         if canonical == LIST_WORKSPACES {
             return Ok(plain_result(list_workspaces(&members)));
         }
@@ -664,17 +688,38 @@ impl Hub {
             context: Some(context.clone()),
         });
 
+        // 项目关了 confine-reads 时，读工具能读整台机器（数据目录除外）。那是操作员给自己
+        // 开的方便，不该跟着开给 grant：grant 用这个项目一律拒，说清楚怎么办（RFC-0007）。
+        if auth.grant().is_some() && !member.runtime.confine_reads {
+            let result = plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "GRANT_NEEDS_CONFINED_READS",
+                message: format!(
+                    "Workspace {} lets its read tools reach outside its directory (confine-reads=false), so connections that came in with a grant cannot use it. The operator turns it back on with `gld set {} confine-reads=true`.",
+                    member.name, member.name
+                ),
+                category: "permission",
+                retryable: false,
+                details: json!({ "workspace": local_ref(member) }),
+            }));
+            return Ok(result);
+        }
+
         let structured = if canonical == WORKSPACE_CONTEXT {
-            self.workspace_context(member, &context)
+            self.workspace_context(member, &context, auth.grant())
         } else if !exposed_tool_names(&context.tool_profile).contains(&canonical) {
             tool_not_in_workspace(canonical, member, &context.tool_profile)
         } else if canonical == "server_info" {
-            self.with_connection_surface(call_tool_as(
-                &context,
-                &Caller::from_auth(auth),
-                canonical,
-                args,
-            ))
+            let mut info = call_tool_as(&context, &Caller::from_auth(auth), canonical, args);
+            // 成员的 server_info 按项目工具集报 tools；只读 grant 调不了其中写和执行的那些，
+            // 照报的话模型会去试（审查 D07）。
+            if auth.grant().is_some_and(|grant| grant.read_only) {
+                if let Some(tools) = info.get_mut("tools").and_then(Value::as_array_mut) {
+                    tools.retain(|name| name.as_str().is_some_and(read_only_allows));
+                    let count = tools.len();
+                    info["tool_count"] = json!(count);
+                }
+            }
+            self.with_connection_surface(info, auth.grant())
         } else {
             call_tool_as(&context, &Caller::from_auth(auth), canonical, args)
         };
@@ -805,6 +850,20 @@ impl Hub {
                 code: "CODING_REQUIRES_AUTH",
                 message: format!(
                     "Writing to a remote workspace needs an authenticated connection, and this hub is running with auth_type=noauth. Reading {} still works.",
+                    member.name
+                ),
+                category: "permission",
+                retryable: false,
+                details: json!({ "workspace": remote_ref(member) }),
+            }));
+        }
+        // 远端写会话只给服务凭据（RFC-0007）。一个远端成员同一时刻只有一条写连接，换个
+        // 主体来开就把原来那条顶掉：grant 开一个，操作员正开着的会话、后台命令和写锁就没了。
+        if auth.grant().is_some() {
+            return plain_result(tool_err(WorkspaceError::ToolDetails {
+                code: "GRANT_CANNOT_WRITE_REMOTE",
+                message: format!(
+                    "This connection came in with a grant, and grants cannot open a writing session on a remote workspace: a remote workspace has one writing connection at a time, so opening one would cut off whoever has it now. Reading {} still works.",
                     member.name
                 ),
                 category: "permission",
@@ -970,11 +1029,21 @@ impl Hub {
         self.connections.retain(&still_here);
     }
 
-    fn workspace_context(&self, member: &WorkspaceProfile, context: &SharedToolContext) -> Value {
+    fn workspace_context(
+        &self,
+        member: &WorkspaceProfile,
+        context: &SharedToolContext,
+        grant: Option<&Grant>,
+    ) -> Value {
         let member_tools = exposed_tool_names(&context.tool_profile);
+        let read_only = grant.is_some_and(|grant| grant.read_only);
         let tools: Vec<&str> = exposed_tool_names(&self.tool_profile)
             .into_iter()
-            .filter(|name| !HIDDEN_TOOLS.contains(name) && member_tools.contains(name))
+            .filter(|name| {
+                !HIDDEN_TOOLS.contains(name)
+                    && member_tools.contains(name)
+                    && (!read_only || read_only_allows(name))
+            })
             .collect();
         // 目录怎么给（compact 有字符预算）和单工作区 initialize 走同一个函数，
         // 两边口径不会漂。
@@ -1016,6 +1085,24 @@ fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> Str
         &settings.global_hidden_skills,
     ))
     .unwrap_or_default()
+}
+
+/// 这把凭据看得到的成员（RFC-0007）。范围外的当成不存在：不列、不进任何报错的候选，
+/// 按名字或 id 去调报的也是 `WORKSPACE_NOT_IN_HUB`。
+fn visible(members: Vec<Member>, grant: Option<&Grant>) -> Vec<Member> {
+    match grant {
+        None => members,
+        Some(grant) => members
+            .into_iter()
+            .filter(|member| grant.allows(member.id()))
+            .collect(),
+    }
+}
+
+/// 只读 grant 能调的本地工具：就是 read-only 工具集那一份，和服务、项目自己的工具集
+/// 再取交集。
+fn read_only_allows(name: &str) -> bool {
+    exposed_tool_names("read-only").contains(&name)
 }
 
 /// 按 id、名称、不分大小写的名称、id 前缀（≥4 位）的顺序找成员。
@@ -3537,5 +3624,394 @@ mod tests {
             "关掉之后下一次调用就不给了"
         );
         assert_eq!(opened.load(Ordering::SeqCst), 2);
+    }
+
+    // ---- grant：一把凭据只开几个项目（RFC-0007） ----
+
+    fn granted(principal: crate::auth::Principal, ids: &[&str], read_only: bool) -> AuthContext {
+        AuthContext::new(principal, HUB_SCOPE).with_grant(Some(Grant {
+            id: format!("g-{}", ids.join("-")),
+            name: "alice".into(),
+            workspaces: ids.iter().map(|id| id.to_string()).collect(),
+            read_only,
+        }))
+    }
+
+    fn bearer_grant(id: &str, ids: &[&str]) -> AuthContext {
+        AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE).with_grant(Some(Grant {
+            id: id.into(),
+            name: id.into(),
+            workspaces: ids.iter().map(|id| id.to_string()).collect(),
+            read_only: false,
+        }))
+    }
+
+    fn rpc(hub: &Hub, auth: &AuthContext, method: &str, params: Value) -> Value {
+        hub.handle_request(
+            auth,
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }),
+        )
+        .0
+    }
+
+    fn tool_names(hub: &Hub, auth: &AuthContext) -> Vec<String> {
+        rpc(hub, auth, "tools/list", json!({}))["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// 范围外的项目当成不存在：不列、说明里没有、按名字或 id 调报的和不存在的一样，
+    /// 候选里也没有它。服务凭据照旧看到全部。
+    #[test]
+    fn a_grant_sees_only_its_workspaces() {
+        let fixture = fixture();
+        let alice = granted(
+            crate::auth::Principal::OAuthClient {
+                client_id: "dcr-a".into(),
+            },
+            &[&fixture.api.id],
+            false,
+        );
+
+        let listed = call_as(&fixture.hub, &alice, LIST_WORKSPACES, json!({}));
+        assert_eq!(listed["count"], 1, "{listed}");
+        assert!(!listed.to_string().contains("\"web\""), "{listed}");
+
+        for selector in [fixture.web.id.as_str(), "web"] {
+            let refused = call_as(
+                &fixture.hub,
+                &alice,
+                "read_file",
+                json!({ "workspace": selector, "path": "only-web.txt" }),
+            );
+            assert_eq!(
+                refused["error"]["code"], "WORKSPACE_NOT_IN_HUB",
+                "{refused}"
+            );
+            assert_eq!(
+                refused["error"]["details"]["available"],
+                json!([{ "id": fixture.api.id, "name": "api" }]),
+                "候选里漏出了范围外的项目：{refused}"
+            );
+            assert!(!refused.to_string().contains("web page"), "{refused}");
+        }
+        let missing = call_as(&fixture.hub, &alice, "list_dir", json!({ "path": "." }));
+        assert_eq!(missing["error"]["code"], "WORKSPACE_REQUIRED");
+        assert!(!missing.to_string().contains(&fixture.web.id), "{missing}");
+
+        let read = call_as(
+            &fixture.hub,
+            &alice,
+            "read_file",
+            json!({ "workspace": "api", "path": "only-api.txt" }),
+        );
+        assert_eq!(read["ok"], true, "{read}");
+
+        let instructions = rpc(&fixture.hub, &alice, "initialize", json!({}))["result"]
+            ["instructions"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(instructions.contains("api"), "{instructions}");
+        assert!(!instructions.contains(&fixture.web.id), "{instructions}");
+
+        let owner = call(&fixture.hub, LIST_WORKSPACES, json!({}));
+        assert_eq!(owner["count"], 2, "服务凭据还是全部：{owner}");
+    }
+
+    /// 只读 grant：工具表里没有写和执行的，硬发也是 Unknown tool；读照常。
+    #[test]
+    fn a_read_only_grant_can_read_but_not_write_or_run() {
+        let fixture = fixture();
+        let viewer = granted(
+            crate::auth::Principal::SharedSecret,
+            &[&fixture.api.id],
+            true,
+        );
+        let names = tool_names(&fixture.hub, &viewer);
+        for writer in ["exec_command", "apply_patch", "write_stdin", "kill_session"] {
+            assert!(
+                !names.iter().any(|name| name == writer),
+                "{writer} 还在：{names:?}"
+            );
+        }
+        assert!(names.iter().any(|name| name == "read_file"), "{names:?}");
+        assert!(
+            tool_names(&fixture.hub, &caller())
+                .iter()
+                .any(|name| name == "exec_command"),
+            "服务凭据的工具表不受影响"
+        );
+
+        for (tool, args) in [
+            ("exec_command", json!({ "workspace": "api", "cmd": "pwd" })),
+            (
+                "apply_patch",
+                json!({ "workspace": "api", "patch": "*** Begin Patch\n*** Add File: x.txt\n+x\n*** End Patch" }),
+            ),
+        ] {
+            let refused = rpc(
+                &fixture.hub,
+                &viewer,
+                "tools/call",
+                json!({ "name": tool, "arguments": args }),
+            );
+            assert_eq!(
+                refused["error"]["data"]["reason"], "unknown_tool",
+                "{refused}"
+            );
+        }
+        assert!(!fixture.api.path.is_empty());
+        assert!(
+            !std::path::Path::new(&fixture.api.path)
+                .join("x.txt")
+                .exists(),
+            "只读 grant 写进了文件"
+        );
+
+        let read = call_as(
+            &fixture.hub,
+            &viewer,
+            "read_file",
+            json!({ "workspace": "api", "path": "only-api.txt" }),
+        );
+        assert_eq!(read["ok"], true, "{read}");
+        let context = call_as(
+            &fixture.hub,
+            &viewer,
+            WORKSPACE_CONTEXT,
+            json!({ "workspace": "api" }),
+        );
+        assert!(
+            !context["tools"].to_string().contains("exec_command"),
+            "workspace_context 报了调不了的工具：{context}"
+        );
+    }
+
+    /// 本机 MCP 转发是服务级的，grant 一律不给：不列、硬发也是 Unknown tool，server 不会被拉起。
+    #[test]
+    fn a_grant_gets_no_machine_mcp_relay() {
+        let (hub, opened, _dir) = relay_hub(&["context7"], "compact");
+        let alice = bearer_grant("g1", &[]);
+        let names = tool_names(&hub, &alice);
+        assert!(
+            !names.iter().any(|name| name == "call_mcp_tool"),
+            "{names:?}"
+        );
+        let refused = rpc(
+            &hub,
+            &alice,
+            "tools/call",
+            json!({ "name": "call_mcp_tool", "arguments": { "server": "context7", "tool": "echo" } }),
+        );
+        assert_eq!(
+            refused["error"]["data"]["reason"], "unknown_tool",
+            "{refused}"
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 0);
+        let instructions =
+            rpc(&hub, &alice, "initialize", json!({}))["result"]["instructions"].to_string();
+        assert!(!instructions.contains("call_mcp_tool"), "{instructions}");
+        assert!(
+            named(&listed(&hub), "call_mcp_tool").is_some(),
+            "服务凭据照旧有"
+        );
+    }
+
+    /// 按 grant 过滤成员之后不能拿过滤后的名单去判"谁离开了"：那会把范围外成员当成
+    /// 移走了、停掉服务凭据在它上面起的命令。
+    #[test]
+    fn a_grant_call_does_not_stop_commands_in_other_workspaces() {
+        let fixture = fixture();
+        let started = call(
+            &fixture.hub,
+            "exec_command",
+            json!({
+                "workspace": "web",
+                "cmd": "python3 -c \"import time; time.sleep(5)\"",
+                "yield_time_ms": 0,
+                "timeout_ms": 10_000
+            }),
+        );
+        assert_eq!(started["ok"], true, "{started}");
+        let session_id = started["session_id"].as_str().expect("session").to_string();
+        let output_ref = started["output_refs"]["stdout"]
+            .as_str()
+            .expect("ref")
+            .to_string();
+
+        let alice = bearer_grant("g1", &[&fixture.api.id]);
+        call_as(&fixture.hub, &alice, LIST_WORKSPACES, json!({}));
+        call_as(
+            &fixture.hub,
+            &alice,
+            "read_file",
+            json!({ "workspace": "api", "path": "only-api.txt" }),
+        );
+
+        let still = call(
+            &fixture.hub,
+            "read_output",
+            json!({ "workspace": "web", "output_ref": output_ref }),
+        );
+        assert_eq!(still["ok"], true, "{still}");
+        assert_ne!(still["status"], "killed", "{still}");
+        call(
+            &fixture.hub,
+            "kill_session",
+            json!({ "workspace": "web", "session_id": session_id }),
+        );
+    }
+
+    /// 两把 grant 都开了 api、都是 bearer：它们是两个主体，命令会话互相看不见。
+    #[test]
+    fn two_grants_on_one_workspace_do_not_share_command_sessions() {
+        let fixture = fixture();
+        let (alpha, beta) = (
+            bearer_grant("g-alpha", &[&fixture.api.id]),
+            bearer_grant("g-beta", &[&fixture.api.id]),
+        );
+        let started = call_as(
+            &fixture.hub,
+            &alpha,
+            "exec_command",
+            json!({
+                "workspace": "api",
+                "cmd": "python3 -c \"import time; time.sleep(5)\"",
+                "yield_time_ms": 0,
+                "timeout_ms": 10_000
+            }),
+        );
+        let session_id = started["session_id"].as_str().expect("session").to_string();
+        let output_ref = started["output_refs"]["stdout"]
+            .as_str()
+            .expect("ref")
+            .to_string();
+        let stolen = call_as(
+            &fixture.hub,
+            &beta,
+            "read_output",
+            json!({ "workspace": "api", "output_ref": output_ref }),
+        );
+        assert_eq!(stolen["error"]["code"], "SESSION_NOT_FOUND", "{stolen}");
+        let owner = call(
+            &fixture.hub,
+            "read_output",
+            json!({ "workspace": "api", "output_ref": output_ref }),
+        );
+        assert_eq!(
+            owner["error"]["code"], "SESSION_NOT_FOUND",
+            "服务凭据也不是同一个主体：{owner}"
+        );
+        call_as(
+            &fixture.hub,
+            &alpha,
+            "kill_session",
+            json!({ "workspace": "api", "session_id": session_id }),
+        );
+    }
+
+    /// 远端成员：grant（能写的也一样）开不了写会话，工具表里也没有 coding 那几个。
+    /// 一个远端成员同一时刻只有一条写连接，grant 开一个就把操作员正开着的顶掉了。
+    #[test]
+    fn a_grant_opens_no_remote_writing_session() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        for read_only in [true, false] {
+            let holder = granted(
+                crate::auth::Principal::SharedSecret,
+                &[&fixture.remote.id],
+                read_only,
+            );
+            let names = tool_names(&fixture.hub, &holder);
+            assert!(
+                !names.iter().any(|name| name == "remote_coding_begin"),
+                "{names:?}"
+            );
+            assert!(
+                names.iter().any(|name| name.starts_with("remote_")),
+                "{names:?}"
+            );
+            let refused = call_as(
+                &fixture.hub,
+                &holder,
+                "remote_coding_begin",
+                json!({ "workspace": "prod" }),
+            );
+            assert_eq!(
+                refused["error"]["code"], "GRANT_CANNOT_WRITE_REMOTE",
+                "{refused}"
+            );
+        }
+        assert_eq!(fixture.spy.opens(), 0, "被拒的调用不该连到远端");
+        assert!(
+            tool_names(&fixture.hub, &caller())
+                .iter()
+                .any(|name| name == "remote_coding_begin"),
+            "服务凭据照旧能开"
+        );
+    }
+
+    /// 项目关了 confine-reads，读工具能读到项目外面：grant 用它一律拒，服务凭据照旧。
+    #[test]
+    fn a_grant_cannot_use_a_workspace_that_reads_outside_itself() {
+        let fixture = fixture();
+        update_fixed(&fixture.hub, |profiles, _| {
+            for profile in profiles.iter_mut().filter(|profile| profile.name == "api") {
+                profile.runtime.confine_reads = false;
+            }
+        });
+        let alice = granted(
+            crate::auth::Principal::SharedSecret,
+            &[&fixture.api.id],
+            true,
+        );
+        let refused = call_as(
+            &fixture.hub,
+            &alice,
+            "read_file",
+            json!({ "workspace": "api", "path": "only-api.txt" }),
+        );
+        assert_eq!(
+            refused["error"]["code"], "GRANT_NEEDS_CONFINED_READS",
+            "{refused}"
+        );
+        let owner = call(
+            &fixture.hub,
+            "read_file",
+            json!({ "workspace": "api", "path": "only-api.txt" }),
+        );
+        assert_eq!(owner["ok"], true, "{owner}");
+    }
+
+    /// 只读 grant 调 server_info，报的工具里不能有它调不了的（模型会照着去试）。
+    #[test]
+    fn server_info_reports_only_what_a_read_only_grant_can_call() {
+        let fixture = fixture();
+        let viewer = granted(
+            crate::auth::Principal::SharedSecret,
+            &[&fixture.api.id],
+            true,
+        );
+        let info = call_as(
+            &fixture.hub,
+            &viewer,
+            "server_info",
+            json!({ "workspace": "api" }),
+        );
+        let tools = info["tools"].as_array().unwrap_or_else(|| panic!("{info}"));
+        assert!(!tools.iter().any(|name| name == "exec_command"), "{info}");
+        assert_eq!(info["tool_count"], json!(tools.len()));
+        let owner = call(&fixture.hub, "server_info", json!({ "workspace": "api" }));
+        assert!(
+            owner["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name == "exec_command"),
+            "{owner}"
+        );
     }
 }
