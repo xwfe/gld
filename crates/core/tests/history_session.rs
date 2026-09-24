@@ -20,6 +20,8 @@ fn invoke_ok(ctx: &ToolContext, name: &str, args: Value) -> Value {
 }
 
 fn test_context() -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
+    // 不隔离的话写锁、运行记录会落进真实的 ~/.config/gld（独立审查发现）。
+    common::isolate_data_home();
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let harness = tempfile::tempdir().expect("harness tempdir");
     let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
@@ -644,6 +646,7 @@ fn workspace_root_and_history_paths_cannot_escape_workspace() {
 
 #[test]
 fn concurrent_bootstrap_allocates_distinct_numbers() {
+    common::isolate_data_home();
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let barrier = Arc::new(Barrier::new(2));
     let root = workspace.path().to_path_buf();
