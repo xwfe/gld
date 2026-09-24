@@ -57,7 +57,16 @@
 - [x] 文档：connect-clients.md 四档表（什么都不用做 / 点 Refresh / 重新授权 / 删了重建）为唯一权威；install.md 升级
   多一步比工具表指纹；development.md 要求发布说明写明连接器要不要动；排障、README、daemon 同步。
 - [ ] ChatGPT 点 Refresh 后核对新工具表；grant 口令在 ChatGPT 授权页上实测（要用户在网页上操作）。
-- [ ] 开机自启（launchd）：本机没配，机器重启后服务不会自己回来——要不要配由用户定。
+- [x] 开机自启：四步命令写进 daemon.md（临时 launchd 任务实测后撤掉），本机由用户自己配。
+- [x] 重启后 cargo 找不到：补全局可执行路径；修 `gld tool call` 上下文缓存不随全局设置失效（`432dfd7`）。
+
+## D12 尾巴（2026-09-24）
+
+- [x] v0.7.0 glibc 包在 Debian 12 amd64 容器实跑；Linux 上 IPC 正常。
+- [x] 查出并修掉后台命令在守护进程退出 / 直连命令行退出后成孤儿（`4ffd96f`），CI Ubuntu、macOS 全绿。
+- [x] 发布流水线加构建来源证明（`4216d21`）。
+- [ ] 来源证明第一次真正签出来：要用户在 Actions 里手动跑一次 Release（gh 在这边登不上），或下次发版。
+- [ ] 代码签名（付费证书）、Windows 包实跑（没有 Windows 机器）。
 
 不纳入：
 D09 持久 Job、D10 浏览器证据（按真实项目需要）；D12 里的签名与来源证明、glibc / Windows 包真机跑；

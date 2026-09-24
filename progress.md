@@ -101,3 +101,14 @@
   恢复，指纹再比一次一致。临时目录随重启清空，指纹脚本按记下的值重建后比对。
 - 文档：把"升级后插件要不要动"收成 connect-clients.md 一张四档表，其余文档只链过去；改正审查记录里
   "`grants` 键不出现"的错误说法（实际是保存配置时写成空数组）。
+
+## 开机自启与 D12 尾巴（2026-09-24）
+
+- 重启后 Claude 的 shell 里没有 cargo（`rustup which cargo` 补 PATH）；守护进程从这种 shell 拉起后经它跑 cargo
+  也找不到。补全局可执行路径；顺带修 `gld tool call` 上下文缓存不随全局设置失效（测试要先起守护进程才复现）。
+- 开机自启：临时 launchd 任务（隔离 `GLD_HOME` 放 `/tmp/gldlt`，socket 路径限 104 字节）实测 PATH、stop、kill -9、
+  重复启动；写成四步命令，KeepAlive 改 `SuccessfulExit=false`。测完 bootout、删目录。
+- D12：OrbStack 起来拉 amd64 `debian:bookworm-slim`，v0.7.0 glibc 包实跑；查出后台命令孤儿问题，macOS 复现，
+  修复 + 两条测试；CI 全绿。发布流水线加 `actions/attest@v4`（版本、权限名对过官方仓库与文档）。
+  测完删镜像、`orb stop`。
+- 本机服务又升两次（`dbbe713`、`4216d21`），工具表指纹不变，凭据指纹一致。

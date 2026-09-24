@@ -514,6 +514,27 @@ elicitation）。gld 的 HTTP 服务不开 SSE 流，elicitation 发不出去；
 **仍未验证：**ChatGPT 这边点 Refresh 之后的 `tools/list` 和新对话里的工具定义（要用户在网页上操作）；
 grant 口令在 ChatGPT 授权页上的实际授权。
 
+### D12 的尾巴，以及顺带查出的两处修复（2026-09-24）
+
+| 项 | 结果 |
+| --- | --- |
+| glibc 版下载包实跑 | v0.7.0 的 `x86_64-unknown-linux-gnu` 包从公开地址下载，校验和 OK；在 Debian 12（glibc 2.36）amd64 容器里（OrbStack 转译）`--version` 报 0.7.0，登记项目、起守护进程（socket 权限 `srw-------`）、经守护进程调工具、起后台命令都正常 |
+| Linux 上的命令清理 | 查出一个 bug：`gld daemon stop` 之后，经 `gld tool call` 起的后台命令还在跑；macOS 上用当前版本复现一样，经服务（MCP）起的倒会被停掉。没有守护进程时（直连模式）命令行一退也一样留下孤儿。已修（`4ffd96f`）：守护进程退出时收掉剩下的全部命令会话；直连模式下命令行退出前停掉并在 stderr 说明。两条新测试在旧代码上失败；CI 的 Ubuntu 与 macOS 测试 job 都跑了它们、全绿（run 35951936414） |
+| 构建来源证明 | 发布流水线的 build job 每个包签一份 SLSA 构建来源证明（`actions/attest@v4`，`4216d21`），用户用 `gh attestation verify` 验，做法写在[安装](../install.md#下载现成的不需要装-rust)。**还没真正签出来过**：要等下一次手动空跑或发版 |
+| 代码签名、Windows 包实跑 | 没做：Developer ID / Authenticode 要付费证书，本机没有 Windows |
+
+顺带查出的另一处：机器重启后守护进程从一个没带 rustup 目录的 shell 拉起，经它跑 `cargo` 报
+`Program not found on PATH`。补了全局可执行路径（`/opt/homebrew/opt/rustup/bin`）后，经服务的调用
+下一次就好了，但 `gld tool call` 还是找不到——它的工具上下文缓存在守护进程里、改全局设置不清。已修
+（`432dfd7`），新测试要先起守护进程才能复现，在旧代码上失败。开机自启的四步命令写进了
+[守护进程 · 开机自启](../daemon.md#开机自启)，用一个隔离数据目录的临时 launchd 任务逐条实测过
+（launchd 给的 PATH、`gld daemon stop` 不被拉回、`kill -9` 被拉回、装之前不停旧的会每 10 秒重试），
+测完撤掉；本机没有配，由用户决定。
+
+本机服务之后又升了两次（`dbbe713`、`4216d21`），每次按同一流程核对：工具表指纹都没变
+（`9ed41391e27553c6`），ChatGPT 不用为这两次做任何事；凭据与注册客户端指纹、`gld ls` 都一致，
+`gld health` 全 ✓。
+
 ### 收尾
 
 - 全部提交已推送到 GitHub。0.7.0 当时只是版本号，发布见上一节。
@@ -534,6 +555,6 @@ grant 口令在 ChatGPT 授权页上的实际授权。
 
 | 编号 | 什么时候 |
 | --- | --- |
-| D12 剩下的：签名与来源证明、glibc / Windows 包真机跑、各平台 IPC 与命令清理记录 | 给别人分发之前，或有人报平台问题时 |
+| D12 剩下的：代码签名（要付费证书）、Windows 包实跑；来源证明等第一次空跑 / 发版时验 | 给别人分发之前，或有人报平台问题时 |
 | D09 持久 Job、D10 浏览器证据 | 真实项目需要时 |
 | D13 实现 2026-07-28 | 出现只讲新版、不会退回的客户端时 |
