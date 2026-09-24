@@ -32,6 +32,13 @@ jobs:
     name: 构建 ${{ matrix.target }}
     needs: test
     runs-on: ${{ matrix.os }}
+    # 构建来源证明要 OIDC 令牌（向 Sigstore 换签名证书）和写证明的权限。job 里写了
+    # permissions，没列出来的就全变成 none，所以 checkout 要的 contents: read 也得写上。
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     # optional 的目标编不过不影响发版，其余目标必须全绿。
     continue-on-error: ${{ matrix.optional || false }}
     strategy:
@@ -79,6 +86,16 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then export VERSION="$GITHUB_REF_NAME"; fi
           scripts/package.sh "${{ matrix.target }}"
+
+      # 构建来源证明（SLSA provenance）：把"这个包是这个仓库、这个提交、这个 workflow 编出来的"
+      # 签成一份证明，下载的人用 `gh attestation verify <包> --repo xwfe/gld` 验。SHA256SUMS 只能
+      # 证明下载到的和 CI 产出的是同一份，证明不了它从哪来。放在 build 里而不是 publish 里：手动
+      # 空跑也会走到这一步，发版之前就知道它是通的。每个目标只出一种包，按目标给确定的路径，
+      # 通配符匹配不到文件时这一步会失败。
+      - name: 构建来源证明
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ endsWith(matrix.target, '-windows-msvc') && 'dist/*.zip' || 'dist/*.tar.gz' }}
 
       - uses: actions/upload-artifact@v4
         with:

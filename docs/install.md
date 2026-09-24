@@ -25,9 +25,10 @@ gld --version
 
 上例应在只解压了一份目标安装包的目录执行；后续终端也需配置相同的 PATH。
 
-**Linux 选哪个：** `gnu` 构建基线是 glibc 2.35；`musl` 是静态链接目标，减少对发行版
-glibc 的依赖，但发行包仍以该次 Release 实际产物和验收平台为准。musl 构建目前是可选
-目标，不保证每次 Release 都有，不能把构建目标列表当成已验证的兼容矩阵。
+**Linux 选哪个：** `gnu` 构建基线是 glibc 2.35（Ubuntu 22.04+ / Debian 12+ / RHEL 9+）；`musl` 是
+静态链接的，不挑发行版和 glibc 版本，Alpine 上也能跑。两个都是每次发版必须编过的目标。实跑过的：
+v0.7.0 的 gnu 包在 Debian 12（glibc 2.36，amd64 容器）、musl 包在 Oracle Linux 9 容器里；别的发行版
+没实测，构建目标列表不等于验过的兼容矩阵。
 
 **macOS 首次运行可能被 Gatekeeper 拦。** 核对发布来源和校验和后，确认信任该文件，
 再决定是否移除下载隔离属性；这不是安全验证的替代：
@@ -41,6 +42,18 @@ xattr -d com.apple.quarantine "$HOME/.local/bin/gld"
 ```bash
 sha256sum -c SHA256SUMS      # macOS 上是 shasum -a 256 -c SHA256SUMS
 ```
+
+**核对它是这个仓库的发布流水线编出来的**（可选，v0.7.0 之后的版本才有）：每个包带一份构建来源证明
+（GitHub artifact attestation，Sigstore 签名，记着是哪个仓库、哪个提交、哪条流水线编的）。装了
+[GitHub CLI](https://cli.github.com/) 且它能访问 GitHub API 的话：
+
+```bash
+gh attestation verify gld-<版本>-aarch64-apple-darwin.tar.gz --repo xwfe/gld \
+  --signer-workflow xwfe/gld/.github/workflows/release.yml
+```
+
+命令成功退出（退出码 0）才算过。`SHA256SUMS` 只证明下载到的和 Release 页上的是同一份，说明不了它从哪来；
+来源证明补的是这一半。v0.7.0 及以前的包没有这份证明，这条命令会报找不到。
 
 ## 从源码装
 

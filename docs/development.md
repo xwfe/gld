@@ -178,11 +178,13 @@ scripts/package.sh --checksums              # 给 dist/ 里已有的包生成 SH
    [装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。拿不准就在本机升级一次，
    按[安装 · 换完核对](install.md#换完核对)比工具表指纹，以它为准。
 2. 本机打一次包：`scripts/package.sh`，再按安装文档的做法校验、解压、`--version`、起一次服务。
-3. 在 Actions 里手动跑一次 Release（workflow_dispatch）：走完测试、五个目标的构建打包、上传构件，
-   但不建 Release（`publish` 只在 tag 上跑，空跑时它显示 skipped 是对的）。全绿再打 tag。
+3. 在 Actions 里手动跑一次 Release（workflow_dispatch）：走完测试、五个目标的构建打包、构建来源证明、
+   上传构件，但不建 Release（`publish` 只在 tag 上跑，空跑时它显示 skipped 是对的）。全绿再打 tag。
 
 发版后（推 tag 到 Release 出来 8–10 分钟），从 Release 页下载全部包和 `SHA256SUMS`，
-`shasum -a 256 -c SHA256SUMS` 要全部 OK，再把能跑的包解压跑 `--version`。Apple Silicon 上
+`shasum -a 256 -c SHA256SUMS` 要全部 OK，每个包再 `gh attestation verify <包> --repo xwfe/gld
+--signer-workflow xwfe/gld/.github/workflows/release.yml` 验来源证明（要能用 gh 访问 GitHub API），
+再把能跑的包解压跑 `--version`。Apple Silicon 上
 `arch -x86_64` 能跑 Intel 版；musl 版是静态链接的，随便一个 Linux 容器都能跑。这一步补的是
 CI 核对不到的地方：见下一段，交叉编译的两个目标 CI 跑不起来。
 
@@ -191,9 +193,14 @@ CI 核对不到的地方：见下一段，交叉编译的两个目标 CI 跑不�
 的架构，CI 里 `aarch64-apple-darwin`、`x86_64-unknown-linux-gnu`、`x86_64-pc-windows-msvc` 会跑到
 这一步，交叉编译的 `x86_64-apple-darwin`、`x86_64-unknown-linux-musl` 跑不到。
 
-签名和构建来源证明（provenance）还没有做。`SHA256SUMS` 只证明下载到的和 CI 产出的是同一份；
-同一个提交本机和 CI 打出来的包哈希不一样（构建不是逐字节可复现的），所以它证明不了包是从
-这份源码编出来的。
+**构建来源证明**：build job 打完包之后用 `actions/attest@v4` 给每个包签一份 SLSA 构建来源证明
+（Sigstore 签名，记下仓库、提交和流水线），手动空跑也签，所以发版前就能看到这一步是不是绿的。
+`SHA256SUMS` 只证明下载到的和 Release 页上的是同一份，说明不了它从哪来；来源证明补的是这一半。
+同一个提交本机和 CI 打出来的包哈希不一样（构建不是逐字节可复现的），所以本机打的包没有这份证明。
+2026-09-24 加上，v0.7.0 及以前的包没有；第一次真正签出来要等下一次空跑或发版，之前没实测过。
+
+**代码签名还没做**：macOS 的 Developer ID 签名和公证、Windows 的 Authenticode 都要付费证书。没有它们，
+Gatekeeper / SmartScreen 会拦第一次运行，处理办法见[安装](install.md#下载现成的不需要装-rust)。
 
 `.github/workflows/release.yml` 会跑一遍全量测试（tag 不触发 ci.yml，
 所以这里补一道，没测过的不往外发），然后并行构建五个目标、生成 `SHA256SUMS`、建 Release。
