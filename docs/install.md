@@ -93,6 +93,8 @@ install -m 755 target/release/gld "$GLD.new" && mv "$GLD.new" "$GLD"
 
 # 4. 重启守护进程。版本号没变也要做，见下面
 gld daemon restart
+#    配了 launchd 开机自启的换成下面这句，守护进程继续归 launchd 管（见守护进程 · 开机自启）：
+#    gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon
 ```
 
 `gld tool list --served` 是 0.7.0 加的；从更老的版本升上来时没有它，第 2 步那行跳过，换完直接按

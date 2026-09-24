@@ -137,41 +137,81 @@ stdin 关闭，stdout / stderr 追加到 `logs/daemon.log`，工作目录切到�
 
 ## 开机自启
 
-用 `gld daemon run` 交给系统的进程管理器即可，不要用 `daemon start`（那会 fork 一个
-管理器不认识的子进程）。
+**不配的话，电脑一重启服务就断了**：守护进程不会自己回来，ChatGPT 只报连不上（连接器不用删），
+要手动 `gld daemon start`。交给系统的进程管理器用 `gld daemon run`，不要用 `daemon start`
+（那会 fork 一个管理器不认识的子进程）。
 
-macOS launchd（`~/Library/LaunchAgents/dev.gld.daemon.plist`）：
+### macOS：四步，照着复制
 
-```xml
+```bash
+# 1. 让命令找得到你平时用的工具。launchd 起的进程 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin，
+#    Homebrew、rustup、mise / nvm 装的 cargo、node、python 全找不到。把你交互 shell 的 PATH
+#    存成 gld 的全局可执行路径（用 bash 的把 zsh 换成 bash）：
+gld cfg runtime --executable-paths "$(zsh -ic 'print -r -- $PATH' 2>/dev/null | tail -1 | tr ':' ';')"
+
+# 2. 写 launchd 配置，路径按你机器上实际的 gld 和主目录填
+GLD_BIN="$(command -v gld)"
+mkdir -p ~/Library/LaunchAgents
+cat > ~/Library/LaunchAgents/dev.gld.daemon.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>dev.gld.daemon</string>
   <key>ProgramArguments</key><array>
-    <string>/Users/you/.cargo/bin/gld</string><string>daemon</string><string>run</string>
+    <string>$GLD_BIN</string><string>daemon</string><string>run</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/you/.config/gld/logs/daemon.log</string>
-  <key>StandardErrorPath</key><string>/Users/you/.config/gld/logs/daemon.log</string>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>$HOME/.config/gld/logs/daemon.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.config/gld/logs/daemon.log</string>
 </dict></plist>
+EOF
+plutil -lint ~/Library/LaunchAgents/dev.gld.daemon.plist      # 要打出 OK
+
+# 3. 先停掉手动起的，再交给 launchd
+gld daemon stop
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.gld.daemon.plist
+
+# 4. 核对
+launchctl print gui/$(id -u)/dev.gld.daemon | grep -E '^\s+(state|pid) ='   # state = running
+gld daemon status                                   # pid 和上面一样
+gld health                                          # 本地、公网 /mcp 都是 ✓
+gld tool call exec_command -w <项目> cmd='cargo --version'   # 你常用的工具找得到
 ```
 
-```bash
-launchctl load ~/Library/LaunchAgents/dev.gld.daemon.plist
-```
+几条要知道的（2026-09-24 用一个隔离数据目录的临时 launchd 任务逐条实测过）：
 
-**launchd / systemd 起的守护进程没有你 shell 里的 PATH**：launchd 给的只有 `/usr/bin:/bin:/usr/sbin:/sbin`，
-systemd 多一个 `/usr/local/bin`。
+- **第 3 步不先 `gld daemon stop` 的话**，launchd 起的那个拿不到 `daemon.lock`，退出码 1，launchd 每 10 秒
+  重试一次，`daemon.log` 里一直刷"已有另一个守护进程持有 daemon.lock"。补一句 `gld daemon stop` 再
+  `launchctl kickstart gui/$(id -u)/dev.gld.daemon` 就好。
+- **`KeepAlive` 只在崩溃时拉回来**（`SuccessfulExit=false`）：`kill -9` 之后几秒内被拉回；`gld daemon stop`
+  是正常退出（退出码 0），不会被拉回，照旧是"停了就是停了"。以前这里的模板写的是 `KeepAlive=true`，
+  那样 `gld daemon stop` 之后 launchd 马上又起一个，停不下来。
+- **升级**：换完二进制用 `gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，守护进程
+  继续归 launchd 管。直接 `gld daemon restart` 也能用（launchd 那个正常退出，命令行另起一个），只是到下次
+  开机之前它不归 launchd 管，崩了不会被拉回。
+- **第 1 步是一份快照**：以后装了新工具、放在新目录里，重跑第 1 步。它对手动 `gld daemon start` 也有用：
+  守护进程的 PATH 取决于是谁、在什么环境里拉起它的，配成全局可执行路径之后就和这个无关了（2026-09-24
+  本机重启后从一个没带 rustup 目录的 shell 拉起守护进程，AI 跑 `cargo` 报 `Program not found on PATH`）。
+- **不要了**：`launchctl bootout gui/$(id -u)/dev.gld.daemon && rm ~/Library/LaunchAgents/dev.gld.daemon.plist`，
+  还想让它现在接着跑就再 `gld daemon start`。
+
+### 为什么 launchd / systemd 起的找不到命令
+
+launchd 给的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`（实测），systemd 多一个 `/usr/local/bin`。
 Homebrew（`/opt/homebrew/bin`）、`~/.cargo/bin`、conda / nvm 装的 node、python、cargo 全都找不到，
 AI 跑命令会报 `Program not found on PATH: node`——而你在终端里 `gld tool call` 复现时一切正常，
-因为那时候守护进程是终端拉起的。把要用的目录配成全局可执行路径，跟谁拉起守护进程就无关了：
+因为那时候守护进程是终端拉起的。把要用的目录配成全局可执行路径（上面第 1 步，或者只加几个）：
 
 ```bash
 which node cargo python3        # 先在终端里看它们在哪个目录
 gld cfg runtime --executable-paths "/opt/homebrew/bin;$HOME/.cargo/bin"
-gld restart                      # 已经在跑的服务要重启才用上
 ```
+
+改完经服务（MCP）的下一次调用、`gld tool call` 就用上，不用重启。项目的 GPT Actions 不读这个设置，
+用的是守护进程自己的 PATH——所以用 GPT Actions 又配了 launchd 的，要用的工具得在 `/usr/bin` 这几个目录里。
+
+### Linux systemd
 
 Linux systemd 用户单元（`~/.config/systemd/user/gld.service`）：
 
@@ -191,8 +231,8 @@ WantedBy=default.target
 systemctl --user enable --now gld
 ```
 
-这两种方式下 `gld daemon stop` 仍然可用，但管理器会按 KeepAlive / Restart 策略把它拉回来；
-要彻底停用请用 `launchctl unload` / `systemctl --user disable --now gld`。
+`Restart=on-failure` 和上面的 `SuccessfulExit=false` 一个意思：崩溃才拉回，`gld daemon stop` 正常退出不拉回。
+要彻底停用：`systemctl --user disable --now gld`。
 
 ## 升级
 
@@ -202,6 +242,9 @@ systemctl --user enable --now gld
 gld daemon restart
 gld status                       # MCP 服务应该已经自己回来了
 ```
+
+配了 launchd [开机自启](#开机自启)的，把 `gld daemon restart` 换成
+`gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，守护进程继续归 launchd 管。
 
 **MCP 服务会自己回来**：守护进程启动时把上次 `gld start` 过、没 `gld stop` 的服务连同
 隧道一起拉起（上面"启动时发生什么"第 5 条）。用的是 Cloudflare 临时地址的话，地址会换，
