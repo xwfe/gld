@@ -29,13 +29,14 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 ```
 
 两条路径在 `dispatch` 汇合，复用应用用例；但身份、配置、进程寿命和内存会话可能不同。
-特别是 CLI 直连模式不能让下一次新进程继承命令会话，不能仅凭共用代码断言端到端行为相同。
+特别是 CLI 直连模式不能让下一次新进程继承命令会话（只留下运行记录：读得到结局和输出，接不上进程），
+不能仅凭共用代码断言端到端行为相同。
 
 ## core：内核与服务层
 
 | 模块 | 职责 |
 | --- | --- |
-| `tools/` | 统一工具内核：文件、Patch、命令、Git、History、Planning、Skill。`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文。MCP 与 CLI 复用内核，但还需验证各自身份、配置、schema 和结果传递 |
+| `tools/` | 统一工具内核：文件、Patch、命令（含运行记录 `tools/runs.rs`，`GLD_HOME/runs/`）、Git、History、Planning、Skill。`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文。MCP 与 CLI 复用内核，但还需验证各自身份、配置、schema 和结果传递 |
 | `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务 hub 和单个工作区（`Endpoint` 二选一；后者是 RFC-0004 之前单项目服务的路径，命令行已经起不了它），认证、OAuth 路由、请求日志只有一份 |
 | `machine_mcp/` | 本机装好的 MCP server 经服务转给 AI（RFC-0006）。读配置、握手调用、子进程通道、连接池、结果整理在共享库 `toexec-mcp`（ccnm 同用）；这里是 gld 自己的：怎么起进程和怎么杀、HTTP 通道、`list_mcp_tools` 等三个工具。自成一块，hub 只在列工具、分发、关服务三处调它 |
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |

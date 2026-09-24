@@ -47,8 +47,9 @@ gld stop                     # 停服务；项目、配置、凭据都留着
 **停和删是两回事。** `gld stop` 只是让服务不再跑，`gld start` 立刻还能用；`gld rm` 把
 这个项目从服务里拿掉，删掉它的配置和凭据（含 OAuth 客户端注册）。两者都不会碰项目文件，所以
 存在项目里的 Planning（`.gld/`）和历史档案（`docs/history-session/`）都还在。数据目录里还留着
-两样：任务记录（`harness/`，按目录记，同一个目录再加回来还接得上）和日志（`logs/<项目 id>`，
-id 在删之前的 `gld ls` 里）；不要了自己删。删之前默认要确认一次（`-y` 跳过）。
+三样：任务记录（`harness/`，按目录记，同一个目录再加回来还接得上）、命令的运行记录（`runs/`，
+同样按目录记，过了 7 天由下一次起命令的 gld 清掉）和日志（`logs/<项目 id>`，id 在删之前的 `gld ls` 里）；不要了自己删。
+删之前默认要确认一次（`-y` 跳过）。
 
 **`gld start` 不带目录时**：当前目录本来就是（或在）一个项目里，就用它；一个项目都还没有，
 就把当前目录加进来。其余情况**只起服务，不登记当前目录**——只剩一个服务之后，`gld start`
@@ -611,8 +612,10 @@ gld set history-context=           # 清空，恢复"什么都不注入"
 
 ## Durable Task 的工作区基线
 
-**Durable 指任务元数据持久化，不是命令进程和输出持久化。** 任务、事件存于
+**Durable 指任务元数据持久化，不是命令进程持久化。** 任务、事件存于
 `GLD_HOME/harness/`，Planning 存于项目 `.gld/`，历史档案存于项目 `docs/history-session/`。
+命令的结局和最后一段输出另有运行记录（`GLD_HOME/runs/`），gld 重启后读得到，但进程不会被
+恢复，见[命令的输出能读多久](#命令的输出能读多久stdin-怎么关)。
 它们不能互相代替，也没有因为用了 Task 就自动得到验证证据、任务回滚或发布审批。
 
 ### 任务怎么收尾：带证据才算 completed
@@ -630,9 +633,9 @@ SHA-256 指纹和 HEAD）。全部满足才进 `completed`，证据记进 `chang
 
 | `code` | 意思 | 怎么办 |
 | --- | --- | --- |
-| `EVIDENCE_FAILED` | 退出非零、超时、被杀 | 修好再跑 |
-| `EVIDENCE_NOT_FINISHED` | 命令还在后台跑，或结束后还没人读到 | `read_output` 读到它结束（读到那一刻才记终态） |
-| `EVIDENCE_STALE` | 跑的时候或跑完之后文件变了，测的不是现在的内容 | 重跑一次 |
+| `EVIDENCE_FAILED` | 退出非零、超时、被杀；gld 重启前没跑完的（`interrupted`、`unknown`）也算 | 修好再跑 |
+| `EVIDENCE_NOT_FINISHED` | 命令还在后台跑，或结束后还没人读到 | `read_output` 读到它结束（读到那一刻才记进任务；gld 重启过也读得到，从运行记录读） |
+| `EVIDENCE_STALE` | 跑的时候或跑完之后文件变了，测的不是现在的内容；或者 gld 重启过，说不清它跑完之后 gld 有没有改过文件 | 重跑一次 |
 | `EVIDENCE_NOT_FOUND` | 不是这个任务期间起的命令，或 id 写错 | 用 `details.evidence_candidates` 里列的 |
 
 不带证据调 `finish` 进 `verifying`，回包的 `evidence_candidates` 列出现在就能用的命令；
@@ -713,27 +716,61 @@ task_manage action=refresh_baseline task_id=<id> accept_fingerprint=<current.fin
 
 ## 命令的输出能读多久，stdin 怎么关
 
-**输出保留 5 分钟，从进程结束那一刻算起**，和 `timeout_ms` 无关——一条给了
-10 分钟上限、跑 3 秒就完的命令，和一条本来就跑 3 秒的命令，保留期一样长。
-`read_output` 每次都回 `expires_in_ms`（还剩多久）和 `retention_ms`（总共多久）；
-还在跑的命令没有这个数，它的保留期还没开始算。
+**每条命令都留一份运行记录**（审查 D09）：`exec_command` 起的进程，结局和输出落在
+`GLD_HOME/runs/<项目 id>/<session_id>/`，结束那一刻就记下，不等谁来读。所以下面这些情况
+`read_output` 照样读得到，用的还是原来那个 `session:<id>:stdout`：
 
-同一个项目最多留 **32 条已经结束**的会话，超了就把结束得最早的那条收掉
-（还在跑的一条都不动）。每条会话的 stdout / stderr 各留最后 1 MiB。
+- 命令结束超过 5 分钟，或者被 `kill_session`、切 plan 模式停掉了；
+- 守护进程重启过：`gld daemon stop` / `restart`、升级换二进制、机器重启、被 `kill -9`；
+- 直连模式下是上一条 `gld tool call` 起的。
 
-已知回收记录仍在时，再拿那个 `session_id` 报 `SESSION_EXPIRED`；它表示输出已释放，
-**不表示命令没执行、失败或可以安全重跑**。有副作用的命令必须先核对实际结果。
-`SESSION_NOT_FOUND` 只表示当前主体找不到该引用，也可能是服务重启、回收记录淘汰或主体
-不同，不能断言它从未存在。已知的回收原因由 `details.reason` 区分：
+从记录读到的回包多三格：`source: "run_record"`、`pid`（命令的）、`started_by_gld_pid`（起它的那个
+gld 进程的），其余字段和平时一样。它只是记录：**命令不会被重新接上，也不会被重跑**。`write_stdin`
+报 `SESSION_CLOSED`；`kill_session` 不发信号，只如实说它怎样了。
+
+重启之后看 `termination_reason`：
+
+| `termination_reason` | 意思 | 下一步 |
+| --- | --- | --- |
+| `exited` / `timeout` / `killed` | 和平时一样，gld 亲眼看到的结局 | 照常 |
+| `interrupted` | gld 退出时自己停掉的（先 TERM，1.5 秒不走再 KILL）：守护进程停了（不管命令是经服务还是 `gld tool call` 起的），或直连模式下命令行退出。`command_ok: false` | 它没跑完。会改东西的先核对做到了哪一步，再决定要不要重跑 |
+| `unknown` | gld 没来得及记下结局就没了：被 `kill -9`、崩溃、断电。`command_ok: null` | 命令可能跑完了、失败了，**也可能还作为孤儿在跑**。看 `pid_in_use`：`false` 是那个进程组已经没了；`true` 是还有进程用着这个号——可能是它，也可能号已经给了别的程序，先 `pgrep -l -g <pid>` 看清楚再决定要不要手动停。gld 不替你杀 |
+
+记录留多少、留多久：
+
+- 每个流在盘上留最后 **1～2 MiB**（按 1 MiB 分段、只留最新两段）。偏移按整条流算，前面没留下的
+  `read_output` 报 `dropped_bytes`，和读内存时一样。
+- 每个项目留最近 **64 条已经结束**的，最长 **7 天**，起新命令时顺手清；每个 gld 进程第一次起命令时
+  把所有项目扫一遍，删掉的项目也清。还在跑的不动。最坏一个项目占 64 × 2 流 × 2 MiB = 256 MiB。
+- 输出**原样**存，不脱敏：命令打印了密钥，密钥就在盘上待到被清掉。目录 0700、文件 0600，
+  和凭据在同一个数据目录里。
+- 盘写不进去（满了、没权限）时命令照常跑，只是不留记录，结果里 `kept_on_disk: false`，这时只剩
+  内存里那份（下面说的 5 分钟）。写到一半写不进去的，从记录读时 `warnings` 会说那个流从哪儿开始缺。
+- 记录只数 gld 自己往工作区写过几次；编辑器、`git checkout` 这些 gld 以外的改动它不知道，任务验收
+  那边按文件指纹查。从记录读到的 `workspace_writes_since_start` 是起跑到**现在**的次数，只有同一个 gld
+  进程算得出来；gld 重启过就是 `null`，所以**重启前起的命令能读结局，但不能当任务验收证据**，要重跑。
+  `run.json` 里的 `workspace_writes_during_run` 是起跑到结束的次数，给人看的。
+
+**内存里那份还是 5 分钟、32 条**：从进程结束那一刻算起，和 `timeout_ms` 无关；每条会话的
+stdout / stderr 各留最后 1 MiB；超了 32 条先收结束得最早的，还在跑的一条都不动。落了盘的会话，
+过了这 5 分钟 `read_output` 就改从记录读，照样有输出，所以回包里 `kept_on_disk: true` 时
+`expires_in_ms` / `retention_ms` 是 `null`——盘上那份按条数和天数清，没有固定的倒计时。
+没落盘（`kept_on_disk: false`）的才是老样子：`expires_in_ms` 是还剩多久，`retention_ms` 是总共多久。
+
+再拿一个 `session_id` 报 `SESSION_EXPIRED`，是内存和盘上都没了（超了 64 条或 7 天，或者当初就没写进盘）。
+它表示输出取不回来，**不表示命令没执行、失败或可以安全重跑**，有副作用的命令必须先核对实际结果。
+`SESSION_NOT_FOUND` 只表示当前主体找不到该引用，也可能是记录被清掉、服务重启前内存里的回收记录也没了，
+或者主体不同，不能断言它从未存在。`details.reason` 说的是内存里那份怎么没的：
 
 | `reason` | 意思 |
 | --- | --- |
-| `expired` | 保留期到了 |
+| `expired` | 内存保留期到了 |
 | `evicted_over_quota` | 结束的会话太多，它是最早那条 |
 | `terminated` | 被停掉了：`kill_session`、切到 plan 模式、项目被删掉、服务停了 |
 
-（**另一个客户端**拿你的 `session_id` 来读，报的仍然是 `SESSION_NOT_FOUND`——
-会话表按"项目 + 谁在调"分，它连"有过这么一条"都不该知道。）
+（**另一个客户端**拿你的 `session_id` 来读，报的仍然是 `SESSION_NOT_FOUND`，运行记录也一样——
+会话和记录都按"项目 + 谁在调"分，它连"有过这么一条"都不该知道。同一个客户端重连、守护进程重启
+之后还是同一个主体，读得到自己的。）
 
 **stdin 有三种状态**，`exec_command` 的 `stdin_mode` 说了算：
 

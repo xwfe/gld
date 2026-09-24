@@ -118,13 +118,16 @@ pid 文件只用于展示和补充判断。"运行中的服务"数的是 MCP 服
 1. 停止各项目的 GPT Actions 监听器，等端口真正释放（最多 3 秒，超时强制 abort）；
 2. 停掉它们的 frpc / cloudflared 子进程；
 3. 停掉 MCP 服务（连同它的隧道）和全局入口；
-4. 停掉还在跑的命令：服务停的时候已经收了经它起的，这一步收剩下的，主要是 `gld tool call` 起的后台
-   命令（2026-09-24 之前漏了这一步，守护进程退出后它们一直跑到自己的 timeout，谁也读不到、停不掉）；
+4. 停掉还在跑的命令（先 TERM，1.5 秒不走再 KILL）：不管经服务还是 `gld tool call` 起的，都记成 `interrupted` 写进运行记录，
+   重启后同一个客户端 `read_output` 读得到它停之前的输出（[命令的输出能读多久](concepts.md#命令的输出能读多久stdin-怎么关)）。
+   这一步其实在第 1 步之前先做一遍、最后再做一遍：停服务时服务也会停经它起的命令，但记的是
+   `killed`（`gld stop` 也走那里，那时确实是有人要停）。2026-09-24 之前 `gld tool call` 起的命令
+   漏了收，守护进程退出后一直跑到自己的 timeout；
 5. 删除 `daemon.sock` 与 `daemon.json`，释放锁，进程退出。
 
 “下次恢复”清单不会被清空：下一次守护进程启动、且开了 restore-on-launch，GPT Actions 会回来。
 MCP 服务的恢复标记也不动，只有 `gld stop` 会清掉它。
-`kill -9` 跳过以上全部步骤，frpc / cloudflared 可能变成孤儿进程，
+`kill -9` 跳过以上全部步骤：还在跑的命令成了孤儿、结局没人记，重启后读出来是 `unknown`；frpc / cloudflared 可能变成孤儿进程，
 下次起同一条线路时 supervisor 会按 pid 文件回收项目那几条；服务那条要自己找出来 kill。
 
 ## 后台进程和终端的关系

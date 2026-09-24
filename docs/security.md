@@ -68,7 +68,8 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 **关掉上面那个开关也读不到**，返回 `GLD_DATA_HOME_DENIED`。
 因为 `~/.config/gld/data/profiles.json` 里明文存着服务的 `bearer_token`、
 `oauth_password` 和每个项目的 `actions_api_key`——不挡的话，读到一个文件就等于
-拿到了你全部连接器的钥匙。
+拿到了你全部连接器的钥匙。数据目录里还有命令的运行记录（`runs/`，每条命令原样的
+输出，不脱敏），同样挡着，谁的记录只有谁经 `read_output` 读得到。
 
 **一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。skill 目录是链到别处的链接时，读的是链接指向的那个目录；指向主目录本身或文件系统根的不给目录（那等于把整个主目录当成"这个 skill 的文件"）。规则和 ccnm 的 `load_skill` 是同一份（toexec-skill 的 `dir` 模块）。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
 
@@ -319,13 +320,18 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
   结果，由调用方决定。
 - **锁管不到不参与的写者**：编辑器、`git checkout`、别的 AI 工具。文件锁是劝告
   锁，不参与的人照写不误。那一侧靠补丁的版本前置条件挡，它不是强 CAS。
+- **命令输出会落盘，原样、不脱敏。** 每条命令的最后 1～2 MiB 输出留在
+  `GLD_HOME/runs/`，每个项目最近 64 条、最长 7 天（目录 0700、文件 0600）。命令把
+  密钥打印出来，密钥就在盘上待到被清掉；数据目录别放在共享、同步或备份到别处的位置。
+  规则见 [命令的输出能读多久](concepts.md#命令的输出能读多久stdin-怎么关)。
 - **转出去的 MCP server 说什么，模型就读到什么。** 它的工具描述、说明和结果都是
   别人写的文字，和项目里的 README 一样可能带着"顺便做点别的"。gld 只管转、分段、
   限大小，不审内容。
 - **命令会话按"目录 + 是谁在调"分开，而"是谁"只认得出凭据分得开的那些人。**
   `exec_command` 起的命令、它返回的 `session_id` 和 `output_ref`，只有起它的
   那个主体读得到、停得掉；别人拿去用，报的是 `SESSION_NOT_FOUND`，和"这个 id
-  根本不存在"长得一模一样。
+  根本不存在"长得一模一样。gld 重启后从运行记录读也是同一个规矩：记录里存的是
+  主体标识（不含令牌），对不上就当没有。
 
   分得开的：不同的 OAuth 客户端（每个注册客户端一个身份）；不同的 grant（bearer 的也算，
   每把 grant 一个身份）；服务和项目的 GPT Actions（两套凭据本来就不通）；命令行和任何网络连接。
