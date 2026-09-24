@@ -118,7 +118,9 @@ pid 文件只用于展示和补充判断。"运行中的服务"数的是 MCP 服
 1. 停止各项目的 GPT Actions 监听器，等端口真正释放（最多 3 秒，超时强制 abort）；
 2. 停掉它们的 frpc / cloudflared 子进程；
 3. 停掉 MCP 服务（连同它的隧道）和全局入口；
-4. 删除 `daemon.sock` 与 `daemon.json`，释放锁，进程退出。
+4. 停掉还在跑的命令：服务停的时候已经收了经它起的，这一步收剩下的，主要是 `gld tool call` 起的后台
+   命令（2026-09-24 之前漏了这一步，守护进程退出后它们一直跑到自己的 timeout，谁也读不到、停不掉）；
+5. 删除 `daemon.sock` 与 `daemon.json`，释放锁，进程退出。
 
 “下次恢复”清单不会被清空：下一次守护进程启动、且开了 restore-on-launch，GPT Actions 会回来。
 MCP 服务的恢复标记也不动，只有 `gld stop` 会清掉它。

@@ -1211,7 +1211,8 @@ limit:=100 key=@文件    读取文件内容作为字符串，适合 apply_patch
 timeout_ms:=120000 gld tool call git_status
 
 工具返回 ok=false 时退出码为 1，结构化结果照常打印，可以接 jq。 exec_command 跑的命令自己失败（退出非零、超时）不算 ok=false，退出码仍是 0：
-脚本要判断命令结果，读结果里的 command_ok / exit_code。 长命令留下的 exec 会话只在守护进程运行时才能被下一次调用读到 （直连模式每次都是新进程）。
+脚本要判断命令结果，读结果里的 command_ok / exit_code。 长命令留下的 exec 会话只在守护进程运行时才能被下一次调用读到。
+没有守护进程时命令在这个命令行进程里跑，命令行退出前会停掉还在跑的 （不停就成了谁都管不着的孤儿）；要后台跑先 gld daemon start。
 
 Usage: gld tool call [OPTIONS] <NAME> [ARG]...
 

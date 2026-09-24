@@ -160,3 +160,82 @@ fn project_resolution_by_name_prefix_and_cwd() {
     assert_eq!(missing.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&missing.stderr).contains("未找到项目"));
 }
+
+/// 守护进程退出时，经 `gld tool call` 起、还在跑的后台命令要一起停掉。
+///
+/// 以前只停了经服务（MCP）起的：`gld tool call` 起的命令留了下来，守护进程一走就再没人
+/// 读得到、停得掉它们，以你的身份一直跑到自己的 timeout。2026-09-24 在 Linux 容器里
+/// 验 glibc 包时发现，macOS 上一样。
+#[cfg(unix)]
+#[test]
+fn stopping_the_daemon_stops_commands_started_through_tool_call() {
+    let env = Env::new();
+    env.ok(&["add", ".", "--name", "it"]);
+    env.ok(&["set", "it", "allowed-commands=sleep"]);
+    env.ok(&["daemon", "start"]);
+    // 独一无二的时长当记号，用 pgrep 按命令行找这个进程。
+    let marker = "sleep 61.4817";
+    let started = env.json(&[
+        "--json",
+        "tool",
+        "call",
+        "exec_command",
+        &format!("cmd={marker}"),
+        "yield_time_ms:=0",
+        "timeout_ms:=120000",
+    ]);
+    assert_eq!(started["status"], "running", "{started}");
+    let alive = || {
+        Command::new("pgrep")
+            .args(["-f", marker])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    };
+    assert!(alive(), "后台命令没起来");
+
+    env.ok(&["daemon", "stop"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let leaked = alive();
+    if leaked {
+        let _ = Command::new("pkill").args(["-f", marker]).status();
+    }
+    assert!(!leaked, "守护进程退出后，它起的后台命令还在跑");
+}
+
+/// 没有守护进程时，`gld tool call` 起的后台命令是命令行进程的子进程：命令行退出前要停掉它，
+/// 并说清楚为什么。不停的话它成了孤儿，下一条命令读不到也停不掉。
+#[cfg(unix)]
+#[test]
+fn a_direct_tool_call_does_not_leave_its_background_command_behind() {
+    let env = Env::new();
+    env.ok(&["add", ".", "--name", "it"]);
+    env.ok(&["set", "it", "allowed-commands=sleep"]);
+    let marker = "sleep 62.5193";
+    let output = env.gld(&[
+        "--no-autostart",
+        "tool",
+        "call",
+        "exec_command",
+        &format!("cmd={marker}"),
+        "yield_time_ms:=0",
+        "timeout_ms:=120000",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let still_running = Command::new("pgrep")
+        .args(["-f", marker])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if still_running {
+        let _ = Command::new("pkill").args(["-f", marker]).status();
+    }
+    assert!(!still_running, "命令行退出后，它起的后台命令还在跑");
+    assert!(
+        stderr.contains("gld daemon start"),
+        "没说清楚怎么办：{stderr}"
+    );
+}

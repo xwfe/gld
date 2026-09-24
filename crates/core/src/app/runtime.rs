@@ -198,6 +198,12 @@ impl App {
         if let Err(error) = global_gateway::stop().await {
             eprintln!("停止全局入口失败：{error}");
         }
+        // 最后收掉不归任何服务的命令（`gld tool call` 起的）。停命令要等子进程收尾，
+        // 放到阻塞线程里做，别占着异步 worker。
+        let _ = tokio::task::spawn_blocking(
+            crate::tools::workspace_runtime::terminate_all_sessions_everywhere,
+        )
+        .await;
     }
 
     async fn start_inner(&self, id: &str, kind: ServiceKind) -> AppResult<RuntimeStatusDto> {

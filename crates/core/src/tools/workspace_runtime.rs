@@ -507,6 +507,18 @@ static RUNTIMES: LazyLock<Mutex<HashMap<PathBuf, Arc<WorkspaceRuntime>>>> =
 /// 撤销之后它的令牌下一次请求就 401，可已经起来的后台命令（`npm run dev` 这种）
 /// 不会自己停：没人再能读它、停它，它就一直以你的身份跑着。
 pub fn terminate_grant_sessions(grant_id: &str) -> usize {
+    terminate_sessions_everywhere(|caller| caller.grant_id() == Some(grant_id))
+}
+
+/// 停掉这个进程里所有目录上还在跑的命令，返回停掉的条数。守护进程退出时用。
+///
+/// 服务停的时候只收它自己入口起的；`gld tool call` 起的（本机主体）不归任何服务，以前守护
+/// 进程退出也没人收，一直以你的身份跑到自己的 timeout——守护进程都没了，谁也读不到、停不掉。
+pub fn terminate_all_sessions_everywhere() -> usize {
+    terminate_sessions_everywhere(|_| true)
+}
+
+fn terminate_sessions_everywhere(matches: impl Fn(&Caller) -> bool + Copy) -> usize {
     let runtimes: Vec<Arc<WorkspaceRuntime>> = RUNTIMES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -515,7 +527,7 @@ pub fn terminate_grant_sessions(grant_id: &str) -> usize {
         .collect();
     runtimes
         .iter()
-        .map(|runtime| runtime.terminate_sessions(|caller| caller.grant_id() == Some(grant_id)))
+        .map(|runtime| runtime.terminate_sessions(matches))
         .sum()
 }
 

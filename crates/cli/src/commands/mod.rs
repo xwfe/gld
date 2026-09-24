@@ -67,7 +67,7 @@ pub async fn run(cli: Cli) -> CliResult {
         target,
     };
 
-    match cli.command {
+    let result = match cli.command {
         Command::Daemon(_) | Command::Completions { .. } => unreachable!("handled above"),
         Command::Start(args) => service::start(&mut ctx, args).await,
         Command::Stop(args) => service::stop(&mut ctx, args).await,
@@ -98,7 +98,14 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Hub(command) => hub::run(&mut ctx, command).await,
         Command::Tunnel(command) => tunnel::run(&mut ctx, command).await,
         Command::Gateway(command) => gateway::run(&mut ctx, command).await,
+    };
+    let stopped = ctx.backend.finish().await;
+    if stopped > 0 {
+        ctx.out.note(format!(
+            "没有守护进程，命令是在这个命令行进程里跑的：它要退出了，停掉了还在跑的 {stopped} 条命令（下一条命令读不到它们）。要让命令在后台接着跑，先 gld daemon start。"
+        ));
     }
+    result
 }
 
 /// 用户给的路径 → 绝对路径。符号链接不在这里解析，那是 core 的事。
