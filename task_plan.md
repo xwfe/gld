@@ -68,6 +68,16 @@
 - [ ] 来源证明第一次真正签出来：要用户在 Actions 里手动跑一次 Release（gh 在这边登不上），或下次发版。
 - [ ] 代码签名（付费证书）、Windows 包实跑（没有 Windows 机器）。
 
+## D09 运行记录（2026-09-24）
+
+- [x] 旧代码上先复现：守护进程 stop/start、`kill -9`、直连下一条命令行，`read_output` 都报 `SESSION_NOT_FOUND`。
+- [x] `GLD_HOME/runs/`：结局与分段日志落盘、按主体读、配额 64 条 / 7 天；gld 退出记 `interrupted`，没来得及记的判 `unknown`。
+- [x] 查出并修掉：守护进程退出时经服务起的命令被记成 `killed`。
+- [x] 文档：concepts、lifecycle、排障、daemon、security、architecture、README。
+- [x] 独立审查 9 条逐条处理：从记录读的写入次数按起跑计数现算（重启后为 null）、Windows import、全项目清理与测试隔离、
+  补 KILL、kill 与自然退出的竞态、退出提示只数真停掉的等。
+- [ ] 推送、CI；本机服务升级与 ChatGPT 实测要用户点头。
+
 不纳入：
-D09 持久 Job、D10 浏览器证据（按真实项目需要）；D12 里的签名与来源证明、glibc / Windows 包真机跑；
+D10 浏览器证据（按真实项目需要）；D12 里的签名与来源证明、glibc / Windows 包真机跑；
 D13 里真正实现 2026-07-28（等真有只讲新版的客户端）。
