@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use gld_core::app::{
-    CcnmMemberSpec, GlobalRuntimeSettingsDto, PlanStepUpdate, WorkspaceCreateOptions,
+    CcnmMemberSpec, GlobalRuntimeSettingsDto, GrantSpec, PlanStepUpdate, WorkspaceCreateOptions,
     WorkspaceTarget,
 };
 use gld_core::planning::{GoalStatus, PlanStatus, PlanningMode};
@@ -32,7 +32,8 @@ use serde_json::Value;
 ///    `test_mcp_server`（RFC-0006），没再递增。
 /// 4：加了 `served_tools`（`gld tool list --served`）。当时漏了递增，2026-09-23 真机
 ///    升级时新命令行连着旧守护进程，`--served` 报的是 `unknown variant`，不是"请重启"。
-pub const PROTOCOL_VERSION: u32 = 4;
+/// 5：加了 `list_grants`、`add_grant`、`remove_grant`（`gld grant`，RFC-0007）。
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +234,16 @@ pub enum Request {
     TestMcpServer {
         name: String,
     },
+
+    // ---- 只开部分项目的凭据（RFC-0007）----
+    ListGrants,
+    AddGrant {
+        spec: GrantSpec,
+    },
+    /// 作废一把，并停掉它起的命令：必须在守护进程里做，命令会话在这里。
+    RemoveGrant {
+        selector: String,
+    },
     ListFrpProfiles,
     SaveFrpProfile {
         profile: FrpProfile,
@@ -397,6 +408,8 @@ impl Request {
                 | Request::CallTool { .. }
                 // `npx -y` 第一次要下载包，握手最多等 30 秒。
                 | Request::TestMcpServer { .. }
+                // 要停它起的命令，每条最多等 1.5 秒收尾。
+                | Request::RemoveGrant { .. }
         )
     }
 

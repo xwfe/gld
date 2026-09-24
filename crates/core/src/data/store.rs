@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::auth::GrantRecord;
 use crate::bridge::member::CcnmMember;
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
@@ -189,6 +190,25 @@ impl DataStore {
         Ok(Some(removed))
     }
 
+    /// 只开部分项目的凭据（RFC-0007），连同它们的钥匙。
+    pub fn grants(&self) -> &[GrantRecord] {
+        &self.data.grants
+    }
+
+    pub fn add_grant(&mut self, record: GrantRecord) -> AppResult<()> {
+        self.data.grants.push(record);
+        self.save()
+    }
+
+    pub fn remove_grant(&mut self, id: &str) -> AppResult<Option<GrantRecord>> {
+        let Some(index) = self.data.grants.iter().position(|item| item.grant.id == id) else {
+            return Ok(None);
+        };
+        let removed = self.data.grants.remove(index);
+        self.save()?;
+        Ok(Some(removed))
+    }
+
     pub fn init_workspace_secrets(&mut self, profile_id: &str) -> AppResult<()> {
         // oauth_client_secret is optional for MCP OAuth (ChatGPT PKCE); not auto-generated.
         self.set_workspace_secret(profile_id, "oauth_password", &random_secret())?;
@@ -330,7 +350,7 @@ fn lock_data_file() -> AppResult<DataFileGuard> {
     Ok(DataFileGuard(Some(guard)))
 }
 
-fn random_secret() -> String {
+pub(crate) fn random_secret() -> String {
     format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).replace('-', "")
 }
 

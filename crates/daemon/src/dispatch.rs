@@ -177,6 +177,17 @@ pub async fn dispatch(
             app.set_global_runtime_settings(runtime)?;
             ok(&app.global_runtime_settings()?)
         }
+        R::ListGrants => ok(&app.list_grants()?),
+        R::AddGrant { spec } => ok(&app.add_grant(spec)?),
+        R::RemoveGrant { selector } => {
+            // 停命令要等子进程收尾（每条最多 1.5 秒），不能占异步 worker。
+            let app = app.clone();
+            let removed = tokio::task::spawn_blocking(move || app.remove_grant(&selector))
+                .await
+                .map_err(|error| RpcError::internal(format!("作废 grant 的任务失败：{error}")))?
+                .map_err(RpcError::from)?;
+            ok(&removed)
+        }
         R::McpServers => ok(&app.mcp_servers()?),
         R::SwitchMcpServers { names, on, all } => ok(&app.switch_mcp_servers(names, on, all)?),
         R::TestMcpServer { name } => {

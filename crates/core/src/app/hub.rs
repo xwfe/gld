@@ -183,6 +183,15 @@ impl App {
         }
         let auth_type = parse_choice(&config.auth_type, MCP_AUTH_CHOICES)?;
         let tool_profile = parse_tool_profile(&config.tool_profile)?;
+        // noauth 下谁连上都是全权：发出去的 grant 一下子全成了摆设，还照样列在 gld grant ls 里。
+        if auth_type == "noauth" {
+            let grants = self.with_data(|store| Ok(store.grants().len()))?;
+            if grants > 0 {
+                return Err(AppError::Message(format!(
+                    "还有 {grants} 把 grant：改成 noauth 之后谁连上都是全权，它们就挡不住任何人了。先 gld grant rm 掉它们再改"
+                )));
+            }
+        }
         let settings = self.settings()?;
         let before = settings.hub.clone();
         if config.local_port != before.local_port {

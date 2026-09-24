@@ -6,6 +6,7 @@ mod daemon;
 mod doctor;
 mod frp;
 mod gateway;
+mod grant;
 mod hub;
 mod inspect;
 mod logs;
@@ -80,6 +81,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Share(args) => share::run(&mut ctx, args).await,
         Command::Upgrade(args) => upgrade::run(&mut ctx, args).await,
         Command::Remote(command) => hub::remote(&mut ctx, command).await,
+        Command::Grant(command) => grant::run(&mut ctx, command).await,
         Command::Mcp(command) => mcp::run(&mut ctx, command).await,
         Command::Logs(args) => logs::logs(&mut ctx, args).await,
         Command::Health(args) => inspect::health(&mut ctx, args).await,

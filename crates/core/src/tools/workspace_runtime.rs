@@ -502,6 +502,23 @@ pub fn write_lock_busy() -> crate::tools::workspace::WorkspaceError {
 static RUNTIMES: LazyLock<Mutex<HashMap<PathBuf, Arc<WorkspaceRuntime>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// 停掉某个 grant 在所有目录上起的命令，返回停掉的条数（`gld grant rm`，RFC-0007）。
+///
+/// 撤销之后它的令牌下一次请求就 401，可已经起来的后台命令（`npm run dev` 这种）
+/// 不会自己停：没人再能读它、停它，它就一直以你的身份跑着。
+pub fn terminate_grant_sessions(grant_id: &str) -> usize {
+    let runtimes: Vec<Arc<WorkspaceRuntime>> = RUNTIMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    runtimes
+        .iter()
+        .map(|runtime| runtime.terminate_sessions(|caller| caller.grant_id() == Some(grant_id)))
+        .sum()
+}
+
 /// 拿这个目录的执行资源；没有就建一个。
 ///
 /// 同一个目录不管经过几个入口、换过几次 `ToolContext`，拿到的都是同一个

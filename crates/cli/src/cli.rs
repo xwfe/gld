@@ -201,6 +201,21 @@ pub enum Command {
     #[command(subcommand)]
     Remote(RemoteCmd),
 
+    /// 只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
+    ///
+    ///   gld grant add alice api web           只开 api、web，只读：能看能搜，改不了文件、跑不了命令
+    ///   gld grant add me-laptop api --write   能写能跑命令（等于把这台机器交出去，见下）
+    ///   gld grant ls                          有哪些、各开了什么（--reveal 显示口令和令牌）
+    ///   gld grant rm alice                    立即作废，并停掉它起的命令
+    ///
+    /// 客户端地址不变：OAuth 在授权页填 grant 的口令（不是服务口令），bearer 用 grant 的令牌。
+    /// 服务自己的口令和令牌照旧管全部项目。
+    ///
+    /// 能跑命令就能以你的身份读到 gld 数据目录里的服务口令，拿到全权：--write 只发给你
+    /// 愿意把服务口令交给的人，给别人一律用默认的只读。
+    #[command(subcommand, verbatim_doc_comment)]
+    Grant(GrantCmd),
+
     /// 本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
     ///
     ///   gld mcp ls                     ~/.claude.json 和 ~/.codex/config.toml 里装了哪些、开了哪些
@@ -944,6 +959,32 @@ pub struct HubSetArgs {
     /// 经全局入口暴露为 <入口公网地址>/hub/mcp（全局入口要先启用）
     #[arg(long, value_name = "true|false")]
     pub global_gateway: Option<bool>,
+}
+
+// ----------------------------------------------------------------- grant
+
+#[derive(Debug, Subcommand)]
+pub enum GrantCmd {
+    /// 发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
+    Add {
+        /// 名字，在 ls / rm 里用它认这一把
+        name: String,
+        /// 开放的项目，至少一个
+        #[arg(required = true, value_name = "PROJECT")]
+        projects: Vec<String>,
+        /// 能写文件、能跑命令。能跑命令就读得到服务口令，等于全权：只给你信得过的
+        #[arg(long)]
+        write: bool,
+    },
+    /// 列出全部（默认脱敏，--reveal 显示口令和令牌）
+    #[command(visible_alias = "ls")]
+    List {
+        #[arg(long)]
+        reveal: bool,
+    },
+    /// 作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉
+    #[command(visible_alias = "rm")]
+    Remove { name: String },
 }
 
 // ---------------------------------------------------------------- secret

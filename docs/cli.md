@@ -28,6 +28,10 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld mcp on](#gld-mcp-on)
 - [gld mcp off](#gld-mcp-off)
 - [gld mcp test](#gld-mcp-test)
+- [gld grant](#gld-grant)
+- [gld grant add](#gld-grant-add)
+- [gld grant list](#gld-grant-list)
+- [gld grant remove](#gld-grant-remove)
 - [gld logs](#gld-logs)
 - [gld health](#gld-health)
 - [gld doctor](#gld-doctor)
@@ -97,6 +101,7 @@ Commands:
   share        给服务拿一个公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
   upgrade      改服务配置（端口 / 认证 / 工具集 / 公网入口），改完自动重启；也能改项目的目录和名称
   remote       远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
+  grant        只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
   mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
   logs         查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
   health       逐项检查本地 / 公网端点与 OAuth 元数据是否可达
@@ -939,6 +944,122 @@ Options:
 在守护进程里起一次、握手、列工具（用的是服务起它时的 PATH 和环境变量）
 
 Usage: gld mcp test [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld grant
+
+```text
+只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
+
+  gld grant add alice api web           只开 api、web，只读：能看能搜，改不了文件、跑不了命令
+  gld grant add me-laptop api --write   能写能跑命令（等于把这台机器交出去，见下）
+  gld grant ls                          有哪些、各开了什么（--reveal 显示口令和令牌）
+  gld grant rm alice                    立即作废，并停掉它起的命令
+
+客户端地址不变：OAuth 在授权页填 grant 的口令（不是服务口令），bearer 用 grant 的令牌。
+服务自己的口令和令牌照旧管全部项目。
+
+能跑命令就能以你的身份读到 gld 数据目录里的服务口令，拿到全权：--write 只发给你
+愿意把服务口令交给的人，给别人一律用默认的只读。
+
+Usage: gld grant [OPTIONS] <COMMAND>
+
+Commands:
+  add     发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
+  list    列出全部（默认脱敏，--reveal 显示口令和令牌） [alias: ls]
+  remove  作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉 [alias: rm]
+
+Options:
+  -w, --workspace <WS>
+          目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld grant add
+
+```text
+发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
+
+Usage: gld grant add [OPTIONS] <NAME> <PROJECT>...
+
+Arguments:
+  <NAME>        名字，在 ls / rm 里用它认这一把
+  <PROJECT>...  开放的项目，至少一个
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --write           能写文件、能跑命令。能跑命令就读得到服务口令，等于全权：只给你信得过的
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld grant list
+
+```text
+列出全部（默认脱敏，--reveal 显示口令和令牌）
+
+Usage: gld grant list [OPTIONS]
+
+Options:
+      --reveal          
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld grant remove
+
+```text
+作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉
+
+Usage: gld grant remove [OPTIONS] <NAME>
 
 Arguments:
   <NAME>  

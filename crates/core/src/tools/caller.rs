@@ -37,6 +37,9 @@ pub const LOCAL_SCOPE: &str = "local";
 pub struct Caller {
     key: String,
     scope: String,
+    /// 用 grant 的钥匙进来的，记下是哪个：`gld grant rm` 要按它停命令（RFC-0007）。
+    /// 它已经在 `key` 里了，单独放一格是为了不去拆字符串。
+    grant: Option<String>,
 }
 
 impl Caller {
@@ -48,6 +51,7 @@ impl Caller {
         Self {
             key: LOCAL_SCOPE.to_string(),
             scope: LOCAL_SCOPE.to_string(),
+            grant: None,
         }
     }
 
@@ -61,7 +65,12 @@ impl Caller {
         Self {
             key: auth.tag(),
             scope: auth.scope().to_string(),
+            grant: auth.grant().map(|grant| grant.id.clone()),
         }
+    }
+
+    pub fn grant_id(&self) -> Option<&str> {
+        self.grant.as_deref()
     }
 
     /// 哪个入口：`hub`、某个工作区 id，或者 [`LOCAL_SCOPE`]。
