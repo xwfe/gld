@@ -267,3 +267,45 @@ fn doctor_passes_on_a_fresh_project_and_fails_on_a_broken_tunnel() {
     assert!(text.contains("gld share --tunnel frp:"), "{text}");
     assert!(text.contains("需要处理"), "{text}");
 }
+
+/// `gld cfg runtime --executable-paths` 改完，下一次 `gld tool call` 就要用上。
+///
+/// 守护进程按项目缓存工具上下文，以前只在改项目配置时清，改全局设置不清：新加的目录要等
+/// 守护进程重启才进 PATH，表现成"路径配了还是 Program not found"。2026-09-24 本机重启后
+/// cargo 找不到、补上全局可执行路径时实际碰到的。
+#[cfg(unix)]
+#[test]
+fn a_new_global_executable_path_applies_to_the_next_tool_call() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = probe_env();
+    // 缓存在守护进程里；没有守护进程时每条命令都是新进程、没有缓存，测不出来。
+    env.ok(&["daemon", "start"]);
+    let bin = tempfile::tempdir().expect("bin dir");
+    let program = bin.path().join("gld-probe-tool");
+    std::fs::write(&program, "#!/bin/sh\necho probe-ok\n").expect("write program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    env.ok(&["set", "probe", "allowed-commands=gld-probe-tool"]);
+
+    let call = || {
+        let output = env.gld(&[
+            "--json",
+            "tool",
+            "call",
+            "exec_command",
+            "cmd=gld-probe-tool",
+        ]);
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let before = call();
+    assert!(before.contains("Program not found"), "{before}");
+
+    env.ok(&[
+        "settings",
+        "runtime",
+        "--executable-paths",
+        bin.path().to_str().expect("utf-8 path"),
+    ]);
+    let after = call();
+    assert!(after.contains("probe-ok"), "新目录没用上：{after}");
+}

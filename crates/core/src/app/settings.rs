@@ -205,6 +205,13 @@ impl App {
                 settings.restore_actions_workspace_ids = actions_ids;
             }
             Ok(())
+        })?;
+        // 可执行路径、全局说明、Skill 来源都进工具上下文，而 `gld tool call` 的上下文按项目缓存
+        // 在守护进程里。不清的话新值要等守护进程重启才用上：配了路径还是 Program not found。
+        // 清掉不影响正在跑的命令，它们在按目录的执行资源里，不在上下文里。
+        self.with_tool_contexts(|contexts| {
+            contexts.clear();
+            Ok(())
         })
     }
 }
