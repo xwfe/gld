@@ -598,9 +598,28 @@ macOS 的测试 job 里都跑了新的端到端测试（`kill -9`、守护进程
 另按建议把读日志的接口改成只收已经核对过主体的记录。审查核过、没发现问题的：主体隔离与不可枚举、路径只落在
 `runs/` 下、判活不会把活着的进程判死、锁的先后没有环、每个流不超过 2 MiB、Windows 运行时代码只在 unix 下用 libc。
 
+**本机升级与 ChatGPT 实测（用户批准）：**按[安装 · 升级](../install.md#升级)把常驻服务从 `4216d21` 升到
+`bc8e13a`：备份二进制和数据目录，写新文件再改名，`gld daemon restart` 0.2 秒；构建提交等于 HEAD，工具表指纹
+没变（`9ed41391e27553c6`，ChatGPT 不用 Refresh），口令、签名密钥、Client ID、ChatGPT 注册的客户端、配置和
+项目表的指纹逐项一致，`gld health` 全 ✓。
+
+然后在 `~/xdw/gld-d09test`（Python 小项目，`slow.py` 打一行字后睡 5 分钟）上让 ChatGPT 分三段操作，
+两段之间由后台脚本等请求日志安静 20 秒后动守护进程，结果全部从 gld 自己的记录核对：
+
+| 步骤 | 核对到的 |
+| --- | --- |
+| 开任务，后台起 `python3 -m unittest -v`（yield 0）和 `python3 slow.py` | 两条记录都在；unittest 结束那一刻就落了 `exited 0`，没人读过 |
+| 正常重启守护进程，ChatGPT 读两条输出 | slow.py 是 `interrupted`（台账 `cancelled`），重启前打的那行字读得到；unittest 读到 `exited 0`、`workspace_writes_since_start` 为 null |
+| 拿重启前那条 unittest 当证据 finish | 被拒：没有记验收、任务状态没动（回包 4.3 KB） |
+| 重跑 unittest 再 finish | `completed`（回包 18 KB） |
+| 再起一条 slow.py，`kill -9` 守护进程后拉起，ChatGPT 读它、再 `kill_session` | 读的那一刻记录从 `running` 改成 `unknown`，Planning 台账记 `unknown` 和"可能还在跑"；进程 40736 自成一组、父进程变成 1，`kill_session` 没发信号，它照样活着，由我手动停掉 |
+
+整个过程 ChatGPT 用的都是原来那个注册客户端。测完删了项目和它在数据目录里的任务记录、运行记录、日志，
+凭据与配置指纹、`gld ls`、工具表都和测试前一致。
+
 **仍未验证或未做：**
 
-- 没在 ChatGPT 上实测（要升级本机常驻服务，再按提示词操作）。
+- ChatGPT 这边只看了 gld 的记录和回包大小，没逐字看 ChatGPT 拿到的回包（用户没贴，按惯例不贴）。
 - Windows 只靠 CI 编译；本机交叉检查因 `ring` 缺 Windows 头文件做不了。判活用的文件锁在 Windows 上没实跑。
 - 没有列出运行记录的工具或命令：重启后要知道 `session_id`（在对话里、任务事件和 Planning 台账里都有）。
 - 真断电没测：`run.json` 不 `sync`，断电后可能读成"没有这条"。
@@ -629,5 +648,5 @@ macOS 的测试 job 里都跑了新的端到端测试（`kill -9`、守护进程
 | --- | --- |
 | D12 剩下的：代码签名（要付费证书）、Windows 包实跑 | 给别人分发之前，或有人报平台问题时 |
 | D10 浏览器证据 | 真实项目需要时 |
-| D09 剩下的：列出运行记录的入口、ChatGPT 上实测 | 有人需要在重启后找回不知道 id 的命令时；实测等本机服务升级 |
+| D09 剩下的：列出运行记录的入口 | 有人需要在重启后找回不知道 id 的命令时 |
 | D13 实现 2026-07-28 | 出现只讲新版、不会退回的客户端时 |

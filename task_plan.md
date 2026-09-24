@@ -77,7 +77,8 @@
 - [x] 独立审查 9 条逐条处理：从记录读的写入次数按起跑计数现算（重启后为 null）、Windows import、全项目清理与测试隔离、
   补 KILL、kill 与自然退出的竞态、退出提示只数真停掉的等。
 - [x] 推送 4 个提交，CI run 35961573998 全绿（Ubuntu、macOS 跑了新端到端测试，Windows 编过）。
-- [ ] 本机服务升级与 ChatGPT 实测：要用户点头。
+- [x] 经批准升级本机服务到 `bc8e13a`（指纹逐项一致，ChatGPT 不用 Refresh）；ChatGPT 实测三段：正常重启后
+  `interrupted`、重启前的证据被拒、重跑后 `completed`、`kill -9` 后 `unknown` 且孤儿不被误杀。测试项目已清理。
 
 不纳入：
 D10 浏览器证据（按真实项目需要）；D12 里的签名与来源证明、glibc / Windows 包真机跑；
