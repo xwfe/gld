@@ -48,7 +48,7 @@ gld 对外只有**一个 MCP 服务**：一个端口、一套凭据、一个公�
 
 - 一把钥匙开所有项目的门。只想单独给出去的项目，现在没有办法单独给——别加进来。
 - 挂公网时仍然拒绝 `noauth`（沿用 hub 的规则）。
-- 项目级授权（X07 的 grant / scoped view）仍是 L1 没做完的那一半，见[路线](../reviews/2026-09-19-hub-development-roadmap.md)第 7 节。
+- 项目级授权（X07 的 grant / scoped view）仍是 L1 没做完的那一半，见[路线](../reviews/2026-09-19-hub-development-roadmap.md)第 7 节。（2026-09-24 由 [RFC-0007](0007-scoped-grants.md) 补上：grant 绑在凭据上，只开部分项目或只读。）
 
 单项目监听器的内部代码（`mcp/listener.rs` 的工作区路径、工作区隧道、全局入口的 `/w/<id>` 路由）这次没删：Actions 还用着工作区隧道那一套，而删掉它们要先确认没有别的消费者。命令行已经起不了它们。
 

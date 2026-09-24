@@ -264,7 +264,8 @@ Actions 那条线路的字段（端口、认证、隧道）写成 `actions.<字�
 绑回环地址挡不住它。开公网入口之前请读一遍 [security.md](security.md)。
 
 **一把钥匙开所有项目的门。** 拿到服务凭据的人能进服务里的全部项目，调一次
-`list_workspaces` 就知道有哪几个。只想单独给出去的项目，别加进来。
+`list_workspaces` 就知道有哪几个。只想给别人开几个项目，用
+[gld grant](concepts.md#只开几个项目gld-grant) 发一把单独的口令或令牌。
 
 ## 老配置：经全局入口挂公网
 
