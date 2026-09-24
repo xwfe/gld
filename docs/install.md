@@ -43,7 +43,7 @@ xattr -d com.apple.quarantine "$HOME/.local/bin/gld"
 sha256sum -c SHA256SUMS      # macOS 上是 shasum -a 256 -c SHA256SUMS
 ```
 
-**核对它是这个仓库的发布流水线编出来的**（可选，v0.7.0 之后的版本才有）：每个包带一份构建来源证明
+**核对它是这个仓库的发布流水线编出来的**（可选，v0.8.0 起才有）：每个包带一份构建来源证明
 （GitHub artifact attestation，Sigstore 签名，记着是哪个仓库、哪个提交、哪条流水线编的）。装了
 [GitHub CLI](https://cli.github.com/) 且它能访问 GitHub API 的话：
 
