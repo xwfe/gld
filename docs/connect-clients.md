@@ -172,50 +172,78 @@ gld share --off            # 停隧道、清掉公网地址，本地地址照常
 4. 新建一个启用了该插件的对话，发送：
    “请先调用 list_workspaces，再对其中一个项目调用 git_status，告诉我它的目录和 Git 状态。”
 
-看不到新增工具时，断开重连插件或新开对话。连不上先跑 `gld health`，
+看不到新增工具时，要点一次 Refresh，只开新对话没用，见下面
+[装好的连接器什么时候要动](#装好的连接器什么时候要动)。连不上先跑 `gld health`，
 它会分别告诉你本地 `/mcp`、公网 `/mcp`、OAuth 元数据哪一项不通。
 
 **服务挂了公网就不能用 `noauth`**，gld 会直接拒——那等于把全部项目的执行权限开放给整个互联网。
 
-### 什么时候要重新授权，什么时候要删了重建
+### 装好的连接器什么时候要动
 
-装好的连接器不是永久的。哪种操作会打断它，值得先知道——尤其是最后一类，
-因为 ChatGPT 的连接器改不了地址，只能删掉重加。
+ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都碰不到它。会碰到的分三档，从轻到重：
+**点 Refresh**、**重新授权**、**删了重建**。先看你要做的事在哪一档。
 
-**什么都不用做**（最常见的日常操作都在这一档）：
+**什么都不用做**：
 
-- `gld add` / `gld rm`、改项目配置（`gld set`）——服务每次调用都重新读项目表
-- 重复敲 `gld start` / `gld share`（跑着就不碰它）
-- `gld restart`、`gld stop` + `gld start`、重启电脑、守护进程重启——固定地址下没影响
-- 升级 gld（换二进制 + `gld daemon restart`）——Client ID、口令、ChatGPT 注册的客户端都不动，
-  步骤和核对见[安装 · 升级](install.md#升级)；新版加了工具的话让 ChatGPT 重拉一次工具表
+- 升级 gld，而且升级前后 `gld tool list --served` 的指纹没变（怎么比见[安装 · 升级](install.md#升级)）
+- `gld restart`、`gld stop` + `gld start`、守护进程重启——固定公网地址下没影响
+- 重启电脑：配了[开机自启](daemon.md#开机自启)就什么都不用管；没配的话守护进程不会自己回来，期间
+  ChatGPT 只报连不上，**连接器不用删**，`gld daemon start` 一次（上次 `gld start` 过的服务会跟着回来）
+  就好了。2026-09-24 本机重启过一次就是这样：cloudflared 是 launchd 管的、自己回来了，gld 没配自启，
+  `gld daemon start` 之后凭据、注册的客户端逐项核对都没变
+- `gld add` / `gld rm` / `gld set`（改项目，包括项目自己的 `tool-profile`）——服务每次调用都重新读项目表；
+  项目的工具集只在调用时生效，服务发给客户端的工具表不变
+- `gld grant add`——已经连好的连接器不受影响
+- `gld secret regen oauth_password` / `gld secret set oauth_password`——口令只管"下次授权填什么"，
+  已经授权过的照常能用
 - 长时间不用：访问令牌 30 天有效，刷新令牌 90 天，期间用过一次就自动续上
 
-**要重新授权，但连接器留着**——ChatGPT 会自己提示重新连接，输一次授权口令即可：
+**要点 Refresh**——服务发给客户端的工具表变了。ChatGPT 只在建连接器和点 Refresh 时拉工具表
+（`tools/list`），开新对话、gld 重启都不会让它重拉：
+
+| 操作 | 工具表怎么变 |
+| --- | --- |
+| 升级 gld，升级前后指纹不一样 | 新版加了、删了工具或参数，或者改了说明 |
+| `gld mcp on` 开第一个 / `gld mcp off` 关掉最后一个 | 多出 / 少了 `list_mcp_tools` 这三个 |
+| `gld remote add` 加第一个远端项目 / 删掉最后一个；有了第一个 / 没了最后一个 `--mode coding` 的远端项目 | 多出 / 少了 `remote_*` 那几个 |
+| `gld upgrade --tool-profile …` | 整张表换了 |
+
+不刷新的后果：新工具、新参数 AI 看不见；已经没有的工具 AI 还会去调，拿到 `Unknown tool`。怎么刷：
+
+1. 打开 <https://chatgpt.com/plugins>（要先开开发者模式：设置 → Security and login → Developer mode），
+   点进 gld 这条连接，点 **Refresh**。**不用删，授权也不用重来。**
+2. 开一个新对话：旧对话继续用旧表。
+3. 核对刷新真的到了 gld：`gld logs -n 50` 里依次有 `method=server/discover`（回 Method not found，正常，
+   见[排障](troubleshooting.md#客户端连不上)）、`method=initialize`、`method=tools/list`，`auth=` 后面还是
+   原来那个 `oauth:hub:dcr-…`。
+4. 核对 ChatGPT 手上的表：在新对话里问它**它自己看到的**工具定义里有没有这次新加的东西，要它逐条答有或
+   没有。别拿 `server_info` 里的 `connection.tools_fingerprint` 当证据：那是 gld 按自己发出去的表算的，
+   ChatGPT 用旧表时它照样对得上（详见[排障 · 核对客户端拿到的工具表](troubleshooting.md#核对客户端拿到的工具表)）。
+
+用 grant 连的连接器看到的是它那一份（只读的更少），要刷也是各刷各的。
+
+**要重新授权，但连接器留着**——ChatGPT 会自己提示重新连接，在授权页输一次口令即可：
+
+| 操作 | 为什么 | 授权页填什么 |
+| --- | --- | --- |
+| `gld secret regen oauth_token_secret` | 令牌的签名密钥换了，已发的令牌全部作废 | 服务口令 |
+| 超过 90 天没用过 | 刷新令牌也过期了 | 原来那个口令 |
+| `gld grant rm` 之后又建了一把给同一个客户端 | 旧 grant 的令牌全部作废 | 新 grant 的口令 |
+
+口令想自己定一个记得住的，别每次去查：`gld secret set oauth_password 你自己的口令`。
+
+**要删了重建**：
 
 | 操作 | 为什么 |
 | --- | --- |
-| `gld secret regen oauth_token_secret` | 令牌的签名密钥换了，已发的令牌全部作废 |
-| 超过 90 天没用过 | 刷新令牌也过期了 |
+| 公网地址变了：用 `--tunnel cf` 临时地址时服务一重启、`gld upgrade --tunnel cf:新域名`、换 frp 子域名 | ChatGPT 的连接器改不了地址 |
+| 认证方式变了（`gld upgrade --auth …`，oauth ↔ bearer） | 连接器要按新方式配；ChatGPT 里建好的连接器能不能改认证方式没实测过，改不了就只能重建 |
+| 数据目录没了（删了 `~/.config/gld`、换了 `GLD_HOME`、换了台机器又没带备份） | 口令、签名密钥、ChatGPT 注册的客户端都在里面，没有第二份 |
+| `gld grant rm` 之后不再给这个客户端开 | 它的令牌 401，留着也用不了 |
 
-口令想自己定一个记得住的，别每次去查：
-
-```bash
-gld secret set oauth_password 你自己的口令
-```
-
-**必须删掉连接器重建**——只有一个原因：**公网地址变了**。
-
-| 操作 | 地址怎么变的 |
-| --- | --- |
-| 用 `--tunnel cf` 临时地址，服务重启 | 每次都换一个 `xxx.trycloudflare.com` |
-| `gld upgrade --tunnel cf:新域名`、换 frp 子域名 | 你自己换的 |
-
-**所以长期用就别用临时地址。** 固定域名（`cf:mcp.example.com`）、frp 固定子域名、
-自建反代这三种地址不变，上面整张表都碰不到。
-
-改端口（`gld upgrade --port …`）不在此列：公网地址没变，连接器照常能用，
-但隧道那边的回源端口要跟着改，否则是连不上（502），不是认证问题。
+**所以长期用就选固定地址**（`cf:mcp.example.com`、frp 固定子域名、自建反代），别动数据目录，
+也别换认证方式——上面最重的两档就都碰不到了。改端口（`gld upgrade --port …`）不在此列：公网地址
+没变，连接器照常能用，但隧道那边的回源端口要跟着改，否则是连不上（502），不是认证问题。
 
 ## 另一台机器上的项目
 

@@ -96,8 +96,9 @@ gld stop                                    # 停服务；项目、配置和凭�
 | 浏览器验收、发布、部署、运维 | 可组合项目脚本和获准的外部能力；不等于内置可靠的全流程编排 |
 
 源码有某项工具不代表当前客户端已经拿到它：客户端会缓存工具表。升级不用动 ChatGPT 的连接器和
-授权，但新版加了工具或参数时，要到 chatgpt.com/plugins 点一次 Refresh 它才会重拉；怎么升级、
-怎么核对客户端拿到的是新表，见[安装 · 升级](docs/install.md#升级)。现有边界、可用流程和优先补齐项见
+授权，但工具表变了时（升级前后 `gld tool list --served` 的指纹不一样），要到 chatgpt.com/plugins 点一次
+Refresh 它才会重拉。怎么升级见[安装 · 升级](docs/install.md#升级)；哪些操作要点 Refresh、要重新授权、
+要删了重建，见[装好的连接器什么时候要动](docs/connect-clients.md#装好的连接器什么时候要动)。现有边界、可用流程和优先补齐项见
 [项目开发生命周期](docs/project-lifecycle.md)与[2026-09-23 审查](docs/reviews/2026-09-23-lifecycle-and-docs-audit.md)。
 
 ## 查

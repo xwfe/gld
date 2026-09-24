@@ -170,6 +170,13 @@ scripts/package.sh --checksums              # 给 dist/ 里已有的包生成 SH
    没有才退回 `--generate-notes`——这个仓库直接往 main 提交、不走 PR，自动生成的只有一行
    Full Changelog。说明里的链接写成 `https://github.com/xwfe/gld/blob/main/…` 的绝对地址：
    它显示在 Release 页上，相对链接会指到错的地方。
+   **说明里必须有"从上一版升上来"一节，写明 ChatGPT 连接器要不要动**，用户就靠它决定升级后做什么：
+   这一版改没改工具表（工具的名字、参数、说明、标注，定义在 `tools/registry.rs`、`hub/`、
+   `bridge/tools.rs`、`machine_mcp/relay.rs`）——改了写"要到 chatgpt.com/plugins 点一次 Refresh"，
+   没改写"连接器什么都不用做"；守护进程协议号变没变；有没有会让连接器要重新授权或删了重建的改动
+   （签名密钥、公网地址、认证方式、数据目录布局），分档见
+   [装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。拿不准就在本机升级一次，
+   按[安装 · 换完核对](install.md#换完核对)比工具表指纹，以它为准。
 2. 本机打一次包：`scripts/package.sh`，再按安装文档的做法校验、解压、`--version`、起一次服务。
 3. 在 Actions 里手动跑一次 Release（workflow_dispatch）：走完测试、五个目标的构建打包、上传构件，
    但不建 Release（`publish` 只在 tag 上跑，空跑时它显示 skipped 是对的）。全绿再打 tag。

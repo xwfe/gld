@@ -56,19 +56,22 @@ gld --version
 
 ## 升级
 
-**ChatGPT 连接器不用删，也不用重新授权。** 升级只是换二进制、重启守护进程；连接器靠的东西都在
-数据目录 `~/.config/gld` 里，换二进制碰不到它们：
+**ChatGPT 连接器不用删，也不用重新授权。** 升级只是换二进制、重启守护进程；连接器靠的口令、令牌签名
+密钥、ChatGPT 动态注册的客户端（`data/oauth-clients/hub.json`）、公网地址都在数据目录 `~/.config/gld`
+和服务配置里，换二进制碰不到它们。**唯一可能要做的是点一次 Refresh**：新版改了工具表时 ChatGPT 不会
+自己重拉。要不要点，比一下升级前后的工具表指纹就知道（下面第 2 步和"换完核对"）。
+除了升级，还有哪些操作会碰到连接器，见[装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。
 
-| 连接器靠的 | 存在哪 | 什么操作才会动它 |
-| --- | --- | --- |
-| Client ID、授权口令 | 数据目录里的服务凭据 | 只有 `gld secret set` / `gld secret regen` |
-| 令牌签名密钥：已经发给 ChatGPT 的令牌靠它验 | 同上 | `gld secret regen oauth_token_secret`，之后要重新授权 |
-| ChatGPT 自己注册的客户端（日志里 `auth=oauth:hub:dcr-…` 那个） | `data/oauth-clients/hub.json` | 删掉数据目录 |
-| 公网地址 | 服务配置 | 用 `--tunnel cf` 临时地址时，每次重启都换，连接器只能删了重建 |
+实测：本机三次升级（2026-09-23 两次：0.6.0 的两次构建之间、0.6.0 → 0.7.0；09-24 一次：0.7.0 → 加了
+grant 的构建），逐项比对口令、签名密钥、Client ID、ChatGPT 注册的客户端、公网地址、项目表的指纹，
+全部一致；守护进程重启 0.2–0.3 秒，公网 `/mcp` 和 OAuth 元数据照常，服务自己回来，ChatGPT 用原来
+注册的客户端直接连上。
 
-实测（2026-09-23 本机两次升级：0.6.0 的两次构建之间、0.6.0 → 0.7.0）：上表各项升级前后逐项比对
-指纹，全部一致；守护进程重启 0.3 秒，公网 `/mcp` 和 OAuth 元数据照常，服务自己回来；ChatGPT 用原来
-注册的客户端直接连上，没有要求重新授权。
+### 升级前先看两件事
+
+- **公网地址是固定的吗？** `gld ls` 的"公网入口"一行写着 Cloudflare 临时地址的话，服务一重启地址就换，
+  连接器只能删了重建。长期用先换固定地址（[办法二～四](connect-clients.md#办法二cloudflare-固定域名)），再升级。
+- **数据目录别动。** 升级不需要删 `~/.config/gld`，也别换 `GLD_HOME`：口令和签名密钥没有第二份。
 
 ### 步骤
 
@@ -77,7 +80,8 @@ gld --version
 cd gld && git pull && cargo build --release --locked -p gld   # 产物 target/release/gld
 #    用发行包的，解压出来的 gld-*/gld 就是，下面第 3 步换成它
 
-# 2. 记下现在的样子（凭据是脱敏的，可以放心存），再留两份备份好回滚
+# 2. 记下现在的样子（都不含明文凭据，可以放心存），再留两份备份好回滚
+gld tool list --served | sed -n 2p > /tmp/gld-tools-before.txt   # tools/list：28 个工具  指纹 …
 gld ls > /tmp/gld-before.txt
 mkdir -p ~/.local/opt
 cp -p "$(command -v gld)" ~/.local/opt/gld-$(date +%Y%m%d-%H%M)
@@ -90,6 +94,9 @@ install -m 755 target/release/gld "$GLD.new" && mv "$GLD.new" "$GLD"
 # 4. 重启守护进程。版本号没变也要做，见下面
 gld daemon restart
 ```
+
+`gld tool list --served` 是 0.7.0 加的；从更老的版本升上来时没有它，第 2 步那行跳过，换完直接按
+"不一样"处理（点一次 Refresh 没有坏处）。
 
 **别用 `cp` 直接盖正在跑的那个文件。** 在 Apple Silicon 上，往一个已经执行过的
 Mach-O 里写东西会让它的代码签名失效，之后每次 exec 都被 SIGKILL（退出码 137），
@@ -105,38 +112,31 @@ Mach-O 里写东西会让它的代码签名失效，之后每次 exec 都被 SIG
 ### 换完核对
 
 ```bash
-gld daemon status                  # pid 变了，运行时长从头算
-gld tool list --served | head -2   # "构建提交"要等于你编译的那个：git rev-parse --short=12 HEAD
-gld ls | diff /tmp/gld-before.txt -   # Client ID、口令（脱敏后的前后几位）、公网地址、项目表都不该变
-gld health                         # 本地、公网 /mcp，OAuth 元数据都是 ✓
+gld daemon status                        # pid 变了，运行时长从头算，协议号是新版的
+gld tool list --served | head -1         # "构建提交"要等于你编译的那个：git rev-parse --short=12 HEAD
+gld tool list --served | sed -n 2p | diff /tmp/gld-tools-before.txt - && echo "工具表没变，ChatGPT 什么都不用做"
+gld ls | diff /tmp/gld-before.txt -      # Client ID、口令（脱敏后的前后几位）、公网地址、项目表都不该变
+gld health                               # 本地、公网 /mcp，OAuth 元数据都是 ✓
 ```
 
-**版本号没变时，命令行不会提醒你重启。** 命令行只比版本号和协议号：同样叫 0.6.0 的新构建，
-换完二进制不重启，守护进程接着跑旧代码，**不报任何错**，只有新加的命令会报一句
-`` unknown variant `served_tools` ``（2026-09-23 升级时实际碰到的）。所以不管版本号变没变，
-换完都 `gld daemon restart`，再看上面那行构建提交。版本号变了的时候，命令行会直接拒绝并提示
-重启（退出码 4）。
+**工具表那行（第三条）是决定 ChatGPT 要不要动的那一步：**
 
-**ChatGPT 那边：授权不用动，但新版加了工具或参数时，要手动刷新一次工具表。** ChatGPT 只在建连接器和
-点 Refresh 的时候拉工具表（`tools/list`）：本机的连接器 9-18 建好，到 9-23 点 Refresh 之前，gld 日志里
-一次 `tools/list` 都没有，其间开新对话、gld 重启都没让它重拉。新版没改工具表时（`gld tool list --served`
-的指纹和升级前一样）可以跳过这一步。
+- 打出"工具表没变"：连接器什么都不用做。
+- diff 出了不一样（工具数或指纹变了）：新版改了工具表，到 chatgpt.com/plugins 点一次 **Refresh**、再开
+  新对话，做法和怎么核对见[点 Refresh](connect-clients.md#装好的连接器什么时候要动)。不点也能接着用，
+  只是新加的工具和参数 AI 看不见。每一版的[发布说明](releases/)也会写这一版要不要点。
 
-1. 打开 <https://chatgpt.com/plugins>（要先开开发者模式：设置 → Security and login → Developer mode），
-   点进 gld 这条连接，点 **Refresh**。**不用删连接器。**
-2. 开一个新对话（OpenAI 的说明要求这么做，旧对话继续用旧表）。
-3. 核对刷新真的到了 gld：`gld logs -n 50` 里依次有 `method=server/discover`（回 Method not found，正常，
-   见[排障](troubleshooting.md#客户端连不上)）、`method=initialize`、`method=tools/list`，`auth=` 后面还是
-   原来那个 `oauth:hub:dcr-…`。
-4. 核对 ChatGPT 手上的表：在新对话里问它**它自己看到的**工具定义里有没有这次新加的参数（比如 0.7.0 的
-   `task_manage` 有 `evidence_session_ids`），要它逐条答有或没有。别拿 `server_info` 里的
-   `connection.tools_fingerprint` 当证据：那是 gld 按自己发出去的表算的，ChatGPT 用旧表时它照样对得上。
+**版本号没变时，命令行可能不提醒你重启。** 命令行只比版本号和协议号：两样都没变的新构建，换完二进制
+不重启，守护进程接着跑旧代码，**不报任何错**，只有新加的命令会报一句 `` unknown variant `…` ``
+（2026-09-23 升级时实际碰到的）。所以不管版本号变没变，换完都 `gld daemon restart`，再看上面那行
+构建提交。版本号或协议号变了的时候，命令行会直接拒绝并提示重启（退出码 4）。
 
-只核对 `0.6.0` 这样的版本号不够，源码、构建、运行的服务、客户端拿到的工具表是四层不同的证据，见
+只核对 `0.7.0` 这样的版本号不够，源码、构建、运行的服务、客户端拿到的工具表是四层不同的证据，见
 [生命周期指南](project-lifecycle.md#接入前先确认四层能力)。
 
 **回滚**：把备份的二进制按同样的"写新文件再改名"放回去，再 `gld daemon restart`。数据目录一般
-不用回滚；真要回，先 `gld daemon stop`，再把备份的 `tgz` 解回 `~/.config`。
+不用回滚；真要回，先 `gld daemon stop`，再把备份的 `tgz` 解回 `~/.config`。回滚到的版本比当前的旧、
+工具表不一样时，ChatGPT 也要点一次 Refresh。
 
 > 注意别和 `gld upgrade` 搞混：那条命令改的是**服务和项目的配置**（端口、认证、公网入口、
 > 项目目录），不升级 gld 自己。升级 gld 只有"换二进制 + `gld daemon restart`"这一条路。

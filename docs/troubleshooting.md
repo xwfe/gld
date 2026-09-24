@@ -61,7 +61,8 @@ gld tool call exec_command cmd='cargo test'
 | 401 Unauthorized / 客户端只说连不上 | Bearer Token 不对、改了 token 客户端没更新、填的是某个项目自己的凭据；或者请求压根没到 gld | 先 `gld logs -n 20` 分清是哪种：有 `[auth] rejected credential=missing` / `credential=rejected` 说明请求到了、是凭据问题，`gld secret ls bearer_token --reveal` 核对（OAuth 就重新授权）；客户端一连日志里却什么都没有，说明请求没到，查公网地址和隧道（`gld health`）。日志只记带没带凭据，不记凭据本身 |
 | `gld health -s actions` 显示 `HTTP 404（这个端口上应答的不是 gld 的服务）` | 这个端口上跑着别的程序（Actions 默认端口 8787 很容易被撞） | `gld set <项目> actions.port=<其他端口>`（会自动重启）；`gld doctor` 会告诉你占用者是谁 |
 | 工具列表是旧的：AI 说没有 `check_command`、`read_file` 不收 `start_byte` 这类，而你确定服务已经升级 | 客户端缓存了升级前的工具表。服务端声明 `listChanged: false`，不会通知客户端重拉 | 见下面"核对客户端拿到的工具表" |
-| ChatGPT 连接器突然要重新连接，配置看着没动过 | 多半是公网地址变了（临时 `cf` 隧道一重启就换地址） | 换固定地址，见 [connect-clients.md 什么时候要重新授权](connect-clients.md#什么时候要重新授权什么时候要删了重建)。重启服务本身不会掉授权 |
+| ChatGPT 连接器突然要重新连接，配置看着没动过 | 多半是公网地址变了（临时 `cf` 隧道一重启就换地址） | 换固定地址，见[装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。重启服务本身不会掉授权 |
+| 电脑重启之后 ChatGPT 连不上，`gld daemon status` 说守护进程未运行 | 守护进程没配开机自启，不会自己回来；cloudflared 这类自己有 launchd 服务的隧道倒是回来了，所以公网地址通、回源不通 | `gld daemon start`，上次 `gld start` 过的服务会跟着回来，连接器不用动。以后不想手动起：[开机自启](daemon.md#开机自启) |
 | 局域网另一台机器连不上 | 默认只监听 127.0.0.1 | `gld cfg runtime --lan-access true` 后 `gld restart`，并确认认证不是 noauth |
 | `gld logs` 里每次连接先有一条 `method=server/discover`，回的是 `Method not found` | 正常。支持 MCP 2026-07-28 的客户端先发这个探测：ChatGPT 连接器（请求 id 是 `openai-mcp-discover`，本机日志里实际看到的）、官方 TS / Python / Go / C# SDK、Claude Code 的 v2 运行时；gld 讲的是 2025-06-18，回"没有这个方法"，客户端就退回 `initialize` 按 2025-06-18 连，工具和指令都照常。实测官方 TS SDK 2.0 就是这样连上的 | 不用处理。紧接着应该有 `method=initialize`；没有的话，把客户端名字和版本记下来报问题 |
 
@@ -80,8 +81,8 @@ gld tool call exec_command cmd='cargo test'
    它照样对得上。客户端手上是哪张表，要问 AI **它自己看到的**工具定义里有没有某个新参数，让它逐条答
    有或没有（`connection.tools` 列着每个工具该有的参数，照着问）。
 3. 对不上就是客户端缓存了旧表：ChatGPT 到 <https://chatgpt.com/plugins> 打开 gld 点 Refresh（不用删，
-   授权也不用重来，步骤见[安装 · 升级](install.md#换完核对)），Claude Code / Cursor 断开重连 MCP，
-   再新开一个对话从第 2 步重来。
+   授权也不用重来，步骤见[点 Refresh](connect-clients.md#装好的连接器什么时候要动)），Claude Code / Cursor
+   断开重连 MCP，再新开一个对话从第 2 步重来。
    想确认客户端到底有没有重新拉过：`gld logs` 里看它重连之后有没有
    `[rpc] request … method=tools/list` 那一行。
 4. 对上了之后再做一次实际调用：`check_command` 做只读预检，然后在一个无关紧要的项目里打一个
