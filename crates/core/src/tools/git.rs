@@ -36,6 +36,8 @@ pub fn git_status(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
     if !include_untracked {
         status_args.push("--untracked-files=no");
     }
+    let scope = scope_to_workspace(ws.root(), &[])?;
+    push_pathspec(&mut status_args, &scope);
     let completed = run_git(&resolved.path, &status_args, Duration::from_secs(10))?;
     if !completed.success && completed.exit_code != 0 {
         return Err(git_error(&completed.stderr));
@@ -117,7 +119,7 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         }
     }
     for p in &path_filters {
-        ws.reject_unsafe_text(p)?;
+        check_pathspec(ws, p)?;
     }
 
     if !is_git_repo(ws.root()) {
@@ -129,6 +131,7 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         })));
     }
 
+    let path_filters = scope_to_workspace(ws.root(), &path_filters)?;
     let mut chunks = Vec::new();
     if unstaged {
         chunks.push(run_git_diff(ws.root(), context, &path_filters, false)?);
@@ -200,9 +203,14 @@ pub fn git_log(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         pretty,
         ref_name,
     ];
+    // 项目是仓库子目录时 "." 也要带上，不然列的是整个仓库的提交。项目就是仓库根时不带：
+    // `-- .` 会触发历史简化，把合并提交藏掉。
+    let scope = scope_to_workspace(ws.root(), &[])?;
     if path_filter != "." {
         cmd_args.push("--");
         cmd_args.push(path_filter.as_str());
+    } else {
+        push_pathspec(&mut cmd_args, &scope);
     }
 
     let completed = run_git(ws.root(), &cmd_args, Duration::from_secs(10))?;
@@ -272,8 +280,10 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         }
     }
     for p in &path_filters {
-        ws.reject_unsafe_text(p)?;
+        check_pathspec(ws, p)?;
     }
+    check_object_path(rev, &repo_prefix(ws.root()))?;
+    let path_filters = scope_to_workspace(ws.root(), &path_filters)?;
 
     let unified = format!("--unified={context}");
     let mut cmd_args = vec!["show", "--no-ext-diff", "--format=fuller", unified.as_str()];
@@ -390,6 +400,90 @@ pub fn git_blame(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         "truncated": truncated,
         "warnings": if truncated { vec!["line limit reached"] } else { Vec::<&str>::new() }
     })))
+}
+
+/// 这个项目在它所属仓库里的子目录前缀（`git rev-parse --show-prefix`，形如 `api/`）；
+/// 项目就是仓库根时是空串。
+fn repo_prefix(root: &std::path::Path) -> String {
+    run_git(
+        root,
+        &["rev-parse", "--show-prefix"],
+        Duration::from_secs(5),
+    )
+    .ok()
+    .filter(|output| output.success)
+    .map(|output| output.stdout.trim().to_string())
+    .unwrap_or_default()
+}
+
+/// 给 git 的路径过滤。项目是仓库的子目录、调用方又没给过滤时补一个 `.`。
+///
+/// 不补的话 git 看的是整个仓库：同一个仓库里的兄弟目录（monorepo 里的另一个项目）
+/// 的提交、未提交改动都读得到，越过了"读 Git 历史：项目目录内"这条边界——开给 api 的
+/// 只读 grant 就能读 web（审查 D07）。项目就是仓库根时不补：整个仓库本来就是它的。
+fn scope_to_workspace(
+    root: &std::path::Path,
+    filters: &[String],
+) -> Result<Vec<String>, WorkspaceError> {
+    if !filters.is_empty() || repo_prefix(root).is_empty() {
+        return Ok(filters.to_vec());
+    }
+    Ok(vec![".".to_string()])
+}
+
+fn push_pathspec<'a>(args: &mut Vec<&'a str>, pathspec: &'a [String]) {
+    if !pathspec.is_empty() {
+        args.push("--");
+        args.extend(pathspec.iter().map(String::as_str));
+    }
+}
+
+/// 路径过滤只能是项目里的普通相对路径。`:` 开头是 git 的 pathspec 魔法，`:/x`、
+/// `:(top)x` 都从仓库根算，能指到项目外面去。
+fn check_pathspec(ws: &Workspace, pathspec: &str) -> Result<(), WorkspaceError> {
+    ws.reject_unsafe_text(pathspec)?;
+    if pathspec.starts_with(':') {
+        return Err(WorkspaceError::path_outside_workspace());
+    }
+    Ok(())
+}
+
+/// `git_show` 的 `rev` 可以是 `提交:路径`（看某个版本的文件）。路径默认从仓库根算，
+/// 项目是子目录时 `HEAD:web/.env` 就读到了兄弟项目，所以要落在项目前缀里。`:/文字`
+/// （按提交说明搜）一样不收：它按整个仓库搜。项目就是仓库根时不查。
+fn check_object_path(rev: &str, prefix: &str) -> Result<(), WorkspaceError> {
+    let Some((_, path)) = rev.split_once(':') else {
+        return Ok(());
+    };
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    let joined = if path.starts_with("./") || path.starts_with("../") || path == "." {
+        format!("{prefix}{path}")
+    } else if path.starts_with('/') {
+        return Err(WorkspaceError::path_outside_workspace());
+    } else {
+        path.to_string()
+    };
+    // 按字面归一化 `.` / `..`，再看落没落在前缀里。
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(WorkspaceError::path_outside_workspace());
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let normalized = format!("{}/", parts.join("/"));
+    if normalized.starts_with(prefix) {
+        Ok(())
+    } else {
+        Err(WorkspaceError::path_outside_workspace())
+    }
 }
 
 fn validate_git_ref(ref_name: &str) -> Result<&str, WorkspaceError> {
@@ -570,7 +664,8 @@ fn run_git_diff(
     cached: bool,
 ) -> Result<String, WorkspaceError> {
     let unified = format!("--unified={context}");
-    let mut args = vec!["diff", unified.as_str()];
+    // 和 git_show 一样不走外部 diff 程序：那是仓库配置里写的任意命令。
+    let mut args = vec!["diff", "--no-ext-diff", unified.as_str()];
     if cached {
         args.push("--cached");
     }
@@ -923,5 +1018,86 @@ mod tests {
             ],
             "{shown}"
         );
+    }
+
+    /// 项目是仓库的子目录（monorepo 里的 api/）：Git 工具看不到同一个仓库里的 web/。
+    /// 以前 `git_show HEAD:web/.env` 直接读出内容，`git_diff` / `git_status` / `git_log`
+    /// 列的是整个仓库（审查 D07：开给 api 的只读 grant 能读 web）。
+    #[test]
+    fn a_workspace_inside_a_repo_sees_only_its_own_subtree() {
+        use super::{git_diff, git_log, git_show, git_status};
+        use crate::tools::workspace::Workspace;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::create_dir_all(repo.join("api")).unwrap();
+        std::fs::create_dir_all(repo.join("web")).unwrap();
+        std::fs::write(repo.join("api/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(repo.join("web/.env"), "WEB_SECRET=1\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "both"]);
+        std::fs::write(repo.join("web/.env"), "WEB_SECRET=2\n").unwrap();
+        git(&repo, &["commit", "-qam", "only web touched"]);
+        std::fs::write(repo.join("web/.env"), "WEB_SECRET=3\n").unwrap();
+        std::fs::write(repo.join("api/main.rs"), "fn main() { api() }\n").unwrap();
+
+        let ws = Workspace::new(repo.join("api")).expect("workspace");
+        let leaks = |value: &serde_json::Value| {
+            value.to_string().contains("WEB_SECRET") || value.to_string().contains("web/")
+        };
+
+        for rev in [
+            "HEAD:web/.env",
+            "HEAD:./../web/.env",
+            "HEAD:api/../web/.env",
+            ":/only web",
+        ] {
+            let refused = git_show(&ws, &json!({ "rev": rev }));
+            assert!(refused.is_err(), "{rev} 读到了项目外：{refused:?}");
+        }
+        let own = git_show(&ws, &json!({ "rev": "HEAD:./main.rs" })).expect("show own file");
+        assert!(
+            own["content"].as_str().unwrap().contains("fn main"),
+            "{own}"
+        );
+        let own = git_show(&ws, &json!({ "rev": "HEAD~1:api/main.rs" })).expect("show own file");
+        assert!(
+            own["content"].as_str().unwrap().contains("fn main"),
+            "{own}"
+        );
+
+        for magic in [":/web", ":(top)web/.env"] {
+            assert!(git_diff(&ws, &json!({ "path": magic })).is_err(), "{magic}");
+            assert!(git_show(&ws, &json!({ "path": magic })).is_err(), "{magic}");
+        }
+
+        let diff = git_diff(&ws, &json!({})).expect("diff");
+        assert!(diff["diff"].as_str().unwrap().contains("api()"), "{diff}");
+        assert!(!leaks(&diff), "{diff}");
+        let status = git_status(&ws, &json!({})).expect("status");
+        assert_eq!(status["entries"].as_array().unwrap().len(), 1, "{status}");
+        assert!(!leaks(&status), "{status}");
+        let log = git_log(&ws, &json!({})).expect("log");
+        let subjects: Vec<&str> = log["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|commit| commit["subject"].as_str().unwrap())
+            .collect();
+        assert_eq!(subjects, ["both"], "只动了 web 的提交不该出现：{log}");
+        let first = git_show(&ws, &json!({ "rev": "HEAD~1" })).expect("show commit");
+        assert!(!leaks(&first), "提交里 web 的改动漏出来了：{first}");
+
+        // 项目就是仓库根时一切照旧：整个仓库本来就是它的。
+        let whole = Workspace::new(repo.clone()).expect("workspace");
+        let shown = git_show(&whole, &json!({ "rev": "HEAD:web/.env" })).expect("root show");
+        assert!(
+            shown["content"].as_str().unwrap().contains("WEB_SECRET=2"),
+            "{shown}"
+        );
+        let whole_log = git_log(&whole, &json!({})).expect("root log");
+        assert_eq!(whole_log["commits"].as_array().map(Vec::len), Some(2));
     }
 }
