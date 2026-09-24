@@ -76,7 +76,8 @@
 - [x] 文档：concepts、lifecycle、排障、daemon、security、architecture、README。
 - [x] 独立审查 9 条逐条处理：从记录读的写入次数按起跑计数现算（重启后为 null）、Windows import、全项目清理与测试隔离、
   补 KILL、kill 与自然退出的竞态、退出提示只数真停掉的等。
-- [ ] 推送、CI；本机服务升级与 ChatGPT 实测要用户点头。
+- [x] 推送 4 个提交，CI run 35961573998 全绿（Ubuntu、macOS 跑了新端到端测试，Windows 编过）。
+- [ ] 本机服务升级与 ChatGPT 实测：要用户点头。
 
 不纳入：
 D10 浏览器证据（按真实项目需要）；D12 里的签名与来源证明、glibc / Windows 包真机跑；

@@ -576,7 +576,8 @@ running 记录不在内存里就是 unknown）、`run_records.rs` 7（停掉后�
 `status: unknown`；直连那条还核对跑完的命令不被说成"停掉了"）。改了 2 条旧测试的断言：切 plan 模式后读到的是
 `killed` 的记录而不是 `SESSION_EXPIRED`；直连模式下一次调用读到的是 `interrupted` 的记录而不是
 `SESSION_NOT_FOUND`。隔离 `GLD_HOME` 下全量 853 passed、0 failed、0 ignored（上一轮 831）；fmt、clippy `-D warnings`、
-文档链接与命令名检查通过。真实 `target/debug/gld`、隔离数据目录手动走了一遍：`daemon stop` / `start` 后两个流
+文档链接与命令名检查通过。推送 4 个提交（`6113fb8..d72ef18`）后 CI run 35961573998 的 8 个 job 全绿，Ubuntu 和
+macOS 的测试 job 里都跑了新的端到端测试（`kill -9`、守护进程重启、经服务起的命令），Windows 编译检查通过。真实 `target/debug/gld`、隔离数据目录手动走了一遍：`daemon stop` / `start` 后两个流
 都从记录读到、`kill_session` 回原样结局；`kill -9` 后孤儿还在时 `pid_in_use: true`，手动收掉后 `false`；
 盘上目录 0700、文件 0600，死进程的 owner 锁被清掉。
 
