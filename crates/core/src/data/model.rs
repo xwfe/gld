@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::GrantRecord;
 use crate::bridge::member::CcnmMember;
 use crate::settings::{FrpProfile, GlobalGatewayConfig, HubConfig, ProxyConfig};
 use crate::workspace::WorkspaceProfile;
@@ -56,6 +57,9 @@ pub struct AppData {
     /// 旧数据文件里没有这个键，`default` 让它读出来是空的。
     #[serde(default)]
     pub ccnm_members: Vec<CcnmMember>,
+    /// 只开部分项目的凭据（RFC-0007），连同它们自己的钥匙。
+    #[serde(default)]
+    pub grants: Vec<GrantRecord>,
 }
 
 /// Legacy `{ "profiles": [...] }` file at the app root.

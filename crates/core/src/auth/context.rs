@@ -18,6 +18,8 @@
 //! 自然人」）。它能做的是两件实在事：**把不同主体的远端连接分开**，
 //! 以及**把「这次有没有过鉴权」这个事实往下传**。
 
+use super::Grant;
+
 /// 已经通过鉴权的调用主体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
@@ -39,6 +41,9 @@ pub struct AuthContext {
     principal: Principal,
     /// 这道鉴权守的是哪个入口：`hub`，或者某个工作区 id。
     scope: String,
+    /// 用 grant 的钥匙进来的：只看得到它开的那几个项目（RFC-0007）。
+    /// None 是服务自己的凭据，全部项目。
+    grant: Option<Grant>,
 }
 
 impl AuthContext {
@@ -46,7 +51,18 @@ impl AuthContext {
         AuthContext {
             principal,
             scope: scope.into(),
+            grant: None,
         }
+    }
+
+    /// 这次请求是用某个 grant 的钥匙过的鉴权。
+    pub fn with_grant(mut self, grant: Option<Grant>) -> Self {
+        self.grant = grant;
+        self
+    }
+
+    pub fn grant(&self) -> Option<&Grant> {
+        self.grant.as_ref()
     }
 
     /// 没配鉴权的入口。
@@ -74,13 +90,20 @@ impl AuthContext {
     ///
     /// OAuth 那支带上 client_id：不同的注册客户端拿到不同的远端连接，
     /// 而不是共用一条按 workspace id 缓存的。
+    ///
+    /// 带 grant 的再接上 `#grant:<id>`：两把 grant 的 bearer 令牌都是 SharedSecret，
+    /// 不接上就成了同一个主体，互相读得到对方的命令输出。全权的不接，标识和以前一样。
     pub fn tag(&self) -> String {
-        match &self.principal {
+        let base = match &self.principal {
             Principal::Anonymous => format!("noauth:{}", self.scope),
             Principal::SharedSecret => format!("bearer:{}", self.scope),
             Principal::OAuthClient { client_id } => {
                 format!("oauth:{}:{client_id}", self.scope)
             }
+        };
+        match &self.grant {
+            Some(grant) => format!("{base}#grant:{}", grant.id),
+            None => base,
         }
     }
 }
@@ -123,6 +146,23 @@ mod tests {
         assert_ne!(one, other);
         assert_ne!(one, shared);
         assert_ne!(shared, AuthContext::anonymous("hub").tag());
+    }
+
+    /// 两把 grant 的 bearer 令牌都是 SharedSecret，标识必须分开；全权的标识和以前一样。
+    #[test]
+    fn a_grant_is_its_own_principal() {
+        let grant = |id: &str| Grant {
+            id: id.into(),
+            name: id.into(),
+            workspaces: vec![],
+            read_only: false,
+        };
+        let owner = AuthContext::new(Principal::SharedSecret, "hub");
+        let alice = owner.clone().with_grant(Some(grant("a1")));
+        let bob = owner.clone().with_grant(Some(grant("b2")));
+        assert_eq!(owner.tag(), "bearer:hub");
+        assert_ne!(alice.tag(), bob.tag());
+        assert_ne!(alice.tag(), owner.tag());
     }
 
     /// 同一个入口、同一种鉴权，标识要稳定——否则每次请求都重开一条 bridge。

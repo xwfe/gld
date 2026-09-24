@@ -14,11 +14,11 @@ use tokio::sync::oneshot;
 use tower_http::cors::CorsLayer;
 
 use crate::auth::{
-    authorization_server_metadata, authorize_get, authorize_post, external_base_url, hub_audience,
-    protected_resource_metadata, protected_resource_metadata_url, register_client, token_exchange,
-    verify_bearer_header, verify_oauth_bearer_header, workspace_audience, AuthContext,
-    AuthorizeForm, AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime,
-    Principal, TokenForm,
+    authorization_server_metadata, authorize_get, authorize_post, bearer_token, external_base_url,
+    hub_audience, protected_resource_metadata, protected_resource_metadata_url, register_client,
+    token_exchange, verify_bearer_header, verify_oauth_bearer_header, workspace_audience,
+    AuthContext, AuthorizeForm, AuthorizeParams, ClientRegistrationRequest, ClientRegistry,
+    GrantBook, NoGrants, OAuthRuntime, Principal, StoredGrants, TokenForm,
 };
 use crate::hub::{Hub, HubSecrets, HUB_SCOPE};
 use crate::local_network;
@@ -134,6 +134,8 @@ struct ListenerState {
     bearer_token: Option<String>,
     oauth: Option<Arc<OAuthRuntime>>,
     oauth_client_secret: Option<String>,
+    /// bearer 令牌对不上服务令牌时，去这里看是不是哪个 grant 的（RFC-0007）。
+    grants: Arc<dyn GrantBook>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -208,6 +210,7 @@ pub fn spawn_listener(
         bearer_token,
         oauth,
         oauth_client_secret,
+        grants: Arc::new(NoGrants),
     })
 }
 
@@ -234,27 +237,34 @@ pub fn spawn_hub_listener(
                 .into(),
         );
     }
+    // 只有这条入口认 grant：工作区自己的监听器本来就只管一个项目。
+    let grants: Arc<dyn GrantBook> = Arc::new(StoredGrants);
     let oauth = auth.oauth_enabled().then(|| {
-        Arc::new(OAuthRuntime::new(
-            hub_audience(),
-            secrets.oauth_client_id.clone(),
-            None,
-            secrets.oauth_password.clone(),
-            secrets.oauth_token_secret.clone(),
-            Arc::new(ClientRegistry::load(HUB_SCOPE, HUB_SCOPE)),
-        ))
+        Arc::new(
+            OAuthRuntime::new(
+                hub_audience(),
+                secrets.oauth_client_id.clone(),
+                None,
+                secrets.oauth_password.clone(),
+                secrets.oauth_token_secret.clone(),
+                Arc::new(ClientRegistry::load(HUB_SCOPE, HUB_SCOPE)),
+            )
+            .with_grants(grants.clone()),
+        )
     });
     let bearer_token = auth.bearer_enabled().then_some(secrets.bearer_token);
     listen(ListenerState {
         endpoint: Endpoint::Hub(hub),
         auth,
         scope: HUB_SCOPE.into(),
-        authorize_label: "gld 聚合入口（hub）：授权后可访问它的全部成员工作区".into(),
+        authorize_label: "gld 服务：填服务口令可访问全部项目；填 gld grant 发的口令只开它那几个"
+            .into(),
         bind_port: port,
         configured_public_url: public_base_url.trim().to_string(),
         bearer_token,
         oauth,
         oauth_client_secret: None,
+        grants,
     })
 }
 
@@ -589,19 +599,33 @@ fn require_mcp_auth(
 ) -> Result<AuthContext, Box<Response>> {
     if state.auth.bearer_enabled() {
         let expected = state.bearer_token.as_deref().unwrap_or("");
-        return match verify_bearer_header(headers, expected) {
-            Some(refused) => Err(Box::new(refused)),
-            None => Ok(AuthContext::new(Principal::SharedSecret, &state.scope)),
+        let Some(refused) = verify_bearer_header(headers, expected) else {
+            return Ok(AuthContext::new(Principal::SharedSecret, &state.scope));
+        };
+        // 不是服务令牌，再看是不是哪个 grant 的（RFC-0007）。
+        let grant = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(bearer_token)
+            .and_then(|token| state.grants.by_bearer_token(token));
+        return match grant {
+            Some(grant) => {
+                Ok(AuthContext::new(Principal::SharedSecret, &state.scope).with_grant(Some(grant)))
+            }
+            None => Err(Box::new(refused)),
         };
     }
     if state.auth.oauth_enabled() {
         if let Some(oauth) = state.oauth.as_ref() {
             let server_url = resolve_oauth_base(state, headers);
             return match verify_oauth_bearer_header(headers, oauth, &server_url) {
-                Ok(client_id) => Ok(AuthContext::new(
-                    Principal::OAuthClient { client_id },
+                Ok(identity) => Ok(AuthContext::new(
+                    Principal::OAuthClient {
+                        client_id: identity.client_id,
+                    },
                     &state.scope,
-                )),
+                )
+                .with_grant(identity.grant)),
                 Err(mut response) => {
                     if response.status() == StatusCode::UNAUTHORIZED {
                         let metadata_url = protected_resource_metadata_url(&server_url);
@@ -725,6 +749,7 @@ mod tests {
             bearer_token: None,
             oauth: None,
             oauth_client_secret: None,
+            grants: Arc::new(crate::auth::NoGrants),
         }
     }
 

@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use super::bearer::constant_time_eq_str;
 use super::client_registry::{ClientRegistry, RegisteredClient};
+use super::grant::{Grant, GrantBook, NoGrants};
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
 pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
@@ -33,6 +34,17 @@ pub struct OAuthRuntime {
     audience: String,
     pending: Arc<Mutex<HashMap<String, PendingCode>>>,
     clients: Arc<ClientRegistry>,
+    /// 授权页填的口令、令牌里写的 grant id 去哪儿查（RFC-0007）。只有服务那条入口
+    /// 接了真的，工作区和 GPT Actions 是 [`NoGrants`]：它们本来就只管一个项目。
+    grants: Arc<dyn GrantBook>,
+}
+
+/// 一条访问令牌验过之后是谁、开了什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessIdentity {
+    pub client_id: String,
+    /// 令牌是用 grant 的口令授权来的：只开它那几个项目。None 是全权。
+    pub grant: Option<Grant>,
 }
 
 fn registration_error(error: &str, description: &str) -> Response {
@@ -59,6 +71,8 @@ struct PendingCode {
     redirect_uri: String,
     state: String,
     expires_at: u64,
+    /// 授权页填的是哪个 grant 的口令；填服务口令是 None。
+    grant: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -70,6 +84,10 @@ struct TokenClaims {
     scope: String,
     client_id: String,
     token_use: String,
+    /// grant 的 id（RFC-0007）。全权令牌不写这一格，格式和以前一样；升级前发的令牌
+    /// 没有它，读出来是 None，照旧全权。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<String>,
 }
 
 impl OAuthRuntime {
@@ -89,6 +107,22 @@ impl OAuthRuntime {
             audience,
             pending: Arc::new(Mutex::new(HashMap::new())),
             clients,
+            grants: Arc::new(NoGrants),
+        }
+    }
+
+    /// 让这个入口认 grant 的口令和令牌（只有服务那条入口这么做）。
+    pub fn with_grants(mut self, grants: Arc<dyn GrantBook>) -> Self {
+        self.grants = grants;
+        self
+    }
+
+    /// 令牌里写的 grant 现在还在不在。没写就是全权（`Some(None)`）；写了但查不到是
+    /// 撤销了（`None`），这张令牌不能再用。
+    fn live_grant(&self, id: Option<&str>) -> Option<Option<Grant>> {
+        match id {
+            None => Some(None),
+            Some(id) => self.grants.by_id(id).map(Some),
         }
     }
 
@@ -141,13 +175,19 @@ impl OAuthRuntime {
         self.identify_access_token(token, server_url).is_some()
     }
 
-    /// 验一条访问令牌，并把里面已签名的 `client_id` 取出来。
+    /// 验一条访问令牌，并把里面已签名的 `client_id` 和 grant 取出来。
     ///
-    /// 只认 `token_use = access`：刷新令牌换不来访问权限。
-    pub fn identify_access_token(&self, token: &str, server_url: &str) -> Option<String> {
-        self.decode_any(token, server_url)
-            .filter(|claims| claims.token_use == "access")
-            .map(|claims| claims.client_id)
+    /// 只认 `token_use = access`：刷新令牌换不来访问权限。写了 grant 的，grant 被删了
+    /// 就验不过——撤销靠的就是这一步，每次请求都查。
+    pub fn identify_access_token(&self, token: &str, server_url: &str) -> Option<AccessIdentity> {
+        let claims = self
+            .decode_any(token, server_url)
+            .filter(|claims| claims.token_use == token_use("access", claims.grant.as_deref()))?;
+        let grant = self.live_grant(claims.grant.as_deref())?;
+        Some(AccessIdentity {
+            client_id: claims.client_id,
+            grant,
+        })
     }
 
     /// 先按稳定受众验，再按"当前公网地址"验一次。
@@ -262,7 +302,7 @@ pub fn verify_oauth_bearer_header(
     headers: &HeaderMap,
     oauth: &OAuthRuntime,
     server_url: &str,
-) -> Result<String, Box<Response>> {
+) -> Result<AccessIdentity, Box<Response>> {
     // Err 那支装箱：axum 的 Response 有 128 字节，成功路径不该为它变胖。
     let refused = || -> Box<Response> {
         Box::new((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response())
@@ -281,10 +321,9 @@ pub fn verify_oauth_bearer_header(
     let Some(token) = super::bearer::bearer_token(header_str) else {
         return Err(refused());
     };
-    match oauth.identify_access_token(token, server_url) {
-        Some(client_id) => Ok(client_id),
-        None => Err(refused()),
-    }
+    oauth
+        .identify_access_token(token, server_url)
+        .ok_or_else(refused)
 }
 
 #[derive(Debug, Deserialize)]
@@ -396,7 +435,17 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
         ))
         .into_response();
     }
-    if !constant_time_eq_str(&form.password, &oauth.password) {
+    // 服务口令进来是全权；grant 的口令进来只开它那几个项目（RFC-0007）。
+    let grant = if constant_time_eq_str(&form.password, &oauth.password) {
+        Ok(None)
+    } else {
+        oauth
+            .grants
+            .by_password(&form.password)
+            .map(|grant| Some(grant.id))
+            .ok_or(())
+    };
+    let Ok(grant) = grant else {
         return (
             StatusCode::UNAUTHORIZED,
             Html(login_page(
@@ -411,7 +460,7 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
             )),
         )
             .into_response();
-    }
+    };
 
     let code = uuid::Uuid::new_v4().to_string().replace('-', "");
     let now = unix_now();
@@ -426,6 +475,7 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
                 redirect_uri: form.redirect_uri.clone(),
                 state: form.state.clone(),
                 expires_at: now + OAUTH_CODE_TTL_SECONDS,
+                grant,
             },
         );
     }
@@ -504,8 +554,15 @@ fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Respons
     if !verify_pkce(&form.code_verifier, &code_data.code_challenge) {
         return token_error("invalid_grant", "PKCE verification failed");
     }
+    // 授权码活 5 分钟，这期间 grant 被删了的话不能再换出令牌。
+    if oauth.live_grant(code_data.grant.as_deref()).is_none() {
+        return token_error(
+            "invalid_grant",
+            "The grant this code was issued for was revoked",
+        );
+    }
 
-    issue_token_pair(oauth, &form.client_id)
+    issue_token_pair(oauth, &form.client_id, code_data.grant.as_deref())
 }
 
 fn refresh_token_exchange(oauth: &OAuthRuntime, mut form: TokenForm, server_url: &str) -> Response {
@@ -514,7 +571,7 @@ fn refresh_token_exchange(oauth: &OAuthRuntime, mut form: TokenForm, server_url:
     }
     let Some(claims) = oauth
         .decode_any(&form.refresh_token, server_url)
-        .filter(|claims| claims.token_use == "refresh")
+        .filter(|claims| claims.token_use == token_use("refresh", claims.grant.as_deref()))
     else {
         return token_error("invalid_grant", "Invalid refresh_token");
     };
@@ -536,23 +593,33 @@ fn refresh_token_exchange(oauth: &OAuthRuntime, mut form: TokenForm, server_url:
     if known_client && !oauth.client_credentials_allowed(&form.client_id, &form.client_secret) {
         return token_error("invalid_client", "Invalid client credentials");
     }
-    issue_token_pair(oauth, &form.client_id)
+    // grant 删了，刷新令牌也换不来新的：不然撤销只挡得住 30 天的访问令牌，挡不住
+    // 90 天的刷新令牌。
+    if oauth.live_grant(claims.grant.as_deref()).is_none() {
+        return token_error(
+            "invalid_grant",
+            "The grant this token was issued for was revoked",
+        );
+    }
+    issue_token_pair(oauth, &form.client_id, claims.grant.as_deref())
 }
 
-fn issue_token_pair(oauth: &OAuthRuntime, client_id: &str) -> Response {
-    let access = create_token(
+fn issue_token_pair(oauth: &OAuthRuntime, client_id: &str, grant: Option<&str>) -> Response {
+    let access = sign_token(
         &oauth.audience,
         &oauth.token_secret,
         OAUTH_TOKEN_TTL_SECONDS,
         client_id,
         "access",
+        grant,
     );
-    let refresh = create_token(
+    let refresh = sign_token(
         &oauth.audience,
         &oauth.token_secret,
         OAUTH_REFRESH_TOKEN_TTL_SECONDS,
         client_id,
         "refresh",
+        grant,
     );
     match (access, refresh) {
         (Ok(access_token), Ok(refresh_token)) => (
@@ -569,12 +636,35 @@ fn issue_token_pair(oauth: &OAuthRuntime, client_id: &str) -> Response {
     }
 }
 
+#[cfg(test)]
 fn create_token(
     server_url: &str,
     token_secret: &str,
     ttl: i64,
     client_id: &str,
     token_use: &str,
+) -> Result<String, ()> {
+    sign_token(server_url, token_secret, ttl, client_id, token_use, None)
+}
+
+/// 令牌里 `token_use` 写什么。grant 发的写 `grant_access` / `grant_refresh`，不写
+/// `access` / `refresh`：旧版本（0.7.0 及以前）不认 `grant` 这一格、会把它忽略掉，
+/// 要是 `token_use` 也一样，回滚之后 grant 的令牌就成了全权令牌。换个旧版本不认的值，
+/// 回滚后它们只会 401。
+fn token_use(kind: &str, grant: Option<&str>) -> String {
+    match grant {
+        Some(_) => format!("grant_{kind}"),
+        None => kind.to_string(),
+    }
+}
+
+fn sign_token(
+    server_url: &str,
+    token_secret: &str,
+    ttl: i64,
+    client_id: &str,
+    kind: &str,
+    grant: Option<&str>,
 ) -> Result<String, ()> {
     let now = unix_now() as i64;
     let claims = TokenClaims {
@@ -584,7 +674,8 @@ fn create_token(
         exp: now + ttl,
         scope: "mcp".into(),
         client_id: client_id.to_string(),
-        token_use: token_use.to_string(),
+        token_use: token_use(kind, grant),
+        grant: grant.map(str::to_string),
     };
     encode(
         &Header::new(Algorithm::HS256),
@@ -775,6 +866,18 @@ mod tests {
         client_id: &str,
         base: &str,
     ) -> (String, String) {
+        let code = authorize_code(oauth, client_id, base, PASSWORD);
+        let response = exchange_code(oauth, client_id, base, code);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response);
+        (
+            body["access_token"].as_str().expect("access").to_string(),
+            body["refresh_token"].as_str().expect("refresh").to_string(),
+        )
+    }
+
+    /// 授权页填 `password` 提交，返回发出来的授权码。
+    fn authorize_code(oauth: &OAuthRuntime, client_id: &str, base: &str, password: &str) -> String {
         let redirect = authorize_post(
             oauth,
             AuthorizeForm {
@@ -783,16 +886,21 @@ mod tests {
                 code_challenge: challenge(),
                 code_challenge_method: "S256".into(),
                 state: "state".into(),
-                password: PASSWORD.into(),
+                password: password.into(),
             },
             base,
         );
         assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
-        let code = {
-            let pending = oauth.pending.lock().expect("lock");
-            pending.keys().next().cloned().expect("pending code")
-        };
-        let response = token_exchange(
+        let location = redirect.headers()["location"].to_str().unwrap().to_string();
+        let code = location
+            .split(['?', '&'])
+            .find_map(|pair| pair.strip_prefix("code="))
+            .expect("code in redirect");
+        code.to_string()
+    }
+
+    fn exchange_code(oauth: &OAuthRuntime, client_id: &str, base: &str, code: String) -> Response {
+        token_exchange(
             oauth,
             &HeaderMap::new(),
             TokenForm {
@@ -804,13 +912,185 @@ mod tests {
                 ..TokenForm::default()
             },
             base,
-        );
+        )
+    }
+
+    fn refresh_with(oauth: &OAuthRuntime, client_id: &str, refresh_token: String) -> Response {
+        token_exchange(
+            oauth,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: client_id.into(),
+                refresh_token,
+                ..TokenForm::default()
+            },
+            "https://lb.example.com",
+        )
+    }
+
+    fn grant_record(id: &str, password: &str) -> crate::auth::GrantRecord {
+        crate::auth::GrantRecord {
+            grant: Grant {
+                id: id.into(),
+                name: "alice".into(),
+                workspaces: vec!["ws-a".into()],
+                read_only: false,
+            },
+            oauth_password: password.into(),
+            bearer_token: format!("{id}-bearer"),
+            created_at: String::new(),
+        }
+    }
+
+    fn runtime_with_grants(grants: Arc<crate::auth::FixedGrants>) -> OAuthRuntime {
+        runtime("chatgpt-client-test").with_grants(grants)
+    }
+
+    fn tokens(response: Response) -> (String, String) {
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_json(response);
         (
             body["access_token"].as_str().expect("access").to_string(),
             body["refresh_token"].as_str().expect("refresh").to_string(),
         )
+    }
+
+    /// 授权页填 grant 的口令，发出来的令牌只带那个 grant；填服务口令还是全权（RFC-0007）。
+    #[test]
+    fn a_grant_password_issues_tokens_scoped_to_that_grant() {
+        let grants = Arc::new(crate::auth::FixedGrants::new(vec![grant_record(
+            "g1", "grant-pw",
+        )]));
+        let oauth = runtime_with_grants(grants);
+        let base = "https://lb.example.com";
+        let client = "chatgpt-client-test";
+
+        let code = authorize_code(&oauth, client, base, "grant-pw");
+        let (access, _) = tokens(exchange_code(&oauth, client, base, code));
+        let identity = oauth.identify_access_token(&access, base).expect("valid");
+        assert_eq!(identity.grant.map(|grant| grant.id), Some("g1".into()));
+
+        let (owner, _) = authorize_and_exchange(&oauth, client, base);
+        let identity = oauth.identify_access_token(&owner, base).expect("valid");
+        assert_eq!(identity.grant, None, "服务口令进来的是全权");
+
+        // 全权令牌的格式和加 grant 之前一样：不写这一格。
+        let payload = owner.split('.').nth(1).unwrap();
+        let claims: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).expect("claims");
+        assert!(claims.get("grant").is_none(), "{claims}");
+    }
+
+    /// 删掉 grant：它的访问令牌下一次就验不过，刷新令牌也换不来新的；删了再建一个同名、
+    /// 同口令的，旧令牌照样不能用——令牌认的是随机 id，不是名字。
+    #[test]
+    fn revoking_a_grant_voids_its_access_and_refresh_tokens() {
+        let grants = Arc::new(crate::auth::FixedGrants::new(vec![grant_record(
+            "g1", "grant-pw",
+        )]));
+        let oauth = runtime_with_grants(grants.clone());
+        let base = "https://lb.example.com";
+        let client = "chatgpt-client-test";
+        let code = authorize_code(&oauth, client, base, "grant-pw");
+        let (access, refresh) = tokens(exchange_code(&oauth, client, base, code));
+        let (owner, _) = authorize_and_exchange(&oauth, client, base);
+
+        grants.revoke("g1");
+        assert!(oauth.identify_access_token(&access, base).is_none());
+        let refused = refresh_with(&oauth, client, refresh.clone());
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(refused)["error"], "invalid_grant");
+        assert!(
+            oauth.identify_access_token(&owner, base).is_some(),
+            "全权令牌不受影响"
+        );
+
+        grants
+            .0
+            .lock()
+            .unwrap()
+            .push(grant_record("g2", "grant-pw"));
+        assert!(oauth.identify_access_token(&access, base).is_none());
+        assert_eq!(
+            refresh_with(&oauth, client, refresh).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// 回滚到不认 grant 的旧版本时，grant 的令牌不能被当成全权令牌。旧版本只认
+    /// `token_use == "access"` / `"refresh"`，这里照它的判法验一遍。
+    #[test]
+    fn a_grant_token_is_refused_by_a_version_that_does_not_know_grants() {
+        let grants = Arc::new(crate::auth::FixedGrants::new(vec![grant_record(
+            "g1", "grant-pw",
+        )]));
+        let oauth = runtime_with_grants(grants);
+        let base = "https://lb.example.com";
+        let client = "chatgpt-client-test";
+        let code = authorize_code(&oauth, client, base, "grant-pw");
+        let (access, refresh) = tokens(exchange_code(&oauth, client, base, code));
+        let (owner, owner_refresh) = authorize_and_exchange(&oauth, client, base);
+
+        let old_kind = |token: &str| {
+            decode_token_claims(token, TOKEN_SECRET, AUDIENCE)
+                .expect("signature and audience are the same")
+                .token_use
+        };
+        assert_ne!(old_kind(&access), "access", "旧版本会把它当全权访问令牌");
+        assert_ne!(old_kind(&refresh), "refresh", "旧版本会拿它换全权令牌");
+        assert_eq!(old_kind(&owner), "access", "全权令牌格式要和旧版本一样");
+        assert_eq!(old_kind(&owner_refresh), "refresh");
+    }
+
+    /// 授权码活 5 分钟：这期间 grant 被删了，拿着码也换不出令牌。
+    #[test]
+    fn a_code_issued_for_a_revoked_grant_cannot_be_exchanged() {
+        let grants = Arc::new(crate::auth::FixedGrants::new(vec![grant_record(
+            "g1", "grant-pw",
+        )]));
+        let oauth = runtime_with_grants(grants.clone());
+        let base = "https://lb.example.com";
+        let code = authorize_code(&oauth, "chatgpt-client-test", base, "grant-pw");
+        grants.revoke("g1");
+        let refused = exchange_code(&oauth, "chatgpt-client-test", base, code);
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(refused)["error"], "invalid_grant");
+    }
+
+    /// 刷新 grant 的令牌，新令牌还是那个 grant 的，不会刷成全权。
+    #[test]
+    fn refreshing_keeps_the_grant() {
+        let grants = Arc::new(crate::auth::FixedGrants::new(vec![grant_record(
+            "g1", "grant-pw",
+        )]));
+        let oauth = runtime_with_grants(grants);
+        let base = "https://lb.example.com";
+        let client = "chatgpt-client-test";
+        let code = authorize_code(&oauth, client, base, "grant-pw");
+        let (_, refresh) = tokens(exchange_code(&oauth, client, base, code));
+        let (access, _) = tokens(refresh_with(&oauth, client, refresh));
+        let identity = oauth.identify_access_token(&access, base).expect("valid");
+        assert_eq!(identity.grant.map(|grant| grant.id), Some("g1".into()));
+    }
+
+    /// 没接 grant 的入口（工作区、GPT Actions）不认任何 grant 口令。
+    #[test]
+    fn an_entry_without_grants_refuses_a_grant_password() {
+        let oauth = runtime("chatgpt-client-test");
+        let refused = authorize_post(
+            &oauth,
+            AuthorizeForm {
+                client_id: "chatgpt-client-test".into(),
+                redirect_uri: REDIRECT_URI.into(),
+                code_challenge: challenge(),
+                code_challenge_method: "S256".into(),
+                state: "state".into(),
+                password: "grant-pw".into(),
+            },
+            "https://lb.example.com",
+        );
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
     }
 
     fn register(oauth: &OAuthRuntime) -> String {
