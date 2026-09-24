@@ -53,7 +53,11 @@
 - [x] `gld grant add / ls / rm`，rm 停掉它起的命令；协议号 5；端到端测试走真的 OAuth 与 bearer。
 - [x] 独立审查 9 条：默认只读 + `--write`、回滚后 grant 令牌 401、Git 收窄到项目子目录、confine-reads 项目不给 grant、
   grant 不开远端写会话、撤销后 35 秒再清一次、有 grant 时拒绝改 noauth 等。
-- [ ] 本机服务升级与 ChatGPT 上用 grant 口令授权（要用户批准和操作）。
+- [x] 推送 10 个提交（CI 全绿）；本机服务升级到 `e754c51`，凭据与注册客户端逐项指纹一致；机器重启后 `gld daemon start` 恢复。
+- [x] 文档：connect-clients.md 四档表（什么都不用做 / 点 Refresh / 重新授权 / 删了重建）为唯一权威；install.md 升级
+  多一步比工具表指纹；development.md 要求发布说明写明连接器要不要动；排障、README、daemon 同步。
+- [ ] ChatGPT 点 Refresh 后核对新工具表；grant 口令在 ChatGPT 授权页上实测（要用户在网页上操作）。
+- [ ] 开机自启（launchd）：本机没配，机器重启后服务不会自己回来——要不要配由用户定。
 
 不纳入：
 D09 持久 Job、D10 浏览器证据（按真实项目需要）；D12 里的签名与来源证明、glibc / Windows 包真机跑；

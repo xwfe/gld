@@ -1,6 +1,6 @@
 # gld 完成度、生命周期与文档审查（2026-09-23）
 
-状态：**D01–D08、D11、D14 已修（D07 本机服务未升级、未在 ChatGPT 上实测），D13 已核对，0.7.0 已在本机真机
+状态：**D01–D08、D11、D14 已修（D07 本机服务已升级，grant 未在 ChatGPT 上实测），D13 已核对，0.7.0 已在本机真机
 验收并发布（D12 做了发布门禁和下载包验收，签名与来源证明未做）；D09、D10 未做。**
 §1–§6 是审查当时（0.6.0）的原始发现，保留原样；每项怎么修的、怎么验证的、还剩什么，看
 [§7 处理进展](#7-处理进展)，末尾"收尾"一节列出没做的项和各自的时机。
@@ -468,7 +468,8 @@ elicitation）。gld 的 HTTP 服务不开 SSE 流，elicitation 发不出去；
 - **项目是某个仓库的子目录时，Git 工具只看这个子目录**（所有凭据都一样）：`git_status` / `git_diff` /
   `git_log` / `git_show` 不再列兄弟目录的东西，`git_show` 的 `rev` 写 `HEAD:别的目录/文件` 报
   `PATH_OUTSIDE_WORKSPACE`，路径过滤不能以 `:` 开头。项目就是仓库根的不受影响。
-- 数据文件多一个 `grants` 键；没有 grant 时不出现。退回 0.7.0 会忽略它，grant 发出的令牌在旧版本上 401。
+- 数据文件多一个 `grants` 键（没有 grant 时是空数组，升级后第一次保存配置才写进去）。退回 0.7.0 会忽略它，
+  grant 发出的令牌在旧版本上 401。
 - 有 grant 时 `gld upgrade --auth noauth` 报错。
 - 服务凭据看到的工具表不变，ChatGPT 不用刷新。
 
@@ -481,9 +482,37 @@ elicitation）。gld 的 HTTP 服务不开 SSE 流，elicitation 发不出去；
 
 **仍未验证或未做：**
 
-- 没在真实 ChatGPT 连接器上用 grant 口令授权过：要在客户端里操作。本机服务也还没升级到这一版。
+- 没在真实 ChatGPT 连接器上用 grant 口令授权过：要在客户端里操作。
 - 改范围只能删了重建；没有有效期；同一个项目里的 Task / History / Planning 对开了它的几把凭据是共用的。
 - 能写的 grant 挡不住存心的人（见上表第一条）；给别人的只能是只读的。
+
+### 本机升级到 D07/D08 这一版（2026-09-24）
+
+推送 10 个提交（`18d85f0..e754c51`，CI run 35948522581 全绿）之后，按[安装 · 升级](../install.md#升级)
+升本机常驻服务：备份二进制（`~/.local/opt/gld-0.7.0-d8c807725fc5`）和数据目录
+（`gld-config-before-grant-20260924-1145.tgz`），在干净的 `e754c51` 上 `cargo build --release`，
+写新文件再改名换上，`gld daemon restart`。
+
+| 核对 | 结果 |
+| --- | --- |
+| 守护进程 | 重启 0.2 秒，协议 4 → 5，服务自己回来 |
+| 构建提交 | `e754c51a6ee2`，等于 HEAD |
+| 口令、签名密钥、Client ID、bearer 令牌、ChatGPT 注册的客户端（`hub.json`）、公网配置、成员表、项目表 | SHA-256 指纹逐项比对，全部一致 |
+| `gld ls` | 升级前后一字不差 |
+| `gld health` | 本地 / 公网 `/mcp`、两份 OAuth 元数据都是 ✓ |
+| 工具表 | 28 个工具不变，指纹 `c18992480bf6164f` → `9ed41391e27553c6`（D08 给 `confirm` 加了说明）：ChatGPT 要点一次 Refresh 才看得到新说明，不点照常能用 |
+
+升级后 13 分钟机器整体重启过一次（开机时间 12:01）。cloudflared 是 launchd 管的，自己回来了；gld 守护
+进程没配开机自启，没回来，公网地址通、回源不通。`gld daemon start` 后服务跟着回来，指纹再比一次仍然
+全部一致，`gld health` 全 ✓。连接器不用动，这一条补进了
+[装好的连接器什么时候要动](../connect-clients.md#装好的连接器什么时候要动)和排障表。
+
+同时把"升级后 ChatGPT 插件要不要动"整理成一处：connect-clients.md 的四档表（什么都不用做 / 点 Refresh /
+重新授权 / 删了重建），install.md 的升级流程多一步"升级前后比 `gld tool list --served` 的工具表指纹"来决定
+要不要 Refresh，development.md 要求每版发布说明写明这一点。
+
+**仍未验证：**ChatGPT 这边点 Refresh 之后的 `tools/list` 和新对话里的工具定义（要用户在网页上操作）；
+grant 口令在 ChatGPT 授权页上的实际授权。
 
 ### 收尾
 

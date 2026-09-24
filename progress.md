@@ -89,3 +89,15 @@
 - 磁盘从 7.6 GiB 掉到 1.2 GiB：删 `target/debug/incremental`（4 GB），之后一律 `CARGO_INCREMENTAL=0`。
 - 验证：全量 828 passed / 0 failed；端到端测试走真实二进制、守护进程和真的 OAuth / bearer。
 - 没做：本机服务升级、ChatGPT 上用 grant 口令授权（要用户批准和操作）。
+
+## 推送与升级（2026-09-24）
+
+- 推送 `18d85f0..e754c51`，CI run 35948522581 全绿（公开 API 查的）。
+- 升级：备份二进制和数据目录到 `~/.local/opt/`；干净 HEAD 上 `cargo build --release`；写新文件再改名；
+  `gld daemon restart` 0.2 秒、协议 5；构建提交等于 HEAD；凭据、Client ID、签名密钥、`hub.json`、公网配置、
+  成员与项目表的 SHA-256 指纹逐项一致；`gld ls` 一字不差；`gld health` 全 ✓。工具表指纹变了（D08 的 `confirm`
+  说明），ChatGPT 要点一次 Refresh。
+- 升级后机器整体重启（12:01）：gld 没配开机自启，没回来；cloudflared（launchd）回来了。`gld daemon start`
+  恢复，指纹再比一次一致。临时目录随重启清空，指纹脚本按记下的值重建后比对。
+- 文档：把"升级后插件要不要动"收成 connect-clients.md 一张四档表，其余文档只链过去；改正审查记录里
+  "`grants` 键不出现"的错误说法（实际是保存配置时写成空数组）。

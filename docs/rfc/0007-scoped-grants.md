@@ -1,6 +1,6 @@
 # RFC-0007：给一把凭据只开几个项目（审查 D07）
 
-日期：2026-09-24。状态：**已实施**（本机服务未升级，ChatGPT 上未实测，见 §6）。来源：[2026-09-23 审查](../reviews/2026-09-23-lifecycle-and-docs-audit.md) D07、
+日期：2026-09-24。状态：**已实施**，本机服务已升级（grant 在 ChatGPT 上未实测，见 §6）。来源：[2026-09-23 审查](../reviews/2026-09-23-lifecycle-and-docs-audit.md) D07、
 [RFC-0004 §4](0004-one-service-many-projects.md#4-代价和跨仓评审-x07-的关系) 留下的缺口。
 
 ## 1. 要解决什么
