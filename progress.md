@@ -78,3 +78,14 @@
 - 验证：全量 808 passed / 0 failed；fmt、clippy 通过；真实二进制在隔离数据目录核对迁移、拒收、落盘。
 - `request_permissions` 经 CLI、hub 调不到（不在对客户端公开的表里），只有 GPT Actions 按名字放行；
   真实二进制核对不了它，覆盖靠 dispatch 层的契约测试。
+
+## D07（2026-09-24）
+
+- 先写 RFC-0007（绑凭据不绑 client_id），再按鉴权层 → hub → 命令 → 文档实施；协议号提到 5。
+- 危险的一处：按 grant 过滤成员后不能拿过滤后的名单判"谁离开了"，否则会停掉服务凭据在别的成员上的命令；
+  变异验证过。
+- 独立审查（后台 agent，只读）找到 9 条：能写的 grant 能读 profiles.json 拿全权（改成默认只读）、回滚后令牌变全权
+  （换 token_use）、Git 工具越出项目子目录（对所有凭据修）、confine-reads、远端写会话被顶掉等，全部处理或写明。
+- 磁盘从 7.6 GiB 掉到 1.2 GiB：删 `target/debug/incremental`（4 GB），之后一律 `CARGO_INCREMENTAL=0`。
+- 验证：全量 828 passed / 0 failed；端到端测试走真实二进制、守护进程和真的 OAuth / bearer。
+- 没做：本机服务升级、ChatGPT 上用 grant 口令授权（要用户批准和操作）。

@@ -46,6 +46,15 @@
 - [x] 退役 `compat-readonly-all`：设置时报错，老配置读成 advanced、标注照实。
 - [x] 四个工具的 `confirm` 参数写明服务端核实不了用户批准。
 
-不纳入：D07 项目级授权（对外多客户端、生产接入前的硬前置）；
+## D07 项目级授权（2026-09-24，RFC-0007）
+
+- [x] 鉴权层：grant 口令授权、令牌带 grant id、验令牌 / 换码 / 刷新都查 grant 还在；bearer 认 grant 令牌。
+- [x] hub：范围外项目看不见；只读 grant 收窄到 read-only 工具集；不给本机 MCP 转发；远端只读。
+- [x] `gld grant add / ls / rm`，rm 停掉它起的命令；协议号 5；端到端测试走真的 OAuth 与 bearer。
+- [x] 独立审查 9 条：默认只读 + `--write`、回滚后 grant 令牌 401、Git 收窄到项目子目录、confine-reads 项目不给 grant、
+  grant 不开远端写会话、撤销后 35 秒再清一次、有 grant 时拒绝改 noauth 等。
+- [ ] 本机服务升级与 ChatGPT 上用 grant 口令授权（要用户批准和操作）。
+
+不纳入：
 D09 持久 Job、D10 浏览器证据（按真实项目需要）；D12 里的签名与来源证明、glibc / Windows 包真机跑；
 D13 里真正实现 2026-07-28（等真有只讲新版的客户端）。
