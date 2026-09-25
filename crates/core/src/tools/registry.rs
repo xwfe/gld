@@ -1513,12 +1513,13 @@ pub fn input_schema(name: &str) -> Value {
             "properties": {
                 "status": {
                     "type": "array",
+                    "minItems": 1,
                     "items": { "type": "string", "enum": ["running", "exited", "timeout", "killed", "interrupted", "unknown"] },
-                    "description": "Only runs whose termination_reason is one of these."
+                    "description": "Only runs whose termination_reason is one of these. \"running\" also matches a run that is being stopped but whose process has not exited yet."
                 },
                 "started_within_minutes": { "type": "integer", "minimum": 1, "maximum": 10080, "description": "Only runs started in the last N minutes." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 64, "default": 20 },
-                "cursor": { "type": "string", "description": "next_cursor from the previous page." }
+                "cursor": { "type": "string", "description": "next_cursor from the previous page, passed back unchanged. Keep status and started_within_minutes the same while paging; change them and start again without a cursor." }
             },
             "additionalProperties": false
         }),

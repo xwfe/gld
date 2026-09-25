@@ -217,6 +217,9 @@ fn a_long_output_pages_from_the_record_by_absolute_offset() {
         "至少留最后 1 MiB：{first}"
     );
     assert_eq!(first["dropped_bytes"], retained_from);
+    // list_runs 只看日志文件名和大小算总字节数，分过段、前面的段删掉了也得对得上。
+    let listed = call_tool(&fx.ctx, "list_runs", &json!({}));
+    assert_eq!(listed["runs"][0]["stdout_bytes"], total, "{listed}");
 
     let mut offset = retained_from;
     let mut last_line = String::new();
@@ -538,25 +541,137 @@ fn a_run_whose_gld_is_gone_is_listed_as_unknown_and_left_alone() {
     let _ = bystander.wait();
 }
 
-/// 本进程起的、记录还是 running、内存表里却没有：列表不改它。`insert` 先建记录后放进
-/// 内存表，列表碰巧夹在中间时，照 `load_detached` 的规矩改成 unknown 就把一条刚起的命令写错了。
+/// 本进程起的、记录还是 running、内存表里却没有：结束时写记录失败了或者会话表被扔掉了。
+/// 起跑超过几秒的判 unknown，和 `read_output` 说法一致；刚起的不动——`insert` 先建记录、
+/// 后放进内存表，列表碰巧夹在中间时不能把一条刚起的命令写成 unknown。
 #[cfg(unix)]
 #[test]
-fn listing_never_marks_this_processs_own_running_record_unknown() {
+fn this_processs_detached_running_record_is_unknown_unless_just_started() {
     let fx = fixture();
     script(&fx.workspace, "ok", "echo hi");
     let template = run_to_end(&fx, "./ok");
-    let starting = forge_record(&fx, &template, |record| {
-        record["status"] = json!("running");
-        record["exit_code"] = Value::Null;
-        record["finished_at_ms"] = Value::Null;
-        record["owner"] = json!(gld_core::tools::runs::instance_id());
-    });
-    let listed = list(&fx.ctx, json!({"status": ["running"]}));
-    assert_eq!(listed_ids(&listed), vec![starting.clone()], "{listed}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mine = |started_at: u64| {
+        forge_record(&fx, &template, |record| {
+            record["status"] = json!("running");
+            record["exit_code"] = Value::Null;
+            record["finished_at_ms"] = Value::Null;
+            record["started_at_ms"] = json!(started_at);
+            record["owner"] = json!(gld_core::tools::runs::instance_id());
+        })
+    };
+    let starting = mine(now);
+    let detached = mine(now - 60_000);
+
+    let running = list(&fx.ctx, json!({"status": ["running"]}));
+    assert_eq!(listed_ids(&running), vec![starting.clone()], "{running}");
+    let unknown = list(&fx.ctx, json!({"status": ["unknown"]}));
+    assert_eq!(listed_ids(&unknown), vec![detached.clone()], "{unknown}");
+    let read = read(&fx.ctx, &detached, 0);
+    assert_eq!(read["termination_reason"], "unknown", "{read}");
     let record: Value =
         serde_json::from_slice(&fs::read(record_path(&fx.workspace, &starting)).unwrap()).unwrap();
-    assert_eq!(record["status"], "running", "{record}");
+    assert_eq!(record["status"], "running", "刚起的被写成了 {record}");
+}
+
+/// 被 kill 了、进程却还没退（拦着 TERM）：原因已经标成 killed，但它还在跑。列表跟
+/// `read_output` 一样说 `running: true`、不说成败，按 running 筛找得到它。
+/// 这时 kill_session 正拿着子进程锁等它退出，列表也不能被卡住。
+#[cfg(unix)]
+#[test]
+fn a_run_being_stopped_is_still_running_and_does_not_block_the_list() {
+    let fx = fixture();
+    script(
+        &fx.workspace,
+        "stubborn",
+        "trap '' TERM\necho ready\nwhile :; do sleep 1; done",
+    );
+    let started = call_tool(
+        &fx.ctx,
+        "exec_command",
+        &json!({"cmd": "./stubborn", "yield_time_ms": 500, "timeout_ms": 60_000}),
+    );
+    let session = session_id(&started);
+    let terminating = call_tool(
+        &fx.ctx,
+        "kill_session",
+        &json!({"session_id": session, "signal": "TERM", "wait_ms": 200}),
+    );
+    assert_eq!(terminating["status"], "terminating", "{terminating}");
+
+    let listed = list(&fx.ctx, json!({"status": ["running"]}));
+    assert_eq!(listed_ids(&listed), vec![session.clone()], "{listed}");
+    let run = &listed["runs"][0];
+    assert_eq!(run["running"], true, "{run}");
+    assert_eq!(run["command_ok"], Value::Null, "{run}");
+    // 盘上记录还是 running；"正在被停"这件事只有内存里知道。
+    assert_eq!(run["termination_reason"], "killed", "{run}");
+
+    // 另一个线程拿着子进程锁等它退出（最长 3 秒），列表照样马上回来。
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            call_tool(
+                &fx.ctx,
+                "kill_session",
+                &json!({"session_id": session, "signal": "TERM", "wait_ms": 3000}),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let begun = Instant::now();
+        list(&fx.ctx, json!({"status": ["exited"]}));
+        assert!(
+            begun.elapsed() < Duration::from_millis(1500),
+            "列表被正在进行的 kill 卡了 {:?}",
+            begun.elapsed()
+        );
+        waiting.join().expect("kill 线程");
+    });
+    call_tool(
+        &fx.ctx,
+        "kill_session",
+        &json!({"session_id": session, "signal": "KILL", "wait_ms": 2000}),
+    );
+}
+
+/// 同一毫秒里起了几条（脚本连着跑很容易）：按 id 排次序，一条一条翻也不重不漏。
+#[cfg(unix)]
+#[test]
+fn paging_within_one_millisecond_is_ordered_by_id() {
+    let fx = fixture();
+    script(&fx.workspace, "ok", "echo hi");
+    let template = run_to_end(&fx, "./ok");
+    // 一分钟前：比 template 早，又在 7 天保留期里。
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 60_000;
+    let mut same: Vec<String> = (0..3)
+        .map(|_| {
+            forge_record(&fx, &template, |record| {
+                record["started_at_ms"] = json!(at);
+                record["finished_at_ms"] = json!(at + 1);
+            })
+        })
+        .collect();
+    same.sort_by(|a, b| b.cmp(a));
+
+    let mut seen = Vec::new();
+    let mut cursor = Value::Null;
+    loop {
+        let page = list(&fx.ctx, json!({"limit": 1, "cursor": cursor}));
+        seen.extend(listed_ids(&page));
+        cursor = page["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    let mut expected = vec![template];
+    expected.extend(same);
+    assert_eq!(seen, expected);
 }
 
 /// 结束超过 7 天、还没轮到清理的不列出来：按保留规矩它已经不在了。时间窗口按起跑时间筛。
@@ -597,6 +712,9 @@ fn bad_list_runs_arguments_are_refused() {
         json!({"started_within_minutes": 0}),
         json!({"started_within_minutes": 20_000}),
         json!({"cursor": "not-a-cursor"}),
+        json!({"status": []}),
+        json!({"cursor": "1:0F8FAD5B-D9CB-469F-A165-70867728950E"}),
+        json!({"cursor": "1:0f8fad5bd9cb469fa16570867728950e"}),
         json!({"session_id": "x"}),
     ] {
         let refused = call_tool(&fx.ctx, "list_runs", &args);
