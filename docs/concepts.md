@@ -737,14 +737,18 @@ gld tool call list_runs status:='["running","unknown"]'     # 还在跑的、结
 gld tool call list_runs started_within_minutes:=60 limit:=5  # 最近一小时的 5 条
 ```
 
-- 每页默认 20 条、最多 64 条，`next_cursor` 交回 `cursor` 翻下一页。翻页中途又起了新命令，新的排在第一页
-  前面，后面的页不重也不漏。
-- 只看得到自己的：别的客户端起的命令不列、也不算进 `total`。命令行 `gld tool call` 是本机这个主体，
-  看不到 ChatGPT 起的命令；反过来也一样。没有跨主体的"管理员视图"。
+- 每页默认 20 条、最多 64 条，`next_cursor` 原样交回 `cursor` 翻下一页。翻页中途又起了新命令，新的排在
+  第一页前面，后面的页不重也不漏。翻页时 `status`、`started_within_minutes` 保持不变；改了条件就不带游标从头翻，
+  带着旧游标换条件不会报错，只会给出另一组结果。
+- 只看得到自己的：别的主体起的命令不列、也不算进 `total`。"自己"指同一个入口上的同一个客户端：hub、项目自己的
+  MCP 监听器、GPT Actions、本机命令行是四个入口，互相看不见；同一入口上按 OAuth 客户端分，ChatGPT 连接器删了
+  重建（重新注册，换了 client_id）之后，之前起的命令就列不到了。noauth、共用一条 bearer 令牌的多个客户端
+  分不开，是同一个主体。没有跨主体的"管理员视图"。
 - 只读：不停命令、不发信号、不重跑。起它的 gld 已经不在、记录还停在 `running` 的，列出来是 `unknown`
   （和读输出时一样会写回记录）。
 - 列出来不等于还能当任务证据：看 `workspace_writes_since_start`，`null`（gld 重启过）就要重跑。
-- 列不到的：没落盘的命令（`kept_on_disk: false`）、结束超过 7 天或被 64 条配额挤掉的、`run.json` 读不出来的。
+- 列不到的：没落盘的命令（`kept_on_disk: false`）、结束超过 7 天的、`run.json` 读不出来的。64 条的配额是这个项目
+  **所有主体共用**的，在下一次有人起命令时才清：清之前超出的照样列得出来；别人起得多，你的旧记录也会被挤掉。
 
 重启之后看 `termination_reason`：
 
