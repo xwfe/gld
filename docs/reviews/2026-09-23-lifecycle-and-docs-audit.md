@@ -641,7 +641,13 @@ v0.7.0 之后的 grant、D08、D09、孤儿进程和全局设置缓存两处修�
 | 下载包 | `shasum -a 256 -c` 5 个全 OK；`gh attestation verify` 按文档那条命令 5 个都退出 0；两个 macOS 包 `--version` 报 0.8.0（Intel 版用 `arch -x86_64`）；musl 包在本机已有的 Oracle Linux 容器（arm64 + Rosetta）里 `--version`、起停守护进程正常 |
 
 **没验：**glibc 包没实跑——Docker Hub 连不上（`registry-1.docker.io` 回 EOF），本机没有 amd64 镜像；Windows 包照旧没实跑。
-本机常驻服务还是 `bc8e13a` 的构建，没换成 0.8.0 发布包（代码只差版本号）。
+
+**本机升级到 0.8.0 发布包（用户要求）：**按[安装 · 升级](../install.md#升级)，用下载后验过校验和与来源证明的
+aarch64 包换掉 `bc8e13a` 的构建：先备份二进制（`~/.local/opt/gld-0.7.0-bc8e13a`）和数据目录（`gld-config-before-0.8.0-*.tgz`，
+权限收紧到 600），写新文件再改名，`gld daemon restart` 0.2 秒，1 个服务自己回来。`daemon status` 报 0.8.0（协议 5），
+构建提交 `09b1ae57d73a`；工具表 28 个、指纹 `9ed41391e27553c6` 没变；`gld ls` 一字不差；profiles.json 里口令、密钥、
+地址、端口等 184 项和 `hub.json` 指纹一致（`daemon.json` 是运行登记，每次重启都变）；`gld health` 全 ✓。
+这次升级本身不改工具表；用户仍要点一次 Refresh，补上 D08 之后一直没刷新的那次。
 
 ### 收尾
 
