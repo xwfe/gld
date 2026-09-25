@@ -726,3 +726,66 @@ ccnm 本地真实管道 3 项用时 8.29 秒，无缺二进制跳过提示；不
 `docs_links_resolve`、`doctor_fixes_are_real_commands`、`messages_name_real_commands` 五组
 集成测试，**9 passed / 0 failed**；`git diff --check` 通过。只改 8 份 Markdown，
 生成的 `docs/cli.md`、运行时代码、依赖与 CI 配置未改；不将此轮文档完成等同于后续功能已实施。
+
+## 9. glibc 包验收、D09 运行记录发现、Windows 运行测试（2026-09-25）
+
+### 0.8.0 glibc 下载包
+
+Docker Hub 经本机代理 SSL 断开（`curl` 也一样，不是 OrbStack 的问题），改拉
+`public.ecr.aws/debian/debian:bookworm-slim`（amd64，glibc 2.36-9+deb12u14）。包从 Release 下载，
+`shasum -c` OK、`gh attestation verify` 退出 0。容器里：
+
+| 核对 | 结果 |
+| --- | --- |
+| 版本、IPC | `--version` 0.8.0；`daemon status` 报协议 5，socket `srw-------` |
+| 前台命令 | 脚本 `exit 3`：`exit_code` 3、`command_ok` false，stdout / stderr 各一行，`kept_on_disk` true |
+| 后台命令 | `sleep 300` 转后台，`read_output` 读到第一行 |
+| 正常停止 | `daemon stop` 后 `/proc` 里没有残留的 sleep |
+| 重启后读记录 | `source: run_record`、`termination_reason: interrupted`、输出还在；记录目录 0700、`run.json` 0600 |
+
+容器里默认白名单没有 `sh`、命令不许 `;` 和重定向，按设计先 `gld set <项目> allowed-commands=sh` 再跑脚本。
+测完删了镜像；OrbStack 原本就在运行，没停。
+
+### D09：`list_runs`
+
+**做了什么：**只读工具 `list_runs`，列出这个主体在这个项目里的运行记录，新的在前；每条给脱敏命令、终态、
+退出码、起止时间、每个流写了多少字节（只看日志文件名和大小）、`output_refs`，不回输出正文。先按主体过滤再计数和
+分页；游标是上一页最后一条的"起跑毫秒 + id"，新起的命令不会让后面的页错位。起它的 gld 不在了的 `running`
+判 `unknown`、不发信号。放进 compact / core / advanced / read-only 四档（工具数 29 / 41 / 55 / 22），
+命令行用 `gld tool call list_runs`，没另加命令：命令行是 `local` 主体，只看得到命令行自己起的。
+
+**独立审查**（另开上下文，只读）找到 1 高 3 中 6 低，都按实测处理：
+
+| 发现 | 处理 |
+| --- | --- |
+| 高：GPT Actions 调工具不带身份，落在和命令行同一个 `local` 主体上，两边互相读得到命令输出，`list_runs` 让它能直接枚举 | 修（`708fc0b`）：Actions 鉴权中间件验完挂上入口名为 `actions` 的身份。**顺带查出 Actions 上 `exec_command` 必然 panic**：在 async worker 上直接调同步工具，里面的 `block_on` 触发 tokio 的 panic，连接被掐断。以前只测过 `read_file`。新端到端测试在旧代码上复现了 panic；把主体改回 `local` 时测试失败 |
+| 中：被 kill、进程还没退的命令被报成已结束且失败 | 修：按进程在不在判 `running`，原因照实显示 `killed`、不说成败 |
+| 中：本进程的孤儿 running 记录，列表说 running、`read_output` 说 unknown | 修：起跑超过 5 秒的也判 unknown；刚起的不动（`insert` 先建记录后进内存表） |
+| 中：列表对每条内存会话阻塞刷新状态，`kill_session` 等进程退出时列表跟着卡（实测 4.7 秒） | 修：拿不到子进程锁就用当前状态 |
+| 低：空 `status`、非原样的游标、翻页中途换条件、配额口径、"自己"指什么 | 前两条报错；后三条写进 concepts.md |
+| 测试：去掉内存覆盖、游标只比毫秒，原测试照样过 | 补测试；四处实现各做变异，对应测试都失败 |
+
+**验证：**隔离 `GLD_HOME` 全量 866 passed、0 failed；fmt、clippy `-D warnings`、`docs/cli.md` 无差异。
+`run_records.rs` 16 条（含上面几条）、`daemon_lifecycle.rs` 里重启和 `kill -9` 两条端到端改成先用
+`list_runs` 找回 id 再读。
+
+**行为变化：**多了一个工具，工具表指纹会变，升级后 ChatGPT 要点一次 Refresh；GPT Actions 起的命令，
+本机 `gld tool call` 不再读得到，反过来也一样。
+
+### Windows 最小运行测试
+
+Windows CI job 加了一步，逐条跑 `daemon_lifecycle.rs` 里 9 条，每条限时 3 分钟，失败的打出输出和
+daemon.log。跑的是这次编出的 `target/debug/gld`，**不是下载包验收**。第一次跑 7 条失败、1 条卡满 20 分钟，
+查出两个真 bug：
+
+- **gld 主线程栈溢出**（0xC00000FD）：Windows 主线程默认 1 MiB，debug 构建的 `gld add` 就溢出。
+  `crates/cli/build.rs` 在 Windows 目标上把栈设成 8 MiB，和另外两个平台一致。release 构建是否也会触发没验。
+- **守护进程继承调用方的输出管道**：Rust 的 `Command` 在 Windows 上把所有可继承句柄交给子进程
+  （rust-lang/rust#38227），`gld daemon start` 的输出被管道接着时，调用方永远等不到 EOF。拉起前清掉三个
+  标准句柄的可继承标志。
+
+修完后 CI run 36093958618 的 8 个 job 全绿，Windows 上 9 条逐条 ok，日志里没有再出现栈溢出。
+
+**仍未验证或未做：**Windows 下载包没实跑；`kill -9` 那条（`pid_in_use` 在 Windows 上是 `null`）、
+`run_records.rs`、按 cwd 找项目（8.3 短路径）还没进 Windows 小组；两个 Windows 修复只有 CI 证据，
+本机交叉检查仍因 `ring` 缺头文件做不了。`list_runs` 还没在真实 ChatGPT 上用过。
