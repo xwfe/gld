@@ -1,10 +1,14 @@
 # gld：三仓重构评审后的落地清单
 
-日期：2026-09-19。状态：**建议，未自动进入实施；不是新的进度数据库。**
+日期：2026-09-19。状态：**历史建议与落地注记；不是当前待办或新的进度数据库。**
+
+> 2026-09-25 对账：本文原列的正式任务验收、基线恢复、最小 grant、运行记录与文档门禁
+> 已有实现，不能从旧段落的“仍未完成”重新派发。当前队列以
+> [task_plan.md](../../task_plan.md) 为准，证据在[生命周期审查 §7](2026-09-23-lifecycle-and-docs-audit.md#7-处理进展)。
 
 主评审：`toexec/docs/plan/2026-09-19-cross-project-refactor-review.md`。本文件只记录 gld 的归属、依赖和验收，不复制主评审。现有入口：[工具审查 U 系列](2026-09-19-gld-tooling-review-and-plan.md)、[hub 路线 L0–L6](2026-09-19-hub-development-roadmap.md)、[RFC-0003](../rfc/0003-native-parity-sync.md)。
 
-## 2026-09-23 对账
+## 2026-09-23 对账（历史快照）
 
 下文“当前”“未开工”均按各节当时日期理解。G3.2 Notebook 已完成（本地编辑使用
 `apply_patch notebook_edits`）；Skills、本机 MCP、构建提交与锁定依赖修订的诊断也已落地。

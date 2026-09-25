@@ -4,7 +4,8 @@
 验收并发布（D12 做了发布门禁、下载包验收和构建来源证明，代码签名未做）；D09 做了运行记录；D07–D09 随 0.8.0
 发布；D10 未做。**
 §1–§6 是审查当时（0.6.0）的原始发现，保留原样；每项怎么修的、怎么验证的、还剩什么，看
-[§7 处理进展](#7-处理进展)，末尾"收尾"一节列出没做的项和各自的时机。
+[§7 处理进展](#7-处理进展)。2026-09-25 重新归并后的**当前任务只在
+[task_plan.md](../../task_plan.md) 排队**，§8 记录本次复核；各历史段落的“未做”不覆盖后来的结果。
 本页是有日期的证据快照与下一步入口，不取代项目的 Planning / Task 或再维护一份进度数据库。
 
 ## 1. 范围与证据口径
@@ -670,7 +671,7 @@ ChatGPT 新对话里实际看到的工具定义没逐字核对。
   配置、凭据和 OAuth 客户端注册：Planning、历史档案在项目目录里本来就不动，数据目录里的任务记录
   （按目录记）和日志也留着。行为没改（删任务记录会让同一个目录再加回来时丢历史），说法已按实际改正。
 
-**还没做、什么时候做**（详见 §4）：
+**当时的收尾快照**（后续排队以 [task_plan.md](../../task_plan.md) 为准）：
 
 | 编号 | 什么时候 |
 | --- | --- |
@@ -678,3 +679,50 @@ ChatGPT 新对话里实际看到的工具定义没逐字核对。
 | D10 浏览器证据 | 真实项目需要时 |
 | D09 剩下的：列出运行记录的入口 | 有人需要在重启后找回不知道 id 的命令时 |
 | D13 实现 2026-07-28 | 出现只讲新版、不会退回的客户端时 |
+
+## 8. 0.8.0 后续规划复核（2026-09-25）
+
+本次起点 `eefdc1b40015af88759efae7239c4da55f79c459`，工作树干净。服务实际报告
+`version=0.8.0`、`build_commit=09b1ae57d73a`、28 个连接工具、
+`connection.tools_fingerprint=9ed41391e27553c6`。`git diff --stat 09b1ae57d73a..HEAD`
+仅有本审查和 task_plan.md，证明仓库比发布构建多的只是文档记录，不是遗漏运行代码部署。
+
+### 现状与规划纠偏
+
+本会话实际发现的 schema 已包括 `check_command`、Skills、Notebook、`argv`、`stdin_mode`、
+`start_byte`、`expected_versions`、`notebook_edits`、`evidence_session_ids` 和
+`refresh_baseline`。`check_command argv=[git,status,--short]` 实际返回 allow、
+`side_effects=none`，并报告上述发布构建。本轮只确认这条连接，不外推所有客户端已刷新或
+grant 的真实授权页验收已完成。
+
+原待办与最新实现的主要差异已收口：D01–D08、D11、D14 有修复；D09 有运行记录；D12 有
+0.8.0 发布及来源证明记录；D13 是兼容回退核验，不是新协议实现。剩余计划不能再写成
+“正式验收未接通”“没有 grant”“输出只有内存”“来源证明没做”。
+
+`task_plan.md` 原末尾把来源证明、glibc 全部列为不纳入，与其自身实施记录矛盾。
+现已拆开当前队列与历史记录：0.7.0 glibc 的已验事实保留，0.8.0 包的实跑仍待补；
+Windows 不以“无本机”无限延期，建议在已有 runner 上增加可跨平台执行的最小运行测试。
+抽查 `daemon_lifecycle.rs`、`run_records.rs` 的部分进程/记录用例仍是 `cfg(unix)`，
+不能仅把命令加到 Windows job 就当作跑到了同一批测试。
+
+后续决策、顺序、最小验收和不做范围均在 task_plan.md，本文不复制第二张待办表。
+最重要的范围约束是：复用已有 RunLog 补“发现”，不重建调度；D10 从真实项目流程出发，
+不先上完整 IDE、通用部署平台或新的状态系统。
+
+### 本轮验证范围
+
+在项目 `target/replan-20260925-test-home` 隔离 GLD_HOME 后运行
+`cargo test --workspace --all-targets --locked -- --quiet --nocapture`，退出 0；38 组结果
+合计 **853 passed、0 failed、0 ignored**。`share_one_command` 中
+`share_reports_the_missing_binary_instead_of_a_silent_no_url` 因本机已有 cloudflared
+提前返回，**该缺程序场景本轮未实际执行**，不能用汇总的 0 ignored 掩盖它。
+ccnm 本地真实管道 3 项用时 8.29 秒，无缺二进制跳过提示；不是跨主机 SSH 验收。
+
+本轮仅同步规划和文档。没有重新查询远端 CI、下载发行包、创建 grant、重启真实服务、
+签名、推送或发布；这些仍按原证据的日期与版本理解。
+
+`cargo fmt --all -- --check` 与 `cargo clippy --workspace --all-targets --locked -- -D warnings`
+均退出 0。文档修改后，在独立 GLD_HOME 下运行 `docs_commands_exist`、`docs_generation`、
+`docs_links_resolve`、`doctor_fixes_are_real_commands`、`messages_name_real_commands` 五组
+集成测试，**9 passed / 0 failed**；`git diff --check` 通过。只改 8 份 Markdown，
+生成的 `docs/cli.md`、运行时代码、依赖与 CI 配置未改；不将此轮文档完成等同于后续功能已实施。

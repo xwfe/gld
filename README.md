@@ -4,12 +4,13 @@
 通用接口），你的项目都挂在它下面。AI 客户端（ChatGPT、Claude Code、Cursor…）只配这一条
 连接，就能在各个项目里读文件、改代码、跑命令、看 Git 状态，并按项目保存任务与历史记录。
 工作区工具每次用 `workspace` 选项目，不共享一个可被其他对话切换的“当前目录”。
-**这是路由与状态分离，不是操作系统沙箱，也不是按客户端划分的项目授权。**
+**路由不是操作系统沙箱。** 要把凭据限制到部分项目，可用默认只读的
+[`gld grant`](docs/concepts.md#只开几个项目gld-grant)；允许命令执行的凭据仍只应交给可信主体。
 
 *Run one MCP server that AI clients (ChatGPT, Claude Code, Cursor, Codex…) connect to
 once, then develop in any of your local projects through it: read, patch, run commands,
-inspect Git, and keep project-scoped task progress. Workspace routing is not an OS
-sandbox or per-client project authorization. Docs are in Chinese.*
+inspect Git, and keep project-scoped task progress. Credential-scoped grants can restrict
+project access; command execution is not OS-sandboxed. Docs are in Chinese.*
 
 ## 什么时候用
 
@@ -66,7 +67,8 @@ gld share --tunnel cf:mcp.example.com  # 自己有域名和 Cloudflare 隧道时
 [docs/connect-clients.md](docs/connect-clients.md)。
 
 > **开公网入口前请先读 [docs/security.md](docs/security.md)。**
-> 它等于把"以你的身份在你电脑上跑命令"这件事对外开放了，而且一把凭据能进**全部**项目。
+> 服务主凭据能访问**全部**项目，允许执行时相当于以运行账号执行代码。
+> 部分项目的只读访问使用 grant；可写 grant 不等于系统级隔离。
 
 增删改查都是一个词：
 
@@ -93,6 +95,7 @@ gld stop                                    # 停服务；项目、配置和凭�
 | 读代码、修改、执行、Git 检查 | 已实现；包括补丁预检、命令输出续读（gld 重启后也读得到结局和最后一段输出，进程不恢复）、Notebook 和 Skills |
 | 多项目、远端项目、本机 MCP 扩展 | 已实现；远端执行由 ccnm 负责，本机 MCP 需操作员点名启用 |
 | 规划、任务、交接 | 可保存 Goal / Plan、任务和历史；任务收尾只收任务期间通过、且之后没再改过文件的命令当验收证据 |
+| 限定项目访问 | grant 默认只读；可写 grant 仅用于可信主体，不开放本机 MCP 转发或远端写会话 |
 | 浏览器验收、发布、部署、运维 | 可组合项目脚本和获准的外部能力；不等于内置可靠的全流程编排 |
 
 源码有某项工具不代表当前客户端已经拿到它：客户端会缓存工具表。升级不用动 ChatGPT 的连接器和
@@ -105,6 +108,7 @@ Refresh 它才会重拉。怎么升级见[安装 · 升级](docs/install.md#升�
 
 | 我想…… | 看这里 |
 | --- | --- |
+| 看当前剩余任务、实施顺序与按需范围 | [当前任务与后续规划](task_plan.md) |
 | 搞清楚服务和项目、工具集、Planning 模式这些名词是什么 | [concepts.md](docs/concepts.md) |
 | 项目路由、状态分离与授权的区别 | [concepts.md 为什么不会串](docs/concepts.md#为什么不会串) |
 | 接到 ChatGPT / Claude Code / Cursor / 自定义 GPT | [connect-clients.md](docs/connect-clients.md) |
