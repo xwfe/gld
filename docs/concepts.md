@@ -444,10 +444,10 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 
 | 取值 | 工具数 | 说明 |
 | --- | --- | --- |
-| `compact` | 28 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
-| `core` | 40 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
-| `advanced` | 54 | 全部工具都暴露 |
-| `read-only` | 21 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
+| `compact` | 29 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
+| `core` | 41 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
+| `advanced` | 55 | 全部工具都暴露 |
+| `read-only` | 22 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
 
 以前还有个 `compat-readonly-all`，已经退役，见[下面](#compat-readonly-all-已退役)。
 
@@ -727,6 +727,24 @@ task_manage action=refresh_baseline task_id=<id> accept_fingerprint=<current.fin
 从记录读到的回包多三格：`source: "run_record"`、`pid`（命令的）、`started_by_gld_pid`（起它的那个
 gld 进程的），其余字段和平时一样。它只是记录：**命令不会被重新接上，也不会被重跑**。`write_stdin`
 报 `SESSION_CLOSED`；`kill_session` 不发信号，只如实说它怎样了。
+
+**不知道 `session_id` 时用 `list_runs` 找**：换了对话、gld 重启过、当初没把 id 转述出来，都一样。
+它列出**这个客户端自己**在这个项目里起过的命令，新的在前，每条给脱敏的命令、`termination_reason`、
+退出码、起止时间、每个流写了多少字节，和能直接交给 `read_output` 的 `output_refs`；不带输出正文。
+
+```bash
+gld tool call list_runs status:='["running","unknown"]'     # 还在跑的、结局不明的
+gld tool call list_runs started_within_minutes:=60 limit:=5  # 最近一小时的 5 条
+```
+
+- 每页默认 20 条、最多 64 条，`next_cursor` 交回 `cursor` 翻下一页。翻页中途又起了新命令，新的排在第一页
+  前面，后面的页不重也不漏。
+- 只看得到自己的：别的客户端起的命令不列、也不算进 `total`。命令行 `gld tool call` 是本机这个主体，
+  看不到 ChatGPT 起的命令；反过来也一样。没有跨主体的"管理员视图"。
+- 只读：不停命令、不发信号、不重跑。起它的 gld 已经不在、记录还停在 `running` 的，列出来是 `unknown`
+  （和读输出时一样会写回记录）。
+- 列出来不等于还能当任务证据：看 `workspace_writes_since_start`，`null`（gld 重启过）就要重跑。
+- 列不到的：没落盘的命令（`kept_on_disk: false`）、结束超过 7 天或被 64 条配额挤掉的、`run.json` 读不出来的。
 
 重启之后看 `termination_reason`：
 

@@ -94,7 +94,7 @@ cd gld && git pull && cargo build --release --locked -p gld   # 产物 target/re
 #    用发行包的，解压出来的 gld-*/gld 就是，下面第 3 步换成它
 
 # 2. 记下现在的样子（都不含明文凭据，可以放心存），再留两份备份好回滚
-gld tool list --served | sed -n 2p > /tmp/gld-tools-before.txt   # tools/list：28 个工具  指纹 …
+gld tool list --served | sed -n 2p > /tmp/gld-tools-before.txt   # tools/list：29 个工具  指纹 …
 gld ls > /tmp/gld-before.txt
 mkdir -p ~/.local/opt
 cp -p "$(command -v gld)" ~/.local/opt/gld-$(date +%Y%m%d-%H%M)
