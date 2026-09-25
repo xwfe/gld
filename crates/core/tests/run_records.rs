@@ -371,6 +371,7 @@ fn list(ctx: &ToolContext, args: Value) -> Value {
     listed
 }
 
+#[cfg(unix)]
 fn listed_ids(listed: &Value) -> Vec<String> {
     listed["runs"]
         .as_array()
@@ -381,6 +382,7 @@ fn listed_ids(listed: &Value) -> Vec<String> {
 }
 
 /// 跑一条前台命令等它结束，返回 session_id。
+#[cfg(unix)]
 fn run_to_end(fx: &Fixture, cmd: &str) -> String {
     let ran = call_tool(
         &fx.ctx,
@@ -393,6 +395,7 @@ fn run_to_end(fx: &Fixture, cmd: &str) -> String {
 
 /// 以一条真记录为底，在同一个项目里造一条改过字段的记录。用来摆出正常流程里要靠 `kill -9`、
 /// 等 7 天才出得来的状态。
+#[cfg(unix)]
 fn forge_record(fx: &Fixture, template: &str, edit: impl FnOnce(&mut Value)) -> String {
     let source = record_path(&fx.workspace, template);
     let mut record: Value =
