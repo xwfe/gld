@@ -50,6 +50,14 @@ cargo test -p gld-daemon
 cargo test -p gld --test daemon_lifecycle
 ```
 
+**Windows CI 不跑全套**，只跑 `ci.yml` 里 `windows` job 列出的两小组：补丁落盘与写锁
+（`gld-core` 单元测试），和 `daemon_lifecycle.rs` 里点名的一小组端到端测试（命名管道上的
+守护进程起停、单实例锁、经守护进程跑命令、停命令不留孤儿、运行记录的 `exited` /
+`interrupted`）。后者跑的是这次编出来的 `target/debug/gld`，**不算下载包验收**。清单只写在
+`ci.yml` 一处；往里加测试前先把 fixture 改成两边都能跑（`sh` 脚本、`sleep`、`pgrep` 在
+Windows 上都没有，`daemon_lifecycle.rs` 里的 `Sleeper`、`write_script` 是现成的写法）。
+测试改了名要同步改清单，否则那一步会报"条数不对"。
+
 ## 文档与完成声明的契约
 
 README 只保留定位、安装、使用、关键边界和导航；产品行为写在 `docs/`，设计取舍与历史

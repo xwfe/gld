@@ -66,15 +66,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Windows 上守护进程走命名管道，与 Unix domain socket 是两套实现，
-      # 至少要保证它能编过；运行时行为由使用者反馈补充。
+      # 至少要保证它能编过；运行时只验下面两步挑出来的小组。
       - run: cargo check --workspace --all-targets --locked
       # 补丁落盘这一块在 Windows 上真跑一遍。为什么单挑它：`toexec_fs::replace`
       # 在那里的语义和 Unix 不一样（替换不了只读目标、目标被独占打开时失败），
       # 而 gld 有 Windows 发布构建。跨仓评审 X01 修的正是这条路径上会丢文件的
       # 老实现——它先 remove_file 再 rename，后一步失败旧文件就没了。
       #
-      # 为什么不是 --workspace：守护进程、命名管道、进程树那些都还没在 Windows
-      # 上验过，一次全开只会得到一片红，分不出哪些是真问题。要扩就一块一块加。
+      # 为什么不是 --workspace：其余测试大多没在 Windows 上跑过，一次全开只会得到
+      # 一片红，分不出哪些是真问题。要扩就一块一块加（守护进程那一组见下一步）。
       # 连 tools::workspace_runtime 一起跑：写锁的跨进程那一层在 Windows 上是
       # LockFileEx，跟 Unix 的 flock 不是一回事（强制锁、按句柄），编得过不代表
       # 拦得住。
@@ -88,6 +88,48 @@ jobs:
           # 读得到。不塞这一段，外面只能看到 "exit code 101"。%0A 是换行转义。
           msg=$(grep -E -A 3 "panicked at|^failures:|FAILED" test.log | head -40 | awk '{printf "%s%%0A", $0}')
           echo "::error title=Windows 上的补丁落盘测试失败::$msg"
+          exit 1
+      # 跑的是这次 checkout 编出来的 target/debug/gld，**不是下载包验收**：发布包的
+      # 打包、解压、Defender/SmartScreen、PATH 安装这些都不在这里。
+      #
+      # 选的这 9 条在 daemon_lifecycle.rs 里，各验一件 Windows 上另有实现的事：命名管道
+      # 上的守护进程起停、daemon.lock 的单实例锁（LockFileEx）、按映像路径认 pid、
+      # 经守护进程跑命令拿退出码和输出、taskkill 停命令不留孤儿、运行记录里的
+      # exited / interrupted。每条为什么选、怎么跨平台写的，看测试上方的注释。
+      # 测试改了名，这里按名字过滤就少跑一条、照样"通过"，所以末尾核对条数。
+      - name: 构建包运行测试（不是下载包验收）
+        timeout-minutes: 20
+        run: |
+          export GLD_HOME="$(mktemp -d)"
+          tests=(
+            full_lifecycle_through_the_real_binary
+            a_second_daemon_on_the_same_home_is_refused
+            a_recycled_pid_is_not_mistaken_for_the_daemon
+            a_command_exit_code_and_outcome_survive_a_daemon_restart
+            stopping_the_daemon_stops_commands_started_through_tool_call
+            a_direct_tool_call_does_not_leave_its_background_command_behind
+            a_command_stopped_by_a_daemon_restart_is_on_record_as_interrupted
+            the_next_direct_tool_call_reads_what_the_previous_one_left
+            a_command_started_through_the_service_is_interrupted_by_a_daemon_restart
+          )
+          if cargo test -p gld --test daemon_lifecycle --locked -- --exact "${tests[@]}" 2>&1 | tee run.log; then
+            if grep -q "test result: ok. ${#tests[@]} passed" run.log; then
+              exit 0
+            fi
+            echo "::error title=Windows 构建包运行测试条数不对::应跑 ${#tests[@]} 条，实际：$(grep 'test result' run.log)"
+            exit 1
+          fi
+          # 失败的测试会把数据目录留在盘上（见 tests/common/env.rs 的 Drop），里面的
+          # daemon.log 是唯一能说清守护进程当时怎么了的东西，打到日志里。
+          # 末尾的 || true：Actions 的 bash 带 -eo pipefail，没有留下现场（比如编译就失败了）
+          # 时 grep 返回 1，会让这一步在写出下面的 annotation 之前就退出。
+          grep -o "失败现场保留在 .*" run.log | sed 's/^失败现场保留在 //' | while read -r home; do
+            log="$(cygpath -u "$home")/logs/daemon.log"
+            echo "===== $log"
+            tail -n 80 "$log" 2>/dev/null || echo "（没有 daemon.log）"
+          done || true
+          msg=$(grep -E -A 3 "panicked at|^failures:|FAILED" run.log | head -40 | awk '{printf "%s%%0A", $0}')
+          echo "::error title=Windows 构建包运行测试失败::$msg"
           exit 1
 
   msrv:
