@@ -96,7 +96,7 @@ jobs:
       # 上的守护进程起停、daemon.lock 的单实例锁（LockFileEx）、按映像路径认 pid、
       # 经守护进程跑命令拿退出码和输出、taskkill 停命令不留孤儿、运行记录里的
       # exited / interrupted。每条为什么选、怎么跨平台写的，看测试上方的注释。
-      # 测试改了名，这里按名字过滤就少跑一条、照样"通过"，所以末尾核对条数。
+      # 测试改了名，--exact 就一条也匹配不上，所以每条都要核对"1 passed"。
       - name: 构建包运行测试（不是下载包验收）
         timeout-minutes: 20
         run: |
@@ -112,24 +112,35 @@ jobs:
             the_next_direct_tool_call_reads_what_the_previous_one_left
             a_command_started_through_the_service_is_interrupted_by_a_daemon_restart
           )
-          if cargo test -p gld --test daemon_lifecycle --locked -- --exact "${tests[@]}" 2>&1 | tee run.log; then
-            if grep -q "test result: ok. ${#tests[@]} passed" run.log; then
-              exit 0
+          # 先编好，下面逐条跑时不把编译时间算进每条的超时。
+          cargo test -p gld --test daemon_lifecycle --locked --no-run
+          # 逐条跑、每条最多 3 分钟：一起跑时一条卡死会把整步 20 分钟耗光，别的失败
+          # 连原因都打不出来（2026-09-25 第一次跑就是这样）。--nocapture 让卡住的那条
+          # 也留下它走到了哪一步。
+          failed=()
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            if timeout 180 cargo test -p gld --test daemon_lifecycle --locked -- --exact "$t" --nocapture > "run-$t.log" 2>&1 \
+              && grep -q "test result: ok. 1 passed" "run-$t.log"; then
+              echo "ok"
+            else
+              failed+=("$t")
+              tail -n 60 "run-$t.log"
+              # 失败的测试把数据目录留在盘上（tests/common/env.rs 的 Drop），里面的 daemon.log
+              # 是唯一能说清守护进程当时怎么了的东西。末尾 || true：没留下现场时 grep 返回 1，
+              # 在 -eo pipefail 下会让整步提前退出。
+              grep -o "失败现场保留在 .*" "run-$t.log" | sed 's/^失败现场保留在 //' | while read -r home; do
+                log="$(cygpath -u "$home")/logs/daemon.log"
+                echo "----- $log"
+                tail -n 60 "$log" 2>/dev/null || echo "（没有 daemon.log）"
+              done || true
             fi
-            echo "::error title=Windows 构建包运行测试条数不对::应跑 ${#tests[@]} 条，实际：$(grep 'test result' run.log)"
-            exit 1
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -eq 0 ]; then
+            exit 0
           fi
-          # 失败的测试会把数据目录留在盘上（见 tests/common/env.rs 的 Drop），里面的
-          # daemon.log 是唯一能说清守护进程当时怎么了的东西，打到日志里。
-          # 末尾的 || true：Actions 的 bash 带 -eo pipefail，没有留下现场（比如编译就失败了）
-          # 时 grep 返回 1，会让这一步在写出下面的 annotation 之前就退出。
-          grep -o "失败现场保留在 .*" run.log | sed 's/^失败现场保留在 //' | while read -r home; do
-            log="$(cygpath -u "$home")/logs/daemon.log"
-            echo "===== $log"
-            tail -n 80 "$log" 2>/dev/null || echo "（没有 daemon.log）"
-          done || true
-          msg=$(grep -E -A 3 "panicked at|^failures:|FAILED" run.log | head -40 | awk '{printf "%s%%0A", $0}')
-          echo "::error title=Windows 构建包运行测试失败::$msg"
+          echo "::error title=Windows 构建包运行测试失败 ${#failed[@]}/${#tests[@]}::${failed[*]}"
           exit 1
 
   msrv:
