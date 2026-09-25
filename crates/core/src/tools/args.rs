@@ -31,6 +31,7 @@ const BOUNDED: &[(&str, &str, u64, u64, u64)] = &[
     ("kill_session", "wait_ms", 5_000, 0, 30_000),
     ("kill_session", "max_output_bytes", 32_768, 1, 1_048_576),
     ("read_output", "limit", 4_096, 1, 1_048_576),
+    ("list_runs", "limit", 20, 1, 64),
     ("git_status", "max_entries", 500, 1, 10_000),
     ("git_diff", "context_lines", 3, 0, 20),
     ("git_diff", "max_bytes", 65_536, 1_024, 1_048_576),
@@ -134,6 +135,9 @@ mod tests {
         ("history_manage", "max_bytes"),
         // Hidden from clients and not read by any code.
         ("request_permissions", "ttl_seconds"),
+        // A filter, not a size: clamping 20000 to 10080 would quietly list
+        // a different set of runs, so list_runs refuses it instead.
+        ("list_runs", "started_within_minutes"),
     ];
 
     /// The aggregate tool routes these arguments to the tool that owns them.

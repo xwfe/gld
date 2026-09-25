@@ -359,3 +359,253 @@ fn a_command_that_ignores_term_is_still_stopped() {
             .expect("json");
     assert_eq!(record["status"], "killed", "{record}");
 }
+
+// ---- list_runs：不知道 session_id 时找回自己的命令 ----
+
+fn list(ctx: &ToolContext, args: Value) -> Value {
+    let listed = call_tool(ctx, "list_runs", &args);
+    assert_eq!(listed["ok"], true, "{listed}");
+    listed
+}
+
+fn listed_ids(listed: &Value) -> Vec<String> {
+    listed["runs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("没有 runs：{listed}"))
+        .iter()
+        .map(|run| run["session_id"].as_str().expect("id").to_string())
+        .collect()
+}
+
+/// 跑一条前台命令等它结束，返回 session_id。
+fn run_to_end(fx: &Fixture, cmd: &str) -> String {
+    let ran = call_tool(
+        &fx.ctx,
+        "exec_command",
+        &json!({"cmd": cmd, "yield_time_ms": 10_000, "timeout_ms": 30_000}),
+    );
+    assert_eq!(ran["termination_reason"], "exited", "{ran}");
+    session_id(&ran)
+}
+
+/// 以一条真记录为底，在同一个项目里造一条改过字段的记录。用来摆出正常流程里要靠 `kill -9`、
+/// 等 7 天才出得来的状态。
+fn forge_record(fx: &Fixture, template: &str, edit: impl FnOnce(&mut Value)) -> String {
+    let source = record_path(&fx.workspace, template);
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&source).expect("run.json")).expect("json");
+    let id = uuid::Uuid::new_v4().to_string();
+    record["session_id"] = json!(id);
+    edit(&mut record);
+    let dir = source.parent().unwrap().parent().unwrap().join(&id);
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(dir.join("run.json"), serde_json::to_vec(&record).unwrap()).expect("write");
+    id
+}
+
+/// 换了对话、忘了 id，也能列出自己跑过的命令：新的在前，给的 `output_refs` 直接能交给
+/// `read_output`，每个流写了多少字节和读出来的对得上。
+#[cfg(unix)]
+#[test]
+fn my_runs_are_listed_newest_first_and_their_refs_read_back() {
+    let fx = fixture();
+    script(&fx.workspace, "ok", "echo 第一条");
+    script(
+        &fx.workspace,
+        "fail",
+        "echo 第二条\necho 出错了 >&2\nexit 4",
+    );
+    let first = run_to_end(&fx, "./ok");
+    let second = run_to_end(&fx, "./fail");
+
+    let listed = list(&fx.ctx, json!({}));
+    assert_eq!(listed["total"], 2, "{listed}");
+    assert_eq!(listed_ids(&listed), vec![second.clone(), first.clone()]);
+    assert_eq!(listed["next_cursor"], Value::Null, "{listed}");
+
+    let newest = &listed["runs"][0];
+    assert_eq!(newest["command"], "./fail", "{newest}");
+    assert_eq!(newest["termination_reason"], "exited", "{newest}");
+    assert_eq!(newest["exit_code"], 4, "{newest}");
+    assert_eq!(newest["command_ok"], false, "{newest}");
+    assert_eq!(newest["running"], false, "{newest}");
+    assert_eq!(newest["started_by_this_gld"], true, "{newest}");
+    assert_eq!(newest["workspace_writes_since_start"], 0, "{newest}");
+    assert_eq!(newest["stderr_bytes"], "出错了\n".len(), "{newest}");
+    // 摘要，不是输出：列表里不带输出正文。
+    assert!(!listed.to_string().contains("第二条"), "{listed}");
+
+    let stdout_ref = newest["output_refs"]["stdout"].as_str().expect("ref");
+    let read = call_tool(&fx.ctx, "read_output", &json!({"output_ref": stdout_ref}));
+    assert_eq!(read["content"], "第二条\n", "{read}");
+    assert_eq!(read["total_stream_bytes"], newest["stdout_bytes"], "{read}");
+}
+
+/// 别的主体一条也看不到，连"有几条"都看不到：`total` 是按主体过滤之后才数的。
+#[cfg(unix)]
+#[test]
+fn another_caller_lists_none_of_my_runs_not_even_a_count() {
+    use gld_core::auth::{AuthContext, Principal};
+    use gld_core::tools::call_tool_as;
+    let fx = fixture();
+    script(&fx.workspace, "ok", "echo 只给我看");
+    run_to_end(&fx, "./ok");
+
+    let stranger = Caller::from_auth(&AuthContext::new(
+        Principal::OAuthClient {
+            client_id: "stranger".into(),
+        },
+        "hub",
+    ));
+    let theirs = call_tool_as(&fx.ctx, &stranger, "list_runs", &json!({}));
+    assert_eq!(theirs["ok"], true, "{theirs}");
+    assert_eq!(theirs["total"], 0, "{theirs}");
+    assert_eq!(theirs["runs"], json!([]), "{theirs}");
+    assert!(!theirs.to_string().contains("./ok"), "{theirs}");
+}
+
+/// 翻页中途又起了新命令：新的排在最前面，下一页照旧从游标往后接，不重不漏。
+/// 游标指的那条被清掉了也接得上，只是多一条提示。
+#[cfg(unix)]
+#[test]
+fn paging_survives_new_runs_and_a_cleaned_up_cursor() {
+    let fx = fixture();
+    script(&fx.workspace, "ok", "echo hi");
+    let oldest = run_to_end(&fx, "./ok");
+    let middle = run_to_end(&fx, "./ok");
+    let newest = run_to_end(&fx, "./ok");
+
+    let page1 = list(&fx.ctx, json!({"limit": 2}));
+    assert_eq!(listed_ids(&page1), vec![newest.clone(), middle.clone()]);
+    assert_eq!(page1["total"], 3, "{page1}");
+    let cursor = page1["next_cursor"].as_str().expect("有下一页").to_string();
+
+    let later = run_to_end(&fx, "./ok");
+    let page2 = list(&fx.ctx, json!({"limit": 2, "cursor": cursor}));
+    assert_eq!(listed_ids(&page2), vec![oldest.clone()], "{page2}");
+    assert_eq!(page2["next_cursor"], Value::Null, "{page2}");
+    assert_eq!(page2["warnings"], json!([]), "{page2}");
+    assert_eq!(listed_ids(&list(&fx.ctx, json!({"limit": 1})))[0], later);
+
+    // 游标那条没了（被配额或年龄清掉）：从它原来的位置接着往后，提示一句。
+    fs::remove_dir_all(record_path(&fx.workspace, &middle).parent().unwrap()).expect("rm");
+    let page2 = list(&fx.ctx, json!({"limit": 2, "cursor": cursor}));
+    assert_eq!(listed_ids(&page2), vec![oldest], "{page2}");
+    assert_eq!(
+        page2["warnings"].as_array().map(Vec::len),
+        Some(1),
+        "{page2}"
+    );
+}
+
+/// 起它的 gld 进程已经不在了、记录还停在 running（`kill -9` 之后就是这样）：列出来是
+/// `unknown`，不说成也不说败；列表不发任何信号，那个 pid 上的进程照样活着。
+#[cfg(unix)]
+#[test]
+fn a_run_whose_gld_is_gone_is_listed_as_unknown_and_left_alone() {
+    let fx = fixture();
+    script(&fx.workspace, "ok", "echo hi");
+    let template = run_to_end(&fx, "./ok");
+    let mut bystander = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("sleep");
+    let pid = bystander.id();
+    let orphan = forge_record(&fx, &template, |record| {
+        record["status"] = json!("running");
+        record["exit_code"] = Value::Null;
+        record["finished_at_ms"] = Value::Null;
+        record["owner"] = json!("gld-instance-that-is-gone");
+        record["pid"] = json!(pid);
+    });
+
+    let listed = list(&fx.ctx, json!({"status": ["unknown"]}));
+    assert_eq!(listed_ids(&listed), vec![orphan.clone()], "{listed}");
+    let run = &listed["runs"][0];
+    assert_eq!(run["command_ok"], Value::Null, "{run}");
+    assert_eq!(run["started_by_this_gld"], false, "{run}");
+    assert_eq!(run["workspace_writes_since_start"], Value::Null, "{run}");
+    // 结论写回了记录：下一个读的人看到的是同一个。
+    let record: Value =
+        serde_json::from_slice(&fs::read(record_path(&fx.workspace, &orphan)).unwrap()).unwrap();
+    assert_eq!(record["status"], "unknown", "{record}");
+    assert_eq!(
+        bystander.try_wait().expect("wait"),
+        None,
+        "列表把别人的进程停了"
+    );
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+}
+
+/// 本进程起的、记录还是 running、内存表里却没有：列表不改它。`insert` 先建记录后放进
+/// 内存表，列表碰巧夹在中间时，照 `load_detached` 的规矩改成 unknown 就把一条刚起的命令写错了。
+#[cfg(unix)]
+#[test]
+fn listing_never_marks_this_processs_own_running_record_unknown() {
+    let fx = fixture();
+    script(&fx.workspace, "ok", "echo hi");
+    let template = run_to_end(&fx, "./ok");
+    let starting = forge_record(&fx, &template, |record| {
+        record["status"] = json!("running");
+        record["exit_code"] = Value::Null;
+        record["finished_at_ms"] = Value::Null;
+        record["owner"] = json!(gld_core::tools::runs::instance_id());
+    });
+    let listed = list(&fx.ctx, json!({"status": ["running"]}));
+    assert_eq!(listed_ids(&listed), vec![starting.clone()], "{listed}");
+    let record: Value =
+        serde_json::from_slice(&fs::read(record_path(&fx.workspace, &starting)).unwrap()).unwrap();
+    assert_eq!(record["status"], "running", "{record}");
+}
+
+/// 结束超过 7 天、还没轮到清理的不列出来：按保留规矩它已经不在了。时间窗口按起跑时间筛。
+#[cfg(unix)]
+#[test]
+fn old_runs_are_not_listed_and_the_time_window_filters() {
+    let fx = fixture();
+    script(&fx.workspace, "ok", "echo hi");
+    let fresh = run_to_end(&fx, "./ok");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let day = 24 * 60 * 60 * 1000;
+    let stale = forge_record(&fx, &fresh, |record| {
+        record["started_at_ms"] = json!(now - 8 * day);
+        record["finished_at_ms"] = json!(now - 8 * day + 1000);
+    });
+    let hours_ago = forge_record(&fx, &fresh, |record| {
+        record["started_at_ms"] = json!(now - 3 * 60 * 60 * 1000);
+        record["finished_at_ms"] = json!(now - 3 * 60 * 60 * 1000 + 1000);
+    });
+
+    let all = listed_ids(&list(&fx.ctx, json!({})));
+    assert_eq!(all, vec![fresh.clone(), hours_ago], "{all:?}");
+    assert!(!all.contains(&stale));
+    let recent = listed_ids(&list(&fx.ctx, json!({"started_within_minutes": 60})));
+    assert_eq!(recent, vec![fresh]);
+}
+
+/// 参数写错直接报错，不悄悄当成"不筛"：筛错了的空列表会被当成"没跑过"。
+#[test]
+fn bad_list_runs_arguments_are_refused() {
+    let fx = fixture();
+    for args in [
+        json!({"status": ["done"]}),
+        json!({"status": "running"}),
+        json!({"started_within_minutes": 0}),
+        json!({"started_within_minutes": 20_000}),
+        json!({"cursor": "not-a-cursor"}),
+        json!({"session_id": "x"}),
+    ] {
+        let refused = call_tool(&fx.ctx, "list_runs", &args);
+        assert_eq!(
+            refused["error"]["code"], "INVALID_ARGUMENT",
+            "{args} → {refused}"
+        );
+    }
+    let empty = list(&fx.ctx, json!({}));
+    assert_eq!(empty["total"], 0, "{empty}");
+    assert_eq!(empty["records_kept"], true, "{empty}");
+}

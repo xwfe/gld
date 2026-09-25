@@ -227,6 +227,50 @@ impl RunLog {
         read_stream(&self.dir.join(&record.session_id), stream)
     }
 
+    /// 这个主体在这个项目里的全部记录，按起跑时间从新到旧（同一毫秒按 id）。给 `list_runs` 用。
+    ///
+    /// 别的主体的、`run.json` 读不出来的、结束超过 [`MAX_AGE`] 还没被清掉的，都不在里面：
+    /// 读不出来的分不清是谁的，报个数就等于告诉别人"这里有东西"。
+    ///
+    /// 起它的 gld 进程不在了的 `running` 照 [`RunLog::load`] 改成 `unknown`。**本进程起的不动**，
+    /// 哪怕内存里没有：[`crate::tools::session::SessionStore::insert`] 先建记录、后放进内存表，
+    /// 列表正好夹在中间的话，按 `load_detached` 的规矩会把一条刚起的命令写成 `unknown`。
+    pub fn list(&self) -> Vec<RunRecord> {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let now = now_ms();
+        let max_age = MAX_AGE.as_millis() as u64;
+        let mut records: Vec<RunRecord> = entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_str().is_some_and(valid_id))
+            .filter_map(|entry| {
+                let dir = entry.path();
+                let record = read_record(&dir)?;
+                (record.caller == self.caller).then(|| settle(&self.root, &dir, record))
+            })
+            .filter(|record| {
+                record.is_running()
+                    || now.saturating_sub(record.finished_at_ms.unwrap_or(record.started_at_ms))
+                        < max_age
+            })
+            .collect();
+        records.sort_by(|a, b| {
+            (b.started_at_ms, &b.session_id).cmp(&(a.started_at_ms, &a.session_id))
+        });
+        records
+    }
+
+    /// 一条记录的某个流一共写过多少字节（不是盘上留着的那么多）。只看文件名和大小，不读内容，
+    /// 列表一次几十条也不用把几十 MiB 日志读一遍。
+    pub fn stream_total(&self, record: &RunRecord, stream: &str) -> u64 {
+        segments(&self.dir.join(&record.session_id), stream)
+            .last()
+            .map_or(0, |(start, path)| {
+                start + fs::metadata(path).map_or(0, |meta| meta.len())
+            })
+    }
+
     /// 清掉这个项目超出配额和太旧的记录。
     fn sweep(&self) {
         sweep_project(&self.root, &self.dir);

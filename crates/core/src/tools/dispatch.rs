@@ -642,6 +642,8 @@ fn dispatch_tool(
             exec::exec_command(ctx, &ctx.runtime.sessions_for(caller), &effective_args)
         }
         "read_output" => session::read_output(&ctx.runtime.sessions_for(caller), &effective_args),
+        // 只列这个主体自己的记录：和另外四个用同一张按目录 + 主体分的表。
+        "list_runs" => session::list_runs(&ctx.runtime.sessions_for(caller), &effective_args),
         "write_stdin" => session::write_stdin(&ctx.runtime.sessions_for(caller), &effective_args),
         "kill_session" => session::kill_session(&ctx.runtime.sessions_for(caller), &effective_args),
         "git_status" => git::git_status(ws, &effective_args),

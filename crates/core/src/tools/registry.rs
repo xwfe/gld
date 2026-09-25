@@ -372,6 +372,14 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
         false,
     ),
     (
+        "list_runs",
+        "List runs",
+        "List this connection's command runs in the workspace, newest first, when you do not have the session_id: after a restart, in a new conversation, or to find commands still running. Returns summaries only (redacted command, termination_reason, exit_code, times, bytes per stream) and output_refs to pass to read_output. Commands started by other connections are never listed or counted. Listing does not stop anything; a run started before the server restarted is still listed but does not count as fresh task evidence (workspace_writes_since_start is null).",
+        true,
+        false,
+        false,
+    ),
+    (
         "list_skills",
         "List skills",
         "List skills discovered from the enabled IDE and coding-agent providers. Skill bodies are loaded separately on demand. Files that look like skills but could not be taken in are listed under skipped, with the reason. Skills with disableModelInvocation are for the user to start: use one only when the user asks for it by name.",
@@ -601,6 +609,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "write_stdin",
     "kill_session",
     "read_output",
+    "list_runs",
     "git_status",
     "git_diff",
     "git_log",
@@ -639,6 +648,7 @@ pub const COMPACT_TOOLS: &[&str] = &[
     "write_stdin",
     "kill_session",
     "read_output",
+    "list_runs",
     "git_status",
     "git_diff",
     "git_log",
@@ -663,6 +673,7 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "search_text",
     "grep_text",
     "read_output",
+    "list_runs",
     "git_status",
     "git_diff",
     "git_log",
@@ -712,6 +723,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "write_stdin",
     "kill_session",
     "read_output",
+    "list_runs",
     "git_status",
     "git_diff",
     "git_log",
@@ -780,6 +792,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "grep_text",
     "grep",
     "read_output",
+    "list_runs",
     "git_status",
     "git_diff",
     "git_log",
@@ -1495,6 +1508,20 @@ pub fn input_schema(name: &str) -> Value {
             "required": ["output_ref"],
             "additionalProperties": false
         }),
+        "list_runs" => json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["running", "exited", "timeout", "killed", "interrupted", "unknown"] },
+                    "description": "Only runs whose termination_reason is one of these."
+                },
+                "started_within_minutes": { "type": "integer", "minimum": 1, "maximum": 10080, "description": "Only runs started in the last N minutes." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 64, "default": 20 },
+                "cursor": { "type": "string", "description": "next_cursor from the previous page." }
+            },
+            "additionalProperties": false
+        }),
         "git_status" => json!({
             "type": "object",
             "properties": {
@@ -1618,7 +1645,10 @@ pub fn input_schema(name: &str) -> Value {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{input_schema, list_tools_for_profile, tool_api_descriptor};
+    use super::{
+        exposed_tool_names, input_schema, list_tools_for_profile, tool_api_descriptor,
+        MUTATING_TOOLS, READ_ONLY_TOOLS,
+    };
 
     /// 能写能执行的工具，在任何工具集里都不能标成只读：客户端拿这个标注决定要不要
     /// 让用户确认（审查 D08）。
@@ -1665,6 +1695,22 @@ mod tests {
         assert_eq!(defaulted.tool_profile, "compact");
     }
 
+    /// 只读 grant 拿到的就是 read-only 这一份（hub::read_only_allows）。它能列的只有自己起的命令，
+    /// 而只读 grant 起不了命令，所以列出来总是空的；放进来是为了四档口径一致，不是给它开口子。
+    #[test]
+    fn list_runs_is_read_only_and_offered_wherever_read_output_is() {
+        for profile in ["core", "compact", "read-only", "advanced"] {
+            let names = exposed_tool_names(profile);
+            assert_eq!(
+                names.contains(&"read_output"),
+                names.contains(&"list_runs"),
+                "{profile}"
+            );
+        }
+        assert!(READ_ONLY_TOOLS.contains(&"list_runs"));
+        assert!(!MUTATING_TOOLS.contains(&"list_runs"));
+    }
+
     #[test]
     fn core_catalog_excludes_non_persistent_permission_tool() {
         let tools = list_tools_for_profile("core");
@@ -1674,7 +1720,7 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), 41);
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_manage"));
         assert!(names.contains(&"planning_manage"));

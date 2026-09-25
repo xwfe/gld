@@ -285,6 +285,14 @@ fn start_ticker(env: &Env, extra: &[&str]) -> String {
         .to_string()
 }
 
+/// 不拿 id，按 `list_runs` 找回最新的那条：重启后换了对话、id 没转述出来时就是这么找的。
+#[cfg(unix)]
+fn newest_listed(env: &Env) -> serde_json::Value {
+    let listed = env.json(&["--json", "tool", "call", "list_runs", "limit:=1"]);
+    assert_eq!(listed["total"], 1, "{listed}");
+    listed["runs"][0].clone()
+}
+
 #[cfg(unix)]
 fn read_back(env: &Env, extra: &[&str], session_id: &str) -> serde_json::Value {
     let output_ref = format!("output_ref=session:{session_id}:stdout");
@@ -309,10 +317,14 @@ fn a_command_stopped_by_a_daemon_restart_is_on_record_as_interrupted() {
 
     env.ok(&["daemon", "stop"]);
     env.ok(&["daemon", "start"]);
+    let listed = newest_listed(&env);
     let read = read_back(&env, &[], &session_id);
     if still_running(marker) {
         let _ = Command::new("pkill").args(["-f", marker]).status();
     }
+    assert_eq!(listed["session_id"], session_id.as_str(), "{listed}");
+    assert_eq!(listed["termination_reason"], "interrupted", "{listed}");
+    assert_eq!(listed["started_by_this_gld"], false, "{listed}");
     assert_eq!(read["termination_reason"], "interrupted", "{read}");
     assert_eq!(read["running"], false, "{read}");
     assert_eq!(read["command_ok"], false, "{read}");
@@ -352,6 +364,11 @@ fn a_command_whose_daemon_was_killed_is_on_record_as_unknown() {
         let _ = Command::new("pkill").args(["-f", marker]).status();
     }
     env.ok(&["daemon", "start"]);
+    // 先列再读：列表这一步就把停在 running 的记录判成 unknown，不靠 read_output 那条路。
+    let listed = newest_listed(&env);
+    assert_eq!(listed["session_id"], session_id.as_str(), "{listed}");
+    assert_eq!(listed["termination_reason"], "unknown", "{listed}");
+    assert!(listed["command_ok"].is_null(), "{listed}");
     let read = read_back(&env, &[], &session_id);
     assert!(
         orphan,
