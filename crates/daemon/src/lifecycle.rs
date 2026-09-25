@@ -245,6 +245,8 @@ pub fn spawn_detached(paths: &DaemonPaths, executable: &Path) -> AppResult<u32> 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // 不然守护进程会顺带继承本进程的输出管道，接着 gld 输出的调用方就一直等 EOF。
+        gld_core::platform::stop_std_handles_being_inherited();
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;

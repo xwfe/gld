@@ -201,3 +201,21 @@ fn terminate_pid(pid: u32) -> AppResult<()> {
         Ok(())
     }
 }
+
+/// 见 [`crate::platform::stop_std_handles_being_inherited`]。
+pub(crate) fn stop_std_handles_being_inherited() {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{SetHandleInformation, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
+    for raw in [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if raw.is_null() {
+            continue;
+        }
+        // 失败（句柄无效、不是本进程的）就算了：最坏是回到原来的行为。
+        let _ =
+            unsafe { SetHandleInformation(HANDLE(raw), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+    }
+}

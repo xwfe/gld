@@ -54,6 +54,18 @@ pub use macos::MacPlatform;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform;
 
+/// 之后起的子进程不再继承本进程的标准输入 / 输出 / 错误句柄。只有 Windows 要做，别的平台是空操作。
+///
+/// Windows 上 Rust 的 `Command` 会把父进程里**所有**可继承的句柄交给子进程
+/// （rust-lang/rust#38227），不只是给它指定的那三个。`gld daemon start` 的输出被管道接着时
+/// （脚本里 `$(gld ls)`、测试的 `Command::output()`），拉起的后台守护进程就把管道的写端也拿走了：
+/// 它不退，管道就不关，调用方永远等不到 EOF。2026-09-25 第一次在 Windows CI 上真跑时卡满了
+/// 20 分钟。给子进程显式指定的 stdio 不受影响：Rust 会另外复制一份可继承的句柄给它。
+pub fn stop_std_handles_being_inherited() {
+    #[cfg(target_os = "windows")]
+    windows::process::stop_std_handles_being_inherited();
+}
+
 static PLATFORM: std::sync::OnceLock<Box<dyn Platform>> = std::sync::OnceLock::new();
 
 pub fn platform() -> &'static dyn Platform {
