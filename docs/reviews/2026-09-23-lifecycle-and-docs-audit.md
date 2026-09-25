@@ -649,6 +649,11 @@ aarch64 包换掉 `bc8e13a` 的构建：先备份二进制（`~/.local/opt/gld-0
 地址、端口等 184 项和 `hub.json` 指纹一致（`daemon.json` 是运行登记，每次重启都变）；`gld health` 全 ✓。
 这次升级本身不改工具表；用户仍要点一次 Refresh，补上 D08 之后一直没刷新的那次。
 
+用户点了 Refresh。服务请求日志里 ChatGPT 用原来的注册客户端连了两轮（`server/discover` → `initialize` →
+`tools/list`），日志最后写入在重启之后。最后那次 `tools/list` 回包 36156 字节，等于服务当前 28 个工具按紧凑 JSON
+算的大小，表里 `confirm` 已是 D08 的新说明。请求日志每行不带时间，"在重启之后"是按文件修改时间判断的；
+ChatGPT 新对话里实际看到的工具定义没逐字核对。
+
 ### 收尾
 
 - 全部提交已推送到 GitHub。0.7.0 当时只是版本号，发布见上一节。

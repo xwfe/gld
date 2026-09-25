@@ -56,7 +56,8 @@
 - [x] 推送 10 个提交（CI 全绿）；本机服务升级到 `e754c51`，凭据与注册客户端逐项指纹一致；机器重启后 `gld daemon start` 恢复。
 - [x] 文档：connect-clients.md 四档表（什么都不用做 / 点 Refresh / 重新授权 / 删了重建）为唯一权威；install.md 升级
   多一步比工具表指纹；development.md 要求发布说明写明连接器要不要动；排障、README、daemon 同步。
-- [ ] ChatGPT 点 Refresh 后核对新工具表；grant 口令在 ChatGPT 授权页上实测（要用户在网页上操作）。
+- [x] ChatGPT 点 Refresh 后核对新工具表（2026-09-25，升到 0.8.0 后：回包 36156 字节与服务当前表一致）。
+- [ ] grant 口令在 ChatGPT 授权页上实测（要用户在网页上操作）。
 - [x] 开机自启：四步命令写进 daemon.md（临时 launchd 任务实测后撤掉），本机由用户自己配。
 - [x] 重启后 cargo 找不到：补全局可执行路径；修 `gld tool call` 上下文缓存不随全局设置失效（`432dfd7`）。
 
