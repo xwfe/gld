@@ -321,3 +321,78 @@ fn wait_for_get(port: u16, path: &str) -> common::http::Reply {
     }
     last
 }
+
+/// Actions 和本机命令行是两个主体：经 Actions 起的命令，`gld tool call list_runs` 列不到，
+/// 反过来也一样；Actions 列得到自己的，给的 output_ref 读得回输出。
+///
+/// 以前 Actions 调工具不带身份，落到和命令行同一个 `local` 主体上，有了 list_runs 就能直接
+/// 列出本机起过的全部命令（独立审查发现）。这条也顺带跑了一遍 Actions 线路上真起进程的工具：
+/// 以前只测过 read_file，不经过工具内核里的 block_on。
+#[cfg(unix)]
+#[test]
+fn actions_and_the_local_cli_do_not_see_each_others_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    env.write("hello", "#!/bin/sh\necho from-actions\n");
+    env.write("local", "#!/bin/sh\necho from-cli\n");
+    for name in ["hello", "local"] {
+        std::fs::set_permissions(
+            env.project.path().join(name),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod");
+    }
+    let port = free_port();
+    env.ok(&["add", ".", "--name", "act"]);
+    env.ok(&["set", "act", &format!("actions.port={port}")]);
+    env.ok(&["start", "-s", "actions"]);
+    let key = env.json(&[
+        "--json",
+        "secret",
+        "ls",
+        "actions_api_key",
+        "--reveal",
+        "-w",
+        "act",
+    ])["value"]
+        .as_str()
+        .expect("actions_api_key")
+        .to_string();
+
+    let ran = post_json(
+        port,
+        "/actions/exec_command",
+        r#"{"cmd":"./hello","yield_time_ms":10000}"#,
+        Some(&key),
+    );
+    assert_eq!(ran.status, 200, "经 Actions 跑命令失败：{}", ran.body);
+    assert!(ran.body.contains("from-actions"), "{}", ran.body);
+    let local = env.json(&["--json", "tool", "call", "exec_command", "cmd=./local"]);
+    assert_eq!(local["exit_code"], 0, "{local}");
+
+    let from_cli = env.json(&["--json", "tool", "call", "list_runs"]);
+    assert_eq!(
+        from_cli["total"], 1,
+        "命令行列到了 Actions 的命令：{from_cli}"
+    );
+    assert_eq!(from_cli["runs"][0]["command"], "./local", "{from_cli}");
+
+    let listed = post_json(port, "/actions/list_runs", "{}", Some(&key));
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    let listed: serde_json::Value = serde_json::from_str(&listed.body).expect("json");
+    let runs = &listed["structured_content"];
+    assert_eq!(runs["total"], 1, "Actions 列到了命令行的命令：{runs}");
+    assert_eq!(runs["runs"][0]["command"], "./hello", "{runs}");
+    let output_ref = runs["runs"][0]["output_refs"]["stdout"]
+        .as_str()
+        .expect("output_ref");
+    let read = post_json(
+        port,
+        "/actions/read_output",
+        &format!(r#"{{"output_ref":"{output_ref}"}}"#),
+        Some(&key),
+    );
+    assert!(read.body.contains("from-actions"), "{}", read.body);
+
+    env.ok(&["stop"]);
+}

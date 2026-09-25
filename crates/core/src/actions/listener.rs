@@ -17,8 +17,8 @@ use tower_http::cors::CorsLayer;
 
 use crate::auth::{
     actions_audience, authorization_server_metadata, authorize_get, authorize_post,
-    external_base_url, register_client, token_exchange, AuthorizeForm, AuthorizeParams,
-    ClientRegistrationRequest, ClientRegistry, OAuthRuntime, TokenForm,
+    external_base_url, register_client, token_exchange, AuthContext, AuthorizeForm,
+    AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, Principal, TokenForm,
 };
 use crate::logs::append_profile_log;
 use crate::tools::{self, is_allowed_tool, policy::PolicySettings, wrap_tool_result, ToolContext};
@@ -376,8 +376,19 @@ fn oauth_not_configured() -> Response {
 async fn execute_action(
     State(state): State<AppState>,
     Path(tool_name): Path<String>,
+    auth: Option<Extension<AuthContext>>,
     body: Option<Json<Value>>,
 ) -> Response {
+    // 鉴权中间件验完挂上的身份；万一没挂（路由没经过它），按匿名算，绝不落到本机主体。
+    let caller = auth.map_or_else(
+        || {
+            tools::Caller::from_auth(&AuthContext::new(
+                Principal::Anonymous,
+                super::auth::ACTIONS_SCOPE,
+            ))
+        },
+        |Extension(auth)| tools::Caller::from_auth(&auth),
+    );
     let arguments = match body {
         Some(Json(value)) if value.is_object() || value.is_null() => {
             if value.is_null() {
@@ -408,11 +419,27 @@ async fn execute_action(
         return (StatusCode::BAD_REQUEST, Json(response)).into_response();
     }
 
-    let structured = if tools::registry::MUTATING_TOOLS.contains(&tool_name.as_str()) {
+    // 工具内核是同步的，exec_command / read_output 里有 block_on，在 async worker 上直接调
+    // 会 panic、连接被掐断，客户端什么也收不到（以前只测过 read_file，碰不到这条）。和 MCP
+    // 监听器一样放进 spawn_blocking。
+    let run = {
+        let ctx = Arc::clone(&state.ctx);
+        let name = tool_name.clone();
+        move || tools::call_tool_as(ctx.as_ref(), &caller, &name, &arguments)
+    };
+    let joined = if tools::registry::MUTATING_TOOLS.contains(&tool_name.as_str()) {
         let _guard = state.write_lock.lock().await;
-        tools::call_tool(state.ctx.as_ref(), &tool_name, &arguments)
+        tokio::task::spawn_blocking(run).await
     } else {
-        tools::call_tool(state.ctx.as_ref(), &tool_name, &arguments)
+        tokio::task::spawn_blocking(run).await
+    };
+    let structured = match joined {
+        Ok(structured) => structured,
+        Err(error) => {
+            let response = json!({ "detail": format!("tool {tool_name} crashed: {error}") });
+            state.usage.record(input_bytes, 0, true, true);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(response)).into_response();
+        }
     };
     let result = wrap_tool_result(structured);
     let is_error = result

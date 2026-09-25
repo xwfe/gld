@@ -8,7 +8,9 @@ use axum::{
     Extension,
 };
 
-use crate::auth::{external_base_url, verify_oauth_bearer_header, OAuthRuntime};
+use crate::auth::{
+    external_base_url, verify_oauth_bearer_header, AuthContext, OAuthRuntime, Principal,
+};
 
 use super::bearer::constant_time_eq;
 
@@ -51,12 +53,22 @@ impl AuthConfig {
     }
 }
 
+/// GPT Actions 这个入口在主体标识里的名字（`noauth:actions`、`bearer:actions`、`oauth:actions:<client>`）。
+///
+/// 以前 Actions 调工具不带身份，落到 [`crate::tools::Caller::local`]，和本机 `gld tool call`
+/// 是同一个主体：两边的命令会话、运行记录互相读得到，有了 `list_runs` 还能直接列出来
+/// （独立审查发现）。验完鉴权就在请求上挂一个自己的 [`AuthContext`]。
+pub const ACTIONS_SCOPE: &str = "actions";
+
 pub async fn require_actions_auth(
     Extension(auth): Extension<Arc<AuthConfig>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     if auth.no_auth() {
+        request
+            .extensions_mut()
+            .insert(AuthContext::new(Principal::Anonymous, ACTIONS_SCOPE));
         return next.run(request).await;
     }
 
@@ -85,6 +97,9 @@ pub async fn require_actions_auth(
             return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response();
         }
 
+        request
+            .extensions_mut()
+            .insert(AuthContext::new(Principal::SharedSecret, ACTIONS_SCOPE));
         return next.run(request).await;
     }
 
@@ -96,8 +111,7 @@ pub async fn require_actions_auth(
             )
                 .into_response();
         };
-        // Actions 没有远端成员，用不上令牌里的 client_id：这里只关心放行还是拒。
-        if let Err(response) = verify_oauth_bearer_header(
+        let identity = match verify_oauth_bearer_header(
             request.headers(),
             oauth,
             &external_base_url(
@@ -106,8 +120,15 @@ pub async fn require_actions_auth(
                 &auth.configured_public_url,
             ),
         ) {
-            return *response;
-        }
+            Ok(identity) => identity,
+            Err(response) => return *response,
+        };
+        request.extensions_mut().insert(AuthContext::new(
+            Principal::OAuthClient {
+                client_id: identity.client_id,
+            },
+            ACTIONS_SCOPE,
+        ));
         return next.run(request).await;
     }
 

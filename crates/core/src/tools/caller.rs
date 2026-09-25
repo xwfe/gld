@@ -6,9 +6,10 @@
 //! 表——经 hub 连进来的两个 OAuth 客户端，A 拿着 B 的 `session_id` 就能读到
 //! B 的命令输出，那是实打实的越权。
 //!
-//! 主体从哪儿来：两条 MCP 路都是监听器验完鉴权得到的
-//! [`crate::auth::AuthContext`]；命令行 `gld tool call`、守护进程内部调用和
-//! 测试是 [`Caller::local`]。
+//! 主体从哪儿来：两条 MCP 路和 GPT Actions 都是监听器验完鉴权得到的
+//! [`crate::auth::AuthContext`]（Actions 的入口名是 `actions`）；命令行 `gld tool call`、
+//! 守护进程内部调用和测试是 [`Caller::local`]。**网络进来的请求不能落到 `local`**：
+//! Actions 以前就是，和命令行互相读得到对方的命令输出。
 //!
 //! # 分得开什么、分不开什么
 //!
