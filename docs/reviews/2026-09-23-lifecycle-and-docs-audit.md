@@ -789,3 +789,33 @@ daemon.log。跑的是这次编出的 `target/debug/gld`，**不是下载包验�
 **仍未验证或未做：**Windows 下载包没实跑；`kill -9` 那条（`pid_in_use` 在 Windows 上是 `null`）、
 `run_records.rs`、按 cwd 找项目（8.3 短路径）还没进 Windows 小组；两个 Windows 修复只有 CI 证据，
 本机交叉检查仍因 `ring` 缺头文件做不了。`list_runs` 还没在真实 ChatGPT 上用过。
+
+### 本机升级到 `684acdd` 与 ChatGPT 只读 grant 实测（2026-09-25 / 10-04）
+
+**升级（用户批准）：**备份二进制（`~/.local/opt/gld-0.8.0-09b1ae5`）和数据目录，在干净的 `684acdd` 上
+`cargo build --release --locked -p gld`，写新文件再改名，`gld daemon restart`。构建提交等于 HEAD；工具表
+28 → 29 个，指纹 `9ed41391e27553c6` → `39557a9cc2871037`（多了 `list_runs`），所以要 Refresh；profiles.json 里口令、
+密钥、地址等 230 项和 `hub.json` 指纹一致；`gld ls` 一字不差。
+
+`gld health` 公网三项当时报错，查下来是本机代理的问题：gld 的代理设置是 `system`（127.0.0.1:7890），这个代理当时
+访问 `ai.xdwa.top` 和 Docker Hub 都 SSL 断开；绕开代理直连，公网 `/mcp` 和两份 OAuth 元数据都是 200。ChatGPT 从外网
+经 Cloudflare 进来，不经本机代理。
+
+**grant 实测：**临时项目 `~/xdw/gld-granttest`，先用命令行在里面跑一条 `git log`（`local` 主体的运行记录）。用户
+自己在终端里跑 `gld grant add granttest-ro granttest` 拿口令（口令不经过这边），在 ChatGPT 新建一条连接器、授权页填
+grant 口令。从请求日志核对：
+
+| 核对 | 结果 |
+| --- | --- |
+| 主体 | 新注册的客户端，标识带 `#grant:…`；原连接器的客户端没变、照常在用 |
+| 工具表 | 23836 字节，比全权的小；整个过程没调过 `apply_patch` / `exec_command`（不在表里），只用 `check_command` 问了 4 次 |
+| `list_runs` | 回包 700 字节，是空列表的大小：命令行起的那条看不到 |
+| 撤销 | `gld grant rm` 之后 ChatGPT 报"连接已过期，重新连接后才能使用"，服务端记 4 次 `[auth] rejected status=401`（`openai-mcp/1.0.0`）；同一时段原连接器的请求照常完成 |
+
+本机用 grant 的 bearer 令牌复现时 401：服务是 OAuth 时只认口令换来的令牌，是设计如此，`grant ls --reveal` 却照样
+显示 bearer 令牌，已在 concepts.md 写明。服务端撤销行为另由 `scoped_grants.rs` 3 条端到端测试在同一份代码上钉住
+（撤销后 401、刷新 400 `invalid_grant`、同名重建旧令牌不复活）。
+
+测完删了 grant、gld 里的项目、它在 `runs/` 和 `harness/workspaces/` 下的记录和项目目录。**仍未验证：**请求日志不记
+内容，ChatGPT 拿到的回包没逐字看；读别的项目被拒只能从回包变小推断；同名重建没在 ChatGPT 上试；测试连接器在
+ChatGPT 里的删除由用户做，它注册的 OAuth 客户端还留在 `hub.json` 里（没有 grant 就只能用服务口令授权，不额外开口子）。
