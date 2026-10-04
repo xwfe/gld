@@ -899,3 +899,32 @@ ChatGPT 起的那个是到点超时退出的。
 HEAD；工具表 29 个，指纹 `39557a9cc2871037` → `d7c4b983b0b20de9`（`read_output` 多了 `session_id`、`change_summary` 少了
 `change_id`、`exec_command` 说明改了），要 Refresh；profiles.json 322 项和 `hub.json` 指纹一致，`gld ls` 一字不差；
 本地 `/mcp` ✓，公网三项绕开本机代理都是 200。
+
+## 12. D10 第三轮：gld 自己的仓库，考 AI 能否自己找出开发规矩（2026-10-04）
+
+**场景：**从 `ba47a5a` 拉 worktree `~/xdw/gld-d10-self`（项目名 `d10-gld`），需求是 `gld grant ls` 只列当前认证方式能用的
+那列凭据、表下说明另一列为什么不显示、`--json` 不变、文档同步。提示词**不给任何命令和文件位置**，看 AI 能不能自己读
+`docs/development.md` 并做到：测试隔离 `GLD_HOME`、fmt、clippy `-D warnings`、改了帮助重新生成 `docs/cli.md`。
+
+**搭场景时顺手修的：**经守护进程跑的项目命令继承了 gld 自己的 `GLD_HOME`，项目里的 `cargo test` 会写进真实数据目录
+（`ba47a5a`，子进程不再带 `GLD_HOME`）。本机升到 `ba47a5a`，工具表没变。
+
+**从 gld 的记录核对：**120 次工具调用、10 条命令。读了 `development.md`、CI 配置、生成脚本、`concepts.md`、`security.md`、
+RFC-0007；先写测试并确认失败（退出码 101）再改，fmt / build / clippy `-D warnings` / 隔离的全量测试都过。文档里的
+`GLD_HOME=$(mktemp -d) cargo test` 经 gld 跑不了（不过 shell），它改用 `cargo --config 'env.GLD_HOME="…/target/…"' test`。
+实现沿用 `grant add` 的 `auth_type == "bearer"` 判断，新测试覆盖 OAuth、bearer 两种和 `--json` 两个字段。真实数据目录
+只多了 d10-gld 自己的任务目录（13 → 14），测试没写进去。
+
+**撞到的一处（gld 的问题）：**仓库要求跑 `scripts/gen-cli-docs.sh`，`exec_command` 拒了（"Workspace 本地入口未获允许"），
+`bash` 也不在白名单。根因：可直接执行的工作区文件按扩展名名单判，默认 `.exe,.bat,.cmd,.ps1` 全是 Windows 的，Unix 上
+没扩展名的能跑、`.sh` 反被拒，拒了也换不来安全；名单已写进每个项目的配置，改默认值无效；报错不说怎么办；gld 自己的
+提示还叫 AI "写成工作区里的脚本"。AI 没去绕策略，照 `--help` 手改了 3 处，我直接跑生成脚本核对，结果一字不差。
+
+| 处理 | 提交 |
+| --- | --- |
+| Unix 上有可执行位的工作区文件直接能跑，名单只在 Windows 起作用；被拒时说原因和办法（`chmod +x` 或用解释器跑）；`security.md` 写明工作区可执行文件不归白名单管 | `fe938db` |
+| 命令没起来时 `command_summary` 直说"没跑"和原因，不再叫人去看是 null 的 `exit_code` | `68eabf6` |
+
+另：`finish` 带 `completed_steps` 被拒，报错说得清楚，AI 去掉就过了，不改。新增测试 1 条（做过变异验证）；全量 874 passed、0 failed。
+
+**这一轮说明的：**开发规矩写进仓库文档，AI 能自己找到并照做；断点在 gld 把仓库自己的入口挡在外面。

@@ -39,7 +39,7 @@
 | 先补验收：D07 / ChatGPT 只读 grant | **已完成**（2026-10-04） | 本机升到 `684acdd` 后，用户在新建的测试连接器上用 grant 口令授权：只看到授权的项目，工具表里没有写类工具（一次也没调过 apply_patch / exec_command），`list_runs` 是空的（命令行起的那条看不到）。`gld grant rm` 之后 ChatGPT 报"连接已过期"，服务端记了 4 次 401；原连接器照常可用。没验：同名重建、逐字核对 ChatGPT 拿到的回包。见审查 §9 |
 | 平行补门禁：D12 / Windows 最小运行测试 | **已完成第一组**（CI run 36093958618） | Windows job 逐条跑 `daemon_lifecycle.rs` 里 9 条（命名管道起停、单实例锁、按映像认 pid、退出码、停命令不留孤儿、运行记录 exited / interrupted），全过。第一次跑查出并修掉 gld 主线程栈溢出和守护进程继承输出管道两个真 bug。跑的是构建产物，**不是下载包验收**；`kill -9` 那条仍 unix-only。下一组按需从 `run_records.rs`、按 cwd 找项目（8.3 短路径）里挑 |
 | 下一项开发：D09 / 运行记录发现 | **已完成**（`list_runs`，未发版） | MCP 工具 `list_runs`，命令行用 `gld tool call list_runs`，不另加命令。独立审查 1 高 3 中 6 低已处理：高的是 GPT Actions 落在本机 `local` 主体上（已改成自己的主体，顺带修掉 Actions 上 `exec_command` 必然 panic）。改了工具表，升级后 ChatGPT 要 Refresh。见审查 §9 |
-| 下一阶段：D10 / 真实项目开发验收 | **Rust、Web 两轮完成**（审查 §10、§11） | 两个场景都靠现有工具走通；修了六处误导或不顺（`command_summary`、按动作查参数、`read_output` 收 `session_id`、排除 Playwright 产物目录、精简收尾回包、写明 10 分钟上限）。下一步按需：长期运行的服务与交互式浏览器（要先定上限和浏览器 MCP 的范围）、任务发现、首次安装依赖 |
+| 下一阶段：D10 / 真实项目开发验收 | **Rust、Web、gld 自身三轮完成**（审查 §10–§12） | 三个场景都靠现有工具走通；修了六处误导或不顺（`command_summary`、按动作查参数、`read_output` 收 `session_id`、排除 Playwright 产物目录、精简收尾回包、写明 10 分钟上限）。第三轮 AI 自己从仓库文档找到了开发规矩，修了项目命令继承 `GLD_HOME`、Unix 上 `.sh` 脚本被拒两处。下一步按需：长期运行的服务与交互式浏览器（要先定上限和浏览器 MCP 的范围）、任务发现、首次安装依赖 |
 
 补验收两项都已完成，下一步是 D10。所有部署、grant 创建/撤销、CI 推送和发布仍须取得对应授权。
 
