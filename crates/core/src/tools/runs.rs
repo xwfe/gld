@@ -780,6 +780,13 @@ mod tests {
         held.try_lock_exclusive().expect("拿锁");
         assert!(owner_alive(&root, "feedbeef"));
         drop(held);
+        // 放锁不一定立刻生效：同一个测试进程里别的测试正好在起子进程时，fork 出来的子进程在
+        // exec 之前拿着这个 fd 的副本（exec 时 CLOEXEC 才关掉），flock 跟着它多留一会儿。
+        // 全量并发跑时偶发过一次失败。真进程退出时锁一定会放，这里给它最多 2 秒。
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while owner_alive(&root, "feedbeef") && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(!owner_alive(&root, "feedbeef"));
         assert!(!path.exists(), "不在了的进程的锁文件该删掉");
         assert!(!owner_alive(&root, "neverexisted"));
