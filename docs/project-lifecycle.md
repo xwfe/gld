@@ -66,7 +66,8 @@ CLI、库和常规后端项目，已有工具足以支持人工监督下的读�
 长命令在返回 `running` 后还没有完成；用 `read_output` 继续读到 `running: false`，
 它会回 `termination_reason`、`exit_code`、`command_ok`。**不能只看工具的 `ok` 或 CLI
 自身退出码**：命令退出 7 时工具 `ok` 仍是 true、`gld tool call` 仍退出 0，要看
-`command_ok` / `exit_code`。Planning 台账（`planning_manage action=state` 的 `execution`）
+`command_ok` / `exit_code`，回包顶层的 `command_summary` 用一句话写着命令成没成（失败的以 `command FAILED` 开头）。
+Planning 台账（`planning_manage action=state` 的 `execution`）
 按命令终态记：`failed` / `timed_out` / `cancelled` / `running` / `unknown`，`last_error` 写明退出码；
 后台命令的终态在 `read_output` 读到时补回（gld 退出时停掉的 `interrupted` 记 `cancelled`，没来得及记
 结局的记 `unknown`）。后台测试期间修改源文件会令证据归属不确定，

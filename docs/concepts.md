@@ -639,6 +639,11 @@ SHA-256 指纹和 HEAD）。全部满足才进 `completed`，证据记进 `chang
 | `EVIDENCE_STALE` | 跑的时候或跑完之后文件变了，测的不是现在的内容；或者 gld 重启过，说不清它跑完之后 gld 有没有改过文件 | 重跑一次 |
 | `EVIDENCE_NOT_FOUND` | 不是这个任务期间起的命令，或 id 写错 | 用 `details.evidence_candidates` 里列的 |
 
+`finish` 可以带一段 `summary`（做了什么、还剩什么），记成一条 `task_summary` 任务事件，脱敏、最多 2000 字符，
+交接时 `task_manage action=events` 看得到；证据被拒时不记。做完的步骤要先用 `action=update` 的 `completed_steps` 记：
+`task_manage` 的每个动作只收自己的参数，`finish` 带 `completed_steps` 会报 `INVALID_ARGUMENT` 并指出该用哪个动作，
+不会像以前那样收下不用。
+
 不带证据调 `finish` 进 `verifying`，回包的 `evidence_candidates` 列出现在就能用的命令；
 `verifying` 里仍可跑测试、改文件（改了之前的证据自然作废）。确认放弃正式验收才用
 `allow_unverified=true`，收成 `completed_unverified`——它只说明没有被接受的证据，
