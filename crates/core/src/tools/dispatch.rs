@@ -748,6 +748,13 @@ fn dispatch_tool(
     }
     record_execution_ledger(ctx, name, &effective_args, &output, task_id.as_deref());
     observe_command_session(ctx, name, &output);
+    if let Some(summary) = outcome::command_summary(&output) {
+        if let Some(object) = output.as_object_mut() {
+            object
+                .entry("command_summary")
+                .or_insert_with(|| json!(summary));
+        }
+    }
     if should_attach_planning_context(ctx, name, &output) {
         if let Ok(latest) = PlanningService::new(ctx.workspace.root()).state() {
             output = attach_planning_context(output, &latest);

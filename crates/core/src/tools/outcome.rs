@@ -94,6 +94,28 @@ pub fn command_outcome(output: &Value) -> Option<CommandOutcome> {
     })
 }
 
+/// 一句话说清命令本身怎样了，放进回包顶层的 `command_summary`。
+///
+/// 顶层 `ok: true`、`status: "exited"` 都只说明工具调用成了，命令退出 101 时照样是这样：
+/// D10 实测 ChatGPT 说"第一次看容易误以为命令成功"。`command_ok` / `exit_code` 才是命令结果，
+/// 这一句把它们翻成人话，不改那两个字段的契约。不是命令结果的回包返回 `None`。
+pub fn command_summary(output: &Value) -> Option<String> {
+    if output.get("ok").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let command = command_outcome(output)?;
+    Some(match command_state(&command) {
+        "completed" => "command succeeded (exit code 0)".into(),
+        "running" => {
+            "command is still running; read_output for more, kill_session to stop it".into()
+        }
+        _ => format!(
+            "command FAILED: {} (the tool call itself worked; see exit_code / command_ok)",
+            describe_failure(&command)
+        ),
+    })
+}
+
 fn command_state(command: &CommandOutcome) -> &'static str {
     match command.status.as_str() {
         "running" => "running",
@@ -127,6 +149,30 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// 顶层 ok: true 时一眼看不出命令失败了；command_summary 用一句话说清，不是命令结果的不加。
+    #[test]
+    fn command_summary_says_what_the_command_did() {
+        let failed = json!({"ok": true, "status": "exited", "termination_reason": "exited", "exit_code": 101, "command_ok": false});
+        let text = command_summary(&failed).expect("summary");
+        assert!(text.starts_with("command FAILED"), "{text}");
+        assert!(text.contains("101"), "{text}");
+        let passed =
+            json!({"ok": true, "termination_reason": "exited", "exit_code": 0, "command_ok": true});
+        assert_eq!(
+            command_summary(&passed).as_deref(),
+            Some("command succeeded (exit code 0)")
+        );
+        let running = json!({"ok": true, "status": "running", "termination_reason": "running"});
+        assert!(command_summary(&running)
+            .expect("running")
+            .contains("still running"));
+        assert_eq!(command_summary(&json!({"ok": true, "content": "x"})), None);
+        assert_eq!(
+            command_summary(&json!({"ok": false, "termination_reason": "exited"})),
+            None
+        );
+    }
 
     #[test]
     fn a_non_zero_exit_is_a_failed_call_even_though_ok_is_true() {
