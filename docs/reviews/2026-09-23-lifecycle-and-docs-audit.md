@@ -833,3 +833,32 @@ ChatGPT 里的删除由用户做，它注册的 OAuth 客户端还留在 `hub.js
 | 下载包 | 校验和 5 个 OK、来源证明 5 个退出 0；两个 macOS 包报 0.8.1；gnu、musl 包在 amd64 Debian 12 容器里报 0.8.1，起停守护进程、`list_runs` 正常 |
 
 **没验：**Windows 下载包没实跑。本机常驻服务还是 `684acdd` 的源码构建（工具表和 0.8.1 一样），没换成发布包。
+
+## 10. D10 第一轮：Rust CLI 场景（2026-10-04）
+
+**场景：**`~/xdw/gld-d10-rust`，零依赖的小 Rust CLI（数词频），埋了现有测试覆盖不到的分词 bug，外加 `--top N`
+需求。用户把一段提示词贴给 ChatGPT（原连接器，服务构建 `684acdd`），要求全程只用 gld：开任务 → 读代码 → 先写失败
+测试并确认失败 → 修复 → 复测 → `git_diff` → 改 README → 再跑一次测试当证据收尾 → 说哪里不顺。
+
+**从 gld 的记录核对：**调用顺序和要求一致（`task_manage start` → 5 次 `read_file` → `apply_patch` 加测试 →
+`cargo test` 退出 101 → `apply_patch` 修代码 → `cargo test` 退出 0 → `git_diff` → `apply_patch` 改 README →
+`cargo test` 退出 0 → `task_manage finish`）。收尾证据是改 README **之后**那一次（`46af2976…`，退出 0，运行期间没写过
+文件），任务 `completed`。我另外在项目里跑了测试（6 passed），逐条试了换行 / 制表符、大小写、首尾标点、撇号和连字符、
+`--top` 的四种非法值，都符合要求。
+
+**ChatGPT 报的两处不顺，都查实并处理：**
+
+| 报的 | 根因 | 处理 |
+| --- | --- | --- |
+| 故意跑失败的测试时顶层 `ok: true`，第一眼像成功 | 契约本来如此（`ok` 是工具调用，`command_ok` / `exit_code` 是命令），但回包里没有一句直说命令失败 | 跑命令的工具回包加 `command_summary`，失败的以 `command FAILED` 开头（`fd3377f`）；契约不动，不改工具表 |
+| `finish` 传了 `completed_steps`，任务完成了，回包里的 `completed_steps` 却是空的 | `task_manage` 的 schema 是各动作参数的并集，分发层按并集查；只有 `update` 读这个参数，`finish` 收下不用 | 每个动作只收自己背后那个工具 schema 里的参数，多出来的报错并指出该用哪个动作（`e9be7e7`） |
+
+对照时又查出两个声明了却从没读过的参数：`finish` 的 `summary`（从桌面版带过来）现在记成 `task_summary` 事件；
+`change_summary` 的 `change_id` 从来不起作用，从 schema 删掉。**这一处改了工具表**，下次本机升级后 ChatGPT 要 Refresh。
+新增测试 4 条，三处实现各做变异，对应测试失败；全量 870 passed、0 failed。
+
+**这一轮说明的：**Rust 项目读、改、测、审加任务验收，靠现有工具能完整走通，没有卡住；问题都出在"回包会误导人"，
+不在缺能力。**没覆盖：**需要依赖下载、长时间编译（超过一次调用的时限、要转后台）的项目；任务发现（这次需求和命令都是
+提示词里给的）；Web 场景。
+
+测试项目留着，下一轮可以接着用；不要时 `gld rm d10-rust -y` 再删目录和它的 `runs/`、`harness/workspaces/e1f66517…`。
