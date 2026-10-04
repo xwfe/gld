@@ -182,6 +182,12 @@ fn is_skipped_dir(name: &std::ffi::OsStr) -> bool {
                 | ".venv"
                 | "venv"
                 | "coverage"
+                // Playwright 的默认输出目录。不排除的话，后台跑一次 E2E 写出的截图和报告会让下一次
+                // apply_patch 报 FILE_CHANGED_EXTERNALLY（D10 Web 场景实测，那次是自定义的目录名，
+                // 照样要 refresh_baseline）。
+                | "test-results"
+                | "playwright-report"
+                | "blob-report"
                 | "Library"
                 | "AppData"
                 | "$Recycle.Bin"
@@ -284,6 +290,8 @@ mod tests {
             ("node_modules/pkg/index.js", b"x".to_vec()),
             (".venv/lib/site.py", b"x".to_vec()),
             ("docs/Library/cache.db", b"x".to_vec()),
+            ("test-results/list-adds/test-finished-1.png", b"x".to_vec()),
+            ("playwright-report/index.html", b"x".to_vec()),
         ] {
             let full = root.join(path);
             fs::create_dir_all(full.parent().unwrap()).expect("dir");
