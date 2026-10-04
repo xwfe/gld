@@ -862,3 +862,34 @@ ChatGPT 里的删除由用户做，它注册的 OAuth 客户端还留在 `hub.js
 提示词里给的）；Web 场景。
 
 测试项目留着，下一轮可以接着用；不要时 `gld rm d10-rust -y` 再删目录和它的 `runs/`、`harness/workspaces/e1f66517…`。
+
+## 11. D10 第二轮：Web 场景（2026-10-04）
+
+**场景：**`~/xdw/gld-d10-web`，Vite + TypeScript 购物清单页，三个 bug（空白也能添加、"1 items"、"清除已完成"
+抛 JS 异常）加"回车添加"需求，Playwright E2E 截图写到 `e2e-artifacts/`。依赖预先装好，ChatGPT 不联网。提示词要求：
+开任务 → 后台起 dev server 并确认就绪 → 写测试且让浏览器报错算失败 → 确认失败、看失败截图 → 修 → 全过、看截图 →
+diff → README → 再跑一次当证据收尾 → 停掉 dev server。
+
+搭场景时撞到两个项目配置坑（和 gld 无关，已在 fixture 里改）：Vite 默认只监听 `[::1]`，Playwright 探测 127.0.0.1
+等 60 秒超时；Playwright 1.63 要的浏览器版本本机没有，改用已装的 Chrome（`channel: 'chrome'`），不另下载。
+
+**从 gld 的记录核对：**开任务、后台 `pnpm dev`、读代码、加测试、后台跑 E2E（失败）、`view_image` 看失败截图、
+`apply_patch` 被拒、`refresh_baseline` 先看后接纳、修代码、E2E 退出 0、看截图、`git_diff`、改 README、再跑 E2E 退出 0、
+`kill_session`、`finish`（证据 `3254eaa3…`，`completed`）。我另外跑了一遍 E2E（5 passed），测试里用 `pageerror` 把
+浏览器报错算失败。端口 5179 上曾留着一个进程，查明是我排查时手动起的 Vite（`pkill` 的模式没匹配上），已停掉；
+ChatGPT 起的那个是到点超时退出的。
+
+**ChatGPT 报的三处和我查到的一处：**
+
+| 问题 | 根因 | 处理 |
+| --- | --- | --- |
+| `read_output` 传 `session_id` 报 schema 错误 | 只收 `output_ref`；搭测试环境时这边也撞过一次 | 也收 `session_id`；`output_ref` 自带的流和 `stream` 冲突时报错（以前悄悄按 `output_ref` 读）（`f3b68cd`，改工具表） |
+| E2E 写出的产物被当成外部修改，`apply_patch` 被拒，要先 `refresh_baseline` | 那次 E2E 在后台跑完，写入不算 gld 的；产物目录不在排除表 | 排除 Playwright 默认的 `test-results/`、`playwright-report/`、`blob-report/`（`946eb76`）；fixture 用的是自定义目录名，照旧要接纳，这是"不静默吞下外部改动"的代价 |
+| 后台 `pnpm dev` 120 秒后被停，Playwright 只好自己起服务 | `timeout_ms` 上限 10 分钟，转后台照样到点停；说明里没写 | 上限不放开；`exec_command` 说明和排障表写明，并给出让测试框架管服务的做法（`77b227c`） |
+| （我查到的）`finish` 回包 43 KB | `change_summary` 原样带全部事件（21 条 16 KB），MCP 再放两遍 | 事件只回精简版，完整的走 `action=events`（`5f4f4fc`） |
+
+新增测试 3 条；全量 872 passed、0 failed。
+
+**这一轮说明的：**Web 场景的读、改、测、看截图、带证据收尾靠现有工具能走通。断点都在"默认值和说明"：参数名的
+自然写法不收、生成目录没排除、上限没告诉 AI、回包太大。**没覆盖：**需要长期开着的服务和交互式浏览器操作（等真有需要再定
+`timeout_ms` 上限和浏览器 MCP）；任务发现；带依赖下载的首次安装。
