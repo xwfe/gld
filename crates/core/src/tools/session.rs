@@ -841,10 +841,29 @@ fn truncate_tail(bytes: &[u8], max_bytes: usize) -> Truncated {
 }
 
 pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
-    let output_ref = args
-        .get("output_ref")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkspaceError::invalid_argument("output_ref is required"))?;
+    // 也收 session_id：exec_command 两个都回，拿 session_id 来读是最自然的写法，以前报
+    // schema 错误（D10 实测 ChatGPT 撞上，搭测试环境时这边也撞过一次）。
+    let by_session;
+    let output_ref = match (
+        args.get("output_ref").and_then(Value::as_str),
+        args.get("session_id").and_then(Value::as_str),
+    ) {
+        (Some(output_ref), None) => output_ref,
+        (None, Some(session_id)) => {
+            by_session = format!("session:{session_id}:full");
+            by_session.as_str()
+        }
+        (Some(_), Some(_)) => {
+            return Err(WorkspaceError::invalid_argument(
+                "give output_ref or session_id, not both",
+            ))
+        }
+        (None, None) => {
+            return Err(WorkspaceError::invalid_argument(
+                "output_ref (from exec_command's output_refs) or session_id is required",
+            ))
+        }
+    };
     let parts: Vec<&str> = output_ref.split(':').collect();
     if parts.len() != 3 || parts[0] != "session" {
         return Err(WorkspaceError::invalid_argument(
@@ -861,6 +880,15 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     let found = store.lookup(session_id)?;
 
     let requested_stream = args.get("stream").and_then(Value::as_str).unwrap_or("");
+    // output_ref 自带流名时再给一个不同的 stream，以前悄悄按 output_ref 读，调用方以为读的是 stderr。
+    if (ref_stream == "stdout" || ref_stream == "stderr")
+        && !requested_stream.is_empty()
+        && requested_stream != ref_stream
+    {
+        return Err(WorkspaceError::invalid_argument(format!(
+            "output_ref is for {ref_stream} but stream says {requested_stream}; use session:{session_id}:{requested_stream} or drop stream"
+        )));
+    }
     let stream = if ref_stream == "stdout" || ref_stream == "stderr" {
         ref_stream
     } else if requested_stream == "stdout" || requested_stream == "stderr" {

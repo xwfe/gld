@@ -366,7 +366,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "read_output",
         "Read output",
-        "Read retained stdout or stderr by output_ref with per-stream byte offset pagination. Only sessions started over this connection exist here; any other output_ref reports SESSION_NOT_FOUND.",
+        "Read retained stdout or stderr by output_ref (or by session_id) with per-stream byte offset pagination. Only sessions started over this connection exist here; any other output_ref reports SESSION_NOT_FOUND.",
         true,
         false,
         false,
@@ -1499,12 +1499,12 @@ pub fn input_schema(name: &str) -> Value {
         "read_output" => json!({
             "type": "object",
             "properties": {
-                "output_ref": { "type": "string", "minLength": 1 },
+                "output_ref": { "type": "string", "minLength": 1, "description": "One of exec_command's output_refs, e.g. session:<id>:stdout. Give this or session_id." },
+                "session_id": { "type": "string", "minLength": 1, "description": "exec_command's session_id; reads stdout unless stream says stderr. Give this or output_ref." },
                 "stream": { "type": "string", "enum": ["stdout", "stderr"] },
                 "offset": { "type": "integer", "minimum": 0, "default": 0 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 4096 }
             },
-            "required": ["output_ref"],
             "additionalProperties": false
         }),
         "list_runs" => json!({

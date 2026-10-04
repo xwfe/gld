@@ -730,3 +730,39 @@ fn bad_list_runs_arguments_are_refused() {
     assert_eq!(empty["total"], 0, "{empty}");
     assert_eq!(empty["records_kept"], true, "{empty}");
 }
+
+/// read_output 也收 session_id（exec_command 两个都回，拿 session_id 读最自然）；两个都给、
+/// output_ref 的流和 stream 对不上，都直接报错，不悄悄按其中一个读。
+#[cfg(unix)]
+#[test]
+fn read_output_takes_a_session_id_and_refuses_contradictions() {
+    let fx = fixture();
+    script(&fx.workspace, "both", "echo 标准输出\necho 标准错误 >&2");
+    let ran = call_tool(
+        &fx.ctx,
+        "exec_command",
+        &json!({"cmd": "./both", "yield_time_ms": 10_000, "timeout_ms": 30_000}),
+    );
+    let session = session_id(&ran);
+
+    let out = call_tool(&fx.ctx, "read_output", &json!({"session_id": session}));
+    assert_eq!(out["content"], "标准输出\n", "{out}");
+    let err = call_tool(
+        &fx.ctx,
+        "read_output",
+        &json!({"session_id": session, "stream": "stderr"}),
+    );
+    assert_eq!(err["content"], "标准错误\n", "{err}");
+
+    for args in [
+        json!({"session_id": session, "output_ref": format!("session:{session}:stdout")}),
+        json!({"output_ref": format!("session:{session}:stdout"), "stream": "stderr"}),
+        json!({}),
+    ] {
+        let refused = call_tool(&fx.ctx, "read_output", &args);
+        assert_eq!(
+            refused["error"]["code"], "INVALID_ARGUMENT",
+            "{args} → {refused}"
+        );
+    }
+}
