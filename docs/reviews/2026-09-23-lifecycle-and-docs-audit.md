@@ -893,3 +893,9 @@ ChatGPT 起的那个是到点超时退出的。
 **这一轮说明的：**Web 场景的读、改、测、看截图、带证据收尾靠现有工具能走通。断点都在"默认值和说明"：参数名的
 自然写法不收、生成目录没排除、上限没告诉 AI、回包太大。**没覆盖：**需要长期开着的服务和交互式浏览器操作（等真有需要再定
 `timeout_ms` 上限和浏览器 MCP）；任务发现；带依赖下载的首次安装。
+
+**本机升级到 `3e2a735`（用户要求 Web 这轮修完再升）：**最新代码的 CI run 37178953070 全绿后，备份二进制
+（`~/.local/opt/gld-684acdd`）和数据目录，从源码编 release 换上，`gld daemon restart`。版本 0.8.1（协议 5），构建提交等于
+HEAD；工具表 29 个，指纹 `39557a9cc2871037` → `d7c4b983b0b20de9`（`read_output` 多了 `session_id`、`change_summary` 少了
+`change_id`、`exec_command` 说明改了），要 Refresh；profiles.json 322 项和 `hub.json` 指纹一致，`gld ls` 一字不差；
+本地 `/mcp` ✓，公网三项绕开本机代理都是 200。
