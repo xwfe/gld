@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::tools::workspace::WorkspaceError;
 use crate::tools::ToolContext;
@@ -112,7 +112,71 @@ pub fn task_manage(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     let Some((_, tool_name)) = TASK_ACTION_TOOLS.iter().find(|(name, _)| *name == action) else {
         return Err(unknown_action("task", action, TASK_ACTIONS));
     };
+    reject_other_actions_arguments(action, tool_name, args)?;
     crate::harness::tools::call(ctx, tool_name, args)
+}
+
+/// 一个动作收到了只有别的动作才用的参数：当场说，并指出它归哪个动作。
+///
+/// task_manage 的 schema 是十几个动作参数的并集，分发层的未知参数检查按并集查，拦不住
+/// "参数对、动作不对"。以前 `finish` 带 `completed_steps` 能过检查，任务也完成了，步骤却
+/// 一条没记——返回的 `completed_steps` 是空的，调用方看不懂（D10 实测，ChatGPT 报的）。
+/// 每个动作收哪些参数直接取它背后那个工具的 schema，不另写一份表。
+fn reject_other_actions_arguments(
+    action: &str,
+    tool: &str,
+    args: &Value,
+) -> Result<(), WorkspaceError> {
+    let Some(given) = args.as_object() else {
+        return Ok(());
+    };
+    let takes = |tool: &str| -> Vec<String> {
+        crate::tools::registry::input_schema(tool)
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let accepted = takes(tool);
+    let misplaced: Vec<&String> = given
+        .keys()
+        .filter(|name| *name != "action" && !name.starts_with('_') && !accepted.contains(name))
+        .collect();
+    if misplaced.is_empty() {
+        return Ok(());
+    }
+    let owners: Vec<String> = misplaced
+        .iter()
+        .map(|name| {
+            let actions: Vec<&str> = TASK_ACTION_TOOLS
+                .iter()
+                .filter(|(_, other)| takes(other).contains(name))
+                .map(|(other, _)| *other)
+                .collect();
+            if actions.is_empty() {
+                format!("{name} (no action takes it)")
+            } else {
+                format!("{name} (use action={})", actions.join(" / action="))
+            }
+        })
+        .collect();
+    Err(WorkspaceError::ToolDetails {
+        code: "INVALID_ARGUMENT",
+        message: format!(
+            "task_manage action={action} does not take {}. It takes: {}",
+            owners.join(", "),
+            accepted.join(", ")
+        ),
+        category: "validation",
+        retryable: false,
+        details: json!({
+            "action": action,
+            "unknown_arguments": misplaced,
+            "accepted_arguments": accepted,
+            // 被拒的调用什么都没做：先用对应的动作记，再重发这一次。
+            "executed": false
+        }),
+    })
 }
 
 pub fn action_is_mutating(name: &str, args: &Value) -> Option<bool> {
@@ -218,6 +282,85 @@ mod tests {
                         "{label} 宣称支持 {action}，实际路由不到：{message}"
                     );
                 }
+            }
+        }
+    }
+
+    fn started_task(ctx: &ToolContext) -> String {
+        let started =
+            task_manage(ctx, &json!({"action": "start", "objective": "验收"})).expect("start");
+        started["task"]["id"].as_str().expect("task id").to_string()
+    }
+
+    /// `finish` 带 `completed_steps`：以前收下不用，任务照样结束、步骤一条没记。现在当场拒，
+    /// 说清它归 `update`，任务状态不动。
+    #[test]
+    fn an_argument_of_another_action_is_refused_and_named() {
+        let (_workspace, _harness, ctx) = context();
+        let task_id = started_task(&ctx);
+        let refused = task_manage(
+            &ctx,
+            &json!({"action": "finish", "task_id": task_id, "completed_steps": ["写测试"]}),
+        )
+        .expect_err("finish 不收 completed_steps");
+        let text = format!("{refused:?}");
+        assert!(text.contains("action=update"), "{text}");
+        assert!(text.contains("completed_steps"), "{text}");
+        let status = task_manage(&ctx, &json!({"action": "status"})).expect("status");
+        assert_eq!(status["task_state"], "active", "{status}");
+
+        // 步骤先用 update 记，再 finish：两步都生效。
+        let updated = task_manage(
+            &ctx,
+            &json!({"action": "update", "task_id": task_id, "completed_steps": ["写测试"]}),
+        )
+        .expect("update");
+        assert_eq!(updated["task"]["completed_steps"], json!(["写测试"]));
+    }
+
+    /// `finish` 的 `summary` 以前声明了却没人读；现在记成一条 task_summary 事件，先脱敏。
+    #[test]
+    fn a_finish_summary_is_kept_as_a_task_event() {
+        let (_workspace, _harness, ctx) = context();
+        let task_id = started_task(&ctx);
+        let finished = task_manage(
+            &ctx,
+            &json!({
+                "action": "finish",
+                "task_id": task_id,
+                "summary": "改了分词；token=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB 别留"
+            }),
+        )
+        .expect("finish");
+        assert_eq!(finished["summary_recorded"], true, "{finished}");
+        let events =
+            task_manage(&ctx, &json!({"action": "events", "task_id": task_id})).expect("events");
+        let summary = events["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .find(|event| event["kind"] == "task_summary")
+            .unwrap_or_else(|| panic!("没有 task_summary 事件：{events}"));
+        let text = summary["input_summary"]["payload"]["summary"]
+            .as_str()
+            .expect("summary");
+        assert!(text.starts_with("改了分词"), "{text}");
+        assert!(!text.contains("ghp_0123456789"), "没脱敏：{text}");
+    }
+
+    /// 每个动作收的参数都在 task_manage 的 schema 里：并集检查先过了，才轮得到按动作的检查，
+    /// 不然合法参数会在分发层就被当成未知参数拒掉。
+    #[test]
+    fn every_action_argument_is_in_the_task_manage_schema() {
+        let union = crate::tools::registry::input_schema("task_manage");
+        let union = union["properties"].as_object().expect("properties");
+        for (action, tool) in TASK_ACTION_TOOLS {
+            let schema = crate::tools::registry::input_schema(tool);
+            for name in schema["properties"].as_object().expect(tool).keys() {
+                assert!(
+                    union.contains_key(name),
+                    "{action}: {name} 不在 task_manage 里"
+                );
             }
         }
     }

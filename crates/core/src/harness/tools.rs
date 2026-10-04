@@ -138,8 +138,26 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
             }),
         });
     }
+    // 证据被拒时上面已经返回了：说明只跟着真正生效的 finish 记。
+    let summary_recorded = match args
+        .get("summary")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        Some(text) => {
+            ctx.harness
+                .record_summary(task_id, text)
+                .map_err(map_error)?;
+            true
+        }
+        None => false,
+    };
     let summary = change_summary(ctx, &json!({"task_id": task_id}))?;
-    let mut value = json!({"task": task_view(&result.task)?, "change_summary": summary});
+    let mut value = json!({
+        "task": task_view(&result.task)?,
+        "change_summary": summary,
+        "summary_recorded": summary_recorded
+    });
     if result.task.status == TaskStatus::Verifying {
         value["verification_required"] = json!(true);
         value["evidence_candidates"] = json!(result.candidates);

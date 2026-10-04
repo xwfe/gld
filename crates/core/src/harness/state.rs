@@ -201,6 +201,24 @@ impl Harness {
         Ok(task)
     }
 
+    /// 收尾时写的一段说明（`finish` 的 `summary`），记成一条 `task_summary` 事件，交接时从事件里看得到。
+    ///
+    /// schema 一直写着 finish 收 `summary`，以前却没人读它，传了也悄悄丢掉（D10 实测发现）。
+    /// 先脱敏、截到 2000 字符：它和任务事件里的命令原文一样会留在数据目录里。
+    pub fn record_summary(&self, task_id: &str, summary: &str) -> HarnessResult<()> {
+        let _lock = self.store.lock(&self.workspace_id)?;
+        let mut text: String = summary.trim().chars().take(2000).collect();
+        crate::tools::history::redact_text(&mut text);
+        self.record_event(
+            task_id,
+            "task_summary",
+            None,
+            json!({ "summary": text }),
+            json!({"ok": true}),
+        )?;
+        Ok(())
+    }
+
     pub fn update_steps(
         &self,
         task_id: &str,

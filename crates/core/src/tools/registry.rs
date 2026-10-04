@@ -563,8 +563,7 @@ fn task_manage_schema() -> Value {
             "cursor": { "type": "integer", "minimum": 0, "default": 0 },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
             "max_files": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 200 },
-            "max_bytes": { "type": "integer", "minimum": 8192, "maximum": 131072, "default": 32768 },
-            "change_id": { "type": "string" }
+            "max_bytes": { "type": "integer", "minimum": 8192, "maximum": 131072, "default": 32768 }
         },
         "required": ["action"],
         "additionalProperties": false
@@ -1302,7 +1301,7 @@ pub fn input_schema(name: &str) -> Value {
         }),
         "change_summary" => json!({
             "type": "object",
-            "properties": { "task_id": { "type": "string" }, "change_id": { "type": "string" } },
+            "properties": { "task_id": { "type": "string" } },
             "additionalProperties": false
         }),
         "read_file" => json!({
