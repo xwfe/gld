@@ -933,3 +933,7 @@ RFC-0007；先写测试并确认失败（退出码 101）再改，fmt / build / 
 换上，`gld daemon restart`。构建提交等于 HEAD；工具表 29 个，指纹 `d7c4b983b0b20de9` 没变，不用 Refresh；数据文件哈希和
 `gld ls` 前后一致，`gld health` 本地、公网、OAuth 四项都 200。经守护进程在 d10-gld 跑 `scripts/gen-cli-docs.sh` 退出 0，
 生成结果和 AI 手改的一致。
+
+**测试项目清理：**`d10-rust`、`d10-web`、`d10-gld` 都 `gld rm -y`，再删项目目录、d10-self worktree 和分支，以及数据目录里
+各自的 `logs/<项目 id>`、`runs/<路径哈希>`、`harness/workspaces/<路径哈希>`、写锁文件；任务目录和锁文件 14 → 11，`gld health`
+正常。`gld rm` 留下这几样是有意的（同一目录加回来还接得上任务记录），但文档没说目录名怎么算，补进 `concepts.md`。
