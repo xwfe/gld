@@ -1162,14 +1162,28 @@ fn resolve_program(
             .and_then(|value| value.to_str())
             .map(|value| format!(".{}", value.to_ascii_lowercase()))
             .unwrap_or_default();
+        // 扩展名名单是给 Windows 的：那边靠扩展名决定一个文件能不能跑。Unix 上靠的是
+        // 可执行位，名单里又没有 .sh，结果没扩展名的脚本能跑、scripts/build.sh 反而被拒，
+        // 而拒了也没换来什么——没扩展名的照样能跑任意内容（D10 第三轮）。
         if policy.workspace_local_entries
-            && (extension.is_empty() || policy.workspace_script_extensions.contains(&extension))
+            && (extension.is_empty()
+                || policy.workspace_script_extensions.contains(&extension)
+                || (cfg!(unix) && is_executable_file(&resolved)))
         {
             return Ok(resolved.to_string_lossy().into_owned());
         }
+        let message = if !policy.workspace_local_entries {
+            format!("这个项目关掉了工作区本地入口（workspace_local_entries），工作区里的文件不能直接执行: {trimmed}")
+        } else if cfg!(windows) {
+            format!(
+                "扩展名 {extension} 不在可直接执行的名单里（workspace_script_extensions）: {trimmed}；用解释器跑它，例如 python {trimmed}"
+            )
+        } else {
+            format!("{trimmed} 没有可执行权限；用解释器跑它（例如 python {trimmed}），或请用户 chmod +x")
+        };
         return Err(WorkspaceError::Tool {
             code: "COMMAND_REJECTED",
-            message: format!("Workspace 本地入口未获允许: {trimmed}"),
+            message,
             category: "policy",
             retryable: false,
         });
@@ -1985,6 +1999,56 @@ mod tests {
         assert!(
             stdout.contains("argument=[argument with spaces]"),
             "{output}"
+        );
+    }
+
+    /// 默认扩展名名单里没有 .sh；Unix 上看可执行位，不看名单。没可执行位的照旧拒，
+    /// 而且报错要说出怎么办，不能只有一句"未获允许"。
+    #[cfg(unix)]
+    #[test]
+    fn unix_executable_sh_scripts_run_and_non_executable_ones_say_why() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let scripts = workspace.path().join("scripts");
+        std::fs::create_dir_all(&scripts).expect("scripts");
+        for (name, mode) in [("gen.sh", 0o755), ("plain.sh", 0o644)] {
+            let path = scripts.join(name);
+            std::fs::write(&path, "#!/bin/sh\necho sh-script-ran\n").expect("script");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
+        }
+        assert!(!crate::tools::policy::PolicySettings::default()
+            .workspace_script_extensions
+            .contains(".sh"));
+
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        let ran = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "scripts/gen.sh", "timeout_ms": 10_000, "yield_time_ms": 10_000 }),
+        );
+        assert_eq!(ran["command_ok"], true, "{ran}");
+        assert!(
+            ran["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("sh-script-ran"),
+            "{ran}"
+        );
+
+        let refused = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "scripts/plain.sh", "timeout_ms": 10_000, "yield_time_ms": 10_000 }),
+        );
+        assert_eq!(refused["status"], "spawn_failed", "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("可执行权限") && message.contains("chmod +x"),
+            "{refused}"
         );
     }
 }
