@@ -104,6 +104,15 @@ pub fn command_summary(output: &Value) -> Option<String> {
         return None;
     }
     let command = command_outcome(output)?;
+    // 没起来的命令（策略拒绝、找不到程序）照上面那句"调用本身成功"写，AI 会去翻
+    // exit_code，可那是 null；原因只在 error.message 里，直接说出来。
+    if command.status == "spawn_failed" {
+        let reason = output
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("see error");
+        return Some(format!("command was NOT started, nothing ran: {reason}"));
+    }
     Some(match command_state(&command) {
         "completed" => "command succeeded (exit code 0)".into(),
         "running" => {
@@ -167,6 +176,13 @@ mod tests {
         assert!(command_summary(&running)
             .expect("running")
             .contains("still running"));
+        let rejected = json!({"ok": true, "status": "spawn_failed", "termination_reason": "spawn_failed",
+            "exit_code": null, "command_ok": false, "error": {"message": "not allowed: x.sh"}});
+        let text = command_summary(&rejected).expect("rejected");
+        assert!(
+            text.contains("NOT started") && text.contains("x.sh"),
+            "{text}"
+        );
         assert_eq!(command_summary(&json!({"ok": true, "content": "x"})), None);
         assert_eq!(
             command_summary(&json!({"ok": false, "termination_reason": "exited"})),
