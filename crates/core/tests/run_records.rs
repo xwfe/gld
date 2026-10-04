@@ -766,3 +766,24 @@ fn read_output_takes_a_session_id_and_refuses_contradictions() {
         );
     }
 }
+
+/// 项目命令拿不到 gld 自己的 GLD_HOME：测试进程设着它（isolate_data_home），经 exec_command
+/// 跑的脚本应当看不见。以前守护进程的 GLD_HOME 原样传下去，拿 gld 当项目跑它的测试时，
+/// 测试往真实数据目录里写了几百个文件（D10 实测前的检查发现）。
+#[cfg(unix)]
+#[test]
+fn project_commands_do_not_inherit_gld_home() {
+    let fx = fixture();
+    assert!(
+        std::env::var_os("GLD_HOME").is_some(),
+        "前提：测试进程设了 GLD_HOME"
+    );
+    script(&fx.workspace, "where", "echo \"[${GLD_HOME:-}]\"");
+    let ran = call_tool(
+        &fx.ctx,
+        "exec_command",
+        &json!({"cmd": "./where", "yield_time_ms": 10_000, "timeout_ms": 30_000}),
+    );
+    assert_eq!(ran["exit_code"], 0, "{ran}");
+    assert_eq!(ran["stdout"], "[]\n", "子进程拿到了 GLD_HOME：{ran}");
+}

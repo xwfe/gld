@@ -768,6 +768,11 @@ async fn run_command(
     if let Some(path) = search_path.as_ref() {
         command.env("PATH", path);
     }
+    // 不把 gld 自己的数据目录交给项目命令。守护进程起的时候设了 GLD_HOME，不去掉的话子进程
+    // 全都继承：项目里跑 gld 自己的测试（D10 拿 gld 当项目），测试的隔离函数看到 GLD_HOME
+    // 已设就照用，往真实的 ~/.config/gld 里写了几百个临时项目的任务记录和锁文件。项目命令也
+    // 本来就不该知道 gld 的凭据放在哪。
+    command.env_remove(crate::home::HOME_ENV);
     command
         .current_dir(platform_command_path(cwd))
         .stdin(std::process::Stdio::piped())
