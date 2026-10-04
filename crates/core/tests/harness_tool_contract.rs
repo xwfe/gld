@@ -542,6 +542,49 @@ fn finish_task_的摘要只列这个任务期间真正改过的文件() {
     assert_eq!(summary["total_changed_files"], 1);
 }
 
+/// change_summary 的事件是精简版：AI 用得上的几格，不带 id、operation_id、workspace_id、起点指纹。
+/// 以前原样回完整事件，D10 Web 场景一次 finish 回了 43 KB；完整的走 task_manage action=events。
+#[test]
+fn change_summary_lists_events_in_short_form() {
+    let temp = tempfile::tempdir().expect("创建临时目录");
+    let ctx = many_files_context(&temp);
+    let started = call_tool(&ctx, "start_task", &json!({"objective": "看事件"}));
+    let task_id = started["task"]["id"].as_str().expect("任务 ID").to_string();
+    let path = "src/module_1400/a_reasonably_descriptive_file_name.rs";
+    let patched = call_tool(
+        &ctx,
+        "apply_patch",
+        &json!({"patch": format!("--- a/{path}\n+++ b/{path}\n@@\n-fn f() {{}}\n+fn g() {{}}\n"), "reason": "改函数名"}),
+    );
+    assert_eq!(patched["ok"], true, "{patched}");
+
+    let summary = call_tool(&ctx, "change_summary", &json!({"task_id": task_id}));
+    let events = summary["evidence"].as_array().expect("evidence");
+    let finished = events
+        .iter()
+        .find(|event| event["kind"] == "operation_finished")
+        .unwrap_or_else(|| panic!("没有 operation_finished：{summary}"));
+    assert_eq!(finished["tool"], "apply_patch", "{finished}");
+    assert_eq!(finished["reason"], "改函数名", "{finished}");
+    for event in events {
+        for noise in [
+            "id",
+            "operation_id",
+            "input_summary",
+            "result_summary",
+            "task_id",
+        ] {
+            assert!(event.get(noise).is_none(), "精简版不该有 {noise}：{event}");
+        }
+    }
+    let full = call_tool(&ctx, "list_task_events", &json!({"task_id": task_id}));
+    assert_eq!(
+        full["events"].as_array().map(Vec::len),
+        Some(events.len()),
+        "完整事件和精简版条数应当一样：{full}"
+    );
+}
+
 /// change_summary 以前先取按路径排序的前 200 个文件（含没改的）再过滤，
 /// 大仓库里排在后面的改动根本进不了摘要。
 #[test]

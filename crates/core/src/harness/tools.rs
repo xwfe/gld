@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 use crate::tools::ToolContext;
 
-use super::model::{TaskSession, TaskStatus};
+use super::model::{HarnessEvent, TaskSession, TaskStatus};
 use super::store::{HarnessError, LogPage};
 use super::verify::verification_records;
 
@@ -356,11 +356,52 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         "why": {"text": task.objective, "source": "task_objective"},
         "files": files,
         "total_changed_files": total_changed_files,
-        "evidence": events,
+        "evidence": events.iter().map(event_digest).collect::<Vec<_>>(),
+        "evidence_detail": "task_manage action=events has every event in full",
         "verification": verification,
         "risks": risks,
         "rollback_capability": "not_available_in_foundation"
     }))
+}
+
+/// change_summary 里每条事件的精简版：发生了什么、哪个工具、为什么、命令结果。
+///
+/// 以前原样回完整事件（id、operation_id、workspace_id、起点指纹……），21 条事件 16 KB，
+/// finish 的回包里又带一份 change_summary，MCP 再把内容放两遍，D10 Web 场景一次 finish 回了 43 KB。
+/// 这些字段 AI 用不上；要完整的走 `task_manage action=events`（分页）。
+fn event_digest(event: &HarnessEvent) -> Value {
+    let evidence = event.result_summary.get("evidence");
+    let command = evidence.and_then(|evidence| evidence.get("command"));
+    let mut digest = serde_json::Map::new();
+    digest.insert("kind".into(), json!(event.kind));
+    digest.insert("at".into(), json!(event.created_at));
+    let mut put = |key: &str, value: Option<&Value>| {
+        if let Some(value) = value.filter(|value| !value.is_null()) {
+            digest.insert(key.into(), value.clone());
+        }
+    };
+    put(
+        "tool",
+        event.tool_name.as_ref().map(|name| json!(name)).as_ref(),
+    );
+    put("reason", event.input_summary.pointer("/payload/reason"));
+    put("state", event.result_summary.get("state"));
+    put(
+        "command",
+        evidence.and_then(|evidence| evidence.get("command_text")),
+    );
+    put(
+        "session_id",
+        command.and_then(|command| command.get("session_id")),
+    );
+    put(
+        "exit_code",
+        command.and_then(|command| command.get("exit_code")),
+    );
+    if !event.affected_files.is_empty() {
+        digest.insert("files".into(), json!(event.affected_files.len()));
+    }
+    Value::Object(digest)
 }
 
 fn task_id(args: &Value) -> Result<&str, WorkspaceError> {
