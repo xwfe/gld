@@ -236,7 +236,8 @@ gld grant rm alice                    # 立即作废
 
 `add` 当场打印这把 grant 的口令（OAuth）或令牌（bearer）。客户端连的还是服务那个地址：
 OAuth 的在授权页填 **grant 的口令**（不是服务口令），bearer 的在 `Authorization: Bearer …`
-里带 grant 的令牌。
+里带 grant 的令牌。用哪个跟着服务的认证方式走（`gld ls` 的"认证方式"）：服务是 OAuth，就只认口令换来的令牌，
+`grant ls --reveal` 里那个 bearer 令牌拿去直接用会 401；服务是 bearer 才反过来。
 
 **默认只读，`--write` 等于把这台机器交出去。** 能跑命令就能以你的身份做任何事，包括读 gld
 数据目录里的服务口令、拿到全权——gld 的命令白名单挡不住这个（见 [security.md](security.md)）。
