@@ -928,3 +928,8 @@ RFC-0007；先写测试并确认失败（退出码 101）再改，fmt / build / 
 另：`finish` 带 `completed_steps` 被拒，报错说得清楚，AI 去掉就过了，不改。新增测试 1 条（做过变异验证）；全量 874 passed、0 failed。
 
 **这一轮说明的：**开发规矩写进仓库文档，AI 能自己找到并照做；断点在 gld 把仓库自己的入口挡在外面。
+
+**本机升级到 `026a8cc`：**CI run 37188538828 全绿后，备份二进制（`~/.local/opt/gld-ba47a5a`）和数据目录，从源码编 release
+换上，`gld daemon restart`。构建提交等于 HEAD；工具表 29 个，指纹 `d7c4b983b0b20de9` 没变，不用 Refresh；数据文件哈希和
+`gld ls` 前后一致，`gld health` 本地、公网、OAuth 四项都 200。经守护进程在 d10-gld 跑 `scripts/gen-cli-docs.sh` 退出 0，
+生成结果和 AI 手改的一致。
