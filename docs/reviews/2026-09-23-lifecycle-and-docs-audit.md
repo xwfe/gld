@@ -1061,3 +1061,8 @@ fmt + clippy 步骤、`web` job 的 `defaults.working-directory`、`pnpm install
 
 **清理：**`gld rm d10-ci -y`，删项目目录、`harness/workspaces/8fad54a3…`、`runs/8fad54a3…`、`logs/8b5713ef…`、
 `write-locks/d9720556fca26a40.lock`；`gld health` 四项照常。
+
+**按 §16 补上（同日）：**用户定做"pnpm 自动装依赖"的提醒、环境变量白名单不做。依赖没装的 pnpm 包，它的 `pnpm run …` 和 CI 里
+同目录的 pnpm 步骤都带 `may_install: true`，回包提醒跑它们和 install 一样先问用户；npm 不标，yarn、bun 没实测也不标。新增测试 1 条，
+变异两处（不分包管理器都标、CI 步骤不标）对应测试失败；去掉 PATH 里的 pnpm 跑过这组测试（CI 机器没装 pnpm）；全量 902 passed、
+0 failed、0 ignored。只改回包内容，工具说明没变，升级后 ChatGPT 不用 Refresh。
