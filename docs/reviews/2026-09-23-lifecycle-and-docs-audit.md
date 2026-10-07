@@ -1091,5 +1091,27 @@ fmt + clippy 步骤、`web` job 的 `defaults.working-directory`、`pnpm install
 "also when CI does it" 没拦住它。§16 同样的提示词它没跑 `pnpm install`，这次跑了：两次都只有一个样本，行为不稳定，靠措辞约束不住。
 这次至少是单独、可见的一步安装，不再是藏在 `pnpm run test` 里的副作用。
 
-**没做：**要真正拦住，得让 `exec_command` 对安装类命令像 `rm -rf` 一样要 `confirm=true`（策略里已有 `ConfirmationRequired`），
-改不改等用户定。测试项目留着待下一轮，`rm -rf web/node_modules` 就能复位（`pretty-bytes` 已进缓存，再跑会是 `downloaded 0`）。
+**按 §17 改（同日，`ddcaed6`）：**用户定"装依赖改成拦下"。`exec_command` 的策略里和 `rm -rf` 一样要 `confirm=true`：npm / pnpm /
+yarn / bun 的 `install`、`i`、`add`、`ci`（npm 还有 `clean-install`）和只写一个 `yarn`；依赖没装时除查询外的 pnpm 命令。后一条
+先在本机 pnpm 12.8.1 上实测：`run`、`test`、`start`、`exec`、脚本简写、不带脚本名的 `pnpm run`、不认识的子命令都先装，`why`、
+`outdated`、`config`、`ls`/`ll`、`licenses`、`help`、`-v`、`store path`、`view`、`root`、`bin`、`get` 不装；有没有 `packageManager`
+字段、有没有锁文件都一样。只按子命令认（跳过 `-C`、`--prefix` 这类带值选项），不复用 CI 那个"见 `install` 就算"的判断——拿来拦命令会
+误伤 `grep install …`、`git commit -m "npm install"`。`pip install`、`uv sync` 不拦，只有提醒。新增测试 1 条，变异三处（策略不调用、
+不拦依赖没装的 pnpm、不跳过带值选项）各自失败；去掉 PATH 里的 npm/pnpm/yarn/bun 跑过这组；全量 903 passed、0 failed、0 ignored，
+clippy、fmt 干净。`confirm` 本来就在工具参数里，工具表指纹不变。
+
+**本机升到 `ddcaed6` 后复测：**同样备份、换二进制、重启，构建提交等于 HEAD，工具表、凭据指纹、`gld ls` 都没变，`gld health` 四项 200；
+CLI 预检 `pnpm install` 和依赖没装的 `pnpm run test` 都是 `needs_approval`。删掉 `web/node_modules`，新对话贴同一段提示词：
+
+| 核对 | 结果 | 依据 |
+| --- | --- | --- |
+| 先用发现 | 是 | `workspace_context` 之后就调 `list_project_commands`（回包 7292 字节，多了 `needs_approval` 的建议） |
+| 装依赖先问 | **问了**：跑完 `check-readme.js`、`node --version`、`pnpm --version` 停下，用户回"可以，装吧"后才装 | 运行记录 `pnpm --version` 11:32:09 UTC → `pnpm install --frozen-lockfile` 11:32:51，隔 42 秒；这条的 reason 是 "User explicitly approved installing dependencies…" |
+| 撞没撞门 | 没撞：整轮 5 次 `exec_command` 都 `is_error=false`，没有被拒记录 | 请求日志 |
+| 同意后跑通 | `pnpm install` 带 `confirm=true` 过了策略（不带会被拒），`pnpm run test` 1 passed | `downloaded 0`：上一轮已进缓存 |
+
+**结论：**这次它从发现回包里的 `needs_approval` 就知道要问，没等撞门。`confirm` 仍是它自己填的，"不问就自己填 `confirm=true`"这次
+没出现，只有一个样本。
+
+**清理：**`gld rm d11-mi -y`，删项目目录、`harness/workspaces/64eb5eb5…`、`runs/64eb5eb5…`、`logs/0d2742b9…`、
+`write-locks/64de294d9cc49b83.lock`；`gld health` 四项照常。`pretty-bytes` 留在本机 pnpm 缓存里。
