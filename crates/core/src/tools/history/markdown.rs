@@ -265,16 +265,22 @@ pub fn redact_record(record: &mut CheckpointRecord) -> bool {
 }
 
 pub fn redact_text(value: &mut String) -> bool {
+    // 名字取「以关键词结尾的整个词」而不是 \b 起头：`_` 是单词字符，\b 下
+    // GITHUB_TOKEN=、ADMIN_PASSWORD: 这类最常见的环境变量写法整条漏掉。
+    const NAME: &str = r"[A-Za-z0-9_-]*(?:(?:api|access|secret)[_ -]?key|token|secret|cookie|password|passwd|pwd|auth)";
+    // 键：成对引号包着（JSON、shell 里转义的 \"）或不带引号。只认成对的，
+    // 否则 echo "TOKEN=x" 前面那个属于 echo 的引号也会被吃掉。
+    // 值依次试：已脱敏的 [REDACTED]（再跑一遍结果不变）、"..."（认 \" 转义）、
+    // \"...\"、'...'、不带引号的一段。引号没闭合就抹到行尾——命令原文先截到
+    // 500 字再脱敏，截断常落在 JSON 里。不带引号的值不许以 `:` 开头，
+    // 否则 auth::login、token::Kind 这种 Rust 路径也会被抹掉。
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         vec![
             Regex::new(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{6,}").expect("bearer regex"),
-            // 名字取「以关键词结尾的整个词」而不是 \b 起头：`_` 是单词字符，\b 下
-            // GITHUB_TOKEN=、ADMIN_PASSWORD: 这类最常见的环境变量写法整条漏掉。
-            // 值不许以 `:` 开头，否则 auth::login、token::Kind 这种 Rust 路径也会被抹掉。
-            Regex::new(
-                r"(?i)([A-Za-z0-9_-]*(?:(?:api|access|secret)[_ -]?key|token|secret|cookie|password|passwd|pwd|auth))\s*[:=]\s*[^\s,;:][^\s,;]*",
-            )
+            Regex::new(&format!(
+                r#"(?i)(?:\\?["']({NAME})\\?["']|({NAME}))\s*[:=]\s*(?:\[REDACTED\]|"(?:[^"\\\n]|\\.)*"?|\\"(?:[^"\\\n]|\\[^"\n])*(?:\\")?|'[^'\n]*'?|[^\s,;:][^\s,;]*)"#
+            ))
             .expect("secret assignment regex"),
             Regex::new(r"(?is)-----BEGIN[^\n]*PRIVATE KEY-----.*?-----END[^\n]*PRIVATE KEY-----")
                 .expect("private key regex"),
@@ -287,7 +293,8 @@ pub fn redact_text(value: &mut String) -> bool {
         .into_owned();
     redacted = patterns[1]
         .replace_all(&redacted, |captures: &regex::Captures<'_>| {
-            format!("{}=[REDACTED]", &captures[1])
+            let name = captures.get(1).or_else(|| captures.get(2));
+            format!("{}=[REDACTED]", name.map_or("", |name| name.as_str()))
         })
         .into_owned();
     redacted = patterns[2]
@@ -354,6 +361,38 @@ mod tests {
     }
 
     #[test]
+    fn quoted_keys_and_values_are_redacted() {
+        for (input, expected) in [
+            (r#"{"password": "hunter 2"}"#, "{password=[REDACTED]}"),
+            (
+                r#"{"user":"bob","api_key":"a,b;c"}"#,
+                r#"{"user":"bob",api_key=[REDACTED]}"#,
+            ),
+            (
+                r#"curl -d '{"token":"abc def"}' https://x"#,
+                "curl -d '{token=[REDACTED]}' https://x",
+            ),
+            (
+                r#"curl -d "{\"password\":\"hunter2\"}" https://x"#,
+                r#"curl -d "{password=[REDACTED]}" https://x"#,
+            ),
+            ("{'secret': 'x y'}", "{secret=[REDACTED]}"),
+            (r#"{"password":"pa\"ss word"}"#, "{password=[REDACTED]}"),
+            (
+                r#"DB_PASSWORD="p@ss w0rd" ./run"#,
+                "DB_PASSWORD=[REDACTED] ./run",
+            ),
+            ("export TOKEN='a b c'", "export TOKEN=[REDACTED]"),
+            // 命令原文先截到 500 字再脱敏，引号可能没闭合：抹到行尾。
+            ("TOKEN=\"abc def\nnext", "TOKEN=[REDACTED]\nnext"),
+            // 前面那个引号属于 echo 的参数，不是键的，不能吃掉。
+            (r#"echo "TOKEN=abc def""#, r#"echo "TOKEN=[REDACTED] def""#),
+        ] {
+            assert_eq!(redacted(input), expected, "{input}");
+        }
+    }
+
+    #[test]
     fn names_without_secret_assignment_are_untouched() {
         for input in [
             "gh auth login --token-file path/to/file",
@@ -364,6 +403,8 @@ mod tests {
             "GIT_AUTHOR_NAME=alice",
             "AUTH_URL=https://example.com/login",
             "调用 crate::auth::verify 和 token::Kind",
+            r#"{"tokenizer": "bert", "max_tokens": 4096, "author": "alice"}"#,
+            r#"{"token_file": "/run/x"}"#,
             "cargo build --release",
         ] {
             let mut text = input.to_string();
@@ -374,10 +415,15 @@ mod tests {
 
     #[test]
     fn redaction_is_idempotent() {
-        let mut text = "GITHUB_TOKEN=ghp_abc123 ADMIN_PASSWORD:hunter2".to_string();
-        assert!(redact_text(&mut text));
-        let once = text.clone();
-        assert!(!redact_text(&mut text));
-        assert_eq!(text, once);
+        for input in [
+            "GITHUB_TOKEN=ghp_abc123 ADMIN_PASSWORD:hunter2",
+            r#"{"password":"x","token":"y"}"#,
+        ] {
+            let mut text = input.to_string();
+            assert!(redact_text(&mut text), "{input}");
+            let once = text.clone();
+            assert!(!redact_text(&mut text), "{once} -> {text}");
+            assert_eq!(text, once);
+        }
     }
 }
