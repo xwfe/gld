@@ -133,6 +133,8 @@ struct Report {
     projects: Vec<Value>,
     commands: Vec<Command>,
     ci_steps: Vec<ci::Step>,
+    /// 用 pnpm、依赖又没装的包所在目录：在这些目录里跑 pnpm，它会先把依赖装上。
+    pnpm_installs_in: BTreeSet<String>,
     ambiguities: Vec<String>,
     problems: Vec<String>,
     truncated: bool,
@@ -147,6 +149,8 @@ struct Command {
     declared: bool,
     script: Option<String>,
     long_running: bool,
+    /// 跑它会顺带装依赖，见 [`Report::pnpm_installs_in`]。
+    may_install: bool,
     exec: Value,
 }
 
@@ -160,6 +164,7 @@ impl Command {
             declared: false,
             script: None,
             long_running: role == "dev_server",
+            may_install: false,
             exec: Value::Null,
         }
     }
@@ -176,6 +181,9 @@ impl Command {
         });
         if let Some(script) = &self.script {
             value["script"] = json!(script);
+        }
+        if self.may_install {
+            value["may_install"] = json!(true);
         }
         value
     }
@@ -207,6 +215,12 @@ impl Report {
         };
         if roles().any(|role| role == "install") {
             notes.push("install downloads packages from the network and runs their install scripts. Ask the user before running it, also when CI does it.".into());
+        }
+        // 2026-10-07 实测（审查 §16）：AI 照提醒没跑 pnpm install，pnpm run test 却自己装上了依赖。
+        if self.commands.iter().any(|command| command.may_install)
+            || self.ci_steps.iter().any(|step| step.may_install)
+        {
+            notes.push("may_install: dependencies are missing and pnpm installs them before it runs a script (pnpm 12 does by default, setting verify-deps-before-run). Running one of these downloads packages and runs their install scripts just like install, so ask the user first.".into());
         }
         if roles().any(|role| role == "deploy") {
             notes.push("deploy-like scripts may publish or change things outside this machine. Run one only after the user explicitly asked for it.".into());

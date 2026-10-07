@@ -518,3 +518,59 @@ fn ci_step_verdicts_are_the_ones_check_command_gives() {
         }
     }
 }
+
+/// 审查 §16：AI 照提醒没跑 pnpm install，pnpm run test 却先把依赖装上了（pnpm 12 的默认行为）。
+/// 依赖没装的 pnpm 包，它的脚本和 CI 里同目录的 pnpm 步骤都要标 may_install；npm 不会自己装，不标。
+fn pnpm_repo_without_node_modules() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    write(
+        root,
+        "web/package.json",
+        r#"{"scripts":{"test":"node --test"},"dependencies":{"ms":"2.1.3"}}"#,
+    );
+    write(root, "web/pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    write(
+        root,
+        "api/package.json",
+        r#"{"scripts":{"test":"node --test"},"dependencies":{"ms":"2.1.3"}}"#,
+    );
+    write(root, "api/package-lock.json", "{}");
+    write(
+        root,
+        ".github/workflows/ci.yml",
+        "jobs:\n  web:\n    defaults:\n      run:\n        working-directory: web\n    steps:\n      - run: pnpm install --frozen-lockfile\n      - run: pnpm run test\n",
+    );
+    dir
+}
+
+#[test]
+fn pnpm_scripts_say_they_install_missing_dependencies() {
+    let repo = pnpm_repo_without_node_modules();
+    let ctx = ctx_for(repo.path());
+    let out = invoke(&ctx, "list_project_commands", json!({}));
+    let payload = assert_ok(&out);
+
+    assert_eq!(
+        command(payload, &["pnpm", "run", "test"])["may_install"],
+        true
+    );
+    // 安装命令本身是 install，不重复标；npm 跑脚本不会自己装。
+    assert!(command(payload, &["pnpm", "install"])["may_install"].is_null());
+    assert!(command(payload, &["npm", "run", "test"])["may_install"].is_null());
+    assert_eq!(ci_step(payload, "pnpm run test")["may_install"], true);
+    assert!(ci_step(payload, "pnpm install")["may_install"].is_null());
+    let notes = payload["notes"].to_string();
+    assert!(
+        notes.contains("pnpm installs them before it runs a script"),
+        "{notes}"
+    );
+
+    // 装上以后就不标了。
+    fs::create_dir_all(repo.path().join("web/node_modules")).expect("node_modules");
+    let out = invoke(&ctx, "list_project_commands", json!({}));
+    let payload = assert_ok(&out);
+    assert!(command(payload, &["pnpm", "run", "test"])["may_install"].is_null());
+    assert!(ci_step(payload, "pnpm run test")["may_install"].is_null());
+    assert!(!payload["notes"].to_string().contains("may_install"));
+}

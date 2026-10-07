@@ -26,6 +26,7 @@ pub(super) struct Step {
     pub(super) source: String,
     name: Option<String>,
     env: Vec<String>,
+    pub(super) may_install: bool,
     pub(super) exec: Value,
 }
 
@@ -43,6 +44,9 @@ impl Step {
         }
         if !self.env.is_empty() {
             value["env"] = json!(self.env);
+        }
+        if self.may_install {
+            value["may_install"] = json!(true);
         }
         value
     }
@@ -121,14 +125,22 @@ fn add_workflow(rel: &str, doc: &Yaml, report: &mut Report) -> bool {
                 .collect();
             env.sort();
             env.dedup();
+            let role = ci_role(run);
+            // 安装步骤本身已经标了 install；别的 pnpm 步骤在依赖没装的目录里也会先装依赖。
+            let may_install = role != "install"
+                && report.pnpm_installs_in.contains(&workdir)
+                && run
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("pnpm "));
             report.ci_steps.push(Step {
                 run: script_preview(single_line),
                 cmd: runnable.then(|| single_line.to_string()),
                 workdir,
-                role: ci_role(run),
+                role,
                 source: format!("{rel} jobs.{job_id}.steps[{index}]"),
                 name: step["name"].as_str().map(str::to_string),
                 env,
+                may_install,
                 exec: Value::Null,
             });
         }

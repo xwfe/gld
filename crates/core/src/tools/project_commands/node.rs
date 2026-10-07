@@ -226,6 +226,11 @@ pub(super) fn add_projects(ws: &Workspace, packages: &[Package], report: &mut Re
             project["node_version"] = json!(version);
         }
         report.projects.push(project);
+        // pnpm 跑脚本前会先装缺的依赖（12.8.1 实测），npm 不会；yarn、bun 没实测，不标。
+        let pnpm_installs = manager.name == "pnpm" && installed == Some(false);
+        if pnpm_installs {
+            report.pnpm_installs_in.insert(package.rel_dir.clone());
+        }
 
         if installed == Some(false) && install_offered.insert(manager.root.clone()) {
             let root = relative_display(ws.root(), &manager.root);
@@ -262,6 +267,7 @@ pub(super) fn add_projects(ws: &Workspace, packages: &[Package], report: &mut Re
             );
             command.declared = true;
             command.long_running = role == "dev_server" || body_watches(body);
+            command.may_install = pnpm_installs;
             command.script = Some(script_preview(body));
             report.commands.push(command);
         }
