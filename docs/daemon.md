@@ -136,7 +136,8 @@ MCP 服务的恢复标记也不动，只有 `gld stop` 会清掉它。
 stdin 关闭，stdout / stderr 追加到 `logs/daemon.log`，工作目录切到数据目录。
 所以关闭终端、退出 SSH 都不会带走它。
 
-环境变量只显式传递 `GLD_HOME`；`PATH` 等继承自拉起它的那个 shell。
+环境变量只显式传递 `GLD_HOME`；`PATH` 等继承自拉起它的那个 shell。`exec_command` 起的项目命令继承守护进程的
+环境，但拿不到 `GLD_HOME`：项目命令不该知道 gld 的凭据放在哪。
 如果你的 frpc 装在只有某个 shell 才有的 PATH 里（比如只在 `.zshrc` 里加过），
 用 `gld cfg runtime --executable-paths` 补上那个目录，让路径不依赖是谁拉起的守护进程。
 

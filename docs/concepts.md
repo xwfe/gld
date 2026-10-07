@@ -512,7 +512,7 @@ skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读—�
 **不想让某个装好的 skill 出现**：`gld cfg runtime --hidden-skills pdf,pptx`（按名字，不分大小写；传 `""` 清空）。藏掉的和没装一样：目录里没有、`list_skills` 不列、`get_skill` 拿不到，`skipped` 里也不提。只管主目录和自定义路径里的，项目自己的 skill 由项目决定。
 
 要让它们全部进去：`gld set <项目> tool-profile=advanced`。
-代价是工具从 28 个涨到 53 个，加上多出来的说明和完整 Skill 目录，
+代价是工具从 30 个涨到 56 个，加上多出来的说明和完整 Skill 目录，
 每次对话的固定开销明显变大。
 
 ### `compat-readonly-all` 已退役
@@ -676,7 +676,8 @@ SHA-256 指纹和 HEAD）。全部满足才进 `completed`，证据记进 `chang
 "有人在 AI 的记账之外改了文件，它手上的认知已经过期了"。
 
 不计入指纹的：`.git/`、`node_modules/`、`target/`、`dist/`、`build/`、`.venv/`、
-`__pycache__/`、`.next/`、`coverage/` 这类构建产物和依赖缓存，工作区指到用户目录时才会
+`__pycache__/`、`.next/`、`coverage/`、Playwright 默认输出的 `test-results/`、`playwright-report/`、`blob-report/`
+这类构建产物和依赖缓存，工作区指到用户目录时才会
 碰到的 `Library/`、`AppData/`，以及 **gld 自己在项目里的状态目录 `.gld/`**（Planning
 状态存在这儿，而它每次工具调用都可能被写）。这些目录里的改动任务发现不了。
 名单只对**目录**生效，任意一层都算；叫 `build` 的脚本、叫 `dist` 的文件照样计入。

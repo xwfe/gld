@@ -93,6 +93,7 @@ gld stop                                    # 停服务；项目、配置和凭�
 | 范围 | 当前状态 |
 | --- | --- |
 | 读代码、修改、执行、Git 检查 | 已实现；包括补丁预检、命令输出续读（gld 重启后也读得到结局和最后一段输出，进程不恢复）、Notebook 和 Skills |
+| 弄清项目怎么构建、怎么测 | `list_project_commands` 列出清单里声明的命令和 CI 的 `run:` 步骤，只列不跑；装依赖（含依赖没装时会顺手装的 `pnpm run`）和 `rm -rf` 这类命令，AI 要先问你、带 `confirm=true` 才跑得动 |
 | 多项目、远端项目、本机 MCP 扩展 | 已实现；远端执行由 ccnm 负责，本机 MCP 需操作员点名启用 |
 | 规划、任务、交接 | 可保存 Goal / Plan、任务和历史；任务收尾只收任务期间通过、且之后没再改过文件的命令当验收证据 |
 | 限定项目访问 | grant 默认只读；可写 grant 仅用于可信主体，不开放本机 MCP 转发或远端写会话 |
@@ -117,6 +118,7 @@ Refresh 它才会重拉。怎么升级见[安装 · 升级](docs/install.md#升�
 | 查某个命令的全部参数 | [cli.md](docs/cli.md)，或直接 `gld <命令> --help` |
 | 弄明白后台那个守护进程 | [daemon.md](docs/daemon.md) |
 | 装 / 升级 / 卸载 | [install.md](docs/install.md) |
+| 看每一版改了什么、升级后 ChatGPT 要不要点 Refresh | [docs/releases/](docs/releases/) |
 | 从桌面版迁移过来 | [migrate-from-desktop.md](docs/migrate-from-desktop.md) |
 | 改这个项目的代码 | [architecture.md](docs/architecture.md)、[development.md](docs/development.md) |
 | 为什么只留多项目模式、命令怎么对应 | [RFC-0004](docs/rfc/0004-one-service-many-projects.md) |

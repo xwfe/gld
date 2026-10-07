@@ -136,7 +136,7 @@ gld tool call exec_command cmd='cargo test'
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
 | 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld set <项目> allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |
 | 分不清一条命令是「没装」还是「不许跑」 | 拒绝信息只说了不许跑 | 让 AI 先调 `check_command cmd='<命令>'`：它不跑命令，只回答能不能跑（`decision`）、是哪条规则拒的（`rule`）、程序在不在机器上（`program.found`）和有什么已获准的替代工具（`alternatives`） |
-| AI 不知道项目怎么跑测试，或者用错了包管理器（pnpm 项目跑了 `npm install`，多出一份 `package-lock.json`） | 提示词没给命令，它在猜 | 让 AI 先调 `list_project_commands`：列出清单里写好的命令和该用的包管理器，几个锁文件同时在的写进 `ambiguities`；CI、开发文档里的额外要求它不解析，列在 `other_sources` 里要 AI 去读。见 [concepts.md](concepts.md#项目怎么构建怎么测list_project_commands) |
+| AI 不知道项目怎么跑测试，或者用错了包管理器（pnpm 项目跑了 `npm install`，多出一份 `package-lock.json`） | 提示词没给命令，它在猜 | 让 AI 先调 `list_project_commands`：列出清单里写好的命令和该用的包管理器，几个锁文件同时在的写进 `ambiguities`；CI 里的 `run:` 步骤单列在 `ci_steps`，`uses:`、矩阵、`if:` 和开发文档里的要求它不解析，列在 `other_sources` 里要 AI 去读。见 [concepts.md](concepts.md#项目怎么构建怎么测list_project_commands) |
 | 改完白名单不确定生效没有 | 配置改了，跑着的服务不一定重载了 | 改前改后各调一次 `check_command`，比对 `policy.runtime_fingerprint`：数变了才是真生效 |
 | 收窄了白名单但 `python` 还能跑 | 不带 `only:` 的写法是追加，不是替换 | 改成 `gld set <项目> allowed-commands=only:…`；细节见 [security.md](security.md) |
 | `Program not found on PATH: node`，终端里明明能跑 | 守护进程是 launchd / systemd 起的，PATH 里没有 Homebrew、`~/.cargo/bin` 这些目录 | 把目录配成全局可执行路径再 `gld restart`，写法见 [daemon.md](daemon.md#开机自启) |
@@ -160,7 +160,7 @@ gld tool call exec_command cmd='cargo test'
 | `STORE_CORRUPT`（`status`、写工具、`start` 都报） | Harness 数据目录里有任务文件读不出来，而且没找到没结束的任务——读不出来的那个可能就是，所以写入先停下 | 消息里有文件路径：修好，或者改名加 `.corrupt` 挪开。别的文件坏了怎么处理见 [concepts.md](concepts.md#任务数据坏了会怎样) |
 | `VERIFICATION_REJECTED`（`finish` 时） | 给的验收证据有不作数的：失败、还没结束、之后改过文件、不是这个任务起的 | `details.rejected` 逐条写了原因，对照表在 [concepts.md](concepts.md#任务怎么收尾带证据才算-completed)；任务状态没动，修好重跑再 `finish` |
 | 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
-| 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 指纹的计算范围变了：跳过名单多过 `.venv/`、`coverage/`、`Library/` 等目录；2026-09-23 起名单只跳目录，叫 `build`、`dist` 这类名字的**文件**开始计入（[concepts.md](concepts.md#durable-task-的工作区基线)）。跟升级前记下的指纹对不上 | `task_manage action=refresh_baseline task_id=<id>` 看一眼变化，确认只是这些文件，带 `accept_fingerprint` 和 `reason="升级 gld 后指纹范围变化"` 接纳。`<id>` 在 `action=status` 的 `task_id` 里 |
+| 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 指纹的计算范围变了：跳过名单多过 `.venv/`、`coverage/`、`Library/`、Playwright 的 `test-results/` 等目录；2026-09-23 起名单只跳目录，叫 `build`、`dist` 这类名字的**文件**开始计入（[concepts.md](concepts.md#durable-task-的工作区基线)）。跟升级前记下的指纹对不上 | `task_manage action=refresh_baseline task_id=<id>` 看一眼变化，确认只是这些文件，带 `accept_fingerprint` 和 `reason="升级 gld 后指纹范围变化"` 接纳。`<id>` 在 `action=status` 的 `task_id` 里 |
 
 ## 服务和项目
 

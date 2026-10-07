@@ -38,7 +38,7 @@ CLI、库和常规后端项目，已有工具足以支持人工监督下的读�
 | --- | --- | --- |
 | 需求与范围 | 项目说明、Skills、Goal / Plan、可编辑文档 | 人或外部 AI 确认需求、约束、完成标准；没有需求自动验收器 |
 | 架构与设计 | 跨文件阅读、搜索、Git 历史，编写 ADR / 契约 | 人或审查 agent 评估设计与依赖；不是已有语义索引或架构证明 |
-| 初始化与依赖 | `list_project_commands` 只读列出 Cargo / package.json 声明的命令、包管理器、依赖装没装和 exec 会不会放行；运行获准的项目脚本、包管理器、编译器 | 只认这两种清单，CI 和开发文档里的额外要求要另读；不自动装依赖、不重建环境，工具链、锁文件、可复现环境由项目维护 |
+| 初始化与依赖 | `list_project_commands` 只读列出 Cargo / package.json 声明的命令、包管理器、依赖装没装和 exec 会不会放行；运行获准的项目脚本、包管理器、编译器 | 清单只认 Cargo / package.json；CI 的 `run:` 步骤单列在 `ci_steps`，`uses:`、矩阵和开发文档里的要求要另读；装依赖要用户点头、带 `confirm=true`；不自动装依赖、不重建环境，工具链、锁文件、可复现环境由项目维护 |
 | 编码与重构 | 补丁预检、文件读写、搜索、Notebook、Git diff | 版本前置条件需客户端支持并实际传入；不保护绕过 gld 的所有写者 |
 | 本地运行与调试 | 命令会话、stdout / stderr、输入、取消；每条命令有运行记录（结局和最后 1～2 MiB 输出，gld 重启后读得到）；可连接获准的本机 MCP | 重启后不恢复进程、不重放；没有就绪探测或统一 dev-server 生命周期；真实 PTY 明确不做 |
 | 测试与审查 | 调用项目测试、静态检查、构建；读取结果与图片；Task `finish` 收任务期间通过的命令作验收证据，并绑定当时的文件指纹 | 证据只证明"这条命令在这份内容上退出 0"，测没测到该测的由人判断；日志和报告要长期留存得另存文件 |
@@ -67,7 +67,7 @@ CLI、库和常规后端项目，已有工具足以支持人工监督下的读�
 长命令在返回 `running` 后还没有完成；用 `read_output` 继续读到 `running: false`，
 它会回 `termination_reason`、`exit_code`、`command_ok`。**不能只看工具的 `ok` 或 CLI
 自身退出码**：命令退出 7 时工具 `ok` 仍是 true、`gld tool call` 仍退出 0，要看
-`command_ok` / `exit_code`，回包顶层的 `command_summary` 用一句话写着命令成没成（失败的以 `command FAILED` 开头）。
+`command_ok` / `exit_code`，回包顶层的 `command_summary` 用一句话写着命令成没成（失败的以 `command FAILED` 开头；根本没起来的——找不到程序、脚本没可执行位——以 `command was NOT started` 开头，后面跟原因）。
 Planning 台账（`planning_manage action=state` 的 `execution`）
 按命令终态记：`failed` / `timed_out` / `cancelled` / `running` / `unknown`，`last_error` 写明退出码；
 后台命令的终态在 `read_output` 读到时补回（gld 退出时停掉的 `interrupted` 记 `cancelled`，没来得及记
