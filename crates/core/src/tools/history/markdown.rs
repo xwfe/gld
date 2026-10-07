@@ -268,20 +268,34 @@ pub fn redact_text(value: &mut String) -> bool {
     // 名字取「以关键词结尾的整个词」而不是 \b 起头：`_` 是单词字符，\b 下
     // GITHUB_TOKEN=、ADMIN_PASSWORD: 这类最常见的环境变量写法整条漏掉。
     const NAME: &str = r"[A-Za-z0-9_-]*(?:(?:api|access|secret)[_ -]?key|token|secret|cookie|password|passwd|pwd|auth)";
-    // 键：成对引号包着（JSON、shell 里转义的 \"）或不带引号。只认成对的，
-    // 否则 echo "TOKEN=x" 前面那个属于 echo 的引号也会被吃掉。
-    // 值依次试：已脱敏的 [REDACTED]（再跑一遍结果不变）、"..."（认 \" 转义）、
-    // \"...\"、'...'、不带引号的一段。引号没闭合就抹到行尾——命令原文先截到
-    // 500 字再脱敏，截断常落在 JSON 里。不带引号的值不许以 `:` 开头，
-    // 否则 auth::login、token::Kind 这种 Rust 路径也会被抹掉。
+    // 带引号的值：已脱敏的 [REDACTED]（再跑一遍结果不变）、"..."（认 \" 转义）、
+    // \"...\"、'...'。引号没闭合就抹到行尾——命令原文先截到 500 字再脱敏，
+    // 截断常落在 JSON 里。
+    const QUOTED: &str =
+        r#"\[REDACTED\]|"(?:[^"\\\n]|\\.)*"?|\\"(?:[^"\\\n]|\\[^"\n])*(?:\\")?|'[^'\n]*'?"#;
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         vec![
             Regex::new(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{6,}").expect("bearer regex"),
+            // URL 里的 user:口令@。口令抹到主机前最后一个 @，没转义的 @ 也不漏后半截。
+            // 要排在赋值规则前面，否则 https://x-access-token:xxx@github.com/o/r
+            // 会被当成 x-access-token=... 连主机和路径一起抹掉。
+            Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]*):[^\s/?#]+@")
+                .expect("url password regex"),
+            // 键：成对引号包着（JSON、shell 里转义的 \"）或不带引号。只认成对的，
+            // 否则 echo "TOKEN=x" 前面那个属于 echo 的引号也会被吃掉。不带引号的值
+            // 不许以 `:` 开头，否则 auth::login、token::Kind 这种 Rust 路径也会被抹掉。
             Regex::new(&format!(
-                r#"(?i)(?:\\?["']({NAME})\\?["']|({NAME}))\s*[:=]\s*(?:\[REDACTED\]|"(?:[^"\\\n]|\\.)*"?|\\"(?:[^"\\\n]|\\[^"\n])*(?:\\")?|'[^'\n]*'?|[^\s,;:][^\s,;]*)"#
+                r#"(?i)(?:\\?["']({NAME})\\?["']|({NAME}))\s*[:=]\s*(?:{QUOTED}|[^\s,;:][^\s,;]*)"#
             ))
             .expect("secret assignment regex"),
+            // --token abc 这种空格隔开的长参数。值以 - < > | & 开头就当后面没跟值：
+            // --password -u root、--with-token < file 里的是开关。短参数（-p、-u）
+            // 含义因命令而异，不管。
+            Regex::new(&format!(
+                r#"(?i)(--{NAME})[ \t]+(?:{QUOTED}|[^\s,;:<>|&-][^\s,;]*)"#
+            ))
+            .expect("secret flag regex"),
             Regex::new(r"(?is)-----BEGIN[^\n]*PRIVATE KEY-----.*?-----END[^\n]*PRIVATE KEY-----")
                 .expect("private key regex"),
         ]
@@ -292,12 +306,18 @@ pub fn redact_text(value: &mut String) -> bool {
         .replace_all(&redacted, "${1}[REDACTED]")
         .into_owned();
     redacted = patterns[1]
+        .replace_all(&redacted, "${1}:[REDACTED]@")
+        .into_owned();
+    redacted = patterns[2]
         .replace_all(&redacted, |captures: &regex::Captures<'_>| {
             let name = captures.get(1).or_else(|| captures.get(2));
             format!("{}=[REDACTED]", name.map_or("", |name| name.as_str()))
         })
         .into_owned();
-    redacted = patterns[2]
+    redacted = patterns[3]
+        .replace_all(&redacted, "${1}=[REDACTED]")
+        .into_owned();
+    redacted = patterns[4]
         .replace_all(&redacted, "[REDACTED]")
         .into_owned();
     *value = redacted;
@@ -393,6 +413,58 @@ mod tests {
     }
 
     #[test]
+    fn long_flags_with_space_separated_values_are_redacted() {
+        for (input, expected) in [
+            (
+                "cargo publish --token abc123 --allow-dirty",
+                "cargo publish --token=[REDACTED] --allow-dirty",
+            ),
+            (
+                "gh secret set FOO --github-token ghp_x",
+                "gh secret set FOO --github-token=[REDACTED]",
+            ),
+            (
+                r#"mysql --password "a b" -u root"#,
+                "mysql --password=[REDACTED] -u root",
+            ),
+            (
+                "curl --cookie 'a=b; c=d' https://x",
+                "curl --cookie=[REDACTED] https://x",
+            ),
+        ] {
+            assert_eq!(redacted(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn url_passwords_are_redacted() {
+        for (input, expected) in [
+            (
+                "git clone https://user:ghp_abc@github.com/o/r.git",
+                "git clone https://user:[REDACTED]@github.com/o/r.git",
+            ),
+            // 口令里带没转义的 @：抹到主机前最后一个 @，不漏后半截。
+            (
+                "DATABASE_URL=postgres://app:p@ss@db:5432/app",
+                "DATABASE_URL=postgres://app:[REDACTED]@db:5432/app",
+            ),
+            (
+                "redis-cli -u redis://:pw123@localhost:6379",
+                "redis-cli -u redis://:[REDACTED]@localhost:6379",
+            ),
+            (
+                "jdbc:mysql://root:pw@localhost/db",
+                "jdbc:mysql://root:[REDACTED]@localhost/db",
+            ),
+        ] {
+            assert_eq!(redacted(input), expected, "{input}");
+        }
+        let actions = redacted("git clone https://x-access-token:ghs_abc@github.com/o/r");
+        assert!(!actions.contains("ghs_abc"), "{actions}");
+        assert!(actions.contains("@github.com/o/r"), "{actions}");
+    }
+
+    #[test]
     fn names_without_secret_assignment_are_untouched() {
         for input in [
             "gh auth login --token-file path/to/file",
@@ -405,6 +477,14 @@ mod tests {
             "调用 crate::auth::verify 和 token::Kind",
             r#"{"tokenizer": "bert", "max_tokens": 4096, "author": "alice"}"#,
             r#"{"token_file": "/run/x"}"#,
+            // 后面跟的是重定向、下一个参数或什么都没有：这些是开关，不是带值的参数。
+            "gh auth login --with-token < token.txt",
+            "mysql --password -u root",
+            "docker login --password-stdin",
+            "tool --password",
+            "curl http://localhost:8080/api?email=a@b.com",
+            "git clone ssh://git@github.com/o/r.git",
+            "git clone git@github.com:o/r.git",
             "cargo build --release",
         ] {
             let mut text = input.to_string();
@@ -418,6 +498,7 @@ mod tests {
         for input in [
             "GITHUB_TOKEN=ghp_abc123 ADMIN_PASSWORD:hunter2",
             r#"{"password":"x","token":"y"}"#,
+            "tool --token abc https://u:p@h/x https://x-access-token:t@h/y",
         ] {
             let mut text = input.to_string();
             assert!(redact_text(&mut text), "{input}");
