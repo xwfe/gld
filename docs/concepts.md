@@ -753,15 +753,24 @@ gld tool call list_project_commands path=web      # 只看 monorepo 里的一个
   `node_modules` 在不在（`dependencies_installed`）、Rust 工具链和 Node 版本要求。依赖没装时多列一条
   `pnpm install` 之类的命令：它要联网，还会跑依赖包自己的安装脚本，**跑之前问用户**。
 
-**它什么都不跑**：不起进程、不装依赖，也不跑 `cargo metadata`（会去拉索引）。所以它只知道清单上写了什么：
-项目还要哪些环境变量、测试隔离、fmt / clippy 参数，往往写在 CI 和开发文档里——回包的 `other_sources` 列出
-仓库里有的这类文件（`.github/workflows/*.yml`、`AGENTS.md`、`CONTRIBUTING.md`、`Makefile`……），要 AI 自己去读。
+**CI 实际怎么验，单独列在 `ci_steps`。**清单说的是"项目声明了哪些入口"，CI 说的是"项目实际怎么验"，两样不混：
+`.github/workflows/*.yml` 里每个 job 的 `run:` 步骤各一条，给出命令原文、`workdir`（步骤的 `working-directory` >
+job 的 `defaults` > 工作流的 `defaults`，`./web/` 写成 `web`）、`env`（只给变量名，值常是 `${{ secrets.X }}`）、
+按命令内容猜的 `role`、`source`（如 `.github/workflows/ci.yml jobs.web.steps[1]`）。单行、不带 `${{ }}` 的步骤也有 `exec`
+判定；多行脚本和用了表达式的是 `null`，要拆开或改写才能交给 `exec_command`。CI 里的 `pnpm install`、`npm ci` 这类
+标 `install`，同样要**先问用户**：2026-10-07 ChatGPT 实测就是照着 CI 直接装了依赖、没问人（审查 §14）。
+`uses:` 的 action、矩阵、`if:` 条件不摘，原文要 AI 自己读。用了 YAML 别名（`*name`）或嵌套超过 64 层的工作流不解析，
+写进 `problems`：别名展开能让几 KB 的文件撑出几十 GB 内存，而仓库内容是不可信的。
+
+**它什么都不跑**：不起进程、不装依赖，也不跑 `cargo metadata`（会去拉索引）。项目还要哪些测试隔离、参数，常写在
+开发文档里——回包的 `other_sources` 列出仓库里有的这类文件（工作流原文、`AGENTS.md`、`CONTRIBUTING.md`、`Makefile`……）。
 Makefile、pyproject、go.mod 这些这一版不解析，只报在不在。
 
 扫描跳过点开头的目录、`node_modules`、`target`、`dist` 这些（和 `list_files` 一样），往下最多 6 层、
 最多 100 个清单（浅的优先，超了从最深处截）、150 条命令；超了 `truncated: true`，用 `path` 指到更深处。
-脚本正文截到 200 字符，过一遍和 `list_runs` 一样的脱敏。坏掉的清单写进 `problems`，不影响别的。
-回包大小参考：单个前端项目 5～8 KB，40 个 Cargo 成员加 20 个前端包的 monorepo 约 30 KB。
+CI 步骤最多 10 个工作流文件、60 步。脚本正文和 CI 命令截到 200 字符，过一遍和 `list_runs` 一样的脱敏。
+坏掉的清单或工作流写进 `problems`，不影响别的。回包大小参考：带 CI 的单个项目 7～9 KB，40 个 Cargo 成员加
+20 个前端包的 monorepo 约 30 KB。
 
 ---
 
