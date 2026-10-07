@@ -290,10 +290,11 @@ pub fn redact_text(value: &mut String) -> bool {
             ))
             .expect("secret assignment regex"),
             // --token abc 这种空格隔开的长参数。值以 - < > | & 开头就当后面没跟值：
-            // --password -u root、--with-token < file 里的是开关。短参数（-p、-u）
-            // 含义因命令而异，不管。
+            // --password -u root、--with-token < file 里的是开关。值是网址（第 2 组）
+            // 也当开关：curl --anyauth https://x 的网址是要访问的地址，网址里的口令
+            // 前面那条已经抹过。短参数（-p、-u）含义因命令而异，不管。
             Regex::new(&format!(
-                r#"(?i)(--{NAME})[ \t]+(?:{QUOTED}|[^\s,;:<>|&-][^\s,;]*)"#
+                r#"(?i)(--{NAME})[ \t]+(?:(["']?[a-z][a-z0-9+.-]*://\S*)|{QUOTED}|[^\s,;:<>|&-][^\s,;]*)"#
             ))
             .expect("secret flag regex"),
             Regex::new(r"(?is)-----BEGIN[^\n]*PRIVATE KEY-----.*?-----END[^\n]*PRIVATE KEY-----")
@@ -315,7 +316,13 @@ pub fn redact_text(value: &mut String) -> bool {
         })
         .into_owned();
     redacted = patterns[3]
-        .replace_all(&redacted, "${1}=[REDACTED]")
+        .replace_all(&redacted, |captures: &regex::Captures<'_>| {
+            if captures.get(2).is_some() {
+                captures[0].to_string()
+            } else {
+                format!("{}=[REDACTED]", &captures[1])
+            }
+        })
         .into_owned();
     redacted = patterns[4]
         .replace_all(&redacted, "[REDACTED]")
@@ -462,6 +469,11 @@ mod tests {
         let actions = redacted("git clone https://x-access-token:ghs_abc@github.com/o/r");
         assert!(!actions.contains("ghs_abc"), "{actions}");
         assert!(actions.contains("@github.com/o/r"), "{actions}");
+        // 参数后面跟的网址会留着，但网址里的口令照样抹。
+        assert_eq!(
+            redacted("curl --anyauth https://user:pw@example.com"),
+            "curl --anyauth https://user:[REDACTED]@example.com"
+        );
     }
 
     #[test]
@@ -482,6 +494,9 @@ mod tests {
             "mysql --password -u root",
             "docker login --password-stdin",
             "tool --password",
+            // 值是网址：这些参数是开关，网址是 curl 要访问的地址。
+            "curl --anyauth https://example.com/a?b=1",
+            r#"curl --proxy-anyauth "http://proxy:8080" https://x"#,
             "curl http://localhost:8080/api?email=a@b.com",
             "git clone ssh://git@github.com/o/r.git",
             "git clone git@github.com:o/r.git",
