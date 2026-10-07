@@ -269,8 +269,13 @@ pub fn redact_text(value: &mut String) -> bool {
     let patterns = PATTERNS.get_or_init(|| {
         vec![
             Regex::new(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{6,}").expect("bearer regex"),
-            Regex::new(r"(?i)\b(api[_ -]?key|token|cookie|password|passwd|pwd)\s*[:=]\s*[^\s,;]+")
-                .expect("secret assignment regex"),
+            // 名字取「以关键词结尾的整个词」而不是 \b 起头：`_` 是单词字符，\b 下
+            // GITHUB_TOKEN=、ADMIN_PASSWORD: 这类最常见的环境变量写法整条漏掉。
+            // 值不许以 `:` 开头，否则 auth::login、token::Kind 这种 Rust 路径也会被抹掉。
+            Regex::new(
+                r"(?i)([A-Za-z0-9_-]*(?:(?:api|access|secret)[_ -]?key|token|secret|cookie|password|passwd|pwd|auth))\s*[:=]\s*[^\s,;:][^\s,;]*",
+            )
+            .expect("secret assignment regex"),
             Regex::new(r"(?is)-----BEGIN[^\n]*PRIVATE KEY-----.*?-----END[^\n]*PRIVATE KEY-----")
                 .expect("private key regex"),
         ]
@@ -290,4 +295,89 @@ pub fn redact_text(value: &mut String) -> bool {
         .into_owned();
     *value = redacted;
     *value != original
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_text;
+
+    fn redacted(input: &str) -> String {
+        let mut text = input.to_string();
+        redact_text(&mut text);
+        text
+    }
+
+    #[test]
+    fn env_var_style_names_are_redacted() {
+        for (input, expected) in [
+            (
+                "GITHUB_TOKEN=ghp_abc123 cargo test",
+                "GITHUB_TOKEN=[REDACTED] cargo test",
+            ),
+            ("ADMIN_PASSWORD:hunter2", "ADMIN_PASSWORD=[REDACTED]"),
+            (
+                "NPM_API_KEY=xyz npm publish",
+                "NPM_API_KEY=[REDACTED] npm publish",
+            ),
+            ("FOO_SECRET=s3cr3t", "FOO_SECRET=[REDACTED]"),
+            (
+                "AWS_SECRET_ACCESS_KEY=abc",
+                "AWS_SECRET_ACCESS_KEY=[REDACTED]",
+            ),
+            (
+                "export BASIC_AUTH=user:pass",
+                "export BASIC_AUTH=[REDACTED]",
+            ),
+            ("PGPASSWORD=x psql", "PGPASSWORD=[REDACTED] psql"),
+            ("githubToken=abc", "githubToken=[REDACTED]"),
+        ] {
+            assert_eq!(redacted(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn previously_handled_forms_still_redacted() {
+        for (input, expected) in [
+            ("token=abc", "token=[REDACTED]"),
+            ("--password=x", "--password=[REDACTED]"),
+            ("api key: abc", "api key=[REDACTED]"),
+            (
+                "Authorization: Bearer abcdef123456",
+                "Authorization: Bearer [REDACTED]",
+            ),
+        ] {
+            assert_eq!(redacted(input), expected, "{input}");
+        }
+        let header = redacted("curl -H \"x-api-key: abc123\" https://example.com");
+        assert!(header.contains("x-api-key=[REDACTED]"), "{header}");
+        assert!(!header.contains("abc123"), "{header}");
+    }
+
+    #[test]
+    fn names_without_secret_assignment_are_untouched() {
+        for input in [
+            "gh auth login --token-file path/to/file",
+            "tool --token-file=path/to/file",
+            "TOKEN_FILE=/run/secrets/x",
+            "tokenizer=bert",
+            "max_tokens=4096",
+            "GIT_AUTHOR_NAME=alice",
+            "AUTH_URL=https://example.com/login",
+            "调用 crate::auth::verify 和 token::Kind",
+            "cargo build --release",
+        ] {
+            let mut text = input.to_string();
+            assert!(!redact_text(&mut text), "{input} -> {text}");
+            assert_eq!(text, input);
+        }
+    }
+
+    #[test]
+    fn redaction_is_idempotent() {
+        let mut text = "GITHUB_TOKEN=ghp_abc123 ADMIN_PASSWORD:hunter2".to_string();
+        assert!(redact_text(&mut text));
+        let once = text.clone();
+        assert!(!redact_text(&mut text));
+        assert_eq!(text, once);
+    }
 }
