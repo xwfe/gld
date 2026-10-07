@@ -252,6 +252,14 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
         false,
     ),
     (
+        "list_project_commands",
+        "List project commands",
+        "List the build, test and run commands this project declares (Cargo.toml, .cargo/config.toml aliases, package.json scripts), each as argv + workdir ready for exec_command, with where it comes from, a role guessed from its name (test, build, dev_server, install, deploy...), whether it keeps running, whether node_modules is installed, and whether exec_command would accept it (the same check as check_command). Read-only: nothing is run or installed. Lists ambiguities such as several lockfiles, and the CI workflows and contributor docs (other_sources) that often add flags, environment variables or steps.",
+        true,
+        false,
+        false,
+    ),
+    (
         "exec_health_check",
         "Exec health check",
         "Verify the exec worker, session creation, command execution, and stdout/stderr capture.",
@@ -593,6 +601,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "capability_health_check",
     "check_exec_environment",
     "check_command",
+    "list_project_commands",
     "get_default_cwd",
     "set_default_cwd",
     "list_skills",
@@ -628,6 +637,7 @@ pub const COMPACT_TOOLS: &[&str] = &[
     "task_manage",
     "check_exec_environment",
     "check_command",
+    "list_project_commands",
     // compact 以前把这两个砍了，等于默认档下 Skill 整体不可用——项目把用法
     // 写进 skill，模型却看不见（RFC-0003 G2）。目录本身有字符预算，见
     // agent_context::COMPACT_SKILL_CATALOG_CHARS。
@@ -661,6 +671,7 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "planning_state",
     "check_exec_environment",
     "check_command",
+    "list_project_commands",
     "get_default_cwd",
     "list_skills",
     "get_skill",
@@ -704,6 +715,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "capability_health_check",
     "check_exec_environment",
     "check_command",
+    "list_project_commands",
     "exec_health_check",
     "get_default_cwd",
     "set_default_cwd",
@@ -779,6 +791,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "planning_state",
     "check_exec_environment",
     "check_command",
+    "list_project_commands",
     "exec_health_check",
     "get_default_cwd",
     "list_skills",
@@ -1447,6 +1460,17 @@ pub fn input_schema(name: &str) -> Value {
             "description": "ok=true 只表示预检做完了；能不能跑看 decision（allow / deny / needs_approval）。不会启动进程、不联网。给 cmd 或 argv，二选一。",
             "additionalProperties": false
         }),
+        "list_project_commands" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Directory inside the workspace to scan from. Use a deeper path when the result is truncated or to look at one project of a monorepo."
+                }
+            },
+            "additionalProperties": false
+        }),
         "exec_command" => json!({
             "type": "object",
             "properties": {
@@ -1711,6 +1735,22 @@ mod tests {
         assert!(!MUTATING_TOOLS.contains(&"list_runs"));
     }
 
+    /// 发现命令和问"这条能不能跑"是一回事的两半，四档里同进同出；它不改任何东西，
+    /// 只读 grant 也给。
+    #[test]
+    fn list_project_commands_is_read_only_and_offered_wherever_check_command_is() {
+        for profile in ["core", "compact", "read-only", "advanced"] {
+            let names = exposed_tool_names(profile);
+            assert_eq!(
+                names.contains(&"check_command"),
+                names.contains(&"list_project_commands"),
+                "{profile}"
+            );
+        }
+        assert!(READ_ONLY_TOOLS.contains(&"list_project_commands"));
+        assert!(!MUTATING_TOOLS.contains(&"list_project_commands"));
+    }
+
     #[test]
     fn core_catalog_excludes_non_persistent_permission_tool() {
         let tools = list_tools_for_profile("core");
@@ -1720,7 +1760,7 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 41);
+        assert_eq!(tools.len(), 42);
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_manage"));
         assert!(names.contains(&"planning_manage"));
@@ -1760,7 +1800,9 @@ mod tests {
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect();
 
-        assert!(names.len() < 30);
+        // 条数预算，不是哪个客户端的硬上限：工具表每次对话都要占 token。往默认档加工具
+        // 要有意识地改这个数（30 是加 list_project_commands 时定的）。
+        assert!(names.len() <= 30, "{}", names.len());
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"exec_command"));

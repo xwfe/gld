@@ -586,6 +586,7 @@ dependencies = [
  "toexec-skill",
  "toexec-text 0.1.0 (git+https://github.com/xwfe/toexec.git?tag=toexec-text-v0.1.0)",
  "tokio",
+ "toml",
  "tower-http",
  "uuid",
  "walkdir",

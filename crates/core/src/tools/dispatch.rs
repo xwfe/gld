@@ -18,8 +18,8 @@ use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
 use crate::tools::{
-    exec, file, git, history, image_tool, manage, notebook, outcome, patch, planning, session,
-    skill,
+    exec, file, git, history, image_tool, manage, notebook, outcome, patch, planning,
+    project_commands, session, skill,
 };
 
 /// 策略拒绝变成工具响应。
@@ -624,6 +624,7 @@ fn dispatch_tool(
         "server_info" => server_info(ctx),
         "check_exec_environment" => check_exec_environment(ctx),
         "check_command" => exec::check_command(ctx, &effective_args),
+        "list_project_commands" => project_commands::list_project_commands(ctx, &effective_args),
         "exec_health_check" => exec::exec_health_check(ctx, &ctx.runtime.sessions_for(caller)),
         "get_default_cwd" => get_default_cwd(ctx),
         "set_default_cwd" => set_default_cwd(ctx, &effective_args),

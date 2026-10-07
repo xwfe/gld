@@ -16,6 +16,7 @@ pub mod patch;
 mod patch_diag;
 pub mod planning;
 pub mod policy;
+mod project_commands;
 pub mod registry;
 pub mod runs;
 pub mod session;
