@@ -1028,4 +1028,6 @@ xwshare 3 步，回包 7～9 KB。查出 `pnpm test:unit` 标成 other：命令�
 **验证：**新增测试 6 条；变异三处（别名预检放行、忽略 job 的 `defaults`、install 提醒不看 CI）对应测试都失败；隔离 `GLD_HOME`
 全量 901 passed、0 failed、0 ignored；fmt、clippy `-D warnings`、文档链接检查通过；`docs/cli.md` 重新生成没有变化。
 
+**推送后 CI 挂了一次：**run 37596210321 的 macOS、Ubuntu 测试 job 失败——新测试断言 `pnpm install` 的判定是 `allow`，CI 机器没装 pnpm 就是 `deny`。本机隔离 `GLD_HOME` 的全量没测出来，因为本机装着 pnpm。改成只断言有判定，去掉 PATH 里的 pnpm 复现并确认修好。
+
 **没做 / 没验：**本机服务没升级，ChatGPT 没实际调过 `ci_steps`；工具说明改了，升级后要 Refresh。`uses:` 的 action、矩阵、`if:` 不摘。
