@@ -1006,3 +1006,26 @@ profiles.json 659 个值、`hub.json` 指纹一致，`daemon.json` 只有 pid �
 
 **清理：**`gld rm d10-discover -y`，删项目目录、`harness/workspaces/5ff9ec74…`、`runs/5ff9ec74…`、`logs/9313cbba…`、
 `write-locks/e67ed2afbf64a79f.lock`（路径的 FNV-1a，算过对得上）；`gld health` 四项照常。
+
+## 15. 按实测补两处：默认白名单加 `rustc`、CI 步骤单列（2026-10-07）
+
+用户定：§14 的三个候选做前两个，`migrate` 角色不做。
+
+| 项 | 做法 | 提交 |
+| --- | --- | --- |
+| `rustc` 进默认白名单 | `cargo` 本来就能编译、运行任意代码，`gcc` / `clang` / `javac` 也在默认里；单拒 `rustc --version` 只是多碰一次壁。不改工具表 | `301d06c` |
+| `ci_steps` | `.github/workflows` 每个 job 的 `run:` 步骤单列，和清单声明的 `commands` 分开：命令、`workdir`（步骤 > job `defaults` > 工作流 `defaults`）、`env` 只给名字、按命令猜的 `role`；单行、不带 `${{ }}` 的有 `exec` 判定。CI 的安装步骤标 `install`，"先问用户"的提醒对 CI 也生效（§14 里 ChatGPT 照 CI 直接装依赖） | `0381f0c`，文档 `a3efa29` |
+
+**新依赖：**用户在"yaml-rust2 / 手写小解析器"里选了前者。`yaml-rust2 0.13` 关掉默认的 `encoding`，Cargo.lock 新增 4 个包
+（yaml-rust2、arraydeque、hashlink、foldhash）。事先说的是 3 个，漏算了 hashlink 硬要的 hashbrown 默认哈希 foldhash。
+
+**不可信 YAML：**yaml-rust2 建树时把别名指向的节点整个复制，三层互相引用的锚点就能指数膨胀；树的释放又是递归的。先过一遍
+事件流，有别名或嵌套超过 64 层就不建树、写进 `problems`。单元测试用三层别名和 100 层嵌套各验一次。
+
+**真实仓库试跑：**gld 自己 15 步（多行脚本、`${{ }}` 的都没给判定，`sudo apt-get … && …` 认成 install、判 deny）、xwcode 12 步、
+xwshare 3 步，回包 7～9 KB。查出 `pnpm test:unit` 标成 other：命令里的词没按 `:` / `-` 拆，改成和脚本名一样拆，顺带认 `tsc`。
+
+**验证：**新增测试 6 条；变异三处（别名预检放行、忽略 job 的 `defaults`、install 提醒不看 CI）对应测试都失败；隔离 `GLD_HOME`
+全量 901 passed、0 failed、0 ignored；fmt、clippy `-D warnings`、文档链接检查通过；`docs/cli.md` 重新生成没有变化。
+
+**没做 / 没验：**本机服务没升级，ChatGPT 没实际调过 `ci_steps`；工具说明改了，升级后要 Refresh。`uses:` 的 action、矩阵、`if:` 不摘。
