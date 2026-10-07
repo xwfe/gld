@@ -966,3 +966,9 @@ RFC-0007；先写测试并确认失败（退出码 101）再改，fmt / build / 
 - 本机服务没升级，ChatGPT 没实际调用过。compact 从 29 个工具变成 30 个（`<= 30` 的断言写明是条数预算），升级后 ChatGPT 要 Refresh。
 - 不解析 Makefile、pyproject、go.mod、justfile；不探测就绪、不管服务归属；dev server 仍受 `timeout_ms` 10 分钟上限，这两项仍等定上限和浏览器 MCP 范围。
 - 角色靠名字和正文猜，`exec: allow` 只说明会放行，不说明会成功。
+
+**合并与本机升级到 `bd51507`（2026-10-07）：**脱敏修复分支（`b3defa7`…`dcf5d8e`，`GITHUB_TOKEN=`、JSON 键、`--token abc`、
+URL 里的口令）以 `--no-ff` 合进 main，合并后隔离 `GLD_HOME` 全量 895 passed、0 failed、0 ignored，CI run 37585890673 全绿。
+备份二进制（`~/.local/opt/gld-026a8cc`）和数据目录，从源码编 release 换上，`gld daemon restart` 0.2 秒。构建提交等于 HEAD；
+工具表 29 → 30 个，指纹 `d7c4b983b0b20de9` → `a45dce670a2742e2`（多了 `list_project_commands`），**ChatGPT 要 Refresh**；
+profiles.json 659 个值、`hub.json` 指纹一致，`daemon.json` 只有 pid 和启动时间变了，`gld ls` 一字不差，`gld health` 四项 200。
