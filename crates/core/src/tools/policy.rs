@@ -32,6 +32,9 @@ const DEFAULT_ALLOWED_COMMANDS: &[&str] = &[
     "gradle",
     "gradlew",
     "cargo",
+    // cargo 本来就能编译、运行任意代码，rustc 不多开一类风险；缺了它，接手 Rust 项目时
+    // 连 `rustc --version` 都被拒（2026-10-07 ChatGPT 实测，审查 §14）。
+    "rustc",
     "go",
     "ruff",
     "mypy",
@@ -794,6 +797,14 @@ mod tests {
         let policy = PolicySettings::from_actions_config(&actions);
         assert!(policy.allowed_commands.contains("cargo"));
         assert!(policy.allowed_commands.contains("pytest"));
+    }
+
+    /// 接手 Rust 项目先要看工具链版本：允许 cargo 却拒 `rustc --version` 说不通。
+    #[test]
+    fn rustc_is_allowed_by_default_like_cargo() {
+        let policy = PolicySettings::default();
+        assert!(policy.allowed_commands.contains("rustc"));
+        assert!(validate_command(&json!({"cmd": "rustc --version"}), &policy).is_ok());
     }
 
     /// `only:` 前缀才是真的收窄。
