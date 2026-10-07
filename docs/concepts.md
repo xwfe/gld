@@ -752,6 +752,9 @@ gld tool call list_project_commands path=web      # 只看 monorepo 里的一个
 - 每个项目的包管理器和依据（`packageManager` 字段 > 锁文件，几个锁文件同时在的写进 `ambiguities`）、
   `node_modules` 在不在（`dependencies_installed`）、Rust 工具链和 Node 版本要求。依赖没装时多列一条
   `pnpm install` 之类的命令：它要联网，还会跑依赖包自己的安装脚本，**跑之前问用户**。
+- `may_install: true`：依赖没装的 pnpm 包，它的 `pnpm run …` 和 CI 里同目录的 pnpm 步骤都带这一格。pnpm 跑脚本前
+  会先把缺的依赖装上（12.8.1 实测是默认行为），跑它和跑 `pnpm install` 一样要联网、跑安装脚本，同样先问用户。
+  2026-10-07 ChatGPT 实测就是照提醒没跑 `pnpm install`、`pnpm run test` 却把依赖装上了（审查 §16）。npm 跑脚本不会自己装，不标；yarn、bun 没实测，也不标。
 
 **CI 实际怎么验，单独列在 `ci_steps`。**清单说的是"项目声明了哪些入口"，CI 说的是"项目实际怎么验"，两样不混：
 `.github/workflows/*.yml` 里每个 job 的 `run:` 步骤各一条，给出命令原文、`workdir`（步骤的 `working-directory` >
