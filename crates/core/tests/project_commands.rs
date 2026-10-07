@@ -574,3 +574,90 @@ fn pnpm_scripts_say_they_install_missing_dependencies() {
     assert!(ci_step(payload, "pnpm run test")["may_install"].is_null());
     assert!(!payload["notes"].to_string().contains("may_install"));
 }
+
+/// 审查 §17：回包里的"先问用户"拦不住，ChatGPT 把"按 CI 全跑"当成同意，没问就跑了 pnpm install。
+/// 现在装依赖的命令、依赖没装时的 pnpm 都要 confirm=true，预检、真跑、list_project_commands 的 exec 一个说法。
+#[test]
+fn installing_dependencies_needs_confirm() {
+    let repo = pnpm_repo_without_node_modules();
+    let ctx = ctx_for(repo.path());
+    let held = |cmd: &str, workdir: &str, confirm: bool| {
+        let checked = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": cmd, "workdir": workdir, "confirm": confirm }),
+        );
+        checked["rule"] == "confirmation_required"
+    };
+
+    // 显式安装：认子命令，带值的选项（-C、--prefix）跳过它的值。
+    for (cmd, workdir) in [
+        ("pnpm install --frozen-lockfile", "web"),
+        ("pnpm add left-pad", "web"),
+        ("pnpm -C web i", "."),
+        ("npm ci", "api"),
+        ("npm --prefix api install", "."),
+        ("yarn", "web"),
+        ("yarn --frozen-lockfile", "web"),
+        ("bun install", "web"),
+    ] {
+        assert!(held(cmd, workdir, false), "{cmd} in {workdir} 该要 confirm");
+        assert!(!held(cmd, workdir, true), "{cmd} 带了 confirm 就该放行");
+    }
+    // 依赖没装时 pnpm 跑什么都先装（12.8.1 实测），查询类不装；npm 跑脚本不会自己装。
+    for (cmd, workdir) in [
+        ("pnpm run test", "web"),
+        ("pnpm test", "web"),
+        ("pnpm exec node -v", "web"),
+        ("pnpm -C web test", "."),
+    ] {
+        assert!(held(cmd, workdir, false), "{cmd} in {workdir} 该要 confirm");
+    }
+    // 只按子命令认：命令行里出现 install 这个词不算。
+    for (cmd, workdir) in [
+        ("pnpm why ms", "web"),
+        ("pnpm --version", "web"),
+        ("npm run test", "api"),
+        ("grep install package.json", "web"),
+        ("git commit -m \"npm install\"", "."),
+    ] {
+        assert!(!held(cmd, workdir, false), "{cmd} in {workdir} 不该拦");
+    }
+
+    // 真跑也拦，而且拦在起进程之前。
+    let out = invoke(
+        &ctx,
+        "exec_command",
+        json!({ "cmd": "pnpm run test", "workdir": "web" }),
+    );
+    let err = assert_err(&out);
+    assert_eq!(
+        err["error"]["code"], "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION",
+        "{err}"
+    );
+    assert!(!repo.path().join("web/node_modules").exists());
+
+    let out = invoke(&ctx, "list_project_commands", json!({}));
+    let payload = assert_ok(&out);
+    assert_eq!(
+        command(payload, &["pnpm", "install"])["exec"]["decision"],
+        "needs_approval"
+    );
+    assert_eq!(
+        command(payload, &["pnpm", "run", "test"])["exec"]["rule"],
+        "confirmation_required"
+    );
+    assert_eq!(
+        ci_step(payload, "pnpm install")["exec"]["decision"],
+        "needs_approval"
+    );
+    assert_ne!(
+        command(payload, &["npm", "run", "test"])["exec"]["rule"],
+        "confirmation_required"
+    );
+
+    // 装上以后跑脚本不再拦，安装本身照样要问。
+    fs::create_dir_all(repo.path().join("web/node_modules")).expect("node_modules");
+    assert!(!held("pnpm run test", "web", false));
+    assert!(held("pnpm install", "web", false));
+}

@@ -538,7 +538,7 @@ skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读—�
 **先说结论：这两个值现在行为完全一样，你不需要动它。** 字段留着是为了老配置照样能读。
 
 - 写入边界一样——都只能写工作区内，绝对路径和 `..` 一律拒（`ABSOLUTE_PATH_DENIED`）；
-- 危险命令（`rm -rf` 那类）一样要 `confirm=true`，`dangerous` 不会替你跳过；
+- 危险命令（`rm -rf` 那类）和[装依赖的命令](#项目怎么构建怎么测list_project_commands)一样要 `confirm=true`，`dangerous` 不会替你跳过；
 - 命令白名单一样生效；
 - 读取限制（`confine-reads`）一样生效。
 
@@ -751,10 +751,17 @@ gld tool call list_project_commands path=web      # 只看 monorepo 里的一个
 - `exec`：交给 `exec_command` 会不会放行，和 `check_command` 对同一组参数的判定一字不差。只说能不能跑，不说会不会成功。
 - 每个项目的包管理器和依据（`packageManager` 字段 > 锁文件，几个锁文件同时在的写进 `ambiguities`）、
   `node_modules` 在不在（`dependencies_installed`）、Rust 工具链和 Node 版本要求。依赖没装时多列一条
-  `pnpm install` 之类的命令：它要联网，还会跑依赖包自己的安装脚本，**跑之前问用户**。
+  `pnpm install` 之类的命令：它要联网，还会跑依赖包自己的安装脚本，**跑之前问用户**。`exec_command` 也会拦：
+  npm / pnpm / yarn / bun 的 `install`、`i`、`add`、`ci`（npm 还有 `clean-install`）和只写一个 `yarn`，不带
+  `confirm=true` 一律报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`，`exec` 判定是 `needs_approval`。
 - `may_install: true`：依赖没装的 pnpm 包，它的 `pnpm run …` 和 CI 里同目录的 pnpm 步骤都带这一格。pnpm 跑脚本前
-  会先把缺的依赖装上（12.8.1 实测是默认行为），跑它和跑 `pnpm install` 一样要联网、跑安装脚本，同样先问用户。
-  2026-10-07 ChatGPT 实测就是照提醒没跑 `pnpm install`、`pnpm run test` 却把依赖装上了（审查 §16）。npm 跑脚本不会自己装，不标；yarn、bun 没实测，也不标。
+  会先把缺的依赖装上（12.8.1 实测是默认行为），跑它和跑 `pnpm install` 一样要联网、跑安装脚本，`exec_command` 同样要
+  `confirm=true`。依赖没装时 pnpm 除了 `why`、`ls`、`outdated`、`config`、`view`、`-v` 这类查询，`run`、`test`、`exec`、
+  脚本简写（`pnpm build`）、连不认识的子命令都先装，所以这几类以外的 pnpm 命令都拦。npm 跑脚本不会自己装，不标也不拦；
+  yarn、bun 没实测，也不标。
+  只在回包里提醒拦不住：2026-10-07 实测两次，一次照提醒没跑 `pnpm install`、`pnpm run test` 却把依赖装上了（审查 §16），
+  一次把"按 CI 全跑一遍"当成用户同意，没问就跑了 `pnpm install`（审查 §17）。`confirm=true` 仍是 AI 自己填的，
+  服务端看不到用户点没点头（见[安全](security.md)），它管的是让 AI 在动手前停一下，记录里也看得出来。
 
 **CI 实际怎么验，单独列在 `ci_steps`。**清单说的是"项目声明了哪些入口"，CI 说的是"项目实际怎么验"，两样不混：
 `.github/workflows/*.yml` 里每个 job 的 `run:` 步骤各一条，给出命令原文、`workdir`（步骤的 `working-directory` >
@@ -762,6 +769,7 @@ job 的 `defaults` > 工作流的 `defaults`，`./web/` 写成 `web`）、`env`�
 按命令内容猜的 `role`、`source`（如 `.github/workflows/ci.yml jobs.web.steps[1]`）。单行、不带 `${{ }}` 的步骤也有 `exec`
 判定；多行脚本和用了表达式的是 `null`，要拆开或改写才能交给 `exec_command`。CI 里的 `pnpm install`、`npm ci` 这类
 标 `install`，同样要**先问用户**：2026-10-07 ChatGPT 实测就是照着 CI 直接装了依赖、没问人（审查 §14）。
+其中 npm / pnpm / yarn / bun 的安装 `exec_command` 会拦；`pip install`、`uv sync` 这类只有提醒。
 `uses:` 的 action、矩阵、`if:` 条件不摘，原文要 AI 自己读。用了 YAML 别名（`*name`）或嵌套超过 64 层的工作流不解析，
 写进 `problems`：别名展开能让几 KB 的文件撑出几十 GB 内存，而仓库内容是不可信的。
 

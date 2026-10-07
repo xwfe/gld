@@ -204,6 +204,106 @@ fn dependencies_installed(dir: &Path, root: &Path) -> bool {
     false
 }
 
+/// 依赖没装时 pnpm 也不去装的子命令：查询和看配置。2026-10-07 本机 pnpm 12.8.1 实测这些不装；
+/// `run`、`test`、`start`、`exec`、脚本简写（`pnpm build`）、不认识的子命令、连不带脚本名的
+/// `pnpm run` 都先装。不在这里的一律当会装：多问一次用户，比漏掉一次安装便宜。
+const PNPM_QUERIES: &[&str] = &[
+    "help", "list", "ls", "ll", "la", "why", "outdated", "config", "c", "get", "set", "store",
+    "view", "info", "show", "v", "licenses", "root", "bin",
+];
+
+/// exec_command 跑 npm / pnpm / yarn / bun 之前要不要先让用户点头：会装依赖的返回原因。
+///
+/// 只按子命令认，不像 CI 步骤那样见到 `install` 就算：拿来拦命令的话，`grep install README.md`、
+/// `git commit -m "npm install"` 都会被拦。`workspace` 为空时只认显式的安装命令。
+pub(crate) fn installs_before_running(
+    workspace: Option<&Workspace>,
+    manager: &str,
+    workdir: &str,
+    args: &[String],
+) -> Option<String> {
+    if !matches!(manager, "npm" | "pnpm" | "yarn" | "bun") {
+        return None;
+    }
+    let (subcommand, dir) = invocation(manager, workdir, args);
+    let install = match subcommand {
+        Some(word) => {
+            matches!(word, "install" | "i" | "add" | "ci")
+                || (manager == "npm" && word == "clean-install")
+        }
+        // 不带子命令的 yarn 就是 yarn install。
+        None => manager == "yarn",
+    };
+    if install {
+        let command = subcommand.map_or(manager.to_string(), |word| format!("{manager} {word}"));
+        return Some(format!(
+            "{command} installs dependencies: it downloads packages and runs their install scripts"
+        ));
+    }
+    // pnpm 跑脚本前会先装缺的依赖，npm 不会；yarn、bun 没实测，不拦（和 may_install 同一口径）。
+    if manager != "pnpm" || subcommand.is_none_or(|word| PNPM_QUERIES.contains(&word)) {
+        return None;
+    }
+    let missing = missing_dependencies(workspace?, &dir)?;
+    Some(format!(
+        "dependencies in {missing} are not installed, and pnpm installs them before it runs anything: it downloads packages and runs their install scripts"
+    ))
+}
+
+/// 子命令，和命令实际作用的目录（`pnpm -C web test`、`npm --prefix web …`、`yarn --cwd web …`）。
+/// 带值的选项要跳过它的值，不然 `pnpm -C web test` 的子命令会认成 `web`。
+fn invocation<'a>(manager: &str, workdir: &str, args: &'a [String]) -> (Option<&'a str>, PathBuf) {
+    let (value_flags, dir_flags): (&[&str], &[&str]) = match manager {
+        "pnpm" => (
+            &["-C", "--dir", "-F", "--filter", "--filter-prod"],
+            &["-C", "--dir"],
+        ),
+        "npm" => (&["-w", "--workspace", "--prefix"], &["--prefix"]),
+        _ => (&["--cwd"], &["--cwd"]),
+    };
+    let mut dir = PathBuf::from(workdir);
+    let mut words = args.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        if !word.starts_with('-') {
+            return (Some(word), dir);
+        }
+        let (flag, inline) = match word.split_once('=') {
+            Some((flag, value)) => (flag, Some(value)),
+            None => (word, None),
+        };
+        if value_flags.contains(&flag) {
+            let value = inline.or_else(|| words.next());
+            if let (true, Some(value)) = (dir_flags.contains(&flag), value) {
+                dir = dir.join(value);
+            }
+        }
+    }
+    (None, dir)
+}
+
+/// `dir` 往上最近的那个 package.json 声明了依赖、却没装的话，返回它所在的目录。
+/// 判"装没装"和 list_project_commands 的 `dependencies_installed` 是同一个函数。
+fn missing_dependencies(ws: &Workspace, dir: &Path) -> Option<String> {
+    let dir = ws.resolve_existing(dir.to_str()?).ok()?.path;
+    let mut cursor = Some(dir.as_path());
+    while let Some(current) = cursor {
+        if !current.starts_with(ws.root()) {
+            return None;
+        }
+        let manifest = current.join("package.json");
+        if manifest.is_file() {
+            let value: Value = serde_json::from_str(&read_manifest(&manifest).ok()?).ok()?;
+            let package = Package::new(ws, &manifest, &value);
+            let manager = package_manager_for(ws, &package.dir, &mut Vec::new());
+            let missing =
+                package.has_dependencies && !dependencies_installed(&package.dir, &manager.root);
+            return missing.then_some(package.rel_dir);
+        }
+        cursor = current.parent();
+    }
+    None
+}
+
 pub(super) fn add_projects(ws: &Workspace, packages: &[Package], report: &mut Report) {
     // 同一个根目录只提示装一次依赖。
     let mut install_offered: BTreeSet<PathBuf> = BTreeSet::new();

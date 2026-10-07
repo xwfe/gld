@@ -125,7 +125,7 @@ gld tool call exec_command cmd='cargo test'
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| Agent 报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION` | 删除 / 覆盖等危险操作要求 `confirm=true` | 让 Agent 带 `confirm=true` 重试同一工具；命令行复现加 `confirm=true` |
+| Agent 报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION` | 删除 / 覆盖等危险操作，或装依赖（`pnpm install`、`npm ci`，依赖没装时的 `pnpm run …`）要求 `confirm=true` | 你同意的话，让 Agent 带 `confirm=true` 重试同一工具；命令行复现加 `confirm=true` |
 | Agent 说某个工具不存在 | 这个项目的工具集没暴露它；或者服务的工具集更窄（两边取交集） | `gld tool list -w <项目>` 看实际暴露了什么；`gld set <项目> tool-profile=advanced` 换更全的，服务那边 `gld upgrade --tool-profile advanced` |
 | 写在 `.cursorrules` / `CLAUDE.md` 里的规则 AI 不理 | 默认工具集 compact 只注入项目里的 `AGENTS.md` 一份 | `gld context` 看谁打 `✓`（真注入）谁打 `·`（只是扫到）；要全部生效 `gld set <项目> tool-profile=advanced` |
 | AI 说没有 Skill 可用 | 0.4.0 起 compact 下 Skill 目录有字符上限（约 1200 字符），排在后面的没进说明；写了 `disable-model-invocation` 的本来就不进目录（打 `◦`） | `gld context` 看谁打 `✓`；让 AI 调一次 `list_skills` 就能拿到全部；要全部进说明用 `gld set <项目> tool-profile=advanced` |

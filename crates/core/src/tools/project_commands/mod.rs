@@ -15,6 +15,8 @@ mod cargo;
 mod ci;
 mod node;
 
+pub(crate) use node::installs_before_running;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -214,13 +216,13 @@ impl Report {
                 .chain(self.ci_steps.iter().map(|step| step.role))
         };
         if roles().any(|role| role == "install") {
-            notes.push("install downloads packages from the network and runs their install scripts. Ask the user before running it, also when CI does it.".into());
+            notes.push("install downloads packages from the network and runs their install scripts. Ask the user before running it, also when CI does it or the user asked you to run CI; exec_command holds back npm / pnpm / yarn / bun installs until confirm=true, which you pass only after the user agreed.".into());
         }
         // 2026-10-07 实测（审查 §16）：AI 照提醒没跑 pnpm install，pnpm run test 却自己装上了依赖。
         if self.commands.iter().any(|command| command.may_install)
             || self.ci_steps.iter().any(|step| step.may_install)
         {
-            notes.push("may_install: dependencies are missing and pnpm installs them before it runs a script (pnpm 12 does by default, setting verify-deps-before-run). Running one of these downloads packages and runs their install scripts just like install, so ask the user first.".into());
+            notes.push("may_install: dependencies are missing and pnpm installs them before it runs a script (pnpm 12 does by default, setting verify-deps-before-run). Running one of these downloads packages and runs their install scripts just like install, so exec_command holds it back the same way: ask the user, then pass confirm=true.".into());
         }
         if roles().any(|role| role == "deploy") {
             notes.push("deploy-like scripts may publish or change things outside this machine. Run one only after the user explicitly asked for it.".into());

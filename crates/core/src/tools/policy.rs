@@ -442,12 +442,7 @@ pub fn validate_command_for_workspace(
             "workspace scope 禁止通过子进程写入 Workspace 外部路径",
         ));
     }
-    if dangerous_command_pattern().is_match(command)
-        && !arguments
-            .get("confirm")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
+    if dangerous_command_pattern().is_match(command) && !confirmed(arguments) {
         return Err(PolicyError::new(
             PolicyReason::ConfirmationRequired,
             "dangerous command requires confirm=true",
@@ -518,7 +513,36 @@ pub fn validate_command_for_workspace(
         }
     }
 
+    // 装依赖要联网下载、跑依赖包自己的安装脚本。回包里写"先问用户"拦不住：ChatGPT 把"按 CI 全跑一遍"
+    // 当成了同意，没问就跑了 pnpm install（审查 §17）。所以和 rm -rf 一样，用户点头后带 confirm=true。
+    // 放在最后：被别的规则拒的命令，问了用户也跑不了，先报那个。
+    if !confirmed(arguments) {
+        let workdir = arguments
+            .get("workdir")
+            .or_else(|| arguments.get("cwd"))
+            .and_then(Value::as_str)
+            .unwrap_or(".");
+        if let Some(why) = crate::tools::project_commands::installs_before_running(
+            workspace,
+            stem,
+            workdir,
+            &parts[1..],
+        ) {
+            return Err(PolicyError::new(
+                PolicyReason::ConfirmationRequired,
+                format!("{why}. Ask the user, then retry with confirm=true"),
+            ));
+        }
+    }
+
     Ok(())
+}
+
+fn confirmed(arguments: &Value) -> bool {
+    arguments
+        .get("confirm")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// 从这台机器直接连出去的那几个。
