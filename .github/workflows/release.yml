@@ -20,7 +20,7 @@ jobs:
     name: 发版前测试
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
@@ -63,7 +63,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -97,7 +97,7 @@ jobs:
         with:
           subject-path: ${{ endsWith(matrix.target, '-windows-msvc') && 'dist/*.zip' || 'dist/*.tar.gz' }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target }}
           path: |
@@ -113,8 +113,8 @@ jobs:
     steps:
       # 这个 job 只收构件、不编译，但仍要 checkout：下面生成校验和用的是
       # 仓库里的 scripts/package.sh（和 build job 那份是同一个）。
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true

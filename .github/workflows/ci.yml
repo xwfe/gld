@@ -14,7 +14,7 @@ jobs:
     name: 格式与 Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -30,7 +30,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # 集成测试会真的拉起守护进程并写数据文件，必须指向临时目录，
@@ -44,7 +44,7 @@ jobs:
     name: 命令参考是否最新
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
@@ -62,7 +62,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Windows 上守护进程走命名管道，与 Unix domain socket 是两套实现，
@@ -159,7 +159,7 @@ jobs:
       # 不该拦住合并。
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # 版本只写在 Cargo.toml 一处：三仓以后一起升 rust-version 时这里不用
       # 跟着改，也就不会还在测旧版本。
       - name: 读 Cargo.toml 里的 rust-version
