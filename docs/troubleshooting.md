@@ -136,6 +136,7 @@ gld tool call exec_command cmd='cargo test'
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
 | 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld set <项目> allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |
 | 分不清一条命令是「没装」还是「不许跑」 | 拒绝信息只说了不许跑 | 让 AI 先调 `check_command cmd='<命令>'`：它不跑命令，只回答能不能跑（`decision`）、是哪条规则拒的（`rule`）、程序在不在机器上（`program.found`）和有什么已获准的替代工具（`alternatives`） |
+| AI 不知道项目怎么跑测试，或者用错了包管理器（pnpm 项目跑了 `npm install`，多出一份 `package-lock.json`） | 提示词没给命令，它在猜 | 让 AI 先调 `list_project_commands`：列出清单里写好的命令和该用的包管理器，几个锁文件同时在的写进 `ambiguities`；CI、开发文档里的额外要求它不解析，列在 `other_sources` 里要 AI 去读。见 [concepts.md](concepts.md#项目怎么构建怎么测list_project_commands) |
 | 改完白名单不确定生效没有 | 配置改了，跑着的服务不一定重载了 | 改前改后各调一次 `check_command`，比对 `policy.runtime_fingerprint`：数变了才是真生效 |
 | 收窄了白名单但 `python` 还能跑 | 不带 `only:` 的写法是追加，不是替换 | 改成 `gld set <项目> allowed-commands=only:…`；细节见 [security.md](security.md) |
 | `Program not found on PATH: node`，终端里明明能跑 | 守护进程是 launchd / systemd 起的，PATH 里没有 Homebrew、`~/.cargo/bin` 这些目录 | 把目录配成全局可执行路径再 `gld restart`，写法见 [daemon.md](daemon.md#开机自启) |

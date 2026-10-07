@@ -456,10 +456,10 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 
 | 取值 | 工具数 | 说明 |
 | --- | --- | --- |
-| `compact` | 29 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
-| `core` | 41 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
-| `advanced` | 55 | 全部工具都暴露 |
-| `read-only` | 22 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
+| `compact` | 30 | **默认值**。把同类操作聚合成一个带 `action` 参数的稳定 API（`history_manage` / `planning_manage` / `task_manage`），描述也更短——工具列表本身要占 token，条目少意味着每次对话省一截 |
+| `core` | 42 | compact 的聚合工具 + 拆开的旧工具名并存。客户端认旧工具名时用它 |
+| `advanced` | 56 | 全部工具都暴露 |
+| `read-only` | 23 | 去掉 `exec_command` / `apply_patch` / `write_stdin` / `kill_session`，只剩读和 Git 查询 |
 
 以前还有个 `compat-readonly-all`，已经退役，见[下面](#compat-readonly-all-已退役)。
 
@@ -728,6 +728,40 @@ task_manage action=refresh_baseline task_id=<id> accept_fingerprint=<current.fin
 
 为什么任务文件坏了要停写：以前读不出来的任务文件被悄悄跳过，项目就成了"没有任务"，
 写入不再查基线，还能再开一个任务——任务模式本来要守的东西悄悄没了。
+
+---
+
+## 项目怎么构建、怎么测：`list_project_commands`
+
+AI 刚接手一个项目、不知道该跑什么时，先调它：
+
+```bash
+gld tool call list_project_commands               # 从项目根往下找
+gld tool call list_project_commands path=web      # 只看 monorepo 里的一个子项目
+```
+
+它读 `Cargo.toml`、`.cargo/config.toml` 的 `[alias]` 和 `package.json` 的 `scripts`，每条命令给出能原样交给
+`exec_command` 的 `argv` + `workdir`，外加：
+
+- `source`：从哪来，比如 `web/package.json scripts.test`、`cargo built-in (Cargo.toml)`；`declared` 说是不是项目自己写的。
+- `role`：**按名字猜的**用途（`test`、`build`、`dev_server`、`lint`、`install`、`deploy`、`hook`……），只用来提醒，不拿来放行。
+  正文里有 `deploy`、`publish`、`release`、`--remote`、`--prod` 这类整词的，不管名字叫什么都标 `deploy`：
+  `db:migrate` 的正文可能是 `wrangler d1 execute … --remote`，改的是线上数据库。
+- `long_running`：会一直跑的（dev server、`--watch`）。`exec_command` 到 `timeout_ms`（最多 10 分钟）照样停掉它。
+- `exec`：交给 `exec_command` 会不会放行，和 `check_command` 对同一组参数的判定一字不差。只说能不能跑，不说会不会成功。
+- 每个项目的包管理器和依据（`packageManager` 字段 > 锁文件，几个锁文件同时在的写进 `ambiguities`）、
+  `node_modules` 在不在（`dependencies_installed`）、Rust 工具链和 Node 版本要求。依赖没装时多列一条
+  `pnpm install` 之类的命令：它要联网，还会跑依赖包自己的安装脚本，**跑之前问用户**。
+
+**它什么都不跑**：不起进程、不装依赖，也不跑 `cargo metadata`（会去拉索引）。所以它只知道清单上写了什么：
+项目还要哪些环境变量、测试隔离、fmt / clippy 参数，往往写在 CI 和开发文档里——回包的 `other_sources` 列出
+仓库里有的这类文件（`.github/workflows/*.yml`、`AGENTS.md`、`CONTRIBUTING.md`、`Makefile`……），要 AI 自己去读。
+Makefile、pyproject、go.mod 这些这一版不解析，只报在不在。
+
+扫描跳过点开头的目录、`node_modules`、`target`、`dist` 这些（和 `list_files` 一样），往下最多 6 层、
+最多 100 个清单（浅的优先，超了从最深处截）、150 条命令；超了 `truncated: true`，用 `path` 指到更深处。
+脚本正文截到 200 字符，过一遍和 `list_runs` 一样的脱敏。坏掉的清单写进 `problems`，不影响别的。
+回包大小参考：单个前端项目 5～8 KB，40 个 Cargo 成员加 20 个前端包的 monorepo 约 30 KB。
 
 ---
 
