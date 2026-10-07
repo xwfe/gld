@@ -363,3 +363,156 @@ fn too_many_manifests_drop_the_deepest_and_say_so() {
         .iter()
         .any(|project| project["workdir"] == "a/pkg099"));
 }
+
+/// 和 ChatGPT 实测（审查 §14）同一个形状：两个锁文件、只有 CI 写明用 pnpm、CI 先装依赖再测。
+fn repo_with_ci() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    write(
+        root,
+        "web/package.json",
+        r#"{"scripts":{"test":"node --test"}}"#,
+    );
+    write(root, "web/pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    write(root, "web/package-lock.json", "{}");
+    write(
+        root,
+        ".github/workflows/ci.yml",
+        r#"name: CI
+on: [push]
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./web/
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - run: pnpm run test
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test --locked
+      - run: |
+          cargo fmt --all -- --check
+          cargo clippy -- -D warnings
+      - run: echo "${{ github.sha }}"
+        working-directory: tools
+      - run: cargo build && cargo test
+"#,
+    );
+    // 用了别名的不展开，报出来；不连累另一个文件。
+    write(
+        root,
+        ".github/workflows/release.yml",
+        "x: &a [1, 2]\njobs:\n  r:\n    steps:\n      - run: npx wrangler deploy\n        with: *a\n",
+    );
+    dir
+}
+
+fn ci_step<'a>(payload: &'a Value, run: &str) -> &'a Value {
+    payload["ci_steps"]
+        .as_array()
+        .expect("ci_steps")
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|text| text.starts_with(run))
+        })
+        .unwrap_or_else(|| panic!("no ci step {run:?} in {:#}", payload["ci_steps"]))
+}
+
+/// CI 的步骤单独列在 ci_steps，不混进清单声明的 commands；工作目录按 GitHub 的优先级取。
+#[test]
+fn ci_run_steps_are_listed_apart_from_the_manifests() {
+    let repo = repo_with_ci();
+    let ctx = ctx_for(repo.path());
+    let out = invoke(&ctx, "list_project_commands", json!({}));
+    let payload = assert_ok(&out);
+
+    let steps = payload["ci_steps"].as_array().expect("ci_steps");
+    assert_eq!(steps.len(), 6, "{steps:#?}");
+    assert!(!payload["commands"].to_string().contains("frozen-lockfile"));
+
+    let install = ci_step(payload, "pnpm install");
+    assert_eq!(install["workdir"], "web", "job defaults, ./web/ normalized");
+    assert_eq!(install["role"], "install");
+    assert_eq!(install["name"], "Install");
+    assert_eq!(
+        install["source"],
+        ".github/workflows/ci.yml jobs.web.steps[1]"
+    );
+    assert_eq!(install["env"], json!(["CARGO_TERM_COLOR", "NODE_ENV"]));
+    assert_eq!(install["exec"]["decision"], "allow");
+
+    // 环境变量只给名字，值里的 secrets 引用不回。
+    let test = ci_step(payload, "pnpm run test");
+    assert_eq!(
+        test["env"],
+        json!(["API_TOKEN", "CARGO_TERM_COLOR", "NODE_ENV"])
+    );
+    assert!(!payload.to_string().contains("secrets.API_TOKEN"));
+
+    let cargo_test = ci_step(payload, "cargo test --locked");
+    assert_eq!(cargo_test["workdir"], ".");
+    assert_eq!(cargo_test["role"], "test");
+
+    // 多行的和带 ${{ }} 的没法原样交给 exec_command：不给判定。
+    assert_eq!(ci_step(payload, "cargo fmt")["exec"], Value::Null);
+    assert_eq!(ci_step(payload, "cargo fmt")["role"], "format");
+    let expression = ci_step(payload, "echo");
+    assert_eq!(expression["exec"], Value::Null);
+    assert_eq!(expression["workdir"], "tools");
+    // 单行但带 shell 语法的照样问 check_command：它会说 exec_command 不收。
+    let chained = ci_step(payload, "cargo build && cargo test");
+    assert_eq!(chained["exec"]["decision"], "deny");
+
+    let problems = payload["problems"].to_string();
+    assert!(
+        problems.contains("release.yml") && problems.contains("aliases"),
+        "{problems}"
+    );
+    assert!(!payload["ci_steps"].to_string().contains("wrangler"));
+
+    let notes = payload["notes"].to_string();
+    assert!(notes.contains("ci_steps are copied"), "{notes}");
+    // 清单里没有 install，CI 里有，也要提醒先问用户：ChatGPT 实测就是照 CI 直接装的。
+    assert!(notes.contains("also when CI does it"), "{notes}");
+    assert_eq!(
+        payload["other_sources"],
+        json!([".github/workflows/ci.yml", ".github/workflows/release.yml"])
+    );
+}
+
+#[test]
+fn ci_step_verdicts_are_the_ones_check_command_gives() {
+    let repo = repo_with_ci();
+    for ctx in [
+        ctx_for(repo.path()),
+        ctx_with_allowed_commands(repo.path(), "only:cargo"),
+    ] {
+        let out = invoke(&ctx, "list_project_commands", json!({}));
+        let payload = assert_ok(&out);
+        for step in payload["ci_steps"].as_array().expect("ci_steps") {
+            if step["exec"].is_null() {
+                continue;
+            }
+            let checked = invoke(
+                &ctx,
+                "check_command",
+                json!({ "cmd": step["run"], "workdir": step["workdir"] }),
+            );
+            assert_eq!(step["exec"]["decision"], checked["decision"], "{step}");
+            assert_eq!(step["exec"]["rule"], checked["rule"], "{step}");
+        }
+    }
+}

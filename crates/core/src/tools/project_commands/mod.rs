@@ -12,6 +12,7 @@
 //! 测没测全、还要哪些环境变量和参数，仍以项目文档和 CI 为准（`other_sources`）。
 
 mod cargo;
+mod ci;
 mod node;
 
 use std::collections::BTreeSet;
@@ -104,16 +105,26 @@ pub fn list_project_commands(ctx: &ToolContext, args: &Value) -> Result<Value, W
 
     cargo::add_projects(ws, &cargo, &mut report);
     node::add_projects(ws, &node, &mut report);
+    let workflows = ci::workflow_files(ws, &start.path);
+    ci::add_steps(ws, &workflows, &mut report);
 
     if report.commands.len() > MAX_COMMANDS {
         report.commands.truncate(MAX_COMMANDS);
         report.truncated = true;
     }
     for command in &mut report.commands {
-        command.exec = exec_decision(ctx, &command.argv, &command.workdir);
+        command.exec = exec_decision(
+            ctx,
+            json!({ "argv": command.argv, "workdir": command.workdir }),
+        );
+    }
+    for step in &mut report.ci_steps {
+        if let Some(cmd) = &step.cmd {
+            step.exec = exec_decision(ctx, json!({ "cmd": cmd, "workdir": step.workdir }));
+        }
     }
 
-    let other_sources = other_sources(ws, &start.path);
+    let other_sources = other_sources(ws, &start.path, &workflows);
     Ok(tool_ok(report.into_json(start.display, other_sources)))
 }
 
@@ -121,6 +132,7 @@ pub fn list_project_commands(ctx: &ToolContext, args: &Value) -> Result<Value, W
 struct Report {
     projects: Vec<Value>,
     commands: Vec<Command>,
+    ci_steps: Vec<ci::Step>,
     ambiguities: Vec<String>,
     problems: Vec<String>,
     truncated: bool,
@@ -184,14 +196,19 @@ impl Report {
         if self.commands.iter().any(|command| command.long_running) {
             notes.push("long_running commands keep going until stopped, and exec_command stops them at timeout_ms (at most 10 minutes) even in the background. For browser tests, let the test runner start and stop the server (for example Playwright webServer).".into());
         }
-        if self
-            .commands
-            .iter()
-            .any(|command| command.role == "install")
-        {
-            notes.push("install downloads packages from the network and runs their install scripts. Ask the user before running it.".into());
+        if !self.ci_steps.is_empty() {
+            notes.push("ci_steps are copied from .github/workflows, separate from what the manifests declare, and were not run. CI runs them on a fresh machine with its own toolchain, env and secrets (env lists the variable names); a step that spans several lines or uses ${{ }} has exec null and cannot be passed to exec_command as it is.".into());
         }
-        if self.commands.iter().any(|command| command.role == "deploy") {
+        let roles = || {
+            self.commands
+                .iter()
+                .map(|command| command.role)
+                .chain(self.ci_steps.iter().map(|step| step.role))
+        };
+        if roles().any(|role| role == "install") {
+            notes.push("install downloads packages from the network and runs their install scripts. Ask the user before running it, also when CI does it.".into());
+        }
+        if roles().any(|role| role == "deploy") {
             notes.push("deploy-like scripts may publish or change things outside this machine. Run one only after the user explicitly asked for it.".into());
         }
         if self.truncated {
@@ -203,6 +220,7 @@ impl Report {
             "path": path,
             "projects": self.projects,
             "commands": self.commands.iter().map(Command::to_json).collect::<Vec<_>>(),
+            "ci_steps": self.ci_steps.iter().map(ci::Step::to_json).collect::<Vec<_>>(),
             "ambiguities": self.ambiguities,
             "problems": self.problems,
             "other_sources": other_sources,
@@ -274,9 +292,8 @@ fn manifest_dir(ws: &Workspace, manifest: &Path) -> (PathBuf, String) {
 }
 
 /// 交给 exec_command 前它会怎么判。和 check_command 是同一个函数、同一份参数。
-fn exec_decision(ctx: &ToolContext, argv: &[String], workdir: &str) -> Value {
-    let checked =
-        crate::tools::exec::check_command(ctx, &json!({ "argv": argv, "workdir": workdir }));
+fn exec_decision(ctx: &ToolContext, args: Value) -> Value {
+    let checked = crate::tools::exec::check_command(ctx, &args);
     let Ok(result) = checked else {
         return json!({ "decision": "unknown" });
     };
@@ -291,7 +308,7 @@ fn exec_decision(ctx: &ToolContext, argv: &[String], workdir: &str) -> Value {
     decision
 }
 
-fn other_sources(ws: &Workspace, start: &Path) -> Vec<String> {
+fn other_sources(ws: &Workspace, start: &Path, workflows: &[PathBuf]) -> Vec<String> {
     let mut dirs = vec![start.to_path_buf()];
     if start != ws.root() {
         dirs.push(ws.root().to_path_buf());
@@ -304,27 +321,11 @@ fn other_sources(ws: &Workspace, start: &Path) -> Vec<String> {
                 found.insert(relative_display(ws.root(), &path));
             }
         }
-        // CI 配置往往是"项目到底怎么测"最准的一份：flag、环境变量、测试隔离都在里面。
-        let workflows = dir.join(".github").join("workflows");
-        if let Ok(entries) = std::fs::read_dir(&workflows) {
-            let mut files: Vec<PathBuf> = entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.is_file()
-                        && matches!(
-                            path.extension().and_then(|ext| ext.to_str()),
-                            Some("yml" | "yaml")
-                        )
-                })
-                .collect();
-            files.sort();
-            for path in files.into_iter().take(10) {
-                if ws.is_safe_existing_path(&path) {
-                    found.insert(relative_display(ws.root(), &path));
-                }
-            }
-        }
+    }
+    // CI 配置往往是"项目到底怎么测"最准的一份：步骤已经摘进 ci_steps，原文还要 AI 自己读
+    // （矩阵、条件、uses 的那些 action 没摘）。
+    for path in workflows {
+        found.insert(relative_display(ws.root(), path));
     }
     found.into_iter().collect()
 }
@@ -381,7 +382,7 @@ fn segment_role(segment: &str) -> &'static str {
         "dev" | "start" | "serve" | "server" | "preview" | "watch" | "storybook" => "dev_server",
         "lint" | "eslint" | "clippy" => "lint",
         "format" | "fmt" | "prettier" => "format",
-        "typecheck" => "typecheck",
+        "typecheck" | "tsc" => "typecheck",
         "clean" => "clean",
         "deploy" | "release" | "publish" | "ship" => "deploy",
         _ => "other",

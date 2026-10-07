@@ -38,6 +38,8 @@ shell-words = "1"
 which = "7"
 # 读 Cargo.toml / .cargo/config.toml（list_project_commands）。toexec-skill 已经带进来同一版本，不新增下载。
 toml = "0.9"
+# 读 .github/workflows（list_project_commands 的 ci_steps）。纯 Rust；关掉默认的 encoding（工作流文件都是 UTF-8），新增 4 个包。
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }

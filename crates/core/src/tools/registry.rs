@@ -254,7 +254,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "list_project_commands",
         "List project commands",
-        "List the build, test and run commands this project declares (Cargo.toml, .cargo/config.toml aliases, package.json scripts), each as argv + workdir ready for exec_command, with where it comes from, a role guessed from its name (test, build, dev_server, install, deploy...), whether it keeps running, whether node_modules is installed, and whether exec_command would accept it (the same check as check_command). Read-only: nothing is run or installed. Lists ambiguities such as several lockfiles, and the CI workflows and contributor docs (other_sources) that often add flags, environment variables or steps.",
+        "List the build, test and run commands this project declares (Cargo.toml, .cargo/config.toml aliases, package.json scripts), each as argv + workdir ready for exec_command, with where it comes from, a role guessed from its name (test, build, dev_server, install, deploy...), whether it keeps running, whether node_modules is installed, and whether exec_command would accept it (the same check as check_command). Separately, ci_steps lists the run: steps of .github/workflows (what CI actually runs, with workdir and env names), each also with the exec_command verdict when it is a single line. Read-only: nothing is run or installed. Lists ambiguities such as several lockfiles, and the contributor docs (other_sources) that often add flags, environment variables or steps.",
         true,
         false,
         false,
