@@ -937,3 +937,32 @@ RFC-0007；先写测试并确认失败（退出码 101）再改，fmt / build / 
 **测试项目清理：**`d10-rust`、`d10-web`、`d10-gld` 都 `gld rm -y`，再删项目目录、d10-self worktree 和分支，以及数据目录里
 各自的 `logs/<项目 id>`、`runs/<路径哈希>`、`harness/workspaces/<路径哈希>`、写锁文件；任务目录和锁文件 14 → 11，`gld health`
 正常。`gld rm` 留下这几样是有意的（同一目录加回来还接得上任务记录），但文档没说目录名怎么算，补进 `concepts.md`。
+
+## 13. D10 任务发现第一版：`list_project_commands`（2026-10-07）
+
+**做了什么：**新的只读工具，读 `Cargo.toml`、`.cargo/config.toml` 的 `[alias]`、`package.json` 的 `scripts`，每条命令给出能原样交给
+`exec_command` 的 `argv` + `workdir`、出处、按名字猜的用途、会不会一直跑、依赖装没装、Rust / Node 版本要求，`exec` 直接调
+`check_command` 得出。几个锁文件、`packageManager` 和锁文件不一致、没锁文件按 npm 猜，都写进 `ambiguities`；CI 配置和开发文档
+只报在不在（`other_sources`）。不起进程、不装依赖、不跑 `cargo metadata`（`617c709`，文档 `4171f87`）。用法见
+[concepts.md](../concepts.md#项目怎么构建怎么测list_project_commands)。
+
+**真实项目试跑**（调试版二进制、隔离 `GLD_HOME`，只读）：
+
+| 项目 | 结果 | 查出并修掉的 |
+| --- | --- | --- |
+| gld 自己 | Cargo workspace 3 个成员、`cargo run --bin gld`、`rust-version 1.89`；CI 两份和 `docs/development.md` 列进 `other_sources`；测试 fixture 里的 `package.json` 也被列出，按 npm 猜并说明 | — |
+| xwshare（pnpm，前端 + worker） | 2 个项目、23 条命令，约 8 KB | `db:init` / `db:migrate` 的正文是 `wrangler d1 execute … --remote`（改线上数据库），原来标 `other`；改成正文里有 `--remote`、`deploy`、`publish` 等整词就标 `deploy` |
+| xdo（41 个 Cargo 成员 + 前端 monorepo，62 个清单） | 修后 21 个项目、82 条命令，约 30 KB，不截断 | 原来按名字深度优先走到第 40 个清单就停，整棵 `packages/` 没扫到还报 `truncated`；改成收齐路径后按深度排、从最深处截，额度 100 |
+| xwcode（Tauri + pnpm） | 依赖没装，列出 `pnpm install` 并提醒要联网、先问用户；`engines.node >=22` | `tauri:build`、`tauri:dev` 原来是 `other`；名字第一段认不出时再看后面几段 |
+
+**验证：**新增测试 14 条（集成 7、单元 7），四处关键逻辑做过变异（`exec` 不走 `check_command`、不剪 `node_modules` / `target`、
+不认 Cargo 成员、先截再排），对应测试都失败；隔离 `GLD_HOME` 全量 888 passed、0 failed、0 ignored；fmt、clippy `-D warnings`、
+文档链接检查通过；`docs/cli.md` 重新生成没有变化。
+
+**顺带查到、另立任务的：**`redact_text` 的正则用 `\b`，下划线后面不算词边界，`GITHUB_TOKEN=…`、`ADMIN_PASSWORD:…`、
+`NPM_API_KEY=…` 都抹不掉。`list_runs` 的命令文本和历史档案同样受影响，不在本次范围。
+
+**没做 / 没验：**
+- 本机服务没升级，ChatGPT 没实际调用过。compact 从 29 个工具变成 30 个（`<= 30` 的断言写明是条数预算），升级后 ChatGPT 要 Refresh。
+- 不解析 Makefile、pyproject、go.mod、justfile；不探测就绪、不管服务归属；dev server 仍受 `timeout_ms` 10 分钟上限，这两项仍等定上限和浏览器 MCP 范围。
+- 角色靠名字和正文猜，`exec: allow` 只说明会放行，不说明会成功。
