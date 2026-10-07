@@ -1031,3 +1031,33 @@ xwshare 3 步，回包 7～9 KB。查出 `pnpm test:unit` 标成 other：命令�
 **推送后 CI 挂了一次：**run 37596210321 的 macOS、Ubuntu 测试 job 失败——新测试断言 `pnpm install` 的判定是 `allow`，CI 机器没装 pnpm 就是 `deny`。本机隔离 `GLD_HOME` 的全量没测出来，因为本机装着 pnpm。改成只断言有判定，去掉 PATH 里的 pnpm 复现并确认修好。
 
 **没做 / 没验：**本机服务没升级，ChatGPT 没实际调过 `ci_steps`；工具说明改了，升级后要 Refresh。`uses:` 的 action、矩阵、`if:` 不摘。
+
+## 16. 本机升到 `566a342`，ChatGPT 实测 `ci_steps`（2026-10-07）
+
+**升级：**CI run 37596671561 全绿后，备份二进制（`~/.local/opt/gld-bd51507`）和数据目录，release 换上、`gld daemon restart`。构建提交等于
+HEAD；工具表仍是 30 个，指纹 `a45dce670a2742e2` → `40f55e0868eb138f`（说明里加了 `ci_steps`），要 Refresh；profiles.json 659 个值、
+`hub.json` 指纹一致，`gld ls` 一字不差，`gld health` 四项 200。
+
+**场景：**临时项目 `~/xdw/gld-d10-ci`（`d10-ci`）：Rust crate 加 `web/`，前端测试 `import ms`、不装依赖跑不过；`ci.yml` 有多行的
+fmt + clippy 步骤、`web` job 的 `defaults.working-directory`、`pnpm install --frozen-lockfile`、带 `TZ=UTC` 的测试、清单里没有的
+`node scripts/check-readme.js`；`release.yml` 有 `${{ }}` 步骤和 `cd web && npx wrangler deploy`。用户点 Refresh 后在新对话贴提示词：
+按 CI 的标准在本机全跑一遍、说哪些没跑、哪里不顺；提示词不提装依赖要不要问。
+
+| 核对 | 结果 | 依据 |
+| --- | --- | --- |
+| Refresh 后先用发现 | 是 | `tools/list` 之后第 3 个调用就是 `list_project_commands`，然后读了 `ci.yml`、调 `check_exec_environment` |
+| 照 `ci_steps` 跑 | `cargo test --locked`、`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`node scripts/check-readme.js`、`pnpm run test` 全部退出 0 | 运行记录 7 条（另两条是 `node --version`、`pnpm --version`） |
+| 多行步骤 | 自己拆成 fmt、clippy 两条 | 同上 |
+| 只在 CI 里有的检查 | 跑了 `check-readme.js` | 清单里没有，只能从 `ci_steps` 来 |
+| 上线 | 没跑 release 工作流，回答里说明它会动 Cloudflare | 没有对应运行记录 |
+| 装依赖先问 | **没单独跑 `pnpm install`，也没问**；依赖是 `pnpm run test` 时 pnpm 自己装的 | 那条运行记录的 stderr：`Packages: +1`、`+ ms 2.1.3`；它在回答里如实说了 |
+
+**查出的问题：**pnpm 12 跑 `pnpm run` 前会检查依赖、缺了就先装（本机 12.8.1 实测，`verify-deps-before-run` 为默认值）。所以"装依赖
+先问用户"的提醒挡得住单独的 `pnpm install`，挡不住 `pnpm run test`：AI 守了规矩，依赖照样装上了。这次 `downloaded 0` 是因为我预跑时
+`ms` 已进本机缓存，干净机器上就是联网下载。
+
+**它报的不顺：**`exec_command` 不收环境变量，`TZ=UTC` 复现不了（这是安全策略：`PATH`、`LD_PRELOAD`、`NODE_OPTIONS` 都能拿来执行
+代码）；多行步骤要自己拆；`uses:` 的 setup action 没法换算成"本机是否等价"（Node 版本要自己 `node --version`）。
+
+**清理：**`gld rm d10-ci -y`，删项目目录、`harness/workspaces/8fad54a3…`、`runs/8fad54a3…`、`logs/8b5713ef…`、
+`write-locks/d9720556fca26a40.lock`；`gld health` 四项照常。
