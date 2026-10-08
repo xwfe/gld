@@ -140,6 +140,7 @@ gld tool call exec_command cmd='cargo test'
 | 改完白名单不确定生效没有 | 配置改了，跑着的服务不一定重载了 | 改前改后各调一次 `check_command`，比对 `policy.runtime_fingerprint`：数变了才是真生效 |
 | 收窄了白名单但 `python` 还能跑 | 不带 `only:` 的写法是追加，不是替换 | 改成 `gld set <项目> allowed-commands=only:…`；细节见 [security.md](security.md) |
 | `Program not found on PATH: node`，终端里明明能跑 | 守护进程是 launchd / systemd 起的，PATH 里没有 Homebrew、`~/.cargo/bin` 这些目录 | 把目录配成全局可执行路径（`gld cfg runtime --executable-paths …`），下一次调用就生效、不用重启，写法见 [daemon.md](daemon.md#为什么-launchd--systemd-起的找不到命令) |
+| 项目里的测试说缺 `XXX_TOKEN`、`XXX_API_KEY`，你终端里明明设了 | 名字像密钥的环境变量 gld 不交给项目命令（[为什么](security.md)），`check_exec_environment` 的 `withheld_environment` 列着扣下了哪些 | 要密钥的测试在你自己的终端里跑；AI 那边让它跳过这类测试，别让它想办法把密钥写进文件 |
 | 项目目录外文件写入被拒 | 写入永远只在项目目录内 | 把目标目录也 `gld add` 成一个项目，或把文件放进项目 |
 | `READS_CONFINED_TO_WORKSPACE`（升级到 0.3.0 后 Agent 突然读不了外部文件） | 0.3.0 起读也默认限制在项目目录内，老配置升级上来一样收紧 | 确实要读外面：`gld set <项目> confine-reads=false`（Actions 那条线路是 `actions.confine-reads`）。先读一下 [security.md](security.md) 再决定 |
 | `GLD_DATA_HOME_DENIED` | 想用文件工具读 gld 自己的数据目录 | 有意挡的，**关掉 confine-reads 也不给读**：那里明文存着所有凭据。要看凭据用 `gld secret ls <key> --reveal` |

@@ -264,10 +264,23 @@ pub fn redact_record(record: &mut CheckpointRecord) -> bool {
     changed
 }
 
+/// 像密钥的名字：以 token、secret、password、auth、api key 这些关键词结尾的整个词。
+///
+/// 取「以关键词结尾的整个词」而不是 \b 起头：`_` 是单词字符，\b 下 GITHUB_TOKEN=、ADMIN_PASSWORD:
+/// 这类最常见的环境变量写法整条漏掉。脱敏命令文本和不交给项目命令的环境变量（[`looks_like_secret_name`]）
+/// 用的是同一个判据，改这里两边一起变。
+const SECRET_NAME: &str = r"[A-Za-z0-9_-]*(?:(?:api|access|secret)[_ -]?key|token|secret|cookie|password|passwd|pwd|auth)";
+
+/// 这个环境变量名像不像装着密钥。`PWD`、`OLDPWD` 是当前目录，不算。
+pub fn looks_like_secret_name(name: &str) -> bool {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    let pattern = PATTERN
+        .get_or_init(|| Regex::new(&format!("(?i)^{SECRET_NAME}$")).expect("secret name regex"));
+    !matches!(name, "PWD" | "OLDPWD") && pattern.is_match(name)
+}
+
 pub fn redact_text(value: &mut String) -> bool {
-    // 名字取「以关键词结尾的整个词」而不是 \b 起头：`_` 是单词字符，\b 下
-    // GITHUB_TOKEN=、ADMIN_PASSWORD: 这类最常见的环境变量写法整条漏掉。
-    const NAME: &str = r"[A-Za-z0-9_-]*(?:(?:api|access|secret)[_ -]?key|token|secret|cookie|password|passwd|pwd|auth)";
+    const NAME: &str = SECRET_NAME;
     // 带引号的值：已脱敏的 [REDACTED]（再跑一遍结果不变）、"..."（认 \" 转义）、
     // \"...\"、'...'。引号没闭合就抹到行尾——命令原文先截到 500 字再脱敏，
     // 截断常落在 JSON 里。
@@ -333,7 +346,41 @@ pub fn redact_text(value: &mut String) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_text;
+    use super::{looks_like_secret_name, redact_text};
+
+    /// 2026-10-08 本机守护进程环境里就有 CLAUDE_CODE_MESSAGING_TOKEN（它是从 Claude Code 会话里起的）。
+    #[test]
+    fn secret_looking_environment_names() {
+        for name in [
+            "GITHUB_TOKEN",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "npm_config__authToken",
+            "NPM_CONFIG__AUTH",
+            "DB_PASSWORD",
+            "MYSQL_PWD",
+            "SESSION_COOKIE",
+            "SLACK_SIGNING_SECRET",
+        ] {
+            assert!(looks_like_secret_name(name), "{name} 该算密钥");
+        }
+        for name in [
+            "PATH",
+            "HOME",
+            "PWD",
+            "OLDPWD",
+            "SSH_AUTH_SOCK",
+            "HTTPS_PROXY",
+            "JAVA_HOME",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "TOKENIZERS_PARALLELISM",
+            "AWS_ACCESS_KEY_ID",
+        ] {
+            assert!(!looks_like_secret_name(name), "{name} 不该算密钥");
+        }
+    }
 
     fn redacted(input: &str) -> String {
         let mut text = input.to_string();

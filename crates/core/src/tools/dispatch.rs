@@ -1258,6 +1258,11 @@ pub fn check_exec_environment(ctx: &ToolContext) -> Result<Value, WorkspaceError
         "workspace_exec_boundary": policy["execution_boundary"],
         "system_command_allowlist": policy["allowed_commands"],
         "configured_executable_paths": ctx.executable_paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+        // 只给名字不给值：项目里的测试说缺某个变量时，AI 能看出是 gld 扣下的，不是没配。
+        "withheld_environment": {
+            "names": crate::tools::exec::withheld_env_names(),
+            "rule": "environment variables whose names end like a secret (…TOKEN, …SECRET, …PASSWORD, …API_KEY, …AUTH) are not passed to project commands"
+        },
         "workspace_local_entries": {
             "enabled": policy["workspace_local_entries"],
             "script_extensions": ctx.policy.workspace_script_extensions.iter().cloned().collect::<Vec<_>>(),

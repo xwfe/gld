@@ -3,7 +3,7 @@ mod model;
 mod storage;
 
 /// 验收证据要记命令原文，写进任务事件之前走同一套脱敏。
-pub(crate) use markdown::redact_text;
+pub(crate) use markdown::{looks_like_secret_name, redact_text};
 
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};

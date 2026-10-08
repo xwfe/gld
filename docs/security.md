@@ -72,6 +72,14 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 拿到了你全部连接器的钥匙。数据目录里还有命令的运行记录（`runs/`，每条命令原样的
 输出，不脱敏），同样挡着，谁的记录只有谁经 `read_output` 读得到。
 
+**项目命令拿不到名字像密钥的环境变量。**AI 跑的命令本来继承守护进程的全部环境，而守护进程带着你起它时那个终端
+（或 Claude Code 会话）的环境：2026-10-08 本机就查到 `CLAUDE_CODE_MESSAGING_TOKEN`，ChatGPT 一句
+`python3 -c "import os; print(os.environ)"` 就能读到。现在名字以 TOKEN、SECRET、PASSWORD、API_KEY、AUTH 这类结尾的
+变量起命令时去掉（判据和运行记录脱敏是同一个），扣下了哪些名字 `check_exec_environment` 的 `withheld_environment`
+里看得到。守护进程自己照样留着：本机 MCP 配置里的 `${GITHUB_TOKEN}` 要靠它展开。**名字看着不像的挡不住**
+（`DATABASE_URL=postgres://user:口令@…`）；要彻底干净，让守护进程由 launchd / systemd 起（[开机自启](daemon.md#开机自启)，
+环境只有几个系统变量），别从带着密钥的终端里起。
+
 **一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。skill 目录是链到别处的链接时，读的是链接指向的那个目录；指向主目录本身或文件系统根的不给目录（那等于把整个主目录当成"这个 skill 的文件"）。规则和 ccnm 的 `load_skill` 是同一份（toexec-skill 的 `dir` 模块）。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
 
 这几道门都只对文件类工具生效。`exec_command` 里 `cat ~/.config/gld/data/profiles.json`

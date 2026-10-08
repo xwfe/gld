@@ -799,6 +799,13 @@ async fn run_command(
     // 已设就照用，往真实的 ~/.config/gld 里写了几百个临时项目的任务记录和锁文件。项目命令也
     // 本来就不该知道 gld 的凭据放在哪。
     command.env_remove(crate::home::HOME_ENV);
+    // 名字像密钥的环境变量也不给。守护进程从哪儿起就带着哪儿的环境：2026-10-08 本机那个是从 Claude Code
+    // 会话里起的，带着 CLAUDE_CODE_MESSAGING_TOKEN，ChatGPT 经 gld 跑一句
+    // `python3 -c "import os; print(os.environ)"` 就读得到。只在这里去掉、守护进程自己留着：本机 MCP 配置里的
+    // `${GITHUB_TOKEN}` 要靠它展开。名字看着不像的（`DATABASE_URL` 里带口令）挡不住。
+    for name in withheld_env_names() {
+        command.env_remove(name);
+    }
     command
         .current_dir(platform_command_path(cwd))
         .stdin(std::process::Stdio::piped())
@@ -2090,6 +2097,17 @@ fn windows_hidden_creation_flags() -> u32 {
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+}
+
+/// 不交给项目命令的环境变量：守护进程环境里名字像密钥的那些，按名字排。
+/// 判据见 [`crate::tools::history::looks_like_secret_name`]。
+pub(crate) fn withheld_env_names() -> Vec<String> {
+    let mut names: Vec<String> = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| crate::tools::history::looks_like_secret_name(name))
+        .collect();
+    names.sort();
+    names
 }
 
 fn command_for_program(program: &str, args: &[String]) -> Command {
