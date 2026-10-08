@@ -44,7 +44,8 @@ export PATH="$HOME/.local/bin:$PATH"
 gld --version
 ```
 
-macOS 第一次运行可能被 Gatekeeper 拦，处理办法、从源码装都在 [docs/install.md](docs/install.md)。
+macOS 上要是被拦（弹窗说无法验证开发者），核对校验和后执行 `xattr -d com.apple.quarantine ~/.local/bin/gld`；
+新开终端找不到 `gld`、Windows 怎么装、从源码装，见 [docs/install.md](docs/install.md)。
 
 **2. 加项目、起服务。**
 

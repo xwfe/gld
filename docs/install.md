@@ -5,7 +5,7 @@ Git、项目构建工具、隧道程序和启用的外部 MCP server 仍需按�
 
 ## 下载现成的（不需要装 Rust）
 
-到 [Releases](../../releases) 拿对应平台的包：
+到 [Releases](https://github.com/xwfe/gld/releases) 拿对应平台的包：
 
 | 平台 | 文件名 |
 | --- | --- |
@@ -23,15 +23,29 @@ export PATH="$HOME/.local/bin:$PATH"
 gld --version
 ```
 
-上例应在只解压了一份目标安装包的目录执行；后续终端也需配置相同的 PATH。
+上例应在只解压了一份目标安装包的目录执行。`export` 只管当前终端：新开终端会报 `command not found: gld`，
+看着像没装上，其实是 PATH 没带上。要一直生效，写进 shell 配置：
 
-**Linux 选哪个：** `gnu` 构建基线是 glibc 2.35（Ubuntu 22.04+ / Debian 12+ / RHEL 9+）；`musl` 是
-静态链接的，不挑发行版和 glibc 版本，Alpine 上也能跑。两个都是每次发版必须编过的目标。实跑过的：
-v0.7.0 的 gnu 包在 Debian 12（glibc 2.36，amd64 容器）、musl 包在 Oracle Linux 9 容器里；别的发行版
-没实测，构建目标列表不等于验过的兼容矩阵。
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc    # macOS 默认是 zsh；用 bash 的写 ~/.bashrc
+```
 
-**macOS 首次运行可能被 Gatekeeper 拦。** 核对发布来源和校验和后，确认信任该文件，
-再决定是否移除下载隔离属性；这不是安全验证的替代：
+**Windows**：解压 zip，把里面的 `gld.exe` 放进一个固定目录，再把这个目录加进用户的 Path，新开一个 PowerShell
+窗口跑 `gld --version`（这几条命令没在 Windows 真机跑过）：
+
+```powershell
+Expand-Archive gld-*-x86_64-pc-windows-msvc.zip -DestinationPath .
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.local\bin" | Out-Null
+Copy-Item gld-*-x86_64-pc-windows-msvc\gld.exe "$env:USERPROFILE\.local\bin\gld.exe"
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.local\bin", "User")
+```
+
+**Linux 选哪个：** `gnu` 要 glibc 2.35 以上（Ubuntu 22.04+ / Debian 12+ / RHEL 9+）；`musl` 是静态链接的，
+不挑发行版和 glibc 版本，Alpine 上也能跑。实测过哪些见[平台支持的实际情况](#平台支持的实际情况)。
+
+**macOS 首次运行可能被 Gatekeeper 拦**：包没有代码签名，用浏览器下载的会带"下载隔离"标记，第一次运行
+通常弹窗说无法验证开发者、命令跑不起来（用 `gh release download`、`curl` 下载的不带这个标记）。核对发布来源
+和校验和后，确认信任该文件，再决定是否移除这个标记；这不是安全验证的替代：
 
 ```bash
 xattr -d com.apple.quarantine "$HOME/.local/bin/gld"
@@ -40,8 +54,11 @@ xattr -d com.apple.quarantine "$HOME/.local/bin/gld"
 **核对下载没被掉包**（可选）：每个 Release 旁边有 `SHA256SUMS`。
 
 ```bash
-sha256sum -c SHA256SUMS      # macOS 上是 shasum -a 256 -c SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS    # macOS 上是 shasum -a 256 -c --ignore-missing SHA256SUMS
 ```
+
+`SHA256SUMS` 列着全部 5 个包。不加 `--ignore-missing` 的话，只下了一个包时另外 4 个会报找不到、退出码 1，
+看着像被掉包了，其实只是没下载。
 
 **核对它是这个仓库的发布流水线编出来的**（可选，v0.8.0 起才有）：每个包带一份构建来源证明
 （GitHub artifact attestation，Sigstore 签名，记着是哪个仓库、哪个提交、哪条流水线编的）。装了
@@ -173,14 +190,18 @@ gld ls                     # 项目应该都回来了
 
 | 平台 | 状态 |
 | --- | --- |
-| macOS（Apple 芯片 / Intel） | 有历史实机证据与 CI 测试配置；本次审查仅在当前 macOS 开发机重跑，不外推到所有构件 |
-| Linux x86_64（gnu / musl） | 有历史实机证据，CI 配置包含 Linux 测试；musl 发布构建为可选目标 |
-| Windows x86_64 | CI 配置包含编译及部分补丁 / 写锁测试；尚不能据此宣称完整命名管道、服务、MCP 与进程生命周期已实机验收 |
+| macOS（Apple 芯片 / Intel） | CI 在 macOS 上跑全量测试；v0.8.2 两个包在 Apple 芯片的 Mac 上实跑过（Intel 版经 Rosetta），本机常驻服务用的就是 Apple 芯片版发布包 |
+| Linux x86_64（gnu / musl） | 两个都是每次发版必须编过的目标；CI 在 Ubuntu 上跑全量测试；v0.8.2 两个包在 amd64 的 Debian 12 容器里起停守护进程、调工具正常，v0.7.0 的 musl 包在 Oracle Linux 9 容器里跑过；别的发行版没实测 |
+| Windows x86_64 | CI 跑编译、补丁 / 写锁测试，和 9 条守护进程端到端测试（命名管道起停、单实例锁、命令终态、运行记录）；下载包没在 Windows 真机跑过 |
 
 Windows 上守护进程走的是命名管道，和 Unix domain socket 是两套独立实现。
 遇到问题请提 issue，带上 `gld daemon status` 的输出。
 
 ## 卸载
+
+配过[开机自启](daemon.md#开机自启)的先撤掉，不然删了二进制之后系统还会反复去拉一个不存在的程序：macOS 跑
+`launchctl bootout gui/$(id -u)/dev.gld.daemon && rm ~/Library/LaunchAgents/dev.gld.daemon.plist`，
+Linux 跑 `systemctl --user disable --now gld`。然后：
 
 ```bash
 gld daemon stop            # 先停掉后台进程和它持有的服务、隧道

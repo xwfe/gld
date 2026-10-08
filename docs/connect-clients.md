@@ -19,21 +19,35 @@ gld ls                     # 地址、凭据、项目表；加 --reveal 显示�
 用**本地地址** `http://127.0.0.1:<端口>/mcp`（默认端口 28764，`gld ls` 里那一行）。
 这些客户端和服务在同一台机器上，不需要隧道。
 
-推荐把认证改成 bearer，比 OAuth 少一次授权跳转：
+**认证方式整个服务只有一种，本机客户端和 ChatGPT 共用**，默认是 oauth。只接本机客户端、不接 ChatGPT 的，
+改成 bearer 最省事，少一次授权跳转：
 
 ```bash
 gld upgrade --auth bearer
 gld secret ls bearer_token --reveal
 ```
 
-Claude Code：
+**已经接了 ChatGPT 的别改。** ChatGPT 走 OAuth，服务改成 bearer 之后它的请求一律 401，连接器只能删了重建
+（见[装好的连接器什么时候要动](#装好的连接器什么时候要动)）。保持 oauth 的话，支持 OAuth 的本机客户端连上时会打开
+授权页，填 `gld ls --reveal` 里的"授权口令"；这条路还没在 Claude Code、Cursor、Codex 上实测过。
+
+下面的配置按 bearer 写。
+
+Claude Code（`--scope user` 让所有目录都能用；不加的话只在当前目录生效，换个项目目录就看不到 gld）：
 
 ```bash
-claude mcp add --transport http gld http://127.0.0.1:28764/mcp \
+claude mcp add --transport http --scope user gld http://127.0.0.1:28764/mcp \
   --header "Authorization: Bearer <bearer_token>"
 ```
 
-Cursor（`.cursor/mcp.json`）：
+Codex（令牌从环境变量读，启动 Codex 的那个 shell 里没有这个变量就连不上）：
+
+```bash
+export GLD_BEARER_TOKEN=<bearer_token>     # 写进 ~/.zshrc 才会一直生效
+codex mcp add gld --url http://127.0.0.1:28764/mcp --bearer-token-env-var GLD_BEARER_TOKEN
+```
+
+Cursor（写进全局的 `~/.cursor/mcp.json`；项目里的 `.cursor/mcp.json` 只对那一个项目生效）：
 
 ```json
 {
@@ -74,13 +88,19 @@ brew install cloudflared   # Windows: winget install Cloudflare.cloudflared
 gld share                  # 公网地址形如 https://xxx.trycloudflare.com/mcp（等价 --tunnel cf）
 ```
 
-**每次服务重启地址都会变**，ChatGPT 里要跟着改。适合试用，不适合长期。重复敲
-`gld share` / `gld start` 不会重启服务，地址不会因此变；`gld restart`、改端口、改认证、
-重启电脑会。
+**每次服务重启地址都会变**，ChatGPT 里的连接器改不了地址，只能删了重建。适合试用，不适合长期。重复敲
+`gld share` / `gld start` 不会重启服务，地址不会因此变；会重启服务、换地址的有：`gld restart`、`gld upgrade`
+改任何一项、`gld secret set` / `regen`（改凭据要重启服务才生效）、`gld daemon restart`、重启电脑。
 
 ### 办法二：Cloudflare 固定域名
 
-需要一个 Cloudflare 账号和一条已创建的 Named Tunnel，域名连着一起给：
+需要一个 Cloudflare 账号和一条已创建的 Named Tunnel（固定隧道）。还没有的话：在 Cloudflare Zero Trust 控制台的
+Networks → Tunnels 新建一条 Cloudflared 隧道，页面给的安装命令里 `--token` 后面那一长串就是 Tunnel Token
+（不用照页面把 cloudflared 装成服务，gld 会自己拿 token 起它）；再在这条隧道的 Public Hostname 里把
+`mcp.example.com` 指到 `http://127.0.0.1:<端口>`，端口填 `gld ls` 本地地址里那个，下文的回源端口就天然对齐。
+控制台改版后菜单名可能不同。
+
+有了隧道，把域名一起给：
 
 ```bash
 gld share --tunnel cf:mcp.example.com
@@ -138,8 +158,9 @@ gld share --tunnel frp:公司   # 子域名默认 gld，要指定就加 --subdom
 公网地址是 `https://<子域名>.<frps 域名>/mcp`。`frp:` 后面填的是上一步的名称（也认 id）。
 填了不存在的名字会当场报错并列出已有的配置。
 
-frps 侧需要 `subdomain_host = frp.example.com` 并把 `*.frp.example.com` 解析到 frps，
-HTTPS 由 frps 前面的反向代理（Caddy / Nginx）终结。frps 那边要配什么见 frp 官方文档。
+gld 生成的是 HTTP 类型的代理加子域名，所以 `frps.toml` 至少要有 `subDomainHost = "frp.example.com"` 和
+`vhostHTTPPort = 8080`（少了后者代理注册不上），再把 `*.frp.example.com` 解析到 frps，由前面的反向代理
+（Caddy / Nginx）终结 HTTPS、转到 8080。其他配置见 frp 官方文档。
 **两台机器上的 gld 连同一台 frps 时，子域名要错开**（都用默认的 gld 会撞）。
 
 ### 办法四：已经有公网地址（自建反向代理）
@@ -195,7 +216,7 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
   项目的工具集只在调用时生效，服务发给客户端的工具表不变
 - `gld grant add`——已经连好的连接器不受影响
 - `gld secret regen oauth_password` / `gld secret set oauth_password`——口令只管"下次授权填什么"，
-  已经授权过的照常能用
+  已经授权过的照常能用。前提是固定公网地址：改凭据会重启服务，临时地址下地址跟着变，连接器要重建
 - 长时间不用：访问令牌 30 天有效，刷新令牌 90 天，期间用过一次就自动续上
 
 **要点 Refresh**——服务发给客户端的工具表变了。ChatGPT 只在建连接器和点 Refresh 时拉工具表
@@ -230,7 +251,8 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
 | 超过 90 天没用过 | 刷新令牌也过期了 | 原来那个口令 |
 | `gld grant rm` 之后又建了一把给同一个客户端 | 旧 grant 的令牌全部作废 | 新 grant 的口令 |
 
-口令想自己定一个记得住的，别每次去查：`gld secret set oauth_password 你自己的口令`。
+口令想自己定一个记得住的，别每次去查：`gld secret set oauth_password 你自己的口令`。用临时地址的，在建连接器
+之前定好：之后再改会重启服务、换地址。
 
 **要删了重建**：
 
