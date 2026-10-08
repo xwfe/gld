@@ -39,7 +39,9 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| WorkspaceError::invalid_argument("path is required"))?;
-    let resolved = ws.resolve_read_path(path)?;
+    let resolved = ws
+        .resolve_read_path(path)
+        .map_err(|error| not_found_with_namesakes(ws, path, error))?;
     if resolved.path.is_dir() {
         return Err(WorkspaceError::Tool {
             code: "IS_DIRECTORY",
@@ -274,6 +276,69 @@ pub fn list_dir(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         "truncated": truncated,
         "warnings": if truncated { vec!["entry limit reached"] } else { vec![] }
     })))
+}
+
+/// 遍历找同名文件最多看这么多项：大仓库里没找到就算了，别让一次报错拖成全盘扫描。
+const NAMESAKE_WALK_LIMIT: usize = 20_000;
+const NAMESAKES_SHOWN: usize = 5;
+
+/// `read_file` 找不到时，顺手说出项目里同名的文件。
+///
+/// D10 浏览器那轮（2026-10-08）ChatGPT 照浏览器 console 里的 `/app.js` 去读 `app.js`，只拿到一句
+/// `Path not found`，又列了一次目录才找到 `public/app.js`。按名字找、和 `list_files` 同一套忽略规则，
+/// 只给路径，读不读还是它自己定。别的错误原样返回。
+fn not_found_with_namesakes(
+    ws: &Workspace,
+    requested: &str,
+    error: WorkspaceError,
+) -> WorkspaceError {
+    let WorkspaceError::Tool {
+        code: "NOT_FOUND",
+        ref message,
+        category,
+        retryable,
+    } = error
+    else {
+        return error;
+    };
+    let Some(name) = Path::new(requested).file_name() else {
+        return error;
+    };
+    let root = ws.root().to_path_buf();
+    let mut found = Vec::new();
+    for entry in WalkDir::new(&root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| keep_walking_into(ws, &root, entry, false))
+        .filter_map(Result::ok)
+        .take(NAMESAKE_WALK_LIMIT)
+    {
+        let p = entry.path();
+        if entry.file_type().is_file()
+            && p.file_name() == Some(name)
+            && ws.is_safe_read_path(p)
+            && !ws.is_ignored_path(p, false, false)
+        {
+            found.push(relative_display(&root, p));
+            if found.len() == NAMESAKES_SHOWN {
+                break;
+            }
+        }
+    }
+    if found.is_empty() {
+        return error;
+    }
+    WorkspaceError::ToolDetails {
+        code: "NOT_FOUND",
+        message: format!(
+            "{message}. Files with that name in the workspace: {}",
+            found.join(", ")
+        ),
+        category,
+        retryable,
+        details: json!({ "same_name_elsewhere": found }),
+    }
 }
 
 pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {

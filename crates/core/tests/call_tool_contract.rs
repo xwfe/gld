@@ -50,6 +50,44 @@ fn read_file_happy_path() {
     assert_eq!(payload["encoding"], "utf-8");
 }
 
+/// 路径写错时说出项目里同名的文件：D10 浏览器那轮 ChatGPT 照 console 里的 `/app.js` 去读 `app.js`，
+/// 只拿到 Path not found，又列了一次目录才找到 `public/app.js`。被忽略的目录（node_modules）里的不算。
+#[test]
+fn a_missing_file_names_files_with_the_same_name() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("public")).expect("public");
+    std::fs::write(root.join("public/app.js"), "render();\n").expect("app");
+    std::fs::create_dir_all(root.join("node_modules/x")).expect("deps");
+    std::fs::write(root.join("node_modules/x/app.js"), "").expect("dep app");
+    let ctx = ctx_for(root);
+
+    let out = invoke(&ctx, "read_file", json!({"path": "app.js"}));
+    let err = assert_err(&out);
+    assert_eq!(err["error"]["code"], "NOT_FOUND", "{err}");
+    assert_eq!(
+        err["error"]["details"]["same_name_elsewhere"],
+        json!(["public/app.js"]),
+        "{err}"
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("public/app.js"),
+        "{err}"
+    );
+
+    // 哪儿都没有同名的：还是原来那句，不多给东西。
+    let out = invoke(&ctx, "read_file", json!({"path": "nowhere.js"}));
+    let err = assert_err(&out);
+    assert_eq!(err["error"]["code"], "NOT_FOUND", "{err}");
+    assert!(
+        err["error"]["details"]["same_name_elsewhere"].is_null(),
+        "{err}"
+    );
+}
+
 /// 照着 `next_start_line` 一页页往下翻，每一行都得完整地出现在某一页里。
 ///
 /// 截断落在一行中间时，以前 `next_start_line` 给的是下一行，这一行的后半截就再也
