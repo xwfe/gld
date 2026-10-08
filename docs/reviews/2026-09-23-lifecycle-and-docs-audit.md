@@ -1115,3 +1115,24 @@ CLI 预检 `pnpm install` 和依赖没装的 `pnpm run test` 都是 `needs_appro
 
 **清理：**`gld rm d11-mi -y`，删项目目录、`harness/workspaces/64eb5eb5…`、`runs/64eb5eb5…`、`logs/0d2742b9…`、
 `write-locks/64de294d9cc49b83.lock`；`gld health` 四项照常。`pretty-bytes` 留在本机 pnpm 缓存里。
+
+## 18. 发布 0.8.2（2026-10-08）
+
+0.8.1 之后 19 个改 `crates/` 的提交发成 0.8.2（用户要求）：任务发现 `list_project_commands`（含 `ci_steps`、`may_install`）、
+装依赖要 `confirm=true`、`command_summary`、历史脱敏、D10 三轮的修复。发布说明 [v0.8.2.md](../releases/v0.8.2.md) 写明从 0.8.1
+升上来 ChatGPT 要 Refresh（29 → 30 个工具），协议号不变（`crates/daemon` 自 0.8.1 没改过）、版本号变了要重启。
+发版前先把 CI 的 action 换到 Node 24（checkout v5、upload-artifact v6、download-artifact v7，`07538f0`）。
+
+| 核对 | 结果 |
+| --- | --- |
+| 发版前 | 全量 903 passed、0 failed；本机打包解压报 0.8.2，在隔离 `GLD_HOME` 起服务：30 个工具、有 `list_project_commands`，停掉后没留进程 |
+| 推送与空跑 | `2cc2da0` 的 CI run 37707388637 八个 job 全绿；Release 空跑 run 37707393711 五个目标全绿 |
+| 正式 Release | `v0.8.2` 的 run 37708032034 全绿，`建 Release` 也跑了（`download-artifact@v7` 第一次实跑）；5 个包 + `SHA256SUMS`；注解里没有 Node 20 警告（升级前每次 CI 8 条） |
+| 下载包 | 校验和 5 个 OK、来源证明 5 个退出 0；两个 macOS 包报 0.8.2（Intel 版经 Rosetta）；gnu、musl 包在 amd64 Debian 12 容器里报 0.8.2，起停守护进程、`list_project_commands` 正常，`npm install` 预检是 `confirmation_required` |
+| 本机服务 | 换成官方 Apple 芯片包，构建提交 `2cc2da0`；工具表指纹 `40f55e0868eb138f` 没变（本机此前已是同一份工具表），这条连接器不用 Refresh；凭据指纹、`gld ls` 一致，`gld health` 四项 200 |
+
+**没验：**Windows 下载包没在真机跑。容器用的 `public.ecr.aws/debian/debian:bookworm-slim` 分不清是这次拉的还是之前就有，没删；
+OrbStack 测完已关回原状。
+
+**同日文档：**README 改成"适合 / 不适合 → 能做什么 → 三步上手 → 文档"，130 行减到 88 行；按新手路径核对改了接客户端和安装文档
+（`54e1ccc`）。其中查出接客户端原来推荐"本机客户端改 bearer"，而认证方式全服务只有一种，已接 ChatGPT 的照做会 401。
