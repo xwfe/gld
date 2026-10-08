@@ -752,17 +752,10 @@ gld tool call list_project_commands path=web      # 只看 monorepo 里的一个
 - `exec`：交给 `exec_command` 会不会放行，和 `check_command` 对同一组参数的判定一字不差。只说能不能跑，不说会不会成功。
 - 每个项目的包管理器和依据（`packageManager` 字段 > 锁文件，几个锁文件同时在的写进 `ambiguities`）、
   `node_modules` 在不在（`dependencies_installed`）、Rust 工具链和 Node 版本要求。依赖没装时多列一条
-  `pnpm install` 之类的命令：它要联网，还会跑依赖包自己的安装脚本，**跑之前问用户**。`exec_command` 也会拦：
-  npm / pnpm / yarn / bun 的 `install`、`i`、`add`、`ci`（npm 还有 `clean-install`）和只写一个 `yarn`，不带
-  `confirm=true` 一律报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`，`exec` 判定是 `needs_approval`。
+  `pnpm install` 之类的命令：它要联网，还会跑依赖包自己的安装脚本，`exec_command` 要[你点头](#装东西的命令要你点头)才跑。
 - `may_install: true`：依赖没装的 pnpm 包，它的 `pnpm run …` 和 CI 里同目录的 pnpm 步骤都带这一格。pnpm 跑脚本前
-  会先把缺的依赖装上（12.8.1 实测是默认行为），跑它和跑 `pnpm install` 一样要联网、跑安装脚本，`exec_command` 同样要
-  `confirm=true`。依赖没装时 pnpm 除了 `why`、`ls`、`outdated`、`config`、`view`、`-v` 这类查询，`run`、`test`、`exec`、
-  脚本简写（`pnpm build`）、连不认识的子命令都先装，所以这几类以外的 pnpm 命令都拦。npm 跑脚本不会自己装，不标也不拦；
+  会先把缺的依赖装上（12.8.1 实测是默认行为），所以和 `pnpm install` 一样要你点头。npm 跑脚本不会自己装，不标；
   yarn、bun 没实测，也不标。
-  只在回包里提醒拦不住：2026-10-07 实测两次，一次照提醒没跑 `pnpm install`、`pnpm run test` 却把依赖装上了（审查 §16），
-  一次把"按 CI 全跑一遍"当成用户同意，没问就跑了 `pnpm install`（审查 §17）。`confirm=true` 仍是 AI 自己填的，
-  服务端看不到用户点没点头（见[安全](security.md)），它管的是让 AI 在动手前停一下，记录里也看得出来。
 
 **CI 实际怎么验，单独列在 `ci_steps`。**清单说的是"项目声明了哪些入口"，CI 说的是"项目实际怎么验"，两样不混：
 `.github/workflows/*.yml` 里每个 job 的 `run:` 步骤各一条，给出命令原文、`workdir`（步骤的 `working-directory` >
@@ -770,7 +763,7 @@ job 的 `defaults` > 工作流的 `defaults`，`./web/` 写成 `web`）、`env`�
 按命令内容猜的 `role`、`source`（如 `.github/workflows/ci.yml jobs.web.steps[1]`）。单行、不带 `${{ }}` 的步骤也有 `exec`
 判定；多行脚本和用了表达式的是 `null`，要拆开或改写才能交给 `exec_command`。CI 里的 `pnpm install`、`npm ci` 这类
 标 `install`，同样要**先问用户**：2026-10-07 ChatGPT 实测就是照着 CI 直接装了依赖、没问人（审查 §14）。
-其中 npm / pnpm / yarn / bun 的安装 `exec_command` 会拦；`pip install`、`uv sync` 这类只有提醒。
+这个标记看到 `install` 这个词就算，比 `exec_command` 拦的范围宽，只用来提醒。
 `uses:` 的 action、矩阵、`if:` 条件不摘，原文要 AI 自己读。用了 YAML 别名（`*name`）或嵌套超过 64 层的工作流不解析，
 写进 `problems`：别名展开能让几 KB 的文件撑出几十 GB 内存，而仓库内容是不可信的。
 
@@ -783,6 +776,30 @@ Makefile、pyproject、go.mod 这些这一版不解析，只报在不在。
 CI 步骤最多 10 个工作流文件、60 步。脚本正文和 CI 命令截到 200 字符，过一遍和 `list_runs` 一样的脱敏。
 坏掉的清单或工作流写进 `problems`，不影响别的。回包大小参考：带 CI 的单个项目 7～9 KB，40 个 Cargo 成员加
 20 个前端包的 monorepo 约 30 KB。
+
+### 装东西的命令要你点头
+
+下面这些命令，`exec_command` 不带 `confirm=true` 一律拒，报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`，
+`check_command` 和 `list_project_commands` 的 `exec` 判定是 `needs_approval`。AI 应当先问你，你同意了它再带
+`confirm=true` 重试。
+
+| 生态 | 拦的 |
+| --- | --- |
+| npm / pnpm / yarn / bun | `install`、`i`、`add`、`ci`（npm 还有 `clean-install`）、只写一个 `yarn`；依赖没装时除查询外的 pnpm 命令（见上面 `may_install`） |
+| 一次性运行器 | `npx`、`npm exec`、`bunx`、`bun x` 跑**项目里没装**的包（往上找不到 `node_modules/.bin/<名字>`），或写了版本号（`create-vite@latest`）；`pnpm dlx`、`yarn dlx`、`uvx`、`pipx run` 一律拦 |
+| 浏览器 | `playwright install`（不管经 `npx`、`pnpm exec` 还是直接跑）：往用户缓存目录下几百 MB 的浏览器 |
+| Python | `pip install` / `download` / `wheel`（含 `python -m pip …`）、`uv sync` / `add` / `pip install`、`uv tool install`、没有 `.venv` 时的 `uv run`、`poetry install` / `add`、`pipenv install`、`conda install` |
+| Rust / Go | `cargo install`、`cargo add`、`cargo fetch`；`go install`、`go get`、`go mod download` |
+| 其他 | `gem install`、`bundle install`、`dotnet add package`、`dotnet restore`、`dotnet tool install`、`deno install` / `add`、`composer install` / `require`、`brew install`、`apt-get install` |
+
+**按用途认，不按副作用。**`cargo build`、`go build`、`go mod tidy`、`mvn install`、`gradle build`、`dotnet build` 也会顺手
+下载声明过的依赖，但它们是构建，不拦——拦了每次构建都要问，问多了只会闭眼点同意。只认子命令，所以
+`grep install README.md`、`git commit -m "pip install"` 不会被拦。表里很多程序默认不在白名单里（`pip`、`uv`、`gem`……），
+你把它们加进 `mcp.allowed-commands` 之后这条规则照样管。
+
+**为什么要拦，而不是在回包里提醒：**2026-10-07 实测两次，一次照提醒没跑 `pnpm install`、`pnpm run test` 却把依赖装上了
+（审查 §16），一次把"按 CI 全跑一遍"当成用户同意，没问就跑了 `pnpm install`（审查 §17）。`confirm=true` 仍是 AI 自己填的，
+服务端看不到你点没点头（见[安全](security.md)），它管的是让 AI 在动手前停一下，运行记录里也看得出来。
 
 ---
 

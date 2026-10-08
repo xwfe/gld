@@ -13,9 +13,10 @@
 
 mod cargo;
 mod ci;
+mod installs;
 mod node;
 
-pub(crate) use node::installs_before_running;
+pub(crate) use installs::installs_before_running;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

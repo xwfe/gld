@@ -661,3 +661,60 @@ fn installing_dependencies_needs_confirm() {
     assert!(!held("pnpm run test", "web", false));
     assert!(held("pnpm install", "web", false));
 }
+
+/// 装依赖要 confirm 不只管 JS：默认白名单里的 python、cargo、go、npx 也能装东西。按用途认——
+/// `cargo install`、`go get`、`npx 没装的包`、`playwright install` 拦，`cargo build`、`go test` 这类构建不拦，
+/// 哪怕它们会顺手下载声明过的依赖。
+#[test]
+fn installing_with_other_tools_needs_confirm_too() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    write(root, "node_modules/.bin/tsc", "");
+    write(root, "node_modules/.bin/playwright", "");
+    let ctx = ctx_for(root);
+    let rule = |cmd: &str| {
+        let checked = invoke(&ctx, "check_command", json!({ "cmd": cmd }));
+        checked["rule"].as_str().unwrap_or_default().to_string()
+    };
+
+    for cmd in [
+        "python3 -m pip install -r requirements.txt",
+        "cargo install ripgrep",
+        "cargo add serde",
+        "go install golang.org/x/tools/gopls@latest",
+        "go get example.com/m@v1",
+        "npx left-pad",
+        "npx create-vite@latest app",
+        "npx playwright install chromium",
+        "dotnet add package Newtonsoft.Json",
+    ] {
+        assert_eq!(rule(cmd), "confirmation_required", "{cmd} 该要 confirm");
+        let confirmed = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": cmd, "confirm": true }),
+        );
+        assert_ne!(
+            confirmed["rule"], "confirmation_required",
+            "{cmd} 带了 confirm 就不再要"
+        );
+    }
+    for cmd in [
+        "cargo build --locked",
+        "cargo test",
+        "go test ./...",
+        "python3 -m pytest",
+        "npx tsc --noEmit",
+        "npx playwright test",
+    ] {
+        assert_ne!(rule(cmd), "confirmation_required", "{cmd} 不该拦");
+    }
+
+    // 真跑也拦在起进程之前。
+    let out = invoke(&ctx, "exec_command", json!({ "cmd": "npx left-pad" }));
+    let err = assert_err(&out);
+    assert_eq!(
+        err["error"]["code"], "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION",
+        "{err}"
+    );
+}

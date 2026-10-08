@@ -216,7 +216,7 @@ const PNPM_QUERIES: &[&str] = &[
 ///
 /// 只按子命令认，不像 CI 步骤那样见到 `install` 就算：拿来拦命令的话，`grep install README.md`、
 /// `git commit -m "npm install"` 都会被拦。`workspace` 为空时只认显式的安装命令。
-pub(crate) fn installs_before_running(
+pub(super) fn installs_before_running(
     workspace: Option<&Workspace>,
     manager: &str,
     workdir: &str,

@@ -513,9 +513,9 @@ pub fn validate_command_for_workspace(
         }
     }
 
-    // 装依赖要联网下载、跑依赖包自己的安装脚本。回包里写"先问用户"拦不住：ChatGPT 把"按 CI 全跑一遍"
+    // 装依赖、装工具要联网下载、跑包自己的安装脚本。回包里写"先问用户"拦不住：ChatGPT 把"按 CI 全跑一遍"
     // 当成了同意，没问就跑了 pnpm install（审查 §17）。所以和 rm -rf 一样，用户点头后带 confirm=true。
-    // 放在最后：被别的规则拒的命令，问了用户也跑不了，先报那个。
+    // 哪些算装，见 project_commands/installs.rs。放在最后：被别的规则拒的命令，问了用户也跑不了，先报那个。
     if !confirmed(arguments) {
         let workdir = arguments
             .get("workdir")
