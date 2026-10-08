@@ -28,6 +28,9 @@ GLD_HOME=$(mktemp -d) cargo test --workspace --all-targets --locked
 `crates/cli/tests/daemon_lifecycle.rs` 会真的拉起一个守护进程、起 MCP、走 TCP 请求再停掉。
 不设也能跑（core 的写文件测试自己会切到临时目录），但集成测试会用你的真实数据目录。
 
+经 gld 的 `exec_command` 跑（AI 在 gld 里开发 gld）时 `$(mktemp -d)` 不会展开——它不经 shell。改用 cargo 自己的配置传
+环境变量：`cargo --config 'env.GLD_HOME="target/test-home"' test --workspace --all-targets --locked`（审查 §12 里 AI 就是这么做的）。
+
 | 测试 | 位置 | 覆盖什么 |
 | --- | --- | --- |
 | 单元测试 | 各 crate `src/**` 的 `#[cfg(test)]` | 解析、策略、协议编解码、路径回退、字段表 |
@@ -40,7 +43,7 @@ GLD_HOME=$(mktemp -d) cargo test --workspace --all-targets --locked
 | 一步到位的入口 | `crates/cli/tests/start_and_upgrade.rs` | `gld start <目录>` 的自动登记与归属判断（非项目目录不登记）、`gld ls` 的服务 / 项目视图、`gld upgrade` 换目录换地址 |
 | 公网入口 | `crates/cli/tests/share_one_command.rs`、`named_tunnel_start.rs` | 服务的 `--tunnel` 各种走法（假 cloudflared / 假 frpc）、沿用已配好的入口、缺隧道程序时的报错、固定域名的公网探测 |
 | 收摊 | `crates/cli/tests/destroy_and_stop_all.rs` | `gld stop` 不删东西、`gld rm` 删干净且必须确认 |
-| 文档与提示 | `docs_commands_exist.rs`、`messages_name_real_commands.rs`、`doctor_fixes_are_real_commands.rs` | 校验提取出的 CLI 命令；不等于所有参数、执行效果、链接或客户端 schema 已验证 |
+| 文档与提示 | `docs_commands_exist.rs`、`messages_name_real_commands.rs`、`doctor_fixes_are_real_commands.rs`、`docs_links_resolve.rs`、`docs_generation.rs` | 校验提取出的 CLI 命令、相对链接与锚点、`cli.md` 生成脚本的失败处理；不等于所有参数、执行效果或客户端 schema 已验证 |
 
 只跑某一块：
 
@@ -76,8 +79,9 @@ README 只保留定位、安装、使用、关键边界和导航；产品行为�
 也不进 reviews / RFC：那里记的是当时的命令）。相对链接和 `#锚点` 由
 `docs_links_resolve.rs` 查，范围是 README 加 `docs/` 下全部 Markdown；改标题或挪文件时
 它会点名哪一处断了。锚点按 GitHub 的规则算。
-`ccnm_background_lifecycle` 在没有 ccnm 二进制时会打印跳过后直接返回，测试框架仍可能显示
-passed；需要核对实际依赖和 `--nocapture` 日志，不能用 `0 ignored` 证明全都执行。
+有两条测试会打印"跳过"后直接返回，测试框架照样显示 passed，不能用 `0 ignored` 证明全都执行，要看 `--nocapture` 日志：
+`ccnm_background_lifecycle` 在没有 ccnm 二进制时；`share_reports_the_missing_binary_instead_of_a_silent_no_url` 在本机**装了**
+cloudflared 时（造不出"没装"，这条只在 CI 的干净镜像里真跑）。
 
 `scripts/gen-cli-docs.sh` 在一次性的 `HOME` 里跑（不读你真实的 `~/.config/gld`），先写
 临时文件；任何一条 `gld` 失败、或帮助段数不对、字段表 / 密钥名表像是空的，就退出 1 并

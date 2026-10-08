@@ -55,8 +55,8 @@ gld add ~/code/another        # 再加一个，立即生效
 gld ls                        # 客户端要填的地址和凭据
 ```
 
-**3. 接客户端。** Claude Code、Cursor、Codex 直接填 `gld ls` 给的本地地址。ChatGPT 只能连公网 HTTPS，
-要先拿一个公网地址：
+**3. 接客户端。** Claude Code、Cursor、Codex 填 `gld ls` 给的本地地址（认证怎么配见
+[connect-clients.md](docs/connect-clients.md#本机客户端claude-codecursorcodex-等)）。ChatGPT 只能连公网 HTTPS，要先拿一个公网地址：
 
 ```bash
 gld share                     # Cloudflare 临时地址，要先装 cloudflared
@@ -78,6 +78,8 @@ gld share                     # Cloudflare 临时地址，要先装 cloudflared
 | AI 能碰什么、怎么收紧 | [security.md](docs/security.md) |
 | 报错怎么办 | [troubleshooting.md](docs/troubleshooting.md) |
 | 项目、工具集、Planning、grant 这些概念 | [concepts.md](docs/concepts.md) |
+| 拿它从需求做到上线，哪些靠得住、哪些还得人管 | [project-lifecycle.md](docs/project-lifecycle.md) |
+| 后台守护进程、开机自启 | [daemon.md](docs/daemon.md) |
 | 每个命令的全部参数 | [cli.md](docs/cli.md)，或 `gld <命令> --help` |
 | 每一版改了什么、升级后要不要动 ChatGPT | [docs/releases/](docs/releases/) |
 | 以前用桌面版 | [migrate-from-desktop.md](docs/migrate-from-desktop.md) |

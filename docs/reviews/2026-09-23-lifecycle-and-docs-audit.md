@@ -1,8 +1,7 @@
 # gld 完成度、生命周期与文档审查（2026-09-23）
 
-状态：**D01–D08、D11、D14 已修（D07 本机服务已升级，grant 未在 ChatGPT 上实测），D13 已核对，0.7.0 已在本机真机
-验收并发布（D12 做了发布门禁、下载包验收和构建来源证明，代码签名未做）；D09 做了运行记录；D07–D09 随 0.8.0
-发布；D10 未做。**
+状态（2026-10-08）：**D01–D09、D11、D14 已修，D13 已核对；D07 的 grant 在 ChatGPT 上实测过（§9）；D12 做了发布门禁、
+下载包验收和构建来源证明，代码签名未做；D10 三轮实测、任务发现随 0.8.2 发布（§10–§18），服务模式与浏览器配法已做未发版（§19）。**
 §1–§6 是审查当时（0.6.0）的原始发现，保留原样；每项怎么修的、怎么验证的、还剩什么，看
 [§7 处理进展](#7-处理进展)。2026-09-25 重新归并后的**当前任务只在
 [task_plan.md](../../task_plan.md) 排队**，§8 记录本次复核；各历史段落的“未做”不覆盖后来的结果。
@@ -28,7 +27,7 @@
 | 单服务、多项目主入口 | 已实施；旧“先完成 grant 再收口”已被 9 月 22 日决定替代，grant 仍是缺口 | [RFC-0004](../rfc/0004-one-service-many-projects.md) |
 | 已安装 Skills 与附件 | gld 侧已实施；远端附件的真实全链路仍按原记录保留未验 | [RFC-0005](../rfc/0005-machine-skills.md) |
 | 本机 MCP 与远端 MCP 转发 | 已实施工具发现、调用、连接池和有界结果缓存；不等于所有结果类型无损 | [RFC-0006](../rfc/0006-machine-mcp.md) |
-| 共享写锁、主体命令会话、构建与依赖指纹 | 已有实现；后台命令全程互斥、项目级授权和客户端端到端仍不能据此宣布完成 | [跨仓清单](2026-09-19-cross-project-refactor-actions.md)、[工具审查 §12](2026-09-19-gld-tooling-review-and-plan.md) |
+| 共享写锁、主体命令会话、构建与依赖指纹 | 已有实现；后台命令全程互斥、项目级授权和客户端端到端仍不能据此宣布完成 | [工具审查 §12](2026-09-19-gld-tooling-review-and-plan.md)（当时的跨仓落地清单已删，剩下的三项挪进 task_plan 的"等遇到再做"） |
 
 **总体判断：可靠编码工具集已成形；可靠生命周期的“验收、恢复、授权、证据”尚未闭合。**
 完整覆盖矩阵与当前可用做法移到[生命周期指南](../project-lifecycle.md)，避免 README 堆积细节。
@@ -905,6 +904,7 @@ HEAD；工具表 29 个，指纹 `39557a9cc2871037` → `d7c4b983b0b20de9`（`re
 **场景：**从 `ba47a5a` 拉 worktree `~/xdw/gld-d10-self`（项目名 `d10-gld`），需求是 `gld grant ls` 只列当前认证方式能用的
 那列凭据、表下说明另一列为什么不显示、`--json` 不变、文档同步。提示词**不给任何命令和文件位置**，看 AI 能不能自己读
 `docs/development.md` 并做到：测试隔离 `GLD_HOME`、fmt、clippy `-D warnings`、改了帮助重新生成 `docs/cli.md`。
+这个需求是练习用的，改动随 worktree 一起丢弃了，main 上的 `gld grant ls` 仍列两列。
 
 **搭场景时顺手修的：**经守护进程跑的项目命令继承了 gld 自己的 `GLD_HOME`，项目里的 `cargo test` 会写进真实数据目录
 （`ba47a5a`，子进程不再带 `GLD_HOME`）。本机升到 `ba47a5a`，工具表没变。
@@ -1128,7 +1128,7 @@ CLI 预检 `pnpm install` 和依赖没装的 `pnpm run test` 都是 `needs_appro
 | 发版前 | 全量 903 passed、0 failed；本机打包解压报 0.8.2，在隔离 `GLD_HOME` 起服务：30 个工具、有 `list_project_commands`，停掉后没留进程 |
 | 推送与空跑 | `2cc2da0` 的 CI run 37707388637 八个 job 全绿；Release 空跑 run 37707393711 五个目标全绿 |
 | 正式 Release | `v0.8.2` 的 run 37708032034 全绿，`建 Release` 也跑了（`download-artifact@v7` 第一次实跑）；5 个包 + `SHA256SUMS`；注解里没有 Node 20 警告（升级前每次 CI 8 条） |
-| 下载包 | 校验和 5 个 OK、来源证明 5 个退出 0；两个 macOS 包报 0.8.2（Intel 版经 Rosetta）；gnu、musl 包在 amd64 Debian 12 容器里报 0.8.2，起停守护进程、`list_project_commands` 正常，`npm install` 预检是 `confirmation_required` |
+| 下载包 | 校验和 5 个 OK、来源证明 5 个退出 0；两个 macOS 包报 0.8.2（Intel 版经 Rosetta）；gnu、musl 包在 amd64 Debian 12 容器里报 0.8.2，起停守护进程、`list_project_commands` 正常，`npm install` 预检 `decision` 是 `needs_approval`（`rule` 是 `confirmation_required`） |
 | 本机服务 | 换成官方 Apple 芯片包，构建提交 `2cc2da0`；工具表指纹 `40f55e0868eb138f` 没变（本机此前已是同一份工具表），这条连接器不用 Refresh；凭据指纹、`gld ls` 一致，`gld health` 四项 200 |
 
 **没验：**Windows 下载包没在真机跑。容器用的 `public.ecr.aws/debian/debian:bookworm-slim` 分不清是这次拉的还是之前就有，没删；
@@ -1136,3 +1136,36 @@ OrbStack 测完已关回原状。
 
 **同日文档：**README 改成"适合 / 不适合 → 能做什么 → 三步上手 → 文档"，130 行减到 88 行；按新手路径核对改了接客户端和安装文档
 （`54e1ccc`）。其中查出接客户端原来推荐"本机客户端改 bearer"，而认证方式全服务只有一种，已接 ChatGPT 的照做会 401。
+
+## 19. 0.8.2 之后：装东西的拦截扩到别的生态、服务模式、浏览器配法（2026-10-08）
+
+用户定：没验的和条件触发的那些等遇到再做（已并进 task_plan 的"等遇到再做"），清理文档，其余的做。之前说要先定范围的
+三件（服务最长开多久、端口是否只绑本机、浏览器 MCP 范围），用户没逐项定，按下面的保守默认值做了：
+
+| 项 | 做法 | 提交 |
+| --- | --- | --- |
+| 装东西要 `confirm` | 0.8.2 只拦 JS 包管理器。按用途扩到 `pip install`（含 `python -m pip`）、uv、poetry、`cargo install` / `add` / `fetch`、`go install` / `get`、`gem`、`bundle`、`dotnet add package`、`npx` 跑项目里没装的包、`pnpm dlx`、`playwright install`。构建（`cargo build`、`go build`、`mvn install`）顺手拉依赖不拦，拦了每次构建都要问。工具说明没变 | `8de3ed1` |
+| 服务模式 | `exec_command` 加 `service_port`：起之前端口有人听就不起（`PORT_IN_USE`，是自己那条就给 `session_id`）；只连本机回环，答话就返回；`timeout_ms` 默认 30 分钟、最多 1 小时；不替服务改绑定，只在 `reachable_from_network` 里说出它是否听在所有网卡上。改了工具表 | `681315f` |
+| 浏览器 | 不写代码：本机 MCP 转发加一条单独配置的 Playwright MCP（`--isolated`、`--headless`、`--allowed-origins` 只放本机、`cwd` 指到专用目录） | `4643282` |
+
+**验证：**
+
+- 装东西：新增单元 4 条、集成 1 条；变异两处（`npx` 一律当装了、不认 `cargo install`）对应测试都失败。
+- 服务模式：新增单元 4 条、集成 5 条（真起 `python3 -m http.server`）；变异两处（不查端口、答话不提前返回）对应测试都失败；
+  集成测试连跑 10 遍全绿。取端口照 CLI 测试的规矩"连一下"，不在测试进程里 bind（macOS 上子进程会继承监听 socket）。
+- 全量第一次挂在 `messages_name_real_commands`：报错文案写了 "so gld could not tell…"，被当成子命令 `gld could`，改了措辞。
+  之后隔离 `GLD_HOME` 全量 917 passed、0 failed、0 ignored；fmt、clippy `-D warnings`、文档链接检查通过。
+- 浏览器（隔离 `GLD_HOME`、调试版守护进程端口 28991 加 noauth、临时 `CODEX_HOME`，Playwright MCP 0.0.83 用本机 npx 缓存、
+  不联网，经 `/mcp` 调）：服务模式起 `python3 -m http.server`，123 ms 就 ready → `browser_navigate` → `browser_snapshot` →
+  `browser_click` → `browser_console_messages` 读到页面里的 `clear failed` → `browser_take_screenshot` 回 PNG（base64 16 KB）。
+  `https://example.com` 报 `ERR_BLOCKED_BY_CLIENT`，`file:///etc/hosts` 被拒，上传 `/etc/hosts` 报 outside allowed roots，
+  `cwd` 里的文件能传。对照一条不写 `cwd` 的：允许范围是整个主目录和 `~/.playwright-mcp`。
+- 第一次点击按旧参数名（`element` + `ref`）报 `Invalid arguments`：0.0.83 改成了 `target`。文档写明先用
+  `list_mcp_tools server=… tool=…` 看参数。
+- 清理：`kill_session` 后端口空出；`gld mcp off --all`、`gld stop`、`gld daemon stop`；按本次的命令行查没有残留进程（本机另有
+  30 个前一天 20:18 起就在跑的 `playwright-mcp`，属于别的客户端，没动）。`~/.playwright-mcp` 是不写 `cwd` 那次对照新建的
+  （创建于 10:54:46，只有本次两个快照），已删；临时目录已删。本机 0.8.2 守护进程没动。
+
+**没做 / 没验：**本机服务没升级，ChatGPT 没用过服务模式和浏览器配置；用户的 `~/.codex/config.toml` 没改。uv、pip 这些规则
+按它们文档写的行为判，单元测试只覆盖判定，没在本机真跑 uv / pip。`reachable_from_network` 用的是"往外发包会走的那个本机
+地址"，开着 TUN 代理的机器上那是代理网卡的地址，判定照样成立，但没单独验。

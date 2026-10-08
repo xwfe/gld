@@ -92,10 +92,8 @@ gld --version
 自己重拉。要不要点，比一下升级前后的工具表指纹就知道（下面第 2 步和"换完核对"）。
 除了升级，还有哪些操作会碰到连接器，见[装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。
 
-实测：本机三次升级（2026-09-23 两次：0.6.0 的两次构建之间、0.6.0 → 0.7.0；09-24 一次：0.7.0 → 加了
-grant 的构建），逐项比对口令、签名密钥、Client ID、ChatGPT 注册的客户端、公网地址、项目表的指纹，
-全部一致；守护进程重启 0.2–0.3 秒，公网 `/mcp` 和 OAuth 元数据照常，服务自己回来，ChatGPT 用原来
-注册的客户端直接连上。
+本机从 0.6.0 起每次升级都逐项比对过口令、签名密钥、Client ID、ChatGPT 注册的客户端、公网地址、项目表的指纹，
+全部一致，守护进程重启 0.2–0.3 秒，ChatGPT 用原来注册的客户端直接连上（每次的记录在[审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)里）。
 
 ### 升级前先看两件事
 
@@ -111,7 +109,7 @@ cd gld && git pull && cargo build --release --locked -p gld   # 产物 target/re
 #    用发行包的，解压出来的 gld-*/gld 就是，下面第 3 步换成它
 
 # 2. 记下现在的样子（都不含明文凭据，可以放心存），再留两份备份好回滚
-gld tool list --served | sed -n 2p > /tmp/gld-tools-before.txt   # tools/list：29 个工具  指纹 …
+gld tool list --served | sed -n 2p > /tmp/gld-tools-before.txt   # tools/list：N 个工具  指纹 …
 gld ls > /tmp/gld-before.txt
 mkdir -p ~/.local/opt
 cp -p "$(command -v gld)" ~/.local/opt/gld-$(date +%Y%m%d-%H%M)

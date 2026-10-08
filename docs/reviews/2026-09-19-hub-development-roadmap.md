@@ -63,8 +63,9 @@ Fylane 的 GitHub 网页解析未成功，但通过公开 API/Raw HTTP GET 成�
   原来那个理由（"旧表没人能读了，不收就是孤儿进程"）不成立了。
 - S1、S4–S7 没动过。
 
-这不表示 L1 已经完成：变的是执行资源所有权，授权模型（scoped view、grant）还没做。
-逐条落地情况见[跨项目重构落地清单](2026-09-19-cross-project-refactor-actions.md)第 3 节。
+这不表示 L1 已经完成：变的是执行资源所有权，授权模型（scoped view、grant）还没做（grant 后来在
+[RFC-0007](../rfc/0007-scoped-grants.md) 做了）。当时的逐条落地清单已删，git 历史里有；还没做的几项在
+[task_plan.md](../../task_plan.md) 的"等遇到再做"。
 
 ## 3. hub 与单项目命令如何收敛
 

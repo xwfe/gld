@@ -139,7 +139,7 @@ gld tool call exec_command cmd='cargo test'
 | AI 不知道项目怎么跑测试，或者用错了包管理器（pnpm 项目跑了 `npm install`，多出一份 `package-lock.json`） | 提示词没给命令，它在猜 | 让 AI 先调 `list_project_commands`：列出清单里写好的命令和该用的包管理器，几个锁文件同时在的写进 `ambiguities`；CI 里的 `run:` 步骤单列在 `ci_steps`，`uses:`、矩阵、`if:` 和开发文档里的要求它不解析，列在 `other_sources` 里要 AI 去读。见 [concepts.md](concepts.md#项目怎么构建怎么测list_project_commands) |
 | 改完白名单不确定生效没有 | 配置改了，跑着的服务不一定重载了 | 改前改后各调一次 `check_command`，比对 `policy.runtime_fingerprint`：数变了才是真生效 |
 | 收窄了白名单但 `python` 还能跑 | 不带 `only:` 的写法是追加，不是替换 | 改成 `gld set <项目> allowed-commands=only:…`；细节见 [security.md](security.md) |
-| `Program not found on PATH: node`，终端里明明能跑 | 守护进程是 launchd / systemd 起的，PATH 里没有 Homebrew、`~/.cargo/bin` 这些目录 | 把目录配成全局可执行路径再 `gld restart`，写法见 [daemon.md](daemon.md#开机自启) |
+| `Program not found on PATH: node`，终端里明明能跑 | 守护进程是 launchd / systemd 起的，PATH 里没有 Homebrew、`~/.cargo/bin` 这些目录 | 把目录配成全局可执行路径（`gld cfg runtime --executable-paths …`），下一次调用就生效、不用重启，写法见 [daemon.md](daemon.md#为什么-launchd--systemd-起的找不到命令) |
 | 项目目录外文件写入被拒 | 写入永远只在项目目录内 | 把目标目录也 `gld add` 成一个项目，或把文件放进项目 |
 | `READS_CONFINED_TO_WORKSPACE`（升级到 0.3.0 后 Agent 突然读不了外部文件） | 0.3.0 起读也默认限制在项目目录内，老配置升级上来一样收紧 | 确实要读外面：`gld set <项目> confine-reads=false`（Actions 那条线路是 `actions.confine-reads`）。先读一下 [security.md](security.md) 再决定 |
 | `GLD_DATA_HOME_DENIED` | 想用文件工具读 gld 自己的数据目录 | 有意挡的，**关掉 confine-reads 也不给读**：那里明文存着所有凭据。要看凭据用 `gld secret ls <key> --reveal` |
@@ -202,5 +202,5 @@ gld tool call exec_command cmd='cargo test'
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | 两套配置互相干扰 | 用了同一个 `~/.config/gld` | 用 `GLD_HOME=/path/a gld …` 隔离，守护进程也按 `GLD_HOME` 各自一套 |
-| socket 出现在 `/tmp` 而不是数据目录 | 数据目录路径太长（>100 字节），Unix socket 放不下 | 正常；`gld daemon status` 里能看到实际路径 |
+| socket 出现在 `$TMPDIR`（macOS 上是 `/var/folders/…`）而不是数据目录 | 数据目录路径太长（>100 字节），Unix socket 放不下 | 正常；`gld daemon status` 里能看到实际路径 |
 | 想看守护进程收到了什么 | — | `gld daemon logs -f`，每个请求一行含耗时；参数不记录（里面可能有密钥） |

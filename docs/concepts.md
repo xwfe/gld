@@ -10,6 +10,10 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 - [拿公网地址的方式](#拿公网地址的方式) · [工具集 tool-profile](#工具集tool-profile)
 - [权限模式 permission-mode](#权限模式permission-mode) · [Planning 三种模式](#planning-三种模式)
 - [历史会话档案](#历史会话档案与-history-context) · [Durable Task 的工作区基线](#durable-task-的工作区基线)
+- [本机装好的 MCP server](#本机装好的-mcp-server) · [项目怎么构建、怎么测](#项目怎么构建怎么测list_project_commands) · [装东西的命令要你点头](#装东西的命令要你点头)
+- [dev server 这类要一直开着的](#dev-server-这类要一直开着的service_port) · [用浏览器验页面](#用浏览器验页面单独配一个隔离的-playwright-mcp)
+- [命令的输出能读多久](#命令的输出能读多久stdin-怎么关) · [参数名写错了会被拒](#参数名写错了会被拒不会按默认值跑) · [读文件：超长的一行](#读文件一行比-max_bytes-还长的时候)
+- [文件版本：别盖掉别人的改动](#文件版本别让补丁盖掉别人的改动) · [Jupyter notebook](#jupyter-notebook按-cell-读按-cell-改)
 
 ---
 
@@ -429,7 +433,7 @@ gld share --off                        # 关掉
 `gld share` 会以非零退出码报错。
 
 **cloudflare quick 和 named 的区别：** quick 零配置但**服务每次重启地址都会变**，
-ChatGPT 里得跟着改，适合试用；named 要你在 Cloudflare 建一条隧道拿到 token，
+ChatGPT 的连接器改不了地址，只能删了重建（哪些操作会重启见 [connect-clients.md](connect-clients.md)），适合试用；named 要你在 Cloudflare 建一条隧道拿到 token，
 地址固定，用 `gld share --tunnel cf:<你的域名>` 一次把域名定下来——token
 没配过会当场问，脚本里用 `--token <token>` 直接给。
 
@@ -468,7 +472,7 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 它不是客户端实际拿到的表：服务还会加上 `list_workspaces` 等服务级工具、远端和中继工具，
 去掉 `get/set_default_cwd`，每个工具多一个 `workspace` 参数；客户端还可能缓存旧表。
 客户端实际拿到的那张用 `gld tool list --served` 看，核对办法见
-[troubleshooting.md 工具列表是旧的](troubleshooting.md#客户端连不上)。
+[troubleshooting.md 核对客户端拿到的工具表](troubleshooting.md#核对客户端拿到的工具表)。
 
 ### compact 还会砍掉注入给 AI 的说明，Skill 目录只给一段
 
@@ -539,7 +543,7 @@ skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读—�
 **先说结论：这两个值现在行为完全一样，你不需要动它。** 字段留着是为了老配置照样能读。
 
 - 写入边界一样——都只能写工作区内，绝对路径和 `..` 一律拒（`ABSOLUTE_PATH_DENIED`）；
-- 危险命令（`rm -rf` 那类）和[装依赖的命令](#项目怎么构建怎么测list_project_commands)一样要 `confirm=true`，`dangerous` 不会替你跳过；
+- 危险命令（`rm -rf` 那类）和[装东西的命令](#装东西的命令要你点头)一样要 `confirm=true`，`dangerous` 不会替你跳过；
 - 命令白名单一样生效；
 - 读取限制（`confine-reads`）一样生效。
 
@@ -775,7 +779,7 @@ Makefile、pyproject、go.mod 这些这一版不解析，只报在不在。
 
 扫描跳过点开头的目录、`node_modules`、`target`、`dist` 这些（和 `list_files` 一样），往下最多 6 层、
 最多 100 个清单（浅的优先，超了从最深处截）、150 条命令；超了 `truncated: true`，用 `path` 指到更深处。
-CI 步骤最多 10 个工作流文件、60 步。脚本正文和 CI 命令截到 200 字符，过一遍和 `list_runs` 一样的脱敏。
+CI 步骤从扫描起点和工作区根两处的 `.github/workflows` 各取按名字排的前 10 个文件，最多 60 步。脚本正文和 CI 命令截到 200 字符，过一遍和 `list_runs` 一样的脱敏。
 坏掉的清单或工作流写进 `problems`，不影响别的。回包大小参考：带 CI 的单个项目 7～9 KB，40 个 Cargo 成员加
 20 个前端包的 monorepo 约 30 KB。
 
@@ -923,8 +927,8 @@ gld tool call list_runs started_within_minutes:=60 limit:=5  # 最近一小时�
 - 每页默认 20 条、最多 64 条，`next_cursor` 原样交回 `cursor` 翻下一页。翻页中途又起了新命令，新的排在
   第一页前面，后面的页不重也不漏。翻页时 `status`、`started_within_minutes` 保持不变；改了条件就不带游标从头翻，
   带着旧游标换条件不会报错，只会给出另一组结果。
-- 只看得到自己的：别的主体起的命令不列、也不算进 `total`。"自己"指同一个入口上的同一个客户端：hub、项目自己的
-  MCP 监听器、GPT Actions、本机命令行是四个入口，互相看不见；同一入口上按 OAuth 客户端分，ChatGPT 连接器删了
+- 只看得到自己的：别的主体起的命令不列、也不算进 `total`。"自己"指同一个入口上的同一个客户端：hub、GPT Actions、
+  本机命令行是三个入口，互相看不见（旧版单项目服务的 MCP 监听器也算一个，命令行已经起不了它）；同一入口上按 OAuth 客户端分，ChatGPT 连接器删了
   重建（重新注册，换了 client_id）之后，之前起的命令就列不到了。noauth、共用一条 bearer 令牌的多个客户端
   分不开，是同一个主体。没有跨主体的"管理员视图"。
 - 只读：不停命令、不发信号、不重跑。起它的 gld 已经不在、记录还停在 `running` 的，列出来是 `unknown`

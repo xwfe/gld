@@ -184,7 +184,7 @@ gld share --off            # 停隧道、清掉公网地址，本地地址照常
 
 ### 在 ChatGPT 里配置
 
-1. 设置 → 账户安全与登录 → 打开“开发人员模式”（允许添加未验证的 MCP 连接器）。
+1. 设置 → 账户安全与登录（Security and login）→ 打开“开发人员模式”（Developer mode，允许添加未验证的 MCP 连接器）。
 2. 左侧“插件” → `+` 新建 → 选 MCP，粘贴 `gld ls` 里的**公网地址**（以 `/mcp` 结尾）。
 3. 认证方式和服务一致：
    - `oauth`（默认）：ChatGPT 支持动态注册，通常不用填 Client ID / Secret；
@@ -210,8 +210,7 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
 - `gld restart`、`gld stop` + `gld start`、守护进程重启——固定公网地址下没影响
 - 重启电脑：配了[开机自启](daemon.md#开机自启)就什么都不用管；没配的话守护进程不会自己回来，期间
   ChatGPT 只报连不上，**连接器不用删**，`gld daemon start` 一次（上次 `gld start` 过的服务会跟着回来）
-  就好了。2026-09-24 本机重启过一次就是这样：cloudflared 是 launchd 管的、自己回来了，gld 没配自启，
-  `gld daemon start` 之后凭据、注册的客户端逐项核对都没变
+  就好了
 - `gld add` / `gld rm` / `gld set`（改项目，包括项目自己的 `tool-profile`）——服务每次调用都重新读项目表；
   项目的工具集只在调用时生效，服务发给客户端的工具表不变
 - `gld grant add`——已经连好的连接器不受影响
@@ -231,7 +230,7 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
 
 不刷新的后果：新工具、新参数 AI 看不见；已经没有的工具 AI 还会去调，拿到 `Unknown tool`。怎么刷：
 
-1. 打开 <https://chatgpt.com/plugins>（要先开开发者模式：设置 → Security and login → Developer mode），
+1. 打开 <https://chatgpt.com/plugins>（要先开开发人员模式：设置 → 账户安全与登录（Security and login）→ 开发人员模式（Developer mode）），
    点进 gld 这条连接，点 **Refresh**。**不用删，授权也不用重来。**
 2. 开一个新对话：旧对话继续用旧表。
 3. 核对刷新真的到了 gld：`gld logs -n 50` 里依次有 `method=server/discover`（回 Method not found，正常，
