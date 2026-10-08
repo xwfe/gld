@@ -1183,3 +1183,12 @@ OrbStack 测完已关回原状。
 `socket.getfqdn()` 反查主机名、查完才 listen，macOS CI 上多半卡在这一步（推断，本机复现不了）。产品行为没错，是测试赌了速度。
 改成只会 listen 的 python3 小脚本，第一次调用没起来的照产品用法拿 `read_output` 轮询到它答话（`a2669e0`）。本机 `taskpolicy -b`
 下只换脚本 5 遍挂 2 遍，改完 5 遍全过；去掉"答话就返回"的变异照样被抓到。CI run 37725208706 八个 job 全绿。
+
+**项目命令拿不到名字像密钥的环境变量（同日，`1b11106`）：**对照 uvwt/agentdock（它给子进程只留 PATH、LANG 等白名单）时查到，gld 的项目命令
+继承守护进程的全部环境，只去掉了 `GLD_HOME`。本机守护进程的环境里就有 `CLAUDE_CODE_MESSAGING_TOKEN`（它是从 Claude Code 会话里
+起的），另有 Claude Code 的消息 socket、账户邮箱和组织 ID；`python3` 在默认白名单里，一句 `print(os.environ)` 就读得到。
+没照搬白名单：本机 MCP 配置里的 `${GITHUB_TOKEN}` 要靠守护进程环境展开，构建要代理、`JAVA_HOME`、mise 这些变量，Windows 缺了
+`SystemRoot` 之类进程起不来。改成起项目命令时去掉名字像密钥的（和运行记录脱敏同一个判据，抽成 `looks_like_secret_name`，
+`PWD`/`OLDPWD` 除外），守护进程自己不动；`check_exec_environment` 的 `withheld_environment` 只列名字。新增单元 1 条、集成 1 条
+（单独一个测试文件：改进程环境和别的线程起子进程同时发生是未定义行为）；去掉去除逻辑的变异，集成测试报错。名字看着不像的
+（`DATABASE_URL` 里带口令）仍挡不住，文档写明。
