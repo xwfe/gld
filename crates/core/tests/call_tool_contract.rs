@@ -2596,12 +2596,22 @@ fn a_still_running_command_with_nothing_new_is_not_the_same_as_finished() {
         .expect("stdout ref")
         .to_string();
 
-    let page = invoke(
-        &ctx,
-        "read_output",
-        json!({"output_ref": &stdout_ref, "offset": 0, "limit": 4_096}),
-    );
-    let page = assert_ok(&page).clone();
+    // 1.5 秒的 yield 只管让它转后台，不保证 python 已经打出 first：机器一忙冷启动就不止
+    // 这么久（见 UNTIL_EXIT_MS）。它打完要睡 30 秒，所以一直读到 first 为止，读到时它
+    // 一定还在跑。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let page = loop {
+        let page = invoke(
+            &ctx,
+            "read_output",
+            json!({"output_ref": &stdout_ref, "offset": 0, "limit": 4_096}),
+        );
+        let page = assert_ok(&page).clone();
+        if page["content"] == "first\n" || std::time::Instant::now() >= deadline {
+            break page;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
     assert_eq!(page["content"], "first\n", "{page}");
     // 已经读到当前的尾了，所以没有下一页……
     assert_eq!(page["next_offset"], Value::Null, "{page}");
