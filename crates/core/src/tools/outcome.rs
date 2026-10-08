@@ -113,6 +113,24 @@ pub fn command_summary(output: &Value) -> Option<String> {
             .unwrap_or("see error");
         return Some(format!("command was NOT started, nothing ran: {reason}"));
     }
+    // 服务被停掉不算"命令失败"：kill_session 是停服务的正常办法，到 timeout_ms 停是说好的寿命。
+    // command_ok 照旧是 false（它不是自己正常退出的），只是这句话别写 FAILED——D10 浏览器那轮 ChatGPT
+    // 停完 dev server 看到 command FAILED，还得自己去翻 service 那格确认端口真空了。
+    if let Some(port) = output.pointer("/service/port").and_then(Value::as_u64) {
+        match command.status.as_str() {
+            "killed" => {
+                return Some(format!(
+                    "service stopped: kill_session ended the command serving port {port}, which is the normal way to stop a service (command_ok is false only because it did not exit by itself)"
+                ))
+            }
+            "timeout" => {
+                return Some(format!(
+                    "service stopped: timeout_ms ran out for the command serving port {port}; start it again if you still need it"
+                ))
+            }
+            _ => {}
+        }
+    }
     // 服务模式：AI 要知道的是"能连了没有"，不只是"还在跑"。
     let service = output
         .get("service")
@@ -198,6 +216,28 @@ mod tests {
             "{text}"
         );
         assert_eq!(command_summary(&json!({"ok": true, "content": "x"})), None);
+        // 服务被 kill_session 或 timeout_ms 停掉是说好的结局，不写 FAILED；自己崩了的照旧是 FAILED。
+        let stopped = json!({"ok": true, "status": "exited", "termination_reason": "killed",
+            "command_ok": false, "service": {"port": 5179, "ready": false}});
+        let text = command_summary(&stopped).expect("stopped");
+        assert!(
+            text.starts_with("service stopped") && text.contains("5179"),
+            "{text}"
+        );
+        let expired = json!({"ok": true, "status": "exited", "termination_reason": "timeout",
+            "command_ok": false, "service": {"port": 5179, "ready": false}});
+        assert!(command_summary(&expired)
+            .expect("expired")
+            .contains("timeout_ms"));
+        let crashed = json!({"ok": true, "status": "exited", "termination_reason": "exited",
+            "exit_code": 1, "command_ok": false, "service": {"port": 5179, "ready": false}});
+        assert!(command_summary(&crashed)
+            .expect("crashed")
+            .starts_with("command FAILED"));
+        let killed_plain = json!({"ok": true, "status": "exited", "termination_reason": "killed", "command_ok": false});
+        assert!(command_summary(&killed_plain)
+            .expect("killed")
+            .starts_with("command FAILED"));
         assert_eq!(
             command_summary(&json!({"ok": false, "termination_reason": "exited"})),
             None

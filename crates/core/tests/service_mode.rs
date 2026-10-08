@@ -134,7 +134,16 @@ fn a_service_returns_once_its_port_answers_and_keeps_running() {
     let listed = call_tool(&fx.ctx, "list_runs", &json!({ "status": ["running"] }));
     assert_eq!(listed["runs"][0]["service_port"], port, "{listed}");
 
-    kill(&fx.ctx, &session);
+    // 停服务是正常结局：command_ok 照旧 false，但那句话不写 FAILED。
+    let stopped = call_tool(&fx.ctx, "kill_session", &json!({ "session_id": session }));
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    assert!(
+        stopped["command_summary"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("service stopped"),
+        "{stopped}"
+    );
     assert!(!answers(port), "kill_session 之后端口该空出来");
 }
 
