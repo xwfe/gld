@@ -1,130 +1,87 @@
-# gld — 让本地项目变成 AI 可直接开发的 MCP 工作区
+# gld
 
-`gld` 在后台跑**一个** MCP 服务（Model Context Protocol，说白了就是 AI 客户端调用外部工具的
-通用接口），你的项目都挂在它下面。AI 客户端（ChatGPT、Claude Code、Cursor…）只配这一条
-连接，就能在各个项目里读文件、改代码、跑命令、看 Git 状态，并按项目保存任务与历史记录。
-工作区工具每次用 `workspace` 选项目，不共享一个可被其他对话切换的“当前目录”。
-**路由不是操作系统沙箱。** 要把凭据限制到部分项目，可用默认只读的
-[`gld grant`](docs/concepts.md#只开几个项目gld-grant)；允许命令执行的凭据仍只应交给可信主体。
+让 ChatGPT、Claude Code、Cursor、Codex 这些 AI 客户端，直接在**你电脑上的项目**里读代码、改代码、跑命令、看 Git。
 
-*Run one MCP server that AI clients (ChatGPT, Claude Code, Cursor, Codex…) connect to
-once, then develop in any of your local projects through it: read, patch, run commands,
-inspect Git, and keep project-scoped task progress. Credential-scoped grants can restrict
-project access; command execution is not OS-sandboxed. Docs are in Chinese.*
+gld 在本机后台跑一个 MCP 服务（MCP：AI 客户端调用外部工具的通用接口），你的项目都挂在它下面，
+每个客户端只配一条连接。
 
-## 什么时候用
+*Let ChatGPT, Claude Code, Cursor or Codex work directly in the projects on your machine: one local MCP
+server, all your projects behind it, one connection per client. Docs are in Chinese.*
 
-- **想让网页版 ChatGPT 直接改你电脑上的项目。** 它跑在 OpenAI 的服务器上，碰不到
-  本地文件；gld 在本机起服务，再用一条隧道给它一个公网 HTTPS 地址。
-- **本机的 Claude Code / Cursor / Codex 想共用同一套项目工具**：文件工具默认限制在
-  项目目录，命令经过静态策略检查；子进程仍具有运行账号的系统权限。
-  Planning 可要求先规划、再由你放行。
-- **手上好几个项目**：客户端里只配一条连接，项目加进来就能用，不用每个项目配一次。
-- **项目在另一台机器上**，由 [ccnm](https://github.com/xwfe/ccnm) 管着：把它作为
-  远端项目加进同一个服务。
-- **想让 ChatGPT 也用上本机 Claude Code / Codex 里装好的 MCP server**（context7、
-  deepwiki……）：`gld mcp on context7` 点名开，经同一条连接转过去，见
-  [concepts.md](docs/concepts.md#本机装好的-mcp-server)。
+## 适合你吗
 
-## 装
+**适合：**
 
-到 [Releases](../../releases) 拿对应平台的包，解压后把 `gld` 放进 PATH：
+- 想让**网页版 ChatGPT** 改你本机的项目。它跑在 OpenAI 的服务器上，碰不到你的文件；gld 在本机起服务，
+  再给它一个公网 HTTPS 地址。
+- 手上好几个项目，不想每个项目、每个客户端都配一遍。
+- 想让 ChatGPT 也用上本机装好的 MCP server（context7、deepwiki……），或者操作另一台机器上由
+  [ccnm](https://github.com/xwfe/ccnm) 管着的项目。
+
+**不适合：**
+
+- 需要沙箱隔离。AI 跑的命令以你的账号身份执行，gld 只做命令白名单这类静态检查，不是系统级隔离：
+  凭据给了谁，就等于让谁能在你电脑上跑代码。
+- 想要无人值守、从需求到上线全自动的开发平台。gld 管的是"AI 在你的项目里干活"这一段。
+
+## 能做什么
+
+- **读、改、跑**：读写文件、改之前先预检补丁、跑命令（gld 重启后也读得到命令的结局和最后一段输出）、查 Git。
+- **先弄清项目怎么构建、怎么测**：列出项目里写好的命令和 CI 实际跑的步骤，AI 不用翻文档猜。
+- **要紧的操作停下来问你**：装依赖、`rm -rf` 这类命令不带确认参数就不放行，提醒 AI 先问你。
+- **给别人只开几个项目**：`gld grant` 发一份只能访问指定项目的凭据，默认只读，随时作废。
+- **任务与验收**：记下任务、计划和历史；任务收尾只认任务期间跑通过、之后没再改过文件的命令当证据。
+
+## 三步上手
+
+**1. 装。** 到 [Releases](../../releases) 下载对应平台的包（macOS、Linux、Windows），解压后放进 PATH：
 
 ```bash
-tar xzf gld-*-aarch64-apple-darwin.tar.gz
+tar xzf gld-*-aarch64-apple-darwin.tar.gz        # Apple 芯片的 Mac；其他平台见安装文档
 mkdir -p "$HOME/.local/bin"
 install -m 755 gld-*/gld "$HOME/.local/bin/gld"
 export PATH="$HOME/.local/bin:$PATH"
 gld --version
 ```
 
-上例适用于只解压了一份 Apple 芯片版安装包的目录。macOS 首次运行可能被 Gatekeeper 拦。
-其他平台、校验和、从源码装、升级、卸载
-见 [docs/install.md](docs/install.md)。
+macOS 第一次运行可能被 Gatekeeper 拦，处理办法、从源码装都在 [docs/install.md](docs/install.md)。
 
-## 快速使用
+**2. 加项目、起服务。**
 
 ```bash
-gld start ~/code/my-project   # 起服务，并把这个目录加进来：端口、凭据都自动生成
-gld add ~/code/another        # 再加一个项目；服务在跑就立即生效
-gld ls                        # 给客户端用的地址和凭据，和项目表（gld list 也行）
+gld start ~/code/my-project   # 起服务并加进这个项目；端口、凭据自动生成，关掉终端也照常跑
+gld add ~/code/another        # 再加一个，立即生效
+gld ls                        # 客户端要填的地址和凭据
 ```
 
-守护进程自动在后台拉起，关掉终端服务照常在。`gld start` 不带目录时：当前目录是项目
-（或者一个项目都还没有）就用它，否则只起服务、不登记当前目录——免得在主目录里随手一敲
-就把整个主目录交给 AI。
-
-**本机客户端**（Claude Code、Cursor、Codex）直接填 `gld ls` 给出的本地地址。
-
-**ChatGPT** 只能连公网 HTTPS，`127.0.0.1` 填进去连不上，要再借一个公网地址：
+**3. 接客户端。** Claude Code、Cursor、Codex 直接填 `gld ls` 给的本地地址。ChatGPT 只能连公网 HTTPS，
+要先拿一个公网地址：
 
 ```bash
-gld share                              # Cloudflare 临时地址；需要 cloudflared 在 PATH 里
-gld share --tunnel cf:mcp.example.com  # 自己有域名和 Cloudflare 隧道时，地址固定
+gld share                     # Cloudflare 临时地址，要先装 cloudflared
 ```
 
-固定域名、FRP、自建反代，以及每种客户端里具体怎么填，见
-[docs/connect-clients.md](docs/connect-clients.md)。
+临时地址在服务重启后会变，ChatGPT 里的连接器就得删了重建；长期用请换固定域名。每种客户端具体怎么填、
+固定域名怎么配，见 [docs/connect-clients.md](docs/connect-clients.md)。
 
-> **开公网入口前请先读 [docs/security.md](docs/security.md)。**
-> 服务主凭据能访问**全部**项目，允许执行时相当于以运行账号执行代码。
-> 部分项目的只读访问使用 grant；可写 grant 不等于系统级隔离。
+> **开公网入口前先读 [docs/security.md](docs/security.md)**：服务的主凭据能访问你加进来的全部项目。
 
-增删改查都是一个词：
+出问题先跑 `gld doctor`，每个问题下面都写着该执行的命令；再不行查 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
-```bash
-gld set my-project tool-profile=read-only   # 改某个项目（字段见 gld fields）
-gld upgrade --port 30000 --auth bearer      # 改服务的端口、认证、公网入口，改完自动重启
-gld rm another                              # 删掉一个项目：只删 gld 这边的配置，项目文件不动
-gld stop                                    # 停服务；项目、配置和凭据都留着
-```
+## 文档
 
-出问题先跑 `gld doctor`——它检查常见的配置不一致，
-每一条下面直接写着该执行的命令。
-
-> 2026-09-22 起 gld 只剩这一种用法（[RFC-0004](docs/rfc/0004-one-service-many-projects.md)）：
-> 以前"一个项目一个服务"和"聚合入口 hub"两条路合成了一条。旧命令
-> （`gld ws …`、`gld hub …`、`gld destroy`）还能敲，不进帮助。
-
-## 当前能做到哪里
-
-**已能支撑 AI 主导的日常编码闭环；尚不是独立、无人值守的全生命周期开发平台。**
-
-| 范围 | 当前状态 |
+| 想知道 | 看这里 |
 | --- | --- |
-| 读代码、修改、执行、Git 检查 | 已实现；包括补丁预检、命令输出续读（gld 重启后也读得到结局和最后一段输出，进程不恢复）、Notebook 和 Skills |
-| 弄清项目怎么构建、怎么测 | `list_project_commands` 列出清单里声明的命令和 CI 的 `run:` 步骤，只列不跑；装依赖（含依赖没装时会顺手装的 `pnpm run`）和 `rm -rf` 这类命令，AI 要先问你、带 `confirm=true` 才跑得动 |
-| 多项目、远端项目、本机 MCP 扩展 | 已实现；远端执行由 ccnm 负责，本机 MCP 需操作员点名启用 |
-| 规划、任务、交接 | 可保存 Goal / Plan、任务和历史；任务收尾只收任务期间通过、且之后没再改过文件的命令当验收证据 |
-| 限定项目访问 | grant 默认只读；可写 grant 仅用于可信主体，不开放本机 MCP 转发或远端写会话 |
-| 浏览器验收、发布、部署、运维 | 可组合项目脚本和获准的外部能力；不等于内置可靠的全流程编排 |
+| 各客户端怎么接、固定域名 | [connect-clients.md](docs/connect-clients.md) |
+| 安装、升级、卸载 | [install.md](docs/install.md) |
+| AI 能碰什么、怎么收紧 | [security.md](docs/security.md) |
+| 报错怎么办 | [troubleshooting.md](docs/troubleshooting.md) |
+| 项目、工具集、Planning、grant 这些概念 | [concepts.md](docs/concepts.md) |
+| 每个命令的全部参数 | [cli.md](docs/cli.md)，或 `gld <命令> --help` |
+| 每一版改了什么、升级后要不要动 ChatGPT | [docs/releases/](docs/releases/) |
+| 以前用桌面版 | [migrate-from-desktop.md](docs/migrate-from-desktop.md) |
 
-源码有某项工具不代表当前客户端已经拿到它：客户端会缓存工具表。升级不用动 ChatGPT 的连接器和
-授权，但工具表变了时（升级前后 `gld tool list --served` 的指纹不一样），要到 chatgpt.com/plugins 点一次
-Refresh 它才会重拉。怎么升级见[安装 · 升级](docs/install.md#升级)；哪些操作要点 Refresh、要重新授权、
-要删了重建，见[装好的连接器什么时候要动](docs/connect-clients.md#装好的连接器什么时候要动)。现有边界、可用流程和优先补齐项见
-[项目开发生命周期](docs/project-lifecycle.md)与[2026-09-23 审查](docs/reviews/2026-09-23-lifecycle-and-docs-audit.md)。
-
-## 查
-
-| 我想…… | 看这里 |
-| --- | --- |
-| 看当前剩余任务、实施顺序与按需范围 | [当前任务与后续规划](task_plan.md) |
-| 搞清楚服务和项目、工具集、Planning 模式这些名词是什么 | [concepts.md](docs/concepts.md) |
-| 项目路由、状态分离与授权的区别 | [concepts.md 为什么不会串](docs/concepts.md#为什么不会串) |
-| 接到 ChatGPT / Claude Code / Cursor / 自定义 GPT | [connect-clients.md](docs/connect-clients.md) |
-| 知道 AI 到底能碰什么，以及怎么收紧 | [security.md](docs/security.md) |
-| 照着报错找处理办法 | [troubleshooting.md](docs/troubleshooting.md) |
-| 查某个命令的全部参数 | [cli.md](docs/cli.md)，或直接 `gld <命令> --help` |
-| 弄明白后台那个守护进程 | [daemon.md](docs/daemon.md) |
-| 装 / 升级 / 卸载 | [install.md](docs/install.md) |
-| 看每一版改了什么、升级后 ChatGPT 要不要点 Refresh | [docs/releases/](docs/releases/) |
-| 从桌面版迁移过来 | [migrate-from-desktop.md](docs/migrate-from-desktop.md) |
-| 改这个项目的代码 | [architecture.md](docs/architecture.md)、[development.md](docs/development.md) |
-| 为什么只留多项目模式、命令怎么对应 | [RFC-0004](docs/rfc/0004-one-service-many-projects.md) |
-| 看共享 Rust 内核、服务接 ccnm 远端工具的方案和落地记录（已实施，第 9 节） | [RFC-0002](docs/rfc/0002-shared-kernel-and-ccnm-hub.md) |
-| 看服务怎么跟上 ccnm 的新工具、compact 档怎么放回 skills | [RFC-0003](docs/rfc/0003-native-parity-sync.md) |
-| 看三仓重构中的 gld 职责、优先修复项与验收依赖 | [跨项目重构落地清单](docs/reviews/2026-09-19-cross-project-refactor-actions.md) |
+参与开发：[架构](docs/architecture.md)、[开发与发布](docs/development.md)、[当前任务](task_plan.md)。
 
 ## Credits
 
