@@ -24,7 +24,7 @@ gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
 
 | 能力 | 范围 | 说明 |
 | --- | --- | --- |
-| 执行命令 | 工作目录选在项目内；子进程访问范围由操作系统账号决定 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码，不限于这个目录**。原生 API 支持 `cmd` 或 `argv`；两种形式权限一样，只是参数编码不同，客户端是否支持须看它实际发现的 schema |
+| 执行命令 | 工作目录选在项目内；子进程访问范围由操作系统账号决定 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码，不限于这个目录**。拿不到名字像密钥的环境变量（[见下](#项目命令拿不到名字像密钥的环境变量)）。原生 API 支持 `cmd` 或 `argv`；两种形式权限一样，只是参数编码不同，客户端是否支持须看它实际发现的 schema |
 | 读文件 | 项目目录内 | 0.3.0 起默认收紧，见下 |
 | 写文件 | 项目目录内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
 | 读 Git 历史 | 项目目录内 | status / diff / log / show / blame。项目是某个仓库的子目录时只看这个子目录（2026-09-24 之前看的是整个仓库，兄弟目录的提交和未提交改动都读得到） |
@@ -72,14 +72,6 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 拿到了你全部连接器的钥匙。数据目录里还有命令的运行记录（`runs/`，每条命令原样的
 输出，不脱敏），同样挡着，谁的记录只有谁经 `read_output` 读得到。
 
-**项目命令拿不到名字像密钥的环境变量。**AI 跑的命令本来继承守护进程的全部环境，而守护进程带着你起它时那个终端
-（或 Claude Code 会话）的环境：2026-10-08 本机就查到 `CLAUDE_CODE_MESSAGING_TOKEN`，ChatGPT 一句
-`python3 -c "import os; print(os.environ)"` 就能读到。现在名字以 TOKEN、SECRET、PASSWORD、API_KEY、AUTH 这类结尾的
-变量起命令时去掉（判据和运行记录脱敏是同一个），扣下了哪些名字 `check_exec_environment` 的 `withheld_environment`
-里看得到。守护进程自己照样留着：本机 MCP 配置里的 `${GITHUB_TOKEN}` 要靠它展开。**名字看着不像的挡不住**
-（`DATABASE_URL=postgres://user:口令@…`）；要彻底干净，让守护进程由 launchd / systemd 起（[开机自启](daemon.md#开机自启)，
-环境只有几个系统变量），别从带着密钥的终端里起。
-
 **一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。skill 目录是链到别处的链接时，读的是链接指向的那个目录；指向主目录本身或文件系统根的不给目录（那等于把整个主目录当成"这个 skill 的文件"）。规则和 ccnm 的 `load_skill` 是同一份（toexec-skill 的 `dir` 模块）。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
 
 这几道门都只对文件类工具生效。`exec_command` 里 `cat ~/.config/gld/data/profiles.json`
@@ -120,6 +112,27 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 
 子进程那一层更保守：命令文本里出现删除或递归清空 `.git` / `.github` 一律拒，
 因为从命令文本里分不清"改一行 workflow"和"把 `.github` 删掉"。
+
+### 项目命令拿不到名字像密钥的环境变量
+
+**怎么查扣了哪些：**`gld tool call check_exec_environment -w <项目>`，看 `withheld_environment.names`（只列名字，不给值）。
+
+**规则：**`exec_command` 起的命令拿不到守护进程环境里名字以 TOKEN、SECRET、PASSWORD、PASSWD、PWD、API_KEY、ACCESS_KEY、
+SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 是当前目录，不算）。认法和运行记录脱敏是同一套。
+宁可多扣：`USE_LOCAL_OAUTH` 这种开关也会因为以 AUTH 结尾被扣下。
+
+**为什么：**守护进程带着拉起它的那个终端（或 Claude Code 会话）的全部环境，项目命令以前原样继承。2026-10-08 本机就查到
+`CLAUDE_CODE_MESSAGING_TOKEN`，ChatGPT 一句 `python3 -c "import os; print(os.environ)"` 就能读到。
+
+**挡不住的：**
+- 名字看着不像的：`DATABASE_URL=postgres://user:口令@…`、`AWS_ACCESS_KEY_ID`（`AWS_SECRET_ACCESS_KEY` 会被扣）。
+- 文件里的：命令本来就能以你的身份读文件，`~/.zshrc` 里 export 的密钥、`~/.aws/credentials` 照样读得到。这一条只堵环境变量这条路。
+- 本机 MCP server 拿到的是守护进程的全部环境：它们配置里的 `${GITHUB_TOKEN}` 要靠它展开。
+- 项目里要密钥的测试经 gld 跑会读不到，要在你自己的终端里跑。
+
+**要彻底干净：**让守护进程由 launchd / systemd 起（[开机自启](daemon.md#开机自启)），那里只有几个系统变量；本机 MCP 要用的
+密钥写进它配置里的 `env`，别靠终端 export。注意：守护进程没在跑时，`gld start`、`gld tool call` 会从当前终端把它拉起来，
+带上的就是这个终端的环境。
 
 ## 提示词注入是真实的
 

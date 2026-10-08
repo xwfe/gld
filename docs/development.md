@@ -28,8 +28,10 @@ GLD_HOME=$(mktemp -d) cargo test --workspace --all-targets --locked
 `crates/cli/tests/daemon_lifecycle.rs` 会真的拉起一个守护进程、起 MCP、走 TCP 请求再停掉。
 不设也能跑（core 的写文件测试自己会切到临时目录），但集成测试会用你的真实数据目录。
 
-经 gld 的 `exec_command` 跑（AI 在 gld 里开发 gld）时 `$(mktemp -d)` 不会展开——它不经 shell。改用 cargo 自己的配置传
-环境变量：`cargo --config 'env.GLD_HOME="target/test-home"' test --workspace --all-targets --locked`（审查 §12 里 AI 就是这么做的）。
+经 gld 的 `exec_command` 跑（AI 在 gld 里开发 gld）时上面那行会被拒（`POLICY_REJECTED`，原因 `shell_syntax_rejected`）：它不经
+shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变量，**路径写绝对的**：
+`cargo --config 'env.GLD_HOME="/Users/you/code/gld/target/test-home"' test --workspace --all-targets --locked`。写相对路径的话，
+每个测试二进制按自己的工作目录去算，会落到 `crates/core/target/…` 这种 `.gitignore` 没管到的地方。
 
 | 测试 | 位置 | 覆盖什么 |
 | --- | --- | --- |
@@ -85,7 +87,8 @@ cloudflared 时（造不出"没装"，这条只在 CI 的干净镜像里真跑�
 
 新写 `exec_command` 测试、要断言退出码、输出或写出的文件时，带 `yield_time_ms: UNTIL_EXIT_MS`（core 的
 `tests/common`；CLI 测试用 `common::env::UNTIL_EXIT`）。不带就只等 1 秒，机器一忙 python 还没起来，回来的是
-`status: running`——看着像回归，其实是测试在赌速度。本机用 `taskpolicy -b <测试二进制>` 压到后台优先级能稳定复现。
+`status: running`——看着像回归，其实是测试在赌速度。在 Mac 上用 `taskpolicy -b <测试二进制>` 压到后台优先级能稳定复现。
+`UNTIL_EXIT_MS` 是"等到命令结束、最多 30 秒"，命令一结束调用就返回，平时不多花时间。
 
 后台任务（Claude Code 桌面版）的 git worktree 建在仓库里的 `.claude/worktrees/`，已在 `.gitignore` 里；从仓库根往下遍历
 文件的测试要跳过 `.claude`，不然会把 worktree 里整份副本也扫进去（`naming_is_consistent.rs` 就撞过）。合并后用

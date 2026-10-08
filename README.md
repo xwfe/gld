@@ -28,7 +28,10 @@ server, all your projects behind it, one connection per client. Docs are in Chin
 
 - **读、改、跑**：读写文件、改之前先预检补丁、跑命令（gld 重启后也读得到命令的结局和最后一段输出）、查 Git。
 - **先弄清项目怎么构建、怎么测**：列出项目里写好的命令和 CI 实际跑的步骤，AI 不用翻文档猜。
-- **要紧的操作停下来问你**：装依赖、`rm -rf` 这类命令不带确认参数就不放行，提醒 AI 先问你。
+- **起 dev server、用浏览器看页面**：起服务时告诉 gld 端口，端口连得上它才回话，最多开 1 小时；再配一个隔离的浏览器，
+  AI 就能打开页面、点按钮、看 console 报错、截图（[怎么配](docs/concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。
+- **要紧的操作停下来问你**：装依赖、装工具（`pnpm install`、`pip install`、`cargo install`……）、`rm -rf` 这类命令不带确认参数
+  就不放行，提醒 AI 先问你。
 - **给别人只开几个项目**：`gld grant` 发一份只能访问指定项目的凭据，默认只读，随时作废。
 - **任务与验收**：记下任务、计划和历史；任务收尾只认任务期间跑通过、之后没再改过文件的命令当证据。
 
@@ -78,6 +81,7 @@ gld share                     # Cloudflare 临时地址，要先装 cloudflared
 | AI 能碰什么、怎么收紧 | [security.md](docs/security.md) |
 | 报错怎么办 | [troubleshooting.md](docs/troubleshooting.md) |
 | 项目、工具集、Planning、grant 这些概念 | [concepts.md](docs/concepts.md) |
+| 让 AI 起 dev server、用浏览器验页面 | [concepts.md · dev server](docs/concepts.md#dev-server-这类要一直开着的service_port) |
 | 拿它从需求做到上线，哪些靠得住、哪些还得人管 | [project-lifecycle.md](docs/project-lifecycle.md) |
 | 后台守护进程、开机自启 | [daemon.md](docs/daemon.md) |
 | 每个命令的全部参数 | [cli.md](docs/cli.md)，或 `gld <命令> --help` |

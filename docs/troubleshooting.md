@@ -140,7 +140,7 @@ gld tool call exec_command cmd='cargo test'
 | 改完白名单不确定生效没有 | 配置改了，跑着的服务不一定重载了 | 改前改后各调一次 `check_command`，比对 `policy.runtime_fingerprint`：数变了才是真生效 |
 | 收窄了白名单但 `python` 还能跑 | 不带 `only:` 的写法是追加，不是替换 | 改成 `gld set <项目> allowed-commands=only:…`；细节见 [security.md](security.md) |
 | `Program not found on PATH: node`，终端里明明能跑 | 守护进程是 launchd / systemd 起的，PATH 里没有 Homebrew、`~/.cargo/bin` 这些目录 | 把目录配成全局可执行路径（`gld cfg runtime --executable-paths …`），下一次调用就生效、不用重启，写法见 [daemon.md](daemon.md#为什么-launchd--systemd-起的找不到命令) |
-| 项目里的测试说缺 `XXX_TOKEN`、`XXX_API_KEY`，你终端里明明设了 | 名字像密钥的环境变量 gld 不交给项目命令（[为什么](security.md)），`check_exec_environment` 的 `withheld_environment` 列着扣下了哪些 | 要密钥的测试在你自己的终端里跑；AI 那边让它跳过这类测试，别让它想办法把密钥写进文件 |
+| 项目里的测试说缺 `XXX_TOKEN`、`XXX_API_KEY`，你终端里明明设了 | 名字像密钥的环境变量 gld 不交给项目命令（[为什么](security.md#项目命令拿不到名字像密钥的环境变量)）；`gld tool call check_exec_environment -w <项目>` 的 `withheld_environment.names` 列着扣下了哪些 | 要密钥的测试在你自己的终端里跑；AI 那边让它跳过这类测试，别让它想办法把密钥写进文件 |
 | 项目目录外文件写入被拒 | 写入永远只在项目目录内 | 把目标目录也 `gld add` 成一个项目，或把文件放进项目 |
 | `READS_CONFINED_TO_WORKSPACE`（升级到 0.3.0 后 Agent 突然读不了外部文件） | 0.3.0 起读也默认限制在项目目录内，老配置升级上来一样收紧 | 确实要读外面：`gld set <项目> confine-reads=false`（Actions 那条线路是 `actions.confine-reads`）。先读一下 [security.md](security.md) 再决定 |
 | `GLD_DATA_HOME_DENIED` | 想用文件工具读 gld 自己的数据目录 | 有意挡的，**关掉 confine-reads 也不给读**：那里明文存着所有凭据。要看凭据用 `gld secret ls <key> --reveal` |
@@ -151,6 +151,7 @@ gld tool call exec_command cmd='cargo test'
 | 起后台命令（`yield_time_ms: 0`）报 `WORKSPACE_BUSY` | 0.4.0 改了：命令起来之前也要拿到写权，免得它看到别人写了一半的文件树 | 是 `retryable` 的，重试即可。占着的多半是另一条同步等结果的命令（最多 30 秒），或者一次正在落盘的补丁（毫秒级） |
 | 换了个客户端连上来，`read_output` / `kill_session` 报 `SESSION_NOT_FOUND`，`session_id` 是刚抄过来的 | 命令会话按"项目 + 谁在调"分表，不是同一个主体就看不见。换的是另一个 OAuth 客户端就是另一个主体 | 有意如此：别人的命令输出不该摊开。用起这条命令的那个客户端去读。真要几个客户端共用一批会话，让它们用同一份凭据 |
 | `exec_command` 在后台起的 dev server（`pnpm dev` 这类）过一阵就没了，`read_output` 说 `timeout` | 普通命令的 `timeout_ms` 最多 600000（10 分钟），转到后台的命令到点照样被停 | 起服务时带上 [`service_port`](concepts.md#dev-server-这类要一直开着的service_port)，能开到 1 小时，还会告诉你端口连不连得上。跑 E2E 也可以让测试框架自己起停服务（Playwright 的 `webServer` 加 `reuseExistingServer: true`） |
+| 带 `service_port` 起了，`service.ready` 一直是 `false` | 服务还在编译，或者没用你给的端口（`service_port` 不替服务换端口） | 看 `read_output` 里服务打印的地址；把端口写进命令（Vite 是 `--port 5179 --strictPort`），见 [concepts.md](concepts.md#dev-server-这类要一直开着的service_port) |
 | 带 `service_port` 起服务报 `PORT_IN_USE` | 端口上已经有东西在听，gld 什么都没起：不然分不清待会儿答话的是谁 | 报错里有 `own_session_id` 的，是你自己起过的那条，接着用它或先 `kill_session`；没有的，换个空端口传给服务（`--port … --strictPort`），或者先查清是谁占着（`lsof -iTCP:端口 -sTCP:LISTEN`） |
 | 重启过或换了对话，想看之前那条命令怎样了，却不知道它的 `session_id` | id 只在当初那次回包、任务事件和 Planning 台账里 | `list_runs` 列出这个客户端自己在这个项目里起过的命令，拿其中的 `output_refs` 去 `read_output`，见[命令的输出能读多久](concepts.md#命令的输出能读多久stdin-怎么关)。别的客户端起的列不出来 |
 | 同一个客户端重连之后 `session_id` 就失效了（`SESSION_EXPIRED`） | 不是分表的事：运行记录也有寿命，每个项目只留最近 64 条结束的命令、最长 7 天；数据目录写不进去时（`kept_on_disk: false`）只剩内存里的 5 分钟 | 过期只说明输出没了，**命令已经跑过**：会改东西的命令先核对现状，别原样重跑。要长期留的结果让命令写进文件 |
@@ -189,7 +190,7 @@ gld tool call exec_command cmd='cargo test'
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `gld mcp test` 报 ``cannot find `npx` … not on the PATH``，终端里 `npx` 明明能跑 | 守护进程的 `PATH` 和你的终端不一样：由 launchd / systemd 拉起时常常只有 `/usr/bin:/bin`，mise / nvm 装的 `npx`、`uvx` 不在里面。报错里写了它找的是哪几个目录 | `gld cfg runtime --executable-paths ~/.local/share/mise/shims`（换成 `which npx` 的那个目录），或者在 `~/.claude.json` 里把 `command` 写成绝对路径 |
-| `gld mcp ls` 说"配置里用了环境变量 X，gld 的守护进程里没有" | `~/.claude.json` 里写了 `${X}`，而守护进程起的时候那个 shell 没 export 它（`.zshrc` 里的变量，launchd 起的进程看不到） | 在一个 export 了它的终端里 `gld daemon restart`；或者把值直接写进配置的 `env` |
+| `gld mcp ls` 说"配置里用了环境变量 X，gld 的守护进程里没有" | `~/.claude.json` 里写了 `${X}`，而守护进程起的时候那个 shell 没 export 它（`.zshrc` 里的变量，launchd 起的进程看不到） | 把值直接写进配置的 `env`（推荐，launchd 起的守护进程也读得到）；或者在 export 了它的终端里 `gld daemon restart`——后一种会让守护进程带上那个终端的全部环境，名字不像密钥的变量项目命令也读得到，见 [security.md](security.md#项目命令拿不到名字像密钥的环境变量) |
 | AI 报 `MCP_SERVER_NEEDS_LOGIN`（HTTP 401） | 这个远端 server 要 OAuth 登录，令牌存在 Claude Code 自己那里，gld 拿不到；或者配置里的 key 错了 | 换用它给 key 的写法（请求头或 URL 参数）；要 OAuth 的 gld 用不了 |
 | AI 报 `MCP_SERVER_UNUSABLE`，说是老的 HTTP+SSE 传输 | 配置里是 `"type": "sse"`，gld 只支持 streamable HTTP | 看那个 server 的文档，多半有一个以 `/mcp` 结尾的新地址，改成 `"type": "http"` |
 | AI 说有个 server，调的时候报 `MCP_SERVER_UNKNOWN` | 名字要一字不差（区分大小写：本机常见 `Context7` 和 `context7` 两个都装着）；或者刚被 `gld mcp off` 关了 | `gld mcp ls` 看开着的名字；报错里也列了 |

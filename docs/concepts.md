@@ -1,7 +1,7 @@
 # 这些名词到底是什么意思
 
 gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟直觉常常不一样。
-这篇只讲"它是什么、什么时候该用、用错了会怎样"，具体怎么配在各自的文档里。
+这篇只讲"它是什么、什么时候该用、用错了会怎样"，具体怎么配大多在各自的文档里（浏览器那节例外，配置步骤就写在这里）。
 
 各节都能单独看，按需跳：
 
@@ -769,7 +769,8 @@ job 的 `defaults` > 工作流的 `defaults`，`./web/` 写成 `web`）、`env`�
 按命令内容猜的 `role`、`source`（如 `.github/workflows/ci.yml jobs.web.steps[1]`）。单行、不带 `${{ }}` 的步骤也有 `exec`
 判定；多行脚本和用了表达式的是 `null`，要拆开或改写才能交给 `exec_command`。CI 里的 `pnpm install`、`npm ci` 这类
 标 `install`，同样要**先问用户**：2026-10-07 ChatGPT 实测就是照着 CI 直接装了依赖、没问人（审查 §14）。
-这个标记看到 `install` 这个词就算，比 `exec_command` 拦的范围宽，只用来提醒。
+这个标记按关键词认（`install`、`npm ci`、`uv sync` 这类），和 `exec_command` [真正拦的](#装东西的命令要你点头)不是同一份名单：
+`make install` 会标但不拦，`cargo fetch`、`go get`、`npx 没装的包` 不标但会拦。能不能直接跑，看同一条的 `exec`。
 `uses:` 的 action、矩阵、`if:` 条件不摘，原文要 AI 自己读。用了 YAML 别名（`*name`）或嵌套超过 64 层的工作流不解析，
 写进 `problems`：别名展开能让几 KB 的文件撑出几十 GB 内存，而仓库内容是不可信的。
 
@@ -783,65 +784,73 @@ CI 步骤从扫描起点和工作区根两处的 `.github/workflows` 各取按�
 坏掉的清单或工作流写进 `problems`，不影响别的。回包大小参考：带 CI 的单个项目 7～9 KB，40 个 Cargo 成员加
 20 个前端包的 monorepo 约 30 KB。
 
-### 装东西的命令要你点头
+## 装东西的命令要你点头
 
-下面这些命令，`exec_command` 不带 `confirm=true` 一律拒，报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`，
-`check_command` 和 `list_project_commands` 的 `exec` 判定是 `needs_approval`。AI 应当先问你，你同意了它再带
-`confirm=true` 重试。
+AI 跑下表里的命令时，gld 先拦下，报 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`。AI 问过你、你同意了，它带
+`confirm=true` 再发一次才会跑。`check_command` 和 `list_project_commands` 的 `exec` 对这些命令给 `needs_approval`。
 
-| 生态 | 拦的 |
+| 生态 | 拦的（主要的，完整名单在 `crates/core/src/tools/project_commands/installs.rs`） |
 | --- | --- |
-| npm / pnpm / yarn / bun | `install`、`i`、`add`、`ci`（npm 还有 `clean-install`）、只写一个 `yarn`；依赖没装时除查询外的 pnpm 命令（见上面 `may_install`） |
+| npm / pnpm / yarn / bun | `install`、`i`、`add`、`ci`（npm 还有 `clean-install`）、不带子命令的 `yarn`（等于 `yarn install`）；依赖没装时除查询外的 pnpm 命令（见上面 `may_install`） |
 | 一次性运行器 | `npx`、`npm exec`、`bunx`、`bun x` 跑**项目里没装**的包（往上找不到 `node_modules/.bin/<名字>`），或写了版本号（`create-vite@latest`）；`pnpm dlx`、`yarn dlx`、`uvx`、`pipx run` 一律拦 |
-| 浏览器 | `playwright install`（不管经 `npx`、`pnpm exec` 还是直接跑）：往用户缓存目录下几百 MB 的浏览器 |
-| Python | `pip install` / `download` / `wheel`（含 `python -m pip …`）、`uv sync` / `add` / `pip install`、`uv tool install`、没有 `.venv` 时的 `uv run`、`poetry install` / `add`、`pipenv install`、`conda install` |
-| Rust / Go | `cargo install`、`cargo add`、`cargo fetch`；`go install`、`go get`、`go mod download` |
-| 其他 | `gem install`、`bundle install`、`dotnet add package`、`dotnet restore`、`dotnet tool install`、`deno install` / `add`、`composer install` / `require`、`brew install`、`apt-get install` |
+| 浏览器 | `playwright install`、`playwright install-deps`，经 `npx`、`pnpm exec` 跑还是直接跑都算：要往用户缓存目录下载几百 MB 的浏览器 |
+| Python | `pip install` / `download` / `wheel`（含 `python -m pip …`）；`uv sync` / `add` / `pip install` / `pip sync` / `tool install` / `tool run`，还有没有 `.venv` 时的 `uv run`；`pipx install` / `inject`；`poetry install` / `add` / `update` / `sync`；`pipenv install` / `sync` / `update`；`conda`、`mamba`、`micromamba` 的 `install` / `create` |
+| Rust / Go | `cargo install`、`cargo binstall`、`cargo add`、`cargo fetch`；`go install`、`go get`、`go mod download` |
+| 其他 | `gem install` / `update`、`bundle install` / `update` / `add`、`dotnet add package` / `restore` / `tool install` / `workload install`、`deno install` / `add`、`composer install` / `require` / `update`、`brew install` / `reinstall` / `upgrade`、`apt` / `apt-get` / `dnf` / `yum install`、`apk add` |
 
-**按用途认，不按副作用。**`cargo build`、`go build`、`go mod tidy`、`mvn install`、`gradle build`、`dotnet build` 也会顺手
-下载声明过的依赖，但它们是构建，不拦——拦了每次构建都要问，问多了只会闭眼点同意。只认子命令，所以
-`grep install README.md`、`git commit -m "pip install"` 不会被拦。表里很多程序默认不在白名单里（`pip`、`uv`、`gem`……），
-你把它们加进 `mcp.allowed-commands` 之后这条规则照样管。
+**只拦专门用来装东西的命令，构建时顺手下载依赖的不拦。**`cargo build`、`go build`、`go mod tidy`、`mvn install`、`gradle build`、
+`dotnet build` 也会下载声明过的依赖，但拦了每次构建都要问，问多了只会闭眼点同意。只认子命令，所以
+`grep install README.md`、`git commit -m "pip install"` 不会被拦。
 
-**为什么要拦，而不是在回包里提醒：**2026-10-07 实测两次，一次照提醒没跑 `pnpm install`、`pnpm run test` 却把依赖装上了
-（审查 §16），一次把"按 CI 全跑一遍"当成用户同意，没问就跑了 `pnpm install`（审查 §17）。`confirm=true` 仍是 AI 自己填的，
-服务端看不到你点没点头（见[安全](security.md)），它管的是让 AI 在动手前停一下，运行记录里也看得出来。
+表里不少程序默认不在命令白名单里（`pip`、`uv`、`gem`……），要先 `gld set <项目> allowed-commands=pip` 加进去才跑得了，
+加进去之后装东西照样要你点头。默认就在白名单里的 `python`、`cargo`、`go`、`npx` 不用加：`python -m pip install`、
+`cargo install` 直接就会被拦下来问你。
+
+**为什么要拦，而不是在回包里提醒：**2026-10-07 实测过两次，只提醒拦不住。一次 AI 照提醒没跑 `pnpm install`，可 `pnpm run test`
+自己把依赖装上了；另一次它把"按 CI 全跑一遍"当成你同意了，没问就跑了 `pnpm install`。`confirm=true` 仍是 AI 自己填的，
+服务端看不到你点没点头（见[安全](security.md)），它管的是让 AI 在动手前停下来问你。
 
 ---
 
 ## dev server 这类要一直开着的：`service_port`
 
-AI 要起一个 dev server、再拿浏览器或测试去连它时，`exec_command` 带上 `service_port`（服务要听的端口）：
+AI 要起一个 dev server（`pnpm dev`、`vite` 这类开发时跑的本地网页服务），再拿浏览器或测试去连它时，`exec_command`
+带上 `service_port`，填服务要听的端口。**这个参数只告诉 gld 去等哪个端口，不会替服务换端口**，端口还得写进命令本身：
 
 ```bash
+# 命令行复现时这么写；AI 那边传的是同样的参数
 gld tool call exec_command cmd='pnpm dev --port 5179 --strictPort' workdir=web service_port=5179
 ```
 
-回包里多一格 `service`：
+`--strictPort` 是 Vite 的参数：端口被占就报错退出，不自动换到下一个端口——不加的话它悄悄换到 5180，gld 还在等 5179。
 
-- `ready`：127.0.0.1 或 ::1 上这个端口连得上，命令也还在跑。只连 TCP、不发请求：连得上说明在听，页面对不对是测试的事。
+回包里多一格 `service`。下面说的"回环地址"就是只有本机自己连得上的地址：127.0.0.1（IPv4）和 ::1（IPv6）。
+
+- `ready`：回环地址上这个端口连得上，命令也还在跑。只连 TCP、不发请求：连得上说明在听，页面对不对是测试的事。
   回包顶层的 `command_summary` 会直说 `service is up` 或 `nothing answers on port … yet`。
-- `listening_on`：哪几个本机回环地址答话。只有 `::1` 时 `note` 会提醒：Vite 默认就这样，连 127.0.0.1 的工具
+- `listening_on`：哪几个回环地址答话。只有 `::1` 时 `note` 会提醒：Vite 默认就这样，连 127.0.0.1 的工具
   （`curl 127.0.0.1`、Playwright 的 `webServer.url`）会一直等不到，改用 `http://localhost:端口`，或给服务加 `--host 127.0.0.1`。
-- `reachable_from_network`：从本机的网卡地址也连得上，说明它听在所有网卡上（`--host`、`0.0.0.0`），同一网络里的机器
-  都能访问。gld 不替它改，只说出来；`null` 是没联网、查不了。
+- `reachable_from_network`：`true` 是从本机的网卡地址也连得上，说明它听在所有网卡上（`--host`、`0.0.0.0`），同一网络里的
+  机器都能访问。gld 不替它改，只说出来。`null` 是还没 ready，或者本机没联网、查不了。
 
 和普通命令不一样的地方：
 
 | | 普通命令 | 带 `service_port` |
 | --- | --- | --- |
-| 起之前 | 直接起 | 端口上已经有东西在听，就**什么都不起**，报 `PORT_IN_USE`；占着的是同一个连接自己起的另一条服务时，报错里给出它的 `session_id` |
+| 起之前 | 直接起 | 端口上已经有东西在听，就**什么都不起**，报 `PORT_IN_USE`；占着的是你这个客户端自己起的另一条服务时，报错的 `details.own_session_id` 就是它的 `session_id` |
 | 这次调用等多久 | `yield_time_ms`，默认 1 秒 | 端口一答话就返回；没给 `yield_time_ms` 时最多等 30 秒 |
 | `timeout_ms` | 默认 30 秒，最多 10 分钟 | 默认 30 分钟，最多 1 小时 |
 
 **为什么端口必须空着：**已经有东西在听，就分不清待会儿答话的是这条命令还是别人——另一个 dev server、你手动起的、
-gld 自己的端口。D10 Web 那轮就有一个排查时手动起的 Vite 一直占着端口（审查 §11）。
+gld 自己的端口。实测碰到过：排查时手动起的 Vite 一直占着端口，AI 以为答话的是自己刚起的那个。
 
-**到点照样停：**AI 忘了 `kill_session` 的服务最多再占一小时端口，不会一直挂着。`gld daemon stop`、升级重启也会把它停掉
-（运行记录里是 `interrupted`）。`read_output` 每次都现查一遍端口，`list_runs` 的 `service_port` 认得出哪条是服务。
+**用完要停：**让 AI 调 `kill_session`。回包的 `command_summary` 写 `service stopped`，`command_ok` 是 `false`（因为它不是
+自己退出的）——这是正常结局，不算失败；到 `timeout_ms` 停掉的也这样写。服务自己崩了才写 `command FAILED`。AI 忘了停的，
+最多再占一小时端口；`gld daemon stop`、升级重启也会把它停掉（运行记录里是 `interrupted`）。`read_output` 每次都现查一遍端口，
+`list_runs` 的 `service_port` 认得出哪条是服务。`check_command` 也收 `service_port`，但只是让超时上限按 1 小时判，不查端口有没有被占。
 
-**`ready: false` 怎么办：**命令还在跑的，多半是还在编译，或者服务没用你给的端口——看输出里打印的地址，把端口传给它
-（Vite 是 `--port 5179 --strictPort`）。命令已经退出的，看 `exit_code` 和 stderr。
+**`ready: false` 怎么办：**命令还在跑的，多半是还在编译，或者服务没用你给的端口——看输出里打印的地址，把端口写进命令
+（见上面的 `--strictPort`）。命令已经退出的，看 `exit_code` 和 stderr。
 
 **不管的：**不开端口的长命令（`tsc --watch` 这类）没有服务模式，仍是最多 10 分钟。就绪只到"端口连得上"，业务能不能用
 （数据库连上没有、页面报不报错）要测试或浏览器去验。跑 E2E 也可以继续让测试框架自己起停服务（Playwright 的 `webServer`
@@ -851,10 +860,12 @@ gld 自己的端口。D10 Web 那轮就有一个排查时手动起的 Vite 一�
 
 ## 用浏览器验页面：单独配一个隔离的 Playwright MCP
 
-服务起好之后，让 AI 打开页面、点按钮、看 console 报错、截图，用的是[本机 MCP 转发](#本机装好的-mcp-server)里的
-Playwright MCP。**给它单独配一条，别直接开你已经装的那个 `playwright`。**照着做：
+服务起好之后，要让 AI 打开页面、点按钮、看 console 报错（浏览器开发者工具里"控制台"那一栏的报错）、截图，用的是
+[本机 MCP 转发](#本机装好的-mcp-server)出去的 Playwright MCP（微软出的、让 AI 操作浏览器的 MCP server，npm 包
+`@playwright/mcp`）。**给它单独配一条，别直接开你已经装的那个 `playwright`。**照着做：
 
-1. 在 `~/.codex/config.toml` 里加一条（要用 Codex 的格式：只有它能写 `cwd`）：
+1. 在 `~/.codex/config.toml` 里加一条。要写在 Codex 的配置里，因为 `~/.claude.json` 没有 `cwd` 这一项；没装 Codex 也照样
+   建这个文件，gld 会读。**名字别和 `~/.claude.json` 里已有的重名**：重名时 gld 用那边的，这份隔离配置就白写了。
 
    ```toml
    [mcp_servers.browser]
@@ -866,27 +877,33 @@ Playwright MCP。**给它单独配一条，别直接开你已经装的那个 `pl
      "--allowed-origins", "http://localhost:*;http://127.0.0.1:*",   # 只开本机的页面
    ]
    cwd = ".cache/gld-browser"   # 相对主目录。页面能碰到的文件只限这里，截图、快照也存这里
+   enabled = false              # 只给 gld 用，Codex 自己不加载它（gld 不看这个开关，只认 gld mcp on）
+   disabled_tools = ["browser_run_code_unsafe"]   # 能以你的身份跑任意代码，必须关，见下
    ```
 
 2. 建目录、试起一次、打开：
 
    ```bash
-   mkdir -p ~/.cache/gld-browser
-   gld mcp test browser      # 应列出 25 个左右 browser_* 工具
+   mkdir -p ~/.cache/gld-browser      # 不先建，gld 进不了这个工作目录，server 起不来
+   gld mcp test browser                # 应列出 24 个左右 browser_* 工具，最后一行"配置里不放的：browser_run_code_unsafe"
    gld mcp on browser
    ```
 
-   这是开的第一个本机 MCP 的话，ChatGPT 要在连接器设置里刷新一次。
+   这是开的第一个本机 MCP 的话，ChatGPT 要在连接器设置里刷新一次。它默认用本机装好的 Google Chrome（`--browser` 可换）。
 
 AI 那边的流程：`exec_command` 带 `service_port` 起服务 → `call_mcp_tool server=browser tool=browser_navigate
-arguments={"url":"http://127.0.0.1:5179/"}` → `browser_snapshot` 拿到页面结构和每个元素的 `ref` → `browser_click` 点 →
-`browser_console_messages` 看报错 → `browser_take_screenshot`（图片直接回到对话里）→ 用完 `kill_session`。参数名跟着
-Playwright MCP 的版本变（0.0.83 里点击用 `target`，不是旧的 `ref`），先用 `list_mcp_tools server=browser tool=browser_click`
-看一眼再调，不然报 `Invalid arguments`。
+arguments={"url":"http://127.0.0.1:5179/"}` → `browser_snapshot` 给出页面结构，每个元素带一个 `ref` 值 → 把这个值填进
+`browser_click` 的 `target` 参数（0.0.83 起叫 `target`，更早的版本是 `element` 加 `ref`）→ `browser_console_messages` 看报错 →
+`browser_take_screenshot`（图片直接回到对话里）→ 用完 `kill_session`。参数名跟着 Playwright MCP 的版本变，先用
+`list_mcp_tools server=browser tool=browser_click` 看一眼再调，不然报 `Invalid arguments`。
 
-**为什么不直接用已经装的那个：**gld 起本机 MCP 时工作目录是你的主目录，而 Playwright MCP 默认允许页面读到工作目录下的
-文件。2026-10-08 实测，不写 `cwd` 时它报的允许范围就是整个主目录（`.ssh`、`.config` 里的都算），AI 经网页上一个文件框就能把它们
-传出去；不带 `--isolated` 的话浏览器配置还会存盘，下次带着登录状态。
+**为什么不直接用已经装的那个：**
+- gld 起本机 MCP 时工作目录是你的主目录，而 Playwright MCP 默认允许页面读到工作目录下的文件。2026-10-08 实测，不写 `cwd`
+  时它报的允许范围就是整个主目录（`.ssh`、`.config` 里的都算），AI 经网页上一个文件框就能把它们传出去。
+- 它自带一个 `browser_run_code_unsafe`，自己的说明写着"executes arbitrary JavaScript in the Playwright server process and is
+  RCE-equivalent"：开着它，AI 能以你的身份跑任意代码，gld 的命令白名单、`confirm`、上面的 `cwd` 全都拦不住。
+  `disabled_tools` 里写了它，gld 列工具时不给、AI 按名字直接调也拒。
+- 不带 `--isolated` 的话浏览器配置会存盘，下次带着登录状态。
 
 **实测（2026-10-08，Playwright MCP 0.0.83，经 gld 的 `/mcp`）：**打开服务模式起的页面、点按钮、读到 console 里的报错、
 截图（PNG 直接回到对话里）都通；`https://example.com` 被拦（`ERR_BLOCKED_BY_CLIENT`），`file:///etc/hosts` 被拦，上传 `cwd`
@@ -894,10 +911,12 @@ Playwright MCP 的版本变（0.0.83 里点击用 `target`，不是旧的 `ref`�
 
 **管不到的：**
 - `--allowed-origins` 不是安全边界，Playwright 自己的说明写着它不管重定向；它防的是 AI 手滑打开外网。
+- `browser_evaluate` 还在：它在页面里跑 JavaScript，受浏览器自己的沙箱和上面的 origin 限制，不在 Playwright 进程里。
 - 这条 server 属于整台机器，不属于哪个项目：服务挂在公网上时，拿到凭据的客户端都能用它（[grant](#只开几个项目gld-grant)
-  的客户端用不了本机 MCP）。
+  的客户端用不了本机 MCP）。它拿到的是守护进程的全部环境变量，不像项目命令那样扣掉像密钥的。
 - 截图、快照存在 `cwd` 那个目录里，不在项目里，要留作证据得另存。截图不证明 console 没报错，要看 `browser_console_messages`。
-- `@latest` 每次起都会去 npm 查一次新版本（要联网）；想固定版本就写成 `@playwright/mcp@0.0.83` 这样。
+- `@latest` 每次起都会去 npm 查一次新版本（要联网）；想固定版本就写成 `@playwright/mcp@0.0.83` 这样。新版本可能加新的
+  危险工具，升级后跑一次 `gld mcp test browser` 看看工具表。
 
 ---
 

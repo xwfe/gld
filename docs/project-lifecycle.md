@@ -68,6 +68,8 @@ CLI、库和常规后端项目，已有工具足以支持人工监督下的读�
 它会回 `termination_reason`、`exit_code`、`command_ok`。**不能只看工具的 `ok` 或 CLI
 自身退出码**：命令退出 7 时工具 `ok` 仍是 true、`gld tool call` 仍退出 0，要看
 `command_ok` / `exit_code`，回包顶层的 `command_summary` 用一句话写着命令成没成（失败的以 `command FAILED` 开头；根本没起来的——找不到程序、脚本没可执行位——以 `command was NOT started` 开头，后面跟原因）。
+带 `service_port` 起的服务不会自己结束，别等它 `running: false`：看 `service.ready`，用完 `kill_session`，这时写
+`service stopped`，不算失败（见[服务模式](concepts.md#dev-server-这类要一直开着的service_port)）。
 Planning 台账（`planning_manage action=state` 的 `execution`）
 按命令终态记：`failed` / `timed_out` / `cancelled` / `running` / `unknown`，`last_error` 写明退出码；
 后台命令的终态在 `read_output` 读到时补回（gld 退出时停掉的 `interrupted` 记 `cancelled`，没来得及记
