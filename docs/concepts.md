@@ -336,7 +336,8 @@ read_mcp_result ref=r1a2…  offset=65520     读一个大结果的后面部分
 **server 怎么起、活多久。** 用到才起，按"server + 哪个客户端"各起一份（有状态的
 playwright 不会两个客户端共用一个浏览器），闲 5 分钟收掉，`gld stop` 全收，连它下面起的
 进程一起。起的时候 `PATH` 是 `gld cfg runtime --executable-paths` 加上守护进程自己的，
-工作目录是主目录。
+工作目录是主目录（`~/.codex/config.toml` 里写了 `cwd` 的用它，相对路径按主目录算）。能读文件的 server 常把工作目录
+当允许范围，浏览器就是这样，见[用浏览器验页面](#用浏览器验页面单独配一个隔离的-playwright-mcp)。
 
 **哪些用不了**：要 OAuth 登录的远端 server（令牌在 Claude Code 自己那里，gld 拿不到）、
 老的 HTTP+SSE 传输（`type: "sse"`）、配置里用了守护进程环境里没有的变量的——`gld mcp ls`
@@ -841,6 +842,58 @@ gld 自己的端口。D10 Web 那轮就有一个排查时手动起的 Vite 一�
 **不管的：**不开端口的长命令（`tsc --watch` 这类）没有服务模式，仍是最多 10 分钟。就绪只到"端口连得上"，业务能不能用
 （数据库连上没有、页面报不报错）要测试或浏览器去验。跑 E2E 也可以继续让测试框架自己起停服务（Playwright 的 `webServer`
 加 `reuseExistingServer: true`），就绪和收尾都归它。
+
+---
+
+## 用浏览器验页面：单独配一个隔离的 Playwright MCP
+
+服务起好之后，让 AI 打开页面、点按钮、看 console 报错、截图，用的是[本机 MCP 转发](#本机装好的-mcp-server)里的
+Playwright MCP。**给它单独配一条，别直接开你已经装的那个 `playwright`。**照着做：
+
+1. 在 `~/.codex/config.toml` 里加一条（要用 Codex 的格式：只有它能写 `cwd`）：
+
+   ```toml
+   [mcp_servers.browser]
+   command = "npx"
+   args = [
+     "@playwright/mcp@latest",
+     "--isolated",        # 浏览器配置只放内存：不存盘，不带任何登录状态
+     "--headless",        # 不弹窗口
+     "--allowed-origins", "http://localhost:*;http://127.0.0.1:*",   # 只开本机的页面
+   ]
+   cwd = ".cache/gld-browser"   # 相对主目录。页面能碰到的文件只限这里，截图、快照也存这里
+   ```
+
+2. 建目录、试起一次、打开：
+
+   ```bash
+   mkdir -p ~/.cache/gld-browser
+   gld mcp test browser      # 应列出 25 个左右 browser_* 工具
+   gld mcp on browser
+   ```
+
+   这是开的第一个本机 MCP 的话，ChatGPT 要在连接器设置里刷新一次。
+
+AI 那边的流程：`exec_command` 带 `service_port` 起服务 → `call_mcp_tool server=browser tool=browser_navigate
+arguments={"url":"http://127.0.0.1:5179/"}` → `browser_snapshot` 拿到页面结构和每个元素的 `ref` → `browser_click` 点 →
+`browser_console_messages` 看报错 → `browser_take_screenshot`（图片直接回到对话里）→ 用完 `kill_session`。参数名跟着
+Playwright MCP 的版本变（0.0.83 里点击用 `target`，不是旧的 `ref`），先用 `list_mcp_tools server=browser tool=browser_click`
+看一眼再调，不然报 `Invalid arguments`。
+
+**为什么不直接用已经装的那个：**gld 起本机 MCP 时工作目录是你的主目录，而 Playwright MCP 默认允许页面读到工作目录下的
+文件。2026-10-08 实测，不写 `cwd` 时它报的允许范围就是整个主目录（`.ssh`、`.config` 里的都算），AI 经网页上一个文件框就能把它们
+传出去；不带 `--isolated` 的话浏览器配置还会存盘，下次带着登录状态。
+
+**实测（2026-10-08，Playwright MCP 0.0.83，经 gld 的 `/mcp`）：**打开服务模式起的页面、点按钮、读到 console 里的报错、
+截图（PNG 直接回到对话里）都通；`https://example.com` 被拦（`ERR_BLOCKED_BY_CLIENT`），`file:///etc/hosts` 被拦，上传 `cwd`
+以外的文件被拒。
+
+**管不到的：**
+- `--allowed-origins` 不是安全边界，Playwright 自己的说明写着它不管重定向；它防的是 AI 手滑打开外网。
+- 这条 server 属于整台机器，不属于哪个项目：服务挂在公网上时，拿到凭据的客户端都能用它（[grant](#只开几个项目gld-grant)
+  的客户端用不了本机 MCP）。
+- 截图、快照存在 `cwd` 那个目录里，不在项目里，要留作证据得另存。截图不证明 console 没报错，要看 `browser_console_messages`。
+- `@latest` 每次起都会去 npm 查一次新版本（要联网）；想固定版本就写成 `@playwright/mcp@0.0.83` 这样。
 
 ---
 

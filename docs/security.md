@@ -31,7 +31,8 @@ gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
 
 **开了本机 MCP server 的（`gld mcp on`），拿到 token 的人还能调它们**，范围由 server
 自己决定，不受任何项目的读写限制：开了 Filesystem 就是它配的那些目录，开了
-desktop-commander 就是以你的身份跑任意命令。默认一个都不开；只放 context7、deepwiki
+desktop-commander 就是以你的身份跑任意命令，开了不带 `cwd` 的 Playwright MCP，AI 能把你主目录下的任何文件经网页的文件框传出去
+（[怎么配隔离的](concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。默认一个都不开；只放 context7、deepwiki
 这种只查资料的就够用。工具集是 `read-only` 的服务一个都不转。详见
 [concepts.md](concepts.md#本机装好的-mcp-server)。**项目的 `read-only` 或 Planning 不是本机 MCP
 的权限边界**：这三个服务级工具没有 `workspace`，必须单独评估。服务整体的 `read-only`
