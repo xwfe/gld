@@ -973,7 +973,7 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 ///
 /// 这个字段是调用方自己填的，服务端看不到用户有没有点头，只拿它开危险操作那道门。
 /// 真人确认靠客户端按工具标注弹的确认框，所以标注必须照实给（审查 D08）。
-/// `service_port` 的说明：exec_command 和 check_command 共用一份。
+/// exec_command 的 `service_port` 说明。check_command 那边另写一句：预检不查端口、也没有 `service` 回包。
 const SERVICE_PORT_DESCRIPTION: &str = "Port this command will listen on, for a dev server or other service that keeps running. The port must be free before it starts; the result's service says whether it answers on 127.0.0.1 / ::1 and whether other machines on the network can reach it. read_output re-checks it.";
 
 static CONFIRM_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
@@ -1457,7 +1457,7 @@ pub fn input_schema(name: &str) -> Value {
                 "workdir": { "type": "string", "default": "." },
                 "cwd": { "type": "string", "description": WORKDIR_ALIAS_DESCRIPTION },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
-                "service_port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": SERVICE_PORT_DESCRIPTION },
+                "service_port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Same as exec_command's service_port. Here it only lets timeout_ms go up to 3600000; whether the port is free is not checked." },
                 "confirm": CONFIRM_SCHEMA.clone(),
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" }
             },

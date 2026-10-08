@@ -120,7 +120,7 @@ pub fn command_summary(output: &Value) -> Option<String> {
         match command.status.as_str() {
             "killed" => {
                 return Some(format!(
-                    "service stopped: kill_session ended the command serving port {port}, which is the normal way to stop a service (command_ok is false only because it did not exit by itself)"
+                    "service stopped: the command serving port {port} was stopped on request (kill_session, or its project or the service being stopped), which is the normal way to end a service (command_ok is false only because it did not exit by itself)"
                 ))
             }
             "timeout" => {
