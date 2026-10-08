@@ -1245,8 +1245,9 @@ OrbStack 测完已关回原状。
 
 **之后发现、同日补上（发版前文档梳理时）：**Playwright MCP 自带的 `browser_run_code_unsafe`，它自己的说明写着"executes arbitrary
 JavaScript in the Playwright server process and is RCE-equivalent"（实现是 Node 的 `vm`，不是安全边界）。§19 给的隔离配法和本机
-那条 `browser` 配置都漏了它：开着时 AI 能以用户身份跑任意代码，gld 的白名单、`confirm`、`cwd` 都拦不住。ChatGPT 这一轮没调过它
-（请求日志里 27 次 `call_mcp_tool` 的回包都是几百字节的页面操作和两张截图）。本机配置加 `disabled_tools = ["browser_run_code_unsafe"]`
+那条 `browser` 配置都漏了它：开着时 AI 能以用户身份跑任意代码，gld 的白名单、`confirm`、`cwd` 都拦不住。ChatGPT 这一轮有没有调过它
+**确证不了**：请求日志对转发调用只记 `tool=call_mcp_tool`，不记调到哪个上游工具（全数据目录搜不到这个名字）；27 次回包都是几百字节的
+页面操作加两张截图，不像跑过代码，但只是推断。为此请求日志改成多记 `relay=<server>:<tool>`（只有名字，`7c071de`）。本机配置加 `disabled_tools = ["browser_run_code_unsafe"]`
 （改前备份），`gld mcp test browser` 变成 24 个工具、写明"配置里不放的：browser_run_code_unsafe"；gld 调用时也按这一项拒
 （`machine_mcp/relay.rs` 每次调用都查 `allows_tool`）。文档的配法同步补上，另写明 `enabled = false`、和 `~/.claude.json` 重名会被
 那边覆盖、新版本可能加新的危险工具。
