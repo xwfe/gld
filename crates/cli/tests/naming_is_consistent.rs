@@ -41,9 +41,11 @@ fn source_files() -> Vec<PathBuf> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if path.is_dir() {
+                // `.claude/worktrees/` 下是桌面版后台任务建的 git worktree，整份仓库的副本，
+                // 里面这个文件自己也会被当成"没改名的地方"。
                 if matches!(
                     name.as_ref(),
-                    "target" | "_original" | ".git" | "node_modules"
+                    "target" | "_original" | ".git" | "node_modules" | ".claude"
                 ) {
                     continue;
                 }

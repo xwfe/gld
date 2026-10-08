@@ -12,6 +12,9 @@
 # scripts/package.sh 的产物
 /dist/
 
+# Claude Code 桌面版后台任务建的 git worktree（各是一份完整副本，用完删）
+/.claude/worktrees/
+
 # 编辑器 / 系统
 .DS_Store
 .idea/
