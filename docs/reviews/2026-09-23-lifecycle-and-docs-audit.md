@@ -1169,3 +1169,11 @@ OrbStack 测完已关回原状。
 **没做 / 没验：**本机服务没升级，ChatGPT 没用过服务模式和浏览器配置；用户的 `~/.codex/config.toml` 没改。uv、pip 这些规则
 按它们文档写的行为判，单元测试只覆盖判定，没在本机真跑 uv / pip。`reachable_from_network` 用的是"往外发包会走的那个本机
 地址"，开着 TUN 代理的机器上那是代理网卡的地址，判定照样成立，但没单独验。
+
+**收尾时的偶发失败，同日修掉并合并：**上面那次全量之后又跑了一遍，挂了 5 条（4 条在 `call_tool_contract.rs`），紧接着重跑全过。
+根因是这些老测试只等 `exec_command` 默认的 1 秒，而这 1 秒从进程起来之前就开始算，本机负载 30–35 时 python 还没起来，回来的是
+`status: running`。不是产品回归。另起的后台任务用 `taskpolicy -b` 稳定复现后，让要断言"已跑完"的测试带
+`yield_time_ms: UNTIL_EXIT_MS`、"转后台再读"的那条改成轮询（`86438d6`、`8a24a90`，只改测试）。快进合并到 main 后全量又挂了
+1 条 `the_old_project_name_is_gone_everywhere`：它从仓库根遍历，把建在 `.claude/worktrees/` 里的那份 worktree 副本也扫了；
+改成跳过 `.claude`，并把 `/.claude/worktrees/` 加进 `.gitignore`（`4b64824`）。worktree 和分支已删，写 exec 测试的规矩记进
+[开发文档](../development.md)。

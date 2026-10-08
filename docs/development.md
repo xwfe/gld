@@ -83,6 +83,14 @@ README 只保留定位、安装、使用、关键边界和导航；产品行为�
 `ccnm_background_lifecycle` 在没有 ccnm 二进制时；`share_reports_the_missing_binary_instead_of_a_silent_no_url` 在本机**装了**
 cloudflared 时（造不出"没装"，这条只在 CI 的干净镜像里真跑）。
 
+新写 `exec_command` 测试、要断言退出码、输出或写出的文件时，带 `yield_time_ms: UNTIL_EXIT_MS`（core 的
+`tests/common`；CLI 测试用 `common::env::UNTIL_EXIT`）。不带就只等 1 秒，机器一忙 python 还没起来，回来的是
+`status: running`——看着像回归，其实是测试在赌速度。本机用 `taskpolicy -b <测试二进制>` 压到后台优先级能稳定复现。
+
+后台任务（Claude Code 桌面版）的 git worktree 建在仓库里的 `.claude/worktrees/`，已在 `.gitignore` 里；从仓库根往下遍历
+文件的测试要跳过 `.claude`，不然会把 worktree 里整份副本也扫进去（`naming_is_consistent.rs` 就撞过）。合并后用
+`git worktree remove` 删掉、`git branch -d` 删分支。
+
 `scripts/gen-cli-docs.sh` 在一次性的 `HOME` 里跑（不读你真实的 `~/.config/gld`），先写
 临时文件；任何一条 `gld` 失败、或帮助段数不对、字段表 / 密钥名表像是空的，就退出 1 并
 说清是哪一条，原来的 `docs/cli.md` 一个字不动。这些行为由 `docs_generation.rs` 用假的
