@@ -1192,3 +1192,53 @@ OrbStack 测完已关回原状。
 `PWD`/`OLDPWD` 除外），守护进程自己不动；`check_exec_environment` 的 `withheld_environment` 只列名字。新增单元 1 条、集成 1 条
 （单独一个测试文件：改进程环境和别的线程起子进程同时发生是未定义行为）；去掉去除逻辑的变异，集成测试报错。名字看着不像的
 （`DATABASE_URL` 里带口令）仍挡不住，文档写明。
+
+## 20. D10 第四轮：服务模式与隔离浏览器，ChatGPT 实测（2026-10-08）
+
+**升级：**用户同意后，本机服务从 0.8.2 官方包换成 main `d5d0725` 的 release 构建。备份二进制（`~/.local/opt/gld-0.8.2-20261008-2249`）
+和数据目录（`gld-config-20261008-2249.tgz`，0600），写新文件再改名换上。构建提交等于 HEAD；`gld ls` 一字不差；`data/profiles.json`、
+`data/oauth-clients/hub.json` 按内容（排好键）算的指纹不变；`gld health` 四项 200。工具表 30 项、指纹 `40f55e0868eb138f` →
+`f7db45941922030a`，要 Refresh。
+
+第一次 `gld daemon restart` 时想去掉 Claude Code 会话带的 35 个 `CLAUDE*` 变量（含 `CLAUDE_CODE_MESSAGING_TOKEN`），新守护进程里却还在：
+这台机器的 shell 是 zsh，没加引号的 `$UNSET` 不按空格拆，`env` 收到的是一整个参数。改用 `${=UNSET}` 再重启一次，变量 79 → 44 个，
+少的正好是那 35 个，代理、`JAVA_HOME`、mise 这些都在。
+
+**浏览器配置：**`~/.codex/config.toml`（先备份成 `config.toml.bak-20261008-2250`）末尾加 `[mcp_servers.browser]`：`@playwright/mcp@latest`、
+`--isolated`、`--headless`、`--allowed-origins` 只放本机、`cwd = ".cache/gld-browser"`，另加 `enabled = false` 让 Codex 自己不加载它
+（gld 不看这个开关）。`gld mcp test browser` 1.8 秒起来、25 个工具，`gld mcp on browser`；工具表变成 33 项、指纹 `c592e66bd3b70647`。
+
+**场景：**`~/xdw/gld-d10-browser`（`d10-browser`），零依赖的购物清单页，`npm run dev` 起 `node server.mjs --port 5179`（只听 127.0.0.1）。
+埋了三个 bug：空白也能添加、"1 items left"、"清除已完成"调了不存在的 `rendr()`（列表不刷新，console 报 ReferenceError）。用户点 Refresh、
+开新对话贴提示词：弄清怎么起开发服务器并确认能访问、用浏览器把功能试一遍（console 报错算 bug）、修好复验截图、停服务、说哪里不顺；
+不提 `service_port`，也不提浏览器工具名。
+
+| 核对 | 结果 | 依据 |
+| --- | --- | --- |
+| Refresh 生效 | 是 | 原注册客户端 `dcr-63f31361…` 重拉 `tools/list`，回包 42787 字节 |
+| 用服务模式起 | 是，没提示就用了 | 运行记录：`npm run dev`、`service_port: 5179`；`exec_command` 请求到回包 362 ms（没给 `yield_time_ms`，最多会等 30 秒） |
+| 先查浏览器参数再调 | 是 | `exec_command` 之后先 `list_mcp_tools`（44540 字节），再 27 次 `call_mcp_tool` |
+| console 报错 | 读到了 `ReferenceError: rendr is not defined` | 它的回答；改的正是这一行 |
+| 截图 | PNG 经 `call_mcp_tool` 回到对话（19689 字节，两次） | 请求日志 |
+| 停服务 | 是 | 运行记录 22:56:36 → 23:01:26 `killed`；之后 5179 空着 |
+| gld 拒绝或报错 | 0 次 | 请求日志 47 次调用，没有 rejected / is_error |
+| 修了几个 bug | **1 / 3** | 项目 diff 只有 `rendr` → `render`；复验时看到 "1 items left" 也没当问题，没试空白添加 |
+
+**它报的不顺和处理：**
+
+| 报的 | 核实 | 处理 |
+| --- | --- | --- |
+| 照 console 里的 `/app.js` 读 `app.js`，只说 Path not found，列目录才找到 `public/app.js` | `read_file` 的 NOT_FOUND 没有任何线索 | 报错里带上项目里同名的文件（`details.same_name_elsewhere`，最多 5 个，和 `list_files` 同一套忽略规则，最多遍历 2 万项）（`f04bbb0`） |
+| `kill_session` 停 dev server 后回包说 `command FAILED` | 带 `service_port` 的命令被停是说好的结局 | `command_summary` 写 service stopped 加原因；`command_ok` 照旧 false，契约不动；服务自己崩了照旧 FAILED（`5aa4411`） |
+| 截图指定文件名后存进了浏览器 MCP 自己的目录，gld 的文件工具看不到 | 是设计如此：`cwd` 就是为了把浏览器关在 `~/.cache/gld-browser` 里 | 不改；文档已写截图不在项目里 |
+| 连续调用浏览器工具时被"安全状态检查"拦了 | gld 请求日志里没有任何拒绝，是 ChatGPT 那边的检查 | 不改 |
+
+两处修复各有集成测试，变异各自被抓到；全量 920 passed、0 failed、0 ignored，fmt、clippy 干净。之后本机再升级到 `5aa4411`：工具表指纹
+`c592e66bd3b70647` 没变，不用 Refresh；凭据与注册客户端指纹、`gld ls` 不变，`gld health` 四项 200；实机上 `read_file app.js` 回
+"Files with that name in the workspace: public/app.js"。
+
+**这一轮说明的：**服务模式和隔离浏览器靠现有工具就能把"起服务 → 打开页面 → 读 console → 修 → 复验 → 停服务"走完，AI 不用提示就会用。
+断点仍在回包措辞和报错线索，不在缺能力；漏修的两个 bug 要靠提示词或任务验收去逼，不是工具能管的。
+
+**清理：**`gld rm d10-browser -y`，删项目目录、`runs/59f6228f…`、`harness/workspaces/59f6228f…`、`logs/28dbd41d…`、`write-locks/cfa338a8e66cdaf8.lock`
+（路径的 FNV-1a，算过对得上）；清空 `~/.cache/gld-browser` 里这次的截图和快照（目录留着，配置要用）。`browser` 转发仍开着。
