@@ -748,7 +748,8 @@ gld tool call list_project_commands path=web      # 只看 monorepo 里的一个
 - `role`：**按名字猜的**用途（`test`、`build`、`dev_server`、`lint`、`install`、`deploy`、`hook`……），只用来提醒，不拿来放行。
   正文里有 `deploy`、`publish`、`release`、`--remote`、`--prod` 这类整词的，不管名字叫什么都标 `deploy`：
   `db:migrate` 的正文可能是 `wrangler d1 execute … --remote`，改的是线上数据库。
-- `long_running`：会一直跑的（dev server、`--watch`）。`exec_command` 到 `timeout_ms`（最多 10 分钟）照样停掉它。
+- `long_running`：会一直跑的（dev server、`--watch`）。`exec_command` 到 `timeout_ms`（最多 10 分钟）照样停掉它；
+  dev server 带上 [`service_port`](#dev-server-这类要一直开着的service_port) 能开到 1 小时。
 - `exec`：交给 `exec_command` 会不会放行，和 `check_command` 对同一组参数的判定一字不差。只说能不能跑，不说会不会成功。
 - 每个项目的包管理器和依据（`packageManager` 字段 > 锁文件，几个锁文件同时在的写进 `ambiguities`）、
   `node_modules` 在不在（`dependencies_installed`）、Rust 工具链和 Node 版本要求。依赖没装时多列一条
@@ -800,6 +801,46 @@ CI 步骤最多 10 个工作流文件、60 步。脚本正文和 CI 命令截到
 **为什么要拦，而不是在回包里提醒：**2026-10-07 实测两次，一次照提醒没跑 `pnpm install`、`pnpm run test` 却把依赖装上了
 （审查 §16），一次把"按 CI 全跑一遍"当成用户同意，没问就跑了 `pnpm install`（审查 §17）。`confirm=true` 仍是 AI 自己填的，
 服务端看不到你点没点头（见[安全](security.md)），它管的是让 AI 在动手前停一下，运行记录里也看得出来。
+
+---
+
+## dev server 这类要一直开着的：`service_port`
+
+AI 要起一个 dev server、再拿浏览器或测试去连它时，`exec_command` 带上 `service_port`（服务要听的端口）：
+
+```bash
+gld tool call exec_command cmd='pnpm dev --port 5179 --strictPort' workdir=web service_port=5179
+```
+
+回包里多一格 `service`：
+
+- `ready`：127.0.0.1 或 ::1 上这个端口连得上，命令也还在跑。只连 TCP、不发请求：连得上说明在听，页面对不对是测试的事。
+  回包顶层的 `command_summary` 会直说 `service is up` 或 `nothing answers on port … yet`。
+- `listening_on`：哪几个本机回环地址答话。只有 `::1` 时 `note` 会提醒：Vite 默认就这样，连 127.0.0.1 的工具
+  （`curl 127.0.0.1`、Playwright 的 `webServer.url`）会一直等不到，改用 `http://localhost:端口`，或给服务加 `--host 127.0.0.1`。
+- `reachable_from_network`：从本机的网卡地址也连得上，说明它听在所有网卡上（`--host`、`0.0.0.0`），同一网络里的机器
+  都能访问。gld 不替它改，只说出来；`null` 是没联网、查不了。
+
+和普通命令不一样的地方：
+
+| | 普通命令 | 带 `service_port` |
+| --- | --- | --- |
+| 起之前 | 直接起 | 端口上已经有东西在听，就**什么都不起**，报 `PORT_IN_USE`；占着的是同一个连接自己起的另一条服务时，报错里给出它的 `session_id` |
+| 这次调用等多久 | `yield_time_ms`，默认 1 秒 | 端口一答话就返回；没给 `yield_time_ms` 时最多等 30 秒 |
+| `timeout_ms` | 默认 30 秒，最多 10 分钟 | 默认 30 分钟，最多 1 小时 |
+
+**为什么端口必须空着：**已经有东西在听，就分不清待会儿答话的是这条命令还是别人——另一个 dev server、你手动起的、
+gld 自己的端口。D10 Web 那轮就有一个排查时手动起的 Vite 一直占着端口（审查 §11）。
+
+**到点照样停：**AI 忘了 `kill_session` 的服务最多再占一小时端口，不会一直挂着。`gld daemon stop`、升级重启也会把它停掉
+（运行记录里是 `interrupted`）。`read_output` 每次都现查一遍端口，`list_runs` 的 `service_port` 认得出哪条是服务。
+
+**`ready: false` 怎么办：**命令还在跑的，多半是还在编译，或者服务没用你给的端口——看输出里打印的地址，把端口传给它
+（Vite 是 `--port 5179 --strictPort`）。命令已经退出的，看 `exit_code` 和 stderr。
+
+**不管的：**不开端口的长命令（`tsc --watch` 这类）没有服务模式，仍是最多 10 分钟。就绪只到"端口连得上"，业务能不能用
+（数据库连上没有、页面报不报错）要测试或浏览器去验。跑 E2E 也可以继续让测试框架自己起停服务（Playwright 的 `webServer`
+加 `reuseExistingServer: true`），就绪和收尾都归它。
 
 ---
 
@@ -917,8 +958,8 @@ stdout / stderr 各留最后 1 MiB；超了 32 条先收结束得最早的，还
 exec_command cmd="cargo build" timeout=600000
 → INVALID_ARGUMENT
   exec_command does not take timeout. It takes: argv, cmd, confirm, cwd,
-  filesystem_scope, max_output_bytes, reason, stdin, stdin_mode,
-  timeout_ms, tty, workdir, yield_time_ms
+  filesystem_scope, max_output_bytes, reason, service_port, stdin,
+  stdin_mode, timeout_ms, tty, workdir, yield_time_ms
   details.unknown_arguments = ["timeout"]
   details.executed = false
 ```

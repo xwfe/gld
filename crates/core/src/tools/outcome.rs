@@ -113,8 +113,22 @@ pub fn command_summary(output: &Value) -> Option<String> {
             .unwrap_or("see error");
         return Some(format!("command was NOT started, nothing ran: {reason}"));
     }
+    // 服务模式：AI 要知道的是"能连了没有"，不只是"还在跑"。
+    let service = output
+        .get("service")
+        .filter(|_| command.status == "running");
+    let service_ready = service.and_then(|service| service.get("ready").and_then(Value::as_bool));
+    let service_port = service.and_then(|service| service.get("port").and_then(Value::as_u64));
     Some(match command_state(&command) {
         "completed" => "command succeeded (exit code 0)".into(),
+        "running" if service_ready == Some(true) => format!(
+            "service is up: port {} answers on localhost and the command keeps running; kill_session to stop it",
+            service_port.unwrap_or_default()
+        ),
+        "running" if service_ready == Some(false) => format!(
+            "command is running but nothing answers on port {} yet; read_output to check again, kill_session to stop it",
+            service_port.unwrap_or_default()
+        ),
         "running" => {
             "command is still running; read_output for more, kill_session to stop it".into()
         }

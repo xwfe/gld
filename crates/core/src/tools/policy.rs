@@ -233,7 +233,7 @@ impl PolicyReason {
                 "gh 只放行只读诊断（run list/view、workflow view、pr view/diff/checks、issue view、release view、repo view、auth status）。rerun、合并、release、secret、gh api 这类会改 GitHub 的操作请用户自己在终端做"
             }
             Self::EnvironmentNotAllowed => "环境变量只能由服务端配置，不能随调用传入",
-            Self::TimeoutTooLong => "timeout_ms 不能超过 10 分钟；长任务请后台跑再轮询",
+            Self::TimeoutTooLong => "timeout_ms 普通命令最多 10 分钟；dev server 这类要一直开着的，带上 service_port 最多 1 小时",
             Self::PatchMissing => "patch 必须是非空字符串",
             Self::PatchTooLarge => "补丁超过上限，拆成几批提交",
             Self::ToolNotExposed => "这个工具在当前 profile 里没有暴露",
@@ -505,10 +505,20 @@ pub fn validate_command_for_workspace(
     }
 
     if let Some(timeout_ms) = arguments.get("timeout_ms").and_then(Value::as_u64) {
-        if timeout_ms > 600_000 {
+        // 带 service_port 的是要一直开着的服务（dev server），最多 1 小时；别的命令最多 10 分钟。
+        let service = arguments
+            .get("service_port")
+            .is_some_and(|port| !port.is_null());
+        if service && timeout_ms > crate::tools::service::MAX_TIMEOUT_MS {
             return Err(PolicyError::new(
                 PolicyReason::TimeoutTooLong,
-                "Command timeout exceeds 10 minutes",
+                "Service timeout exceeds 1 hour",
+            ));
+        }
+        if !service && timeout_ms > crate::tools::service::PLAIN_MAX_TIMEOUT_MS {
+            return Err(PolicyError::new(
+                PolicyReason::TimeoutTooLong,
+                "Command timeout exceeds 10 minutes; only a command with service_port may run up to 1 hour",
             ));
         }
     }

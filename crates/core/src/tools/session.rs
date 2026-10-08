@@ -220,6 +220,7 @@ impl SessionStore {
                 &session.command,
                 session.pid,
                 session.writes_at_start,
+                session.service_port,
             );
         }
         let arc = Arc::new(session);
@@ -296,6 +297,25 @@ impl SessionStore {
         if removed.is_some() {
             self.bury(session_id, reason);
         }
+    }
+
+    /// 这个连接自己起的、还在跑的、声明了这个 `service_port` 的命令。
+    ///
+    /// 起新服务前端口被占时用它说出"是你自己那条"，AI 就不会再起一个、也不会去猜是谁。
+    pub fn serving(&self, port: u16) -> Option<Arc<ExecSession>> {
+        let all: Vec<Arc<ExecSession>> = self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .values()
+            .cloned()
+            .collect();
+        all.into_iter().find(|session| {
+            session.service_port == Some(port) && {
+                session.try_refresh_status();
+                !session.has_exited()
+            }
+        })
     }
 
     /// 一条会话都没有。
@@ -376,6 +396,8 @@ pub struct ExecSession {
     pub command: String,
     /// 起来时的 pid，进运行记录。
     pid: Option<u32>,
+    /// 服务模式声明的端口（`exec_command` 的 `service_port`），快照里据此现查它答不答话。
+    service_port: Option<u16>,
     /// 运行记录的写入端。会话表建着运行记录时由 [`SessionStore::insert`] 装上。
     run: Option<RunWriter>,
     pub(crate) child: AsyncMutex<Child>,
@@ -425,6 +447,7 @@ impl ExecSession {
             session_id,
             command,
             pid: child.id(),
+            service_port: None,
             run: None,
             child: AsyncMutex::new(child),
             stdin: AsyncMutex::new(stdin),
@@ -443,6 +466,12 @@ impl ExecSession {
             termination_reason: Mutex::new(None),
             reader_tasks: AsyncMutex::new(Vec::new()),
         }
+    }
+
+    /// 服务模式：要在 [`SessionStore::insert`] 之前设，运行记录里才有这个端口。
+    pub fn with_service_port(mut self, port: Option<u16>) -> Self {
+        self.service_port = port;
+        self
     }
 
     pub async fn spawn_readers(self: &Arc<Self>) {
@@ -646,7 +675,7 @@ impl ExecSession {
         let stdout = self.stdout.lock().expect("stdout lock").clone();
         let stderr = self.stderr.lock().expect("stderr lock").clone();
         let (reason, exit_code, command_ok) = self.termination();
-        snapshot_value(
+        let mut value = snapshot_value(
             Snapshot {
                 session_id: &self.session_id,
                 interactive: self.interactive,
@@ -663,7 +692,15 @@ impl ExecSession {
                 kept_on_disk: self.kept_on_disk(),
             },
             max_output_bytes,
-        )
+        );
+        // 每次现查：服务可能刚起来，也可能自己挂了。
+        if let (Some(port), Some(object)) = (self.service_port, value.as_object_mut()) {
+            object.insert(
+                "service".into(),
+                crate::tools::service::status(port, !self.has_exited()),
+            );
+        }
+        value
     }
 }
 
@@ -780,6 +817,10 @@ fn recorded_snapshot(store: &SessionStore, record: &RunRecord, max_output_bytes:
     if let Some(object) = value.as_object_mut() {
         for (key, field) in record_fields(record) {
             object.insert(key.into(), field);
+        }
+        // 只剩记录的命令 gld 已经不管它的进程了，不去探端口：答话的未必是它。
+        if let Some(port) = record.service_port {
+            object.insert("service".into(), json!({ "port": port, "ready": null }));
         }
     }
     value
@@ -1047,6 +1088,18 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
             object.insert(key.into(), field);
         }
     }
+    // 服务模式：起完服务之后 AI 拿 read_output 来问"起来没有"，所以这里也现查一次端口。
+    let service = match &found {
+        Found::Live(session) => session
+            .service_port
+            .map(|port| crate::tools::service::status(port, running)),
+        Found::Recorded(record) => record
+            .service_port
+            .map(|port| json!({ "port": port, "ready": null })),
+    };
+    if let (Some(service), Some(object)) = (service, result.as_object_mut()) {
+        object.insert("service".into(), service);
+    }
     Ok(tool_ok(result))
 }
 
@@ -1253,6 +1306,7 @@ pub fn list_runs(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceE
                 "incomplete_logs": record.incomplete_logs,
                 "started_by_this_gld": record.owner == crate::tools::runs::instance_id(),
                 "started_by_gld_pid": record.owner_pid,
+                "service_port": record.service_port,
             })
         })
         .collect();
@@ -1760,7 +1814,7 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(5));
         let store = SessionStore::with_runs(runs.clone(), Arc::clone(&counter));
         let id = Uuid::new_v4().to_string();
-        let writer = runs.start(&id, "true", None, 5).expect("建记录");
+        let writer = runs.start(&id, "true", None, 5, None).expect("建记录");
         writer.finish("exited", Some(0), 0);
         counter.fetch_add(2, Ordering::AcqRel);
         let args = json!({ "output_ref": format!("session:{id}:stdout") });
@@ -1783,7 +1837,9 @@ mod tests {
         let runs = RunLog::new(home.path().join("runs"), "p", "local");
         let store = SessionStore::with_runs(runs.clone(), Arc::new(AtomicU64::new(0)));
         let id = Uuid::new_v4().to_string();
-        let _writer = runs.start(&id, "sleep 30", Some(1), 0).expect("建记录");
+        let _writer = runs
+            .start(&id, "sleep 30", Some(1), 0, None)
+            .expect("建记录");
         let out = read_output(
             &store,
             &json!({ "output_ref": format!("session:{id}:stdout") }),

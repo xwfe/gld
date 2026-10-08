@@ -23,7 +23,8 @@ const BOUNDED: &[(&str, &str, u64, u64, u64)] = &[
     ("search_text", "max_preview_bytes", 256, 64, 4_096),
     ("search_text", "max_results", 100, 1, 10_000),
     ("search_text", "max_file_bytes", 2_097_152, 1, 67_108_864),
-    ("exec_command", "timeout_ms", 30_000, 1, 600_000),
+    // 上限是服务模式（带 service_port）的 1 小时；普通命令另由策略和 exec 限在 10 分钟。
+    ("exec_command", "timeout_ms", 30_000, 1, 3_600_000),
     ("exec_command", "max_output_bytes", 32_768, 1_024, 1_048_576),
     ("exec_command", "yield_time_ms", 1_000, 0, 30_000),
     ("write_stdin", "yield_time_ms", 1_000, 0, 30_000),
@@ -138,6 +139,10 @@ mod tests {
         // A filter, not a size: clamping 20000 to 10080 would quietly list
         // a different set of runs, so list_runs refuses it instead.
         ("list_runs", "started_within_minutes"),
+        // A port, not a size: clamping 70000 to 65535 would wait on someone
+        // else's port, so exec_command refuses it (tools::service::port_arg).
+        ("exec_command", "service_port"),
+        ("check_command", "service_port"),
     ];
 
     /// The aggregate tool routes these arguments to the tool that owns them.

@@ -102,6 +102,9 @@ pub struct RunRecord {
     /// 缺的是后面那部分。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incomplete_logs: Vec<String>,
+    /// 服务模式声明的端口（`exec_command` 的 `service_port`）。`list_runs` 里据此认出哪条是服务。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_port: Option<u16>,
 }
 
 impl RunRecord {
@@ -143,6 +146,7 @@ impl RunLog {
         command: &str,
         pid: Option<u32>,
         writes_at_start: u64,
+        service_port: Option<u16>,
     ) -> Option<RunWriter> {
         if !valid_id(session_id) {
             return None;
@@ -166,6 +170,7 @@ impl RunLog {
             workspace_writes_during_run: None,
             writes_at_start: Some(writes_at_start),
             incomplete_logs: Vec::new(),
+            service_port,
         };
         let opened = (|| -> std::io::Result<RunWriter> {
             create_private_dir(&dir)?;
@@ -694,7 +699,7 @@ mod tests {
         let home = tempdir().expect("home");
         let log = RunLog::new(home.path().join("runs"), "p", "local");
         let session = id();
-        let writer = log.start(&session, "flood", None, 0).expect("建记录");
+        let writer = log.start(&session, "flood", None, 0, None).expect("建记录");
         // 3.5 段：每个字节是它在流里位置的低 8 位，读出来的每个字节都能对回位置。
         let total = SEGMENT_BYTES as usize * 7 / 2;
         let bytes: Vec<u8> = (0..total).map(|at| at as u8).collect();
@@ -726,7 +731,7 @@ mod tests {
         let mine = RunLog::new(root.clone(), "p", "oauth:hub:alpha");
         let theirs = RunLog::new(root.clone(), "p", "oauth:hub:beta");
         let session = id();
-        drop(mine.start(&session, "true", None, 0).expect("建记录"));
+        drop(mine.start(&session, "true", None, 0, None).expect("建记录"));
         assert!(mine.load(&session).is_some());
         assert!(theirs.load(&session).is_none(), "别人的记录被读到了");
 
@@ -741,7 +746,7 @@ mod tests {
         );
         for bad in ["../x", "../../etc", "a/b", ".."] {
             assert!(mine.load(bad).is_none(), "{bad} 读到了项目目录外的记录");
-            assert!(mine.start(bad, "true", None, 0).is_none());
+            assert!(mine.start(bad, "true", None, 0, None).is_none());
         }
         assert!(!root.join("etc").exists() && !root.join("p/a").exists());
     }
@@ -753,7 +758,7 @@ mod tests {
         let log = RunLog::new(home.path().join("runs"), "p", "local");
         let session = id();
         let _writer = log
-            .start(&session, "sleep 30", Some(42), 0)
+            .start(&session, "sleep 30", Some(42), 0, None)
             .expect("建记录");
         assert_eq!(log.load(&session).expect("记录").status, "running");
 
@@ -798,7 +803,9 @@ mod tests {
         let home = tempdir().expect("home");
         let log = RunLog::new(home.path().join("runs"), "p", "local");
         let running = id();
-        let _running = log.start(&running, "sleep 30", None, 0).expect("建记录");
+        let _running = log
+            .start(&running, "sleep 30", None, 0, None)
+            .expect("建记录");
         // 把这条跑着的记录的起跑时间改到很久以前：它还在跑，按年龄也不能清。
         {
             let dir = log.dir().join(&running);
@@ -809,7 +816,7 @@ mod tests {
         let mut finished = Vec::new();
         for index in 0..(MAX_FINISHED_RUNS + 3) {
             let session = id();
-            let writer = log.start(&session, "true", None, 0).expect("建记录");
+            let writer = log.start(&session, "true", None, 0, None).expect("建记录");
             writer.finish("exited", Some(0), 0);
             // 结束时间拉开，排序才有先后。
             let dir = log.dir().join(&session);
@@ -819,7 +826,7 @@ mod tests {
             finished.push(session);
         }
         let stale = id();
-        let writer = log.start(&stale, "true", None, 0).expect("建记录");
+        let writer = log.start(&stale, "true", None, 0, None).expect("建记录");
         writer.finish("exited", Some(0), 0);
         {
             let dir = log.dir().join(&stale);
@@ -858,6 +865,7 @@ mod tests {
             workspace_writes_during_run: Some(0),
             writes_at_start: Some(0),
             incomplete_logs: Vec::new(),
+            service_port: None,
         };
         let stale = root.join("removed-project").join(id());
         create_private_dir(&stale).expect("dir");
@@ -868,7 +876,7 @@ mod tests {
 
         drop(
             RunLog::new(root.clone(), "p", "local")
-                .start(&id(), "true", None, 0)
+                .start(&id(), "true", None, 0, None)
                 .expect("建记录"),
         );
         assert!(
@@ -885,7 +893,7 @@ mod tests {
         let home = tempdir().expect("home");
         let root = home.path().join("runs");
         let log = RunLog::new(root.clone(), "p", "local");
-        drop(log.start(&id(), "true", None, 0).expect("建记录"));
+        drop(log.start(&id(), "true", None, 0, None).expect("建记录"));
         let dir = root.join(OWNERS);
         let lock = dir.join(format!("{}.lock", *INSTANCE));
         let other = OpenOptions::new()
@@ -911,7 +919,7 @@ mod tests {
         let home = tempdir().expect("home");
         let log = RunLog::new(home.path().join("runs"), "p", "local");
         let session = id();
-        let writer = log.start(&session, "flood", None, 0).expect("建记录");
+        let writer = log.start(&session, "flood", None, 0, None).expect("建记录");
         let dir = log.dir().join(&session);
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).expect("只读");
         writer.append(true, &vec![b'x'; SEGMENT_BYTES as usize + 10]);
@@ -933,7 +941,9 @@ mod tests {
         let home = tempdir().expect("home");
         let log = RunLog::new(home.path().join("runs"), "p", "local");
         let session = id();
-        let writer = log.start(&session, "echo secret", None, 0).expect("建记录");
+        let writer = log
+            .start(&session, "echo secret", None, 0, None)
+            .expect("建记录");
         writer.append(true, b"token=abc\n");
         writer.finish("exited", Some(0), 0);
         let dir = log.dir().join(&session);

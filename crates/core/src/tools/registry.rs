@@ -350,7 +350,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_command",
         "Execute command",
-        "Run a bounded command in the workspace under runtime policy. Every command takes the workspace write lock before it starts, so it never sees a half-written tree; the lock is held until this call returns (up to yield_time_ms) and released once the command moves to the background, so apply_patch from another session gets WORKSPACE_BUSY only while this call is waiting. A background command is not protected after that: its workspace_writes_since_start says how many times the workspace was written since it started, and anything above 0 means its result may describe older code. timeout_ms (at most 600000, 10 minutes) also stops a command that moved to the background, so a dev server started this way dies after it; let the test runner start and stop the server itself (for example Playwright's webServer with reuseExistingServer). The session it returns belongs to this connection: another client cannot read or kill it.",
+        "Run a bounded command in the workspace under runtime policy. Every command takes the workspace write lock before it starts, so it never sees a half-written tree; the lock is held until this call returns (up to yield_time_ms) and released once the command moves to the background, so apply_patch from another session gets WORKSPACE_BUSY only while this call is waiting. A background command is not protected after that: its workspace_writes_since_start says how many times the workspace was written since it started, and anything above 0 means its result may describe older code. timeout_ms (at most 600000, 10 minutes) also stops a command that moved to the background. For a dev server you will use across several calls, pass service_port: nothing starts if something already listens on that port; the call returns as soon as the port answers on localhost (waiting up to yield_time_ms, default 30000 here) with service.ready, and timeout_ms may go up to 3600000 (default 1800000). Stop it with kill_session when done. Otherwise let the test runner start and stop the server itself (for example Playwright's webServer with reuseExistingServer). The session it returns belongs to this connection: another client cannot read or kill it.",
         false,
         true,
         true,
@@ -973,6 +973,9 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 ///
 /// 这个字段是调用方自己填的，服务端看不到用户有没有点头，只拿它开危险操作那道门。
 /// 真人确认靠客户端按工具标注弹的确认框，所以标注必须照实给（审查 D08）。
+/// `service_port` 的说明：exec_command 和 check_command 共用一份。
+const SERVICE_PORT_DESCRIPTION: &str = "Port this command will listen on, for a dev server or other service that keeps running. The port must be free before it starts; the result's service says whether it answers on 127.0.0.1 / ::1 and whether other machines on the network can reach it. read_output re-checks it.";
+
 static CONFIRM_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     json!({
         "type": "boolean",
@@ -1453,7 +1456,8 @@ pub fn input_schema(name: &str) -> Value {
                 "argv": ARGV_SCHEMA.clone(),
                 "workdir": { "type": "string", "default": "." },
                 "cwd": { "type": "string", "description": WORKDIR_ALIAS_DESCRIPTION },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+                "service_port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": SERVICE_PORT_DESCRIPTION },
                 "confirm": CONFIRM_SCHEMA.clone(),
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" }
             },
@@ -1478,7 +1482,8 @@ pub fn input_schema(name: &str) -> Value {
                 "argv": ARGV_SCHEMA.clone(),
                 "workdir": { "type": "string", "default": "." },
                 "cwd": { "type": "string", "description": WORKDIR_ALIAS_DESCRIPTION },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000, "default": 30000, "description": "At most 600000 (10 minutes); with service_port at most 3600000 (1 hour), default 1800000." },
+                "service_port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": SERVICE_PORT_DESCRIPTION },
                 "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 32768 },
                 "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
                 "tty": { "type": "boolean", "default": false, "description": "Deprecated name for stdin_mode=interactive. It keeps stdin open — it does NOT give the command a terminal: this is a pipe, so programs that require a TTY still will not work." },

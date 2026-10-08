@@ -19,6 +19,7 @@ pub mod policy;
 mod project_commands;
 pub mod registry;
 pub mod runs;
+mod service;
 pub mod session;
 pub mod setup;
 pub mod skill;

@@ -149,7 +149,8 @@ gld tool call exec_command cmd='cargo test'
 | 后台命令跑出来的结果对不上代码（测试挂在一个你已经改掉的地方） | 后台那段没有写互斥，命令测的可能是改之前的代码 | 看那条会话结果里的 `workspace_writes_since_start`：不是 0 就说明它跑的这段时间工作区被改过，那条结果不作数，重跑一次 |
 | 起后台命令（`yield_time_ms: 0`）报 `WORKSPACE_BUSY` | 0.4.0 改了：命令起来之前也要拿到写权，免得它看到别人写了一半的文件树 | 是 `retryable` 的，重试即可。占着的多半是另一条同步等结果的命令（最多 30 秒），或者一次正在落盘的补丁（毫秒级） |
 | 换了个客户端连上来，`read_output` / `kill_session` 报 `SESSION_NOT_FOUND`，`session_id` 是刚抄过来的 | 命令会话按"项目 + 谁在调"分表，不是同一个主体就看不见。换的是另一个 OAuth 客户端就是另一个主体 | 有意如此：别人的命令输出不该摊开。用起这条命令的那个客户端去读。真要几个客户端共用一批会话，让它们用同一份凭据 |
-| `exec_command` 在后台起的 dev server（`pnpm dev` 这类）过一阵就没了，`read_output` 说 `timeout` | `timeout_ms` 最多 600000（10 分钟），转到后台的命令到点照样被停；这是有意的上限，不让忘了停的服务一直占着端口 | 跑 E2E 时让测试框架自己起停服务，比如 Playwright 的 `webServer` 加 `reuseExistingServer: true`，就绪检测和收尾都归它。要服务一直开着，就在 gld 之外自己起 |
+| `exec_command` 在后台起的 dev server（`pnpm dev` 这类）过一阵就没了，`read_output` 说 `timeout` | 普通命令的 `timeout_ms` 最多 600000（10 分钟），转到后台的命令到点照样被停 | 起服务时带上 [`service_port`](concepts.md#dev-server-这类要一直开着的service_port)，能开到 1 小时，还会告诉你端口连不连得上。跑 E2E 也可以让测试框架自己起停服务（Playwright 的 `webServer` 加 `reuseExistingServer: true`） |
+| 带 `service_port` 起服务报 `PORT_IN_USE` | 端口上已经有东西在听，gld 什么都没起：不然分不清待会儿答话的是谁 | 报错里有 `own_session_id` 的，是你自己起过的那条，接着用它或先 `kill_session`；没有的，换个空端口传给服务（`--port … --strictPort`），或者先查清是谁占着（`lsof -iTCP:端口 -sTCP:LISTEN`） |
 | 重启过或换了对话，想看之前那条命令怎样了，却不知道它的 `session_id` | id 只在当初那次回包、任务事件和 Planning 台账里 | `list_runs` 列出这个客户端自己在这个项目里起过的命令，拿其中的 `output_refs` 去 `read_output`，见[命令的输出能读多久](concepts.md#命令的输出能读多久stdin-怎么关)。别的客户端起的列不出来 |
 | 同一个客户端重连之后 `session_id` 就失效了（`SESSION_EXPIRED`） | 不是分表的事：运行记录也有寿命，每个项目只留最近 64 条结束的命令、最长 7 天；数据目录写不进去时（`kept_on_disk: false`）只剩内存里的 5 分钟 | 过期只说明输出没了，**命令已经跑过**：会改东西的命令先核对现状，别原样重跑。要长期留的结果让命令写进文件 |
 | 守护进程重启（或机器重启、升级）后，`read_output` 说 `interrupted` | 守护进程退出时停掉了还在跑的命令，读到的是运行记录（`source: "run_record"`），不是命令还在跑 | 它没跑完。先核对它做到了哪一步，再决定要不要重跑；要命令扛过重启，交给目标机器的服务管理器（launchd / systemd） |

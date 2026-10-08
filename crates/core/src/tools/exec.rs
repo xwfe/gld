@@ -162,10 +162,34 @@ pub fn exec_command(
         }
         return Ok(tool_ok(result));
     }
-    let timeout_ms = crate::tools::args::bounded(args, "exec_command", "timeout_ms");
+    let service_port = crate::tools::service::port_arg(args)?;
+    // 服务模式能开到 1 小时，默认半小时；普通命令最多 10 分钟。策略层已经按同一个口径拒过超长的，
+    // 这里再夹一次，免得哪条不经策略的路径拿到 1 小时。
+    let timeout_ms = match service_port {
+        Some(_) => args
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(crate::tools::service::DEFAULT_TIMEOUT_MS)
+            .clamp(1, crate::tools::service::MAX_TIMEOUT_MS),
+        None => crate::tools::args::bounded(args, "exec_command", "timeout_ms")
+            .min(crate::tools::service::PLAIN_MAX_TIMEOUT_MS),
+    };
     let max_output = crate::tools::args::bounded(args, "exec_command", "max_output_bytes") as usize;
-    let yield_ms = crate::tools::args::bounded(args, "exec_command", "yield_time_ms");
+    // 服务答话了就提前返回，所以没给 yield_time_ms 时等满上限，省得 AI 起完服务还要来回轮询。
+    let yield_ms = match (service_port, args.get("yield_time_ms")) {
+        (Some(_), None) => crate::tools::service::DEFAULT_WAIT_MS,
+        _ => crate::tools::args::bounded(args, "exec_command", "yield_time_ms"),
+    };
     let stdin_plan = StdinPlan::from_args(args)?;
+    if let Some(port) = service_port {
+        let listening = crate::tools::service::answering(port);
+        if !listening.is_empty() {
+            let own = sessions
+                .serving(port)
+                .map(|session| (session.session_id.clone(), session.command.clone()));
+            return Err(crate::tools::service::port_in_use(port, listening, own));
+        }
+    }
 
     // **每条命令起来之前都要先拿到工作区的写权**，不管它是同步等还是转后台。
     // 挡的是"一边跑命令一边打补丁"——那种交叉出来的结果没法解释：命令读到的是
@@ -201,6 +225,7 @@ pub fn exec_command(
             Duration::from_millis(yield_ms),
             max_output,
             &stdin_plan,
+            service_port,
         )
         .await
     });
@@ -751,6 +776,7 @@ async fn run_command(
     yield_time: Duration,
     max_output: usize,
     stdin_plan: &StdinPlan,
+    service_port: Option<u16>,
 ) -> Result<Value, WorkspaceError> {
     let tty = stdin_plan.keeps_stdin_open();
     let cmd = spec.display.as_str();
@@ -802,12 +828,10 @@ async fn run_command(
         }),
     })?;
 
-    let session = sessions.insert(ExecSession::new_with_mode(
-        child,
-        tty,
-        cmd.to_string(),
-        ctx.runtime.write_counter(),
-    ));
+    let session = sessions.insert(
+        ExecSession::new_with_mode(child, tty, cmd.to_string(), ctx.runtime.write_counter())
+            .with_service_port(service_port),
+    );
     session.spawn_readers().await;
     let deadline = start + limit;
 
@@ -861,12 +885,17 @@ async fn run_command(
                 }),
             });
         }
-        if Instant::now() - start >= yield_time || tty {
+        // 服务一答话就返回，不等满 yield_time。
+        let ready =
+            service_port.is_some_and(|port| !crate::tools::service::answering(port).is_empty());
+        if ready || Instant::now() - start >= yield_time || tty {
             let snapshot = session.snapshot(max_output);
             spawn_timeout_monitor(sessions.clone(), session.clone(), deadline);
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, true));
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // 等服务时每次都要连一下端口，问得稀一点。
+        let poll = if service_port.is_some() { 100 } else { 20 };
+        tokio::time::sleep(Duration::from_millis(poll)).await;
     }
 }
 
@@ -946,6 +975,7 @@ pub fn exec_health_check(
         Duration::from_secs(5),
         16_384,
         &StdinPlan::CloseImmediately,
+        None,
     ));
 
     let mut response = json!({
