@@ -414,10 +414,11 @@ async fn mcp_post(
         "mcp-requests.log",
         // 记的是"怎么过的鉴权"，不是令牌——auth.tag() 里没有凭据。
         &format!(
-            "[rpc] request id={} method={} tool={} auth={}",
+            "[rpc] request id={} method={} tool={}{} auth={}",
             request_id,
             method,
             tool_name,
+            relay_target(&tool_name, &body),
             auth.tag()
         ),
     );
@@ -719,6 +720,35 @@ fn oauth_not_configured() -> Response {
         Json(json!({ "error": "OAuth not configured" })),
     )
         .into_response()
+}
+
+/// 转发调用（`call_mcp_tool`、`remote_call_mcp_tool`）实际调的是哪个 server 的哪个工具，记进请求日志。
+///
+/// 以前只记 `tool=call_mcp_tool`，事后查不出 AI 经转发调了什么：2026-10-08 发现隔离浏览器漏关了能跑任意代码的
+/// `browser_run_code_unsafe`，回头想确认上一轮有没有被调过，日志里没有这个名字。只记名字、不记参数；名字是调用方
+/// 传的，只留字母数字和 `_-.`，最多 64 个字符，免得往日志里塞换行伪造一行。
+fn relay_target(tool_name: &str, body: &Value) -> String {
+    if !matches!(tool_name, "call_mcp_tool" | "remote_call_mcp_tool") {
+        return String::new();
+    }
+    let arguments = body.pointer("/params/arguments");
+    let field = |key: &str| -> String {
+        arguments
+            .and_then(|arguments| arguments.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(64)
+            .collect()
+    };
+    format!(" relay={}:{}", field("server"), field("tool"))
 }
 
 #[cfg(test)]

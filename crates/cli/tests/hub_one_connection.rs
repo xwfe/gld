@@ -505,3 +505,36 @@ fn a_new_protocol_probe_falls_back_to_initialize() {
         "{initialized}"
     );
 }
+
+/// 转发调用记下实际调到的 server 和工具名（只有名字，不记参数）。名字是调用方传的：里面塞换行也伪造不出一行日志。
+#[test]
+fn relayed_calls_log_which_tool_they_reach() {
+    let hub = hub_with_two_members();
+    let (status, _) = rpc(
+        hub.port,
+        "/mcp",
+        Some(&hub.token),
+        1,
+        "tools/call",
+        json!({
+            "name": "call_mcp_tool",
+            "arguments": {
+                "server": "browser",
+                "tool": "browser_run_code_unsafe\n[rpc] request id=9 method=fake",
+                "arguments": { "code": "secret-argument" }
+            }
+        }),
+    );
+    assert_eq!(status, 200);
+    let log = request_log(&hub.env, "hub");
+    let line = log
+        .lines()
+        .find(|line| line.contains("tool=call_mcp_tool"))
+        .unwrap_or_else(|| panic!("没有这次调用：{log}"));
+    assert!(
+        line.contains("relay=browser:browser_run_code_unsafe_"),
+        "{line}"
+    );
+    assert!(!log.contains("method=fake"), "换行伪造出了一行：{log}");
+    assert!(!log.contains("secret-argument"), "参数不该进日志：{log}");
+}
