@@ -1,7 +1,12 @@
 //! `exec_command` 的服务模式（`service_port`）：dev server 起之前端口要空着、答话了才算起来、
 //! 能开到 1 小时。D10 Web 那轮后台起的 dev server 到 10 分钟就被停，AI 也只能翻输出猜它起没起来（审查 §11）。
 //!
-//! 真起一个 `python3 -m http.server` 当服务：它是默认白名单里的程序，CI 的 Ubuntu、macOS 都有。
+//! 真起一个只会 listen 的 python3 小脚本当服务：python3 在默认白名单里，CI 的 Ubuntu、macOS 都有。
+//!
+//! **不赌第一次调用就看到它起来。**CI run 37724176474 的 macOS 上，`python3 -m http.server` 跑满 30 秒端口都没人
+//! 答话、一行输出也没有（它 bind 之后先 `socket.getfqdn()` 反查主机名，查完才 listen）；本机用 `taskpolicy -b`
+//! 压到后台优先级，换成这个小脚本也有一两成跑不进 30 秒。所以第一次没起来的，照产品的用法拿 `read_output` 轮询到
+//! 它答话；第一次就起来了的，才检查"答话就返回、没等满 30 秒"。
 
 #![cfg(unix)]
 
@@ -11,6 +16,7 @@ use std::fs;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use gld_core::tools::{call_tool, ToolContext};
 use serde_json::{json, Value};
@@ -50,15 +56,42 @@ fn answers(port: u16) -> bool {
     TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok()
 }
 
+/// 只在 127.0.0.1 上 listen、来一个连接就关一个的服务。服务模式只连 TCP，不需要它会说 HTTP。
+const LISTENER: &str = "import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', int(sys.argv[1])))
+s.listen()
+while True:
+    s.accept()[0].close()
+";
+
 fn serve(ctx: &ToolContext, port: u16, extra: Value) -> Value {
     let mut args = json!({
-        "argv": ["python3", "-m", "http.server", port.to_string(), "--bind", "127.0.0.1"],
+        "argv": ["python3", "-c", LISTENER, port.to_string()],
         "service_port": port,
     });
     for (key, value) in extra.as_object().expect("object") {
         args[key] = value.clone();
     }
     call_tool(ctx, "exec_command", &args)
+}
+
+/// exec_command 回来时服务还没答话的，轮询 read_output 到它答话（最多 2 分钟），返回最后一次回包。
+fn until_ready(ctx: &ToolContext, started: &Value) -> Value {
+    if started["service"]["ready"] == true {
+        return started.clone();
+    }
+    let session = started["session_id"].as_str().expect("session");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let read = call_tool(ctx, "read_output", &json!({ "session_id": session }));
+        if read["service"]["ready"] == true || read["running"] == false || Instant::now() > deadline
+        {
+            return read;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn kill(ctx: &ToolContext, session: &str) {
@@ -74,25 +107,25 @@ fn a_service_returns_once_its_port_answers_and_keeps_running() {
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["status"], "running", "{out}");
     let session = out["session_id"].as_str().expect("session").to_string();
-    assert_eq!(out["service"]["ready"], true, "{out}");
+    let summary = out["command_summary"].as_str().unwrap_or_default();
+    if out["service"]["ready"] == true {
+        // 一答话就返回，不等满默认的 30 秒。去掉提前返回的话，这里总是 30 秒多。
+        assert!(
+            out["duration_ms"].as_u64().expect("duration") < 30_000,
+            "{out}"
+        );
+        assert!(summary.starts_with("service is up"), "{out}");
+    } else {
+        assert!(summary.contains("nothing answers"), "{out}");
+    }
+    let ready = until_ready(&fx.ctx, &out);
+    assert_eq!(ready["service"]["ready"], true, "{ready}");
     assert_eq!(
-        out["service"]["listening_on"],
+        ready["service"]["listening_on"],
         json!(["127.0.0.1"]),
-        "{out}"
+        "{ready}"
     );
-    assert_ne!(out["service"]["reachable_from_network"], true, "{out}");
-    assert!(
-        out["command_summary"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("service is up"),
-        "{out}"
-    );
-    // 一答话就返回，不等满默认的 30 秒。
-    assert!(
-        out["duration_ms"].as_u64().expect("duration") < 15_000,
-        "{out}"
-    );
+    assert_ne!(ready["service"]["reachable_from_network"], true, "{ready}");
     assert!(answers(port));
 
     // read_output 现查一次，list_runs 认得出哪条是服务。
@@ -127,7 +160,8 @@ fn a_second_start_on_my_own_service_names_it() {
     let port = free_port();
     let first = serve(&fx.ctx, port, json!({}));
     let session = first["session_id"].as_str().expect("session").to_string();
-    assert_eq!(first["service"]["ready"], true, "{first}");
+    let ready = until_ready(&fx.ctx, &first);
+    assert_eq!(ready["service"]["ready"], true, "{ready}");
 
     let second = serve(&fx.ctx, port, json!({}));
     assert_eq!(second["error"]["code"], "PORT_IN_USE", "{second}");
