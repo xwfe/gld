@@ -1177,3 +1177,9 @@ OrbStack 测完已关回原状。
 1 条 `the_old_project_name_is_gone_everywhere`：它从仓库根遍历，把建在 `.claude/worktrees/` 里的那份 worktree 副本也扫了；
 改成跳过 `.claude`，并把 `/.claude/worktrees/` 加进 `.gitignore`（`4b64824`）。worktree 和分支已删，写 exec 测试的规矩记进
 [开发文档](../development.md)。
+
+**推送后 CI 挂了一次（同日修掉）：**推到 `3112469` 的 CI run 37724176474，只有 macOS 测试 job 挂了服务模式两条：被测服务
+`python3 -m http.server` 跑满 30 秒，127.0.0.1 上都没人答话、一行输出也没有；Ubuntu 和本机都过。http.server bind 之后先
+`socket.getfqdn()` 反查主机名、查完才 listen，macOS CI 上多半卡在这一步（推断，本机复现不了）。产品行为没错，是测试赌了速度。
+改成只会 listen 的 python3 小脚本，第一次调用没起来的照产品用法拿 `read_output` 轮询到它答话（`a2669e0`）。本机 `taskpolicy -b`
+下只换脚本 5 遍挂 2 遍，改完 5 遍全过；去掉"答话就返回"的变异照样被抓到。CI run 37725208706 八个 job 全绿。
