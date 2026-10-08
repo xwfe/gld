@@ -35,8 +35,13 @@ fn fixture() -> Fixture {
     }
 }
 
+/// 跑完才回来：台账、退出码、拿 session_id 当证据，都要命令已经结束。
 fn exec(ctx: &ToolContext, cmd: &str) -> Value {
-    call_tool(ctx, "exec_command", &json!({"cmd": cmd}))
+    call_tool(
+        ctx,
+        "exec_command",
+        &json!({"cmd": cmd, "yield_time_ms": common::UNTIL_EXIT_MS}),
+    )
 }
 
 fn session_id(output: &Value) -> String {
@@ -153,7 +158,11 @@ fn 超时和取消在台账里各记各的() {
     let timed_out = call_tool(
         &fx.ctx,
         "exec_command",
-        &json!({"cmd": "python3 -c \"import time; time.sleep(5)\"", "timeout_ms": 200}),
+        &json!({
+            "cmd": "python3 -c \"import time; time.sleep(5)\"",
+            "timeout_ms": 200,
+            "yield_time_ms": common::UNTIL_EXIT_MS
+        }),
     );
     assert_eq!(timed_out["termination_reason"], "timeout", "{timed_out}");
     assert_eq!(ledger(&fx.ctx)["state"], "timed_out");

@@ -8,7 +8,7 @@ mod common;
 
 use std::process::Command;
 
-use common::env::Env;
+use common::env::{Env, UNTIL_EXIT};
 
 /// `gld tool` / `gld doctor` 都在一个已登记的项目上跑，这里统一建好。
 fn probe_env() -> Env {
@@ -65,6 +65,7 @@ fn a_failing_command_is_not_a_failed_tool_call() {
         "call",
         "exec_command",
         r#"argv:=["git","rev-parse","--verify","refs/heads/no-such-branch-for-gld-test"]"#,
+        UNTIL_EXIT,
     ]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
@@ -297,6 +298,7 @@ fn a_new_global_executable_path_applies_to_the_next_tool_call() {
             "call",
             "exec_command",
             "cmd=gld-probe-tool",
+            UNTIL_EXIT,
         ]);
         String::from_utf8_lossy(&output.stdout).to_string()
     };

@@ -129,6 +129,11 @@ impl Default for Env {
     }
 }
 
+/// 要断言命令已经跑完（退出码、输出）时，`gld tool call exec_command` 带上这个参数。
+/// 命令一结束就返回，平时不多花时间；不带的话默认只等 1 秒，机器一忙回来的就是
+/// `status: running`。来龙去脉见 `crates/core/tests/common/mod.rs` 的 `UNTIL_EXIT_MS`。
+pub const UNTIL_EXIT: &str = "yield_time_ms:=30000";
+
 /// 找一个当前空闲的端口。测试并行跑，写死端口会互相踩。
 /// 测试要用的端口下界。**故意落在内核自动分配范围之外**，理由见 [`free_port`]。
 const PORT_LOW: u16 = 20000;

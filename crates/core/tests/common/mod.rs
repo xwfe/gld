@@ -269,6 +269,14 @@ pub fn ctx_for_unconfined_reads(root: &Path) -> ToolContext {
     )
 }
 
+/// 要断言命令已经跑完（`status: exited`、退出码、输出、它写的文件）时，`exec_command`
+/// 带的 `yield_time_ms`。取工具允许的上限 30 秒；命令一结束调用就返回，平时不多花时间。
+///
+/// 不带就是默认的 1 秒，而这 1 秒从进程起来之前就开始算。机器一忙就装不下：2026-10-08
+/// 本机负载 30–35 时全量测试挂了 5 条，`python3 --version` 回来的是 `status: running`，
+/// 退出码和输出都还没有，标记文件也还没写。用 `taskpolicy -b` 压到后台优先级能稳定复现。
+pub const UNTIL_EXIT_MS: u64 = 30_000;
+
 pub fn invoke(ctx: &ToolContext, name: &str, args: Value) -> Value {
     call_tool(ctx, name, &args)
 }

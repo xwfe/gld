@@ -367,7 +367,14 @@ fn actions_and_the_local_cli_do_not_see_each_others_runs() {
     );
     assert_eq!(ran.status, 200, "经 Actions 跑命令失败：{}", ran.body);
     assert!(ran.body.contains("from-actions"), "{}", ran.body);
-    let local = env.json(&["--json", "tool", "call", "exec_command", "cmd=./local"]);
+    let local = env.json(&[
+        "--json",
+        "tool",
+        "call",
+        "exec_command",
+        "cmd=./local",
+        common::env::UNTIL_EXIT,
+    ]);
     assert_eq!(local["exit_code"], 0, "{local}");
 
     let from_cli = env.json(&["--json", "tool", "call", "list_runs"]);

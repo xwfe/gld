@@ -119,7 +119,11 @@ fn 无任务时_exec_command不返回任务门禁错误() {
     let result = call_tool(
         &ctx,
         "exec_command",
-        &json!({"cmd": "git status", "filesystem_scope": "workspace"}),
+        &json!({
+            "cmd": "git status",
+            "filesystem_scope": "workspace",
+            "yield_time_ms": common::UNTIL_EXIT_MS
+        }),
     );
 
     assert_ne!(result["error"]["code"], "TASK_STATE_REQUIRED");
@@ -146,10 +150,14 @@ fn 无任务时_exec错误不应建议启动任务() {
     fs::create_dir_all(&workspace).expect("创建工作区");
     let ctx = ctx_for_test(workspace, temp.path().join("harness")).expect("创建上下文");
 
+    // 等它跑完：还在跑的命令不算出错，下面几句就测不到出错那条路。
     let result = call_tool(
         &ctx,
         "exec_command",
-        &json!({"cmd": "python -c \"import sys; sys.exit(1)\""}),
+        &json!({
+            "cmd": "python -c \"import sys; sys.exit(1)\"",
+            "yield_time_ms": common::UNTIL_EXIT_MS
+        }),
     );
 
     assert_eq!(result["harness_mode"], "standalone");

@@ -9,7 +9,7 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
 
-use common::env::{free_port, Env};
+use common::env::{free_port, Env, UNTIL_EXIT};
 use common::http::get;
 
 #[test]
@@ -638,6 +638,7 @@ fn the_next_direct_tool_call_reads_what_the_previous_one_left() {
     );
 
     // 早就跑完的命令不算"停掉了"：以前退出提示把它也数进去，说成被停掉（独立审查发现）。
+    // 得等它真跑完：默认 1 秒里没跑完的话，命令行退出时它确实是被停掉的，提示没说错。
     let done = write_script(&env, "done", &["echo done"], &["echo done"]);
     let quick = env.gld(&[
         "--no-autostart",
@@ -645,6 +646,7 @@ fn the_next_direct_tool_call_reads_what_the_previous_one_left() {
         "call",
         "exec_command",
         &format!("cmd={done}"),
+        UNTIL_EXIT,
     ]);
     assert!(quick.status.success());
     let stderr = String::from_utf8_lossy(&quick.stderr);

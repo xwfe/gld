@@ -397,7 +397,11 @@ fn direct_exec_uses_the_same_result_contract() {
     let result = invoke(
         &ctx,
         "exec_command",
-        json!({"cmd": format!("{TEST_PYTHON} --version"), "filesystem_scope": "workspace"}),
+        json!({
+            "cmd": format!("{TEST_PYTHON} --version"),
+            "filesystem_scope": "workspace",
+            "yield_time_ms": UNTIL_EXIT_MS
+        }),
     );
     let payload = assert_ok(&result);
 
@@ -424,7 +428,8 @@ fn nonzero_command_exit_keeps_transport_ok_but_sets_command_ok_false() {
         "exec_command",
         json!({
             "cmd": format!("{TEST_PYTHON} -c \"import sys; sys.exit(1)\""),
-            "filesystem_scope": "workspace"
+            "filesystem_scope": "workspace",
+            "yield_time_ms": UNTIL_EXIT_MS
         }),
     );
     let payload = assert_ok(&result);
@@ -790,7 +795,7 @@ fn check_command_does_not_run_anything() {
     let executed = invoke(
         &ctx,
         "exec_command",
-        json!({ "cmd": format!("{TEST_PYTHON} marker.py") }),
+        json!({ "cmd": format!("{TEST_PYTHON} marker.py"), "yield_time_ms": UNTIL_EXIT_MS }),
     );
     assert_eq!(executed["ok"], json!(true), "{executed}");
     assert!(marker.exists(), "探针脚本本身没工作，上面那句断言不算数");
@@ -811,7 +816,8 @@ fn argv_passes_arguments_through_untouched() {
         &ctx,
         "exec_command",
         json!({
-            "argv": [TEST_PYTHON, "-c", "import sys; sys.stdout.write(sys.argv[1])", tricky]
+            "argv": [TEST_PYTHON, "-c", "import sys; sys.stdout.write(sys.argv[1])", tricky],
+            "yield_time_ms": UNTIL_EXIT_MS
         }),
     );
     assert_eq!(executed["ok"], json!(true), "{executed}");
@@ -914,10 +920,11 @@ fn a_bare_command_name_resolves_on_path_not_in_the_workspace() {
         "白名单批的是系统 python，解析结果却指向工作区：{checked}"
     );
 
+    // 等它跑完：没跑完 stdout 是空的，下面"不含 impostor"那句就白过了。
     let executed = invoke(
         &ctx,
         "exec_command",
-        json!({ "argv": [TEST_PYTHON, "--version"] }),
+        json!({ "argv": [TEST_PYTHON, "--version"], "yield_time_ms": UNTIL_EXIT_MS }),
     );
     assert_eq!(executed["ok"], json!(true), "{executed}");
     let stdout = executed["stdout"].as_str().unwrap_or_default();
@@ -1361,7 +1368,7 @@ fn stdin_has_three_states_and_none_of_them_loses_the_input() {
     let closed = invoke(
         &ctx,
         "exec_command",
-        json!({ "argv": ["cat"], "timeout_ms": 5000 }),
+        json!({ "argv": ["cat"], "timeout_ms": 5000, "yield_time_ms": UNTIL_EXIT_MS }),
     );
     assert_eq!(closed["ok"], json!(true), "{closed}");
     assert_eq!(closed["stdin_mode"], "close", "{closed}");
@@ -1372,7 +1379,12 @@ fn stdin_has_three_states_and_none_of_them_loses_the_input() {
     let once = invoke(
         &ctx,
         "exec_command",
-        json!({ "argv": ["cat"], "stdin": "hello\n", "timeout_ms": 5000 }),
+        json!({
+            "argv": ["cat"],
+            "stdin": "hello\n",
+            "timeout_ms": 5000,
+            "yield_time_ms": UNTIL_EXIT_MS
+        }),
     );
     assert_eq!(once["stdin_mode"], "once", "{once}");
     assert_eq!(once["stdout"], "hello\n", "{once}");

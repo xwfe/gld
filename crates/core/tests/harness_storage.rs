@@ -362,7 +362,12 @@ fn corrupt_index_files_fall_back_to_the_task_records() {
 }
 
 fn exec_session(ctx: &ToolContext) -> String {
-    let output = call_tool(ctx, "exec_command", &json!({"cmd": PASSING}));
+    // 要拿去当 finish 的证据，得是已经结束的命令。
+    let output = call_tool(
+        ctx,
+        "exec_command",
+        &json!({"cmd": PASSING, "yield_time_ms": common::UNTIL_EXIT_MS}),
+    );
     assert_eq!(output["ok"], true, "{output}");
     output["session_id"]
         .as_str()
