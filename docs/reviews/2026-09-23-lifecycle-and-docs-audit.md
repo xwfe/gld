@@ -1270,7 +1270,11 @@ JavaScript in the Playwright server process and is RCE-equivalent"（实现是 N
 指纹为什么变：旧二进制（`5aa4411`）和新二进制各在隔离目录起服务、逐个比 30 个内置工具，只有 `check_command` 的 `inputSchema`
 不同（`5594318` 给它的 `service_port` 写了单独说明），工具数没变。
 
-**没验：**Windows 下载包没在真机跑。ChatGPT 这条连接器还没 Refresh（等用户点）。容器镜像是之前就有的，没删；OrbStack 测完关回原状。
+**ChatGPT Refresh（同日 22:21 前后）：**用户点了。请求日志末尾是原注册客户端 `dcr-63f31361…` 依次 `server/discover`、
+`initialize`、`tools/list`（日志文件最后改动 22:21，晚于 09:19 的升级），回包 42638 字节；本机 `gld tool list --served --json`
+的 33 项表紧凑序列化 42604 字节，差的 34 字节是 JSON-RPC 外壳。没在新对话里问 ChatGPT 看不看得到 `check_command` 的新说明。
+
+**没验：**Windows 下载包没在真机跑。容器镜像是之前就有的，没删；OrbStack 测完关回原状。
 默认白名单里没有 `pip`，`pip install` 预检先报 `command_not_allowlisted`，轮不到 `confirm`——和[概念](../concepts.md#装东西的命令要你点头)写的一致。
 
 **清理：**gld 本地和远端只剩 `main`，没有别的 worktree；删了本机打的 `dist/` 包和下载验收用的临时目录。
