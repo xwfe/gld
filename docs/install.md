@@ -188,8 +188,8 @@ gld ls                     # 项目应该都回来了
 
 | 平台 | 状态 |
 | --- | --- |
-| macOS（Apple 芯片 / Intel） | CI 在 macOS 上跑全量测试；v0.8.2 两个包在 Apple 芯片的 Mac 上实跑过（Intel 版经 Rosetta），本机常驻服务用的就是 Apple 芯片版发布包 |
-| Linux x86_64（gnu / musl） | 两个都是每次发版必须编过的目标；CI 在 Ubuntu 上跑全量测试；v0.8.2 两个包在 amd64 的 Debian 12 容器里起停守护进程、调工具正常，v0.7.0 的 musl 包在 Oracle Linux 9 容器里跑过；别的发行版没实测 |
+| macOS（Apple 芯片 / Intel） | CI 在 macOS 上跑全量测试；v0.8.3 两个包在 Apple 芯片的 Mac 上实跑过（Intel 版经 Rosetta），本机常驻服务用的就是 Apple 芯片版发布包 |
+| Linux x86_64（gnu / musl） | 两个都是每次发版必须编过的目标；CI 在 Ubuntu 上跑全量测试；v0.8.3 两个包在 amd64 的 Debian 12 容器里起停守护进程、调工具正常，v0.7.0 的 musl 包在 Oracle Linux 9 容器里跑过；别的发行版没实测 |
 | Windows x86_64 | CI 跑编译、补丁 / 写锁测试，和 9 条守护进程端到端测试（命名管道起停、单实例锁、命令终态、运行记录）；下载包没在 Windows 真机跑过 |
 
 Windows 上守护进程走的是命名管道，和 Unix domain socket 是两套独立实现。

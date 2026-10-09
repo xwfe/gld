@@ -1,7 +1,8 @@
 # gld 完成度、生命周期与文档审查（2026-09-23）
 
-状态（2026-10-08）：**D01–D09、D11、D14 已修，D13 已核对；D07 的 grant 在 ChatGPT 上实测过（§9）；D12 做了发布门禁、
-下载包验收和构建来源证明，代码签名未做；D10 三轮实测、任务发现随 0.8.2 发布（§10–§18），服务模式与浏览器配法已做未发版（§19）。**
+状态（2026-10-09）：**D01–D09、D11、D14 已修，D13 已核对；D07 的 grant 在 ChatGPT 上实测过（§9）；D12 做了发布门禁、
+下载包验收和构建来源证明，代码签名未做；D10 三轮实测、任务发现随 0.8.2 发布（§10–§18），服务模式与浏览器配法经 ChatGPT 实测后
+随 0.8.3 发布（§19–§21）。**
 §1–§6 是审查当时（0.6.0）的原始发现，保留原样；每项怎么修的、怎么验证的、还剩什么，看
 [§7 处理进展](#7-处理进展)。2026-09-25 重新归并后的**当前任务只在
 [task_plan.md](../../task_plan.md) 排队**，§8 记录本次复核；各历史段落的“未做”不覆盖后来的结果。
@@ -1251,4 +1252,26 @@ JavaScript in the Playwright server process and is RCE-equivalent"（实现是 N
 （改前备份），`gld mcp test browser` 变成 24 个工具、写明"配置里不放的：browser_run_code_unsafe"；gld 调用时也按这一项拒
 （`machine_mcp/relay.rs` 每次调用都查 `allows_tool`）。文档的配法同步补上，另写明 `enabled = false`、和 `~/.claude.json` 重名会被
 那边覆盖、新版本可能加新的危险工具。
+
+## 21. 发布 0.8.3（2026-10-09）
+
+0.8.2 之后 24 个提交（12 个改 `crates/`）发成 0.8.3（用户批准打 tag）：§19 的装东西拦截扩展、服务模式 `service_port`、项目命令扣下
+像密钥的环境变量，§20 实测后补的 `read_file` 同名线索、service stopped 措辞、`check_command` 的 `service_port` 说明，以及请求日志的
+`relay=`。发布说明 [v0.8.3.md](../releases/v0.8.3.md) 写明从 0.8.2 升上来 ChatGPT 要 Refresh；`crates/daemon` 自 0.8.2 没改，协议仍是 5。
+
+| 核对 | 结果 |
+| --- | --- |
+| 发版前 | 全量 921 passed、0 failed、0 ignored，fmt、clippy 干净；本机打包解压起服务正常；`a4efa44` 的 CI run 37796559934 八个 job 全绿，Release 空跑 run 37796559707 五个目标全绿 |
+| 正式 Release | 附注 tag `v0.8.3` = `a4efa44`；run 37863287099 全绿，`建 Release` 跑了；5 个包 + `SHA256SUMS` |
+| 下载包 | 校验和 5 个 OK、来源证明 5 个退出 0。两个 macOS 包（Intel 版经 Rosetta）在隔离 `GLD_HOME` 起服务：0.8.3、构建提交 `a4efa44`、30 个工具、指纹 `a4c7eaf7d5b10f5e`；`cargo install ripgrep` 预检 `needs_approval`（`confirmation_required`），`npm run dev` 带 `service_port`、`timeout_ms` 1 小时预检 `allow`，`check_exec_environment` 有 `withheld_environment`；停掉后端口没人听 |
+| Linux 包 | gnu、musl 在 amd64 Debian 12 容器里版本、构建提交、指纹同上，`cargo install` 同样 `needs_approval`，停掉后没留 gld 进程。镜像里没有 npm、cargo，服务模式预检是 `program_not_found`；同一条命令不带 `service_port` 时 `rule` 变成 `timeout_too_long`，说明 1 小时上限只对服务模式放开 |
+| 本机服务 | 换成官方 Apple 芯片包（二进制与包内逐字节一致），去掉 `CLAUDE*` 变量重启：构建提交 `a4efa44`，新守护进程 `CLAUDE*` 变量 0 个；凭据与注册客户端指纹、`gld ls` 不变，`gld health` 四项 200；工具表指纹 `c592e66bd3b70647` → `5155ec6663bb33e2`，要 Refresh |
+
+指纹为什么变：旧二进制（`5aa4411`）和新二进制各在隔离目录起服务、逐个比 30 个内置工具，只有 `check_command` 的 `inputSchema`
+不同（`5594318` 给它的 `service_port` 写了单独说明），工具数没变。
+
+**没验：**Windows 下载包没在真机跑。ChatGPT 这条连接器还没 Refresh（等用户点）。容器镜像是之前就有的，没删；OrbStack 测完关回原状。
+默认白名单里没有 `pip`，`pip install` 预检先报 `command_not_allowlisted`，轮不到 `confirm`——和[概念](../concepts.md#装东西的命令要你点头)写的一致。
+
+**清理：**gld 本地和远端只剩 `main`，没有别的 worktree；删了本机打的 `dist/` 包和下载验收用的临时目录。
 
