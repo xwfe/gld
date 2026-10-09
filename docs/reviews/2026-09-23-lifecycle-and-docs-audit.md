@@ -1279,3 +1279,29 @@ JavaScript in the Playwright server process and is RCE-equivalent"（实现是 N
 
 **清理：**gld 本地和远端只剩 `main`，没有别的 worktree；删了本机打的 `dist/` 包和下载验收用的临时目录。
 
+
+## 22. 补丁失败留下原因（2026-10-09）
+
+**起因：**升级到 0.8.3 后当天的日用（HPIAS、xpro 两个项目，全是 ChatGPT 经服务调的）里失败的调用 15 次：补丁 9 次
+（`PATCH_FAILED` 5、`FILE_VERSION_CONFLICT` 2、`PATCH_AMBIGUOUS` 1、`NOT_FOUND` 1），项目命令退出码 1 共 4 次（项目自己的检查没过），
+按设计拦下 2 次（读项目外目录、删文件没带 `confirm`）。`apply_patch` 当天 45 成 5 败约 10%，历史 279 成 27 败约 9%，没变高。
+但这些失败**为什么**事后查不出：请求日志对补丁什么都不记、也没有时间戳，operations.jsonl 只记 `error_code`；回给 AI 的诊断很细，
+没落盘。gld 比对上下文是逐字的，分不清"只差一个行尾空格"（该 gld 放宽）和"补丁写错了"（模型的事）。
+
+**改了什么（`87eba6b`）：**
+
+| 处 | 现在 |
+| --- | --- |
+| 回给 AI 的诊断 | 上下文精确找不到（`context_not_found` / `context_drifted`）时多一格 `near_miss`：依次放宽到行尾空白、首尾空白、花引号长破折号和特殊空格，对上了报 `kind` 和行号；都不中报 `partial`：最像的一处对上几行（空行不算）、补丁旧内容第几行开始不同。比对次数超过 200 万（文件行数 × hunk 行数）不算 |
+| 解析、落盘阶段的失败 | 补上 `details.reason_code`：`no_file_headers`、`unsupported_directive`、`envelope_not_closed`、`hunk_count_mismatch`、`backup_unreadable`、`staging_failed`、`write_failed_rolled_back`、`notebook_not_utf8` |
+| operations.jsonl | 补丁调用的 `result_summary.patch`：`format`（codex / unified / none）、`patch_bytes`，成功的也记；失败时加 `reason_code`、`problem_count`、`not_checked` 个数和每条诊断里的文件、第几段、行号、`near_miss`、版本号。`message` 和 `actual_excerpt` 不进来：operations 经 `operation_log` 回给调用方，沿用"只记码不记内容" |
+| 请求日志 | 失败时一行 `[patch] id=… tool=… operation_id=… code=… reasons=原因码[:near_miss]`，用 `operation_id` 和 operations.jsonl 对上；字段全是 gld 自己的常量和 uuid，伪造不出别的行 |
+
+补丁原文不落盘：和"只记码不记内容"冲突。先看 `near_miss` 的分布够不够判断要不要放宽比对，不够再单独定。
+
+**验证：**集成测试真起服务打一个行尾多空格的补丁，核对回包、`[patch]` 行、operations 记录三处对得上，且文件内容和补丁正文都没进
+日志；再测信封没收尾的原因码、成功的补丁不出 `[patch]` 行。三处变异（摘要漏进原文摘录、不记 `[patch]` 行、解析失败不带原因码）
+各自被抓到。全量 926 passed、0 failed、0 ignored，fmt、clippy 干净。新旧构建在隔离目录起服务，工具表都是 30 项、指纹
+`a4c7eaf7d5b10f5e`：升级后 ChatGPT 不用 Refresh。
+
+**没做：**本机服务还是 0.8.3，没换（要用户点头）；换上之前日用的补丁失败照旧只有码。
