@@ -1304,4 +1304,6 @@ JavaScript in the Playwright server process and is RCE-equivalent"（实现是 N
 各自被抓到。全量 926 passed、0 failed、0 ignored，fmt、clippy 干净。新旧构建在隔离目录起服务，工具表都是 30 项、指纹
 `a4c7eaf7d5b10f5e`：升级后 ChatGPT 不用 Refresh。
 
-**没做：**本机服务还是 0.8.3，没换（要用户点头）；换上之前日用的补丁失败照旧只有码。
+**本机换上（同日 23:37，用户批准）：**`eea0535` 的 release 构建，二进制和数据目录先备份到 `~/.local/opt/`（`gld-0.8.3-20261009-2336`、`gld-config-20261009-2336.tgz`，0600），写新文件再改名，去掉 35 个 `CLAUDE*` 变量重启。换之前没有在跑的命令。构建提交等于 HEAD；工具表 33 项、指纹 `5155ec6663bb33e2` 没变，ChatGPT 不用 Refresh；`gld ls`、`profiles.json` 和 `oauth-clients/hub.json` 按内容算的指纹不变；新守护进程 `CLAUDE*` 变量 0 个；`gld health` 四项 200。实机探针：在 gld 项目上 `gld tool call patch_check` 一个行尾多空格的补丁（只预检不写），回包和 operations.jsonl 都有 `context_drifted` 加 `near_miss: trailing_whitespace`，仓库没改动。
+
+**没验：**`[patch]` 那一行只在 MCP 的 HTTP 入口记，`gld tool call` 不经过它；实机上要等 ChatGPT 下一次补丁失败才看得到，现在只有集成测试的证据。
