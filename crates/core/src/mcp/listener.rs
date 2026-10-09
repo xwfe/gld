@@ -475,6 +475,19 @@ async fn mcp_post(
                         repeated_bytes
                 ));
             }
+            if tool_name == "apply_patch" || tool_name == "patch_check" {
+                let structured = response.pointer("/result/structuredContent");
+                if let Some(fields) = structured.and_then(crate::tools::patch::failure_log_fields) {
+                    let operation_id = structured
+                        .and_then(|value| value.get("operation_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    log.line(&format!(
+                        "[patch] id={} tool={} operation_id={} {}",
+                        request_id, tool_name, operation_id, fields
+                    ));
+                }
+            }
             if tool_name == "exec_command" || tool_name == "exec_health_check" {
                 let structured = response
                     .get("result")

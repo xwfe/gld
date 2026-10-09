@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::tools::caller::Caller;
 use crate::tools::context::ToolContext;
-use crate::tools::patch_diag::{Diagnostic, HunkMiss, MAX_CANDIDATES, MAX_DIAGNOSTICS};
+use crate::tools::patch_diag::{Diagnostic, HunkMiss, NearMiss, MAX_CANDIDATES, MAX_DIAGNOSTICS};
 use crate::tools::workspace::{tool_ok, FileState, Workspace, WorkspaceError};
 use crate::tools::write_class::{Verdict, WriteClass};
 
@@ -67,7 +67,7 @@ pub fn apply_patch(
         parse_unified_diff(patch)?
     };
     if file_patches.is_empty() && notebook_edits.is_none() {
-        return Err(patch_failed("No files were modified."));
+        return Err(patch_failed("no_file_headers", "No files were modified."));
     }
     // 每个目标先过写权限分类器：`.git/` 一律不写，`.github/` 按改的是什么分开
     // （workflow 和 CODEOWNERS 要 confirm，模板之类照常改），关键文件仍然只在
@@ -274,7 +274,7 @@ pub fn apply_patch(
                     op,
                     baseline,
                     &original,
-                    miss,
+                    *miss,
                 ));
                 failed_files.insert(resolved.display.clone());
                 continue;
@@ -362,7 +362,10 @@ pub fn apply_patch(
         };
         // 写回去的是 serde_json 序列化的结果，一定是 UTF-8。
         let text = String::from_utf8(updated).map_err(|_| {
-            patch_failed(format!("{} did not serialize as UTF-8", resolved.display))
+            patch_failed(
+                "notebook_not_utf8",
+                format!("{} did not serialize as UTF-8", resolved.display),
+            )
         })?;
         staged.insert(resolved.display.clone(), Some(text));
         if operations
@@ -544,6 +547,113 @@ pub fn patch_check(
     Ok(result)
 }
 
+/// 补丁是哪种写法。解析和日志都按这一个判，别各判各的。
+pub(crate) fn patch_format(patch: &str) -> &'static str {
+    if patch
+        .lines()
+        .any(|line| line.trim_end_matches('\r') == "*** Begin Patch")
+    {
+        "codex"
+    } else {
+        "unified"
+    }
+}
+
+/// operations.jsonl 里这次打补丁记什么：写法、大小；失败时再加诊断。
+///
+/// 成功的也记写法和大小，才算得出哪种写法、多大的补丁容易失败。诊断只挑
+/// 行号、计数、原因码和版本号：`message`、`actual_excerpt` 带文件原文，不进来
+/// ——operations 会经 `operation_log` 回给调用方，规矩是只记码不记内容。
+pub(crate) fn operation_summary(args: &Value, output: &Value) -> Value {
+    let patch = args.get("patch").and_then(Value::as_str).unwrap_or("");
+    let mut summary = json!({
+        // 只有 notebook_edits、没有文本补丁时是 none。
+        "format": if patch.is_empty() { "none" } else { patch_format(patch) },
+        "patch_bytes": patch.len()
+    });
+    if output.get("ok").and_then(Value::as_bool) != Some(false) {
+        return summary;
+    }
+    let details = output.pointer("/error/details");
+    let field = |key: &str| details.and_then(|details| details.get(key));
+    summary["reason_code"] = field("reason_code").cloned().unwrap_or(Value::Null);
+    summary["problem_count"] = field("problem_count").cloned().unwrap_or(Value::Null);
+    summary["diagnostics"] = field("diagnostics")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().map(diagnostic_summary).collect())
+        .unwrap_or_default();
+    summary["not_checked"] = json!(field("not_checked")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len));
+    summary
+}
+
+fn diagnostic_summary(diagnostic: &Value) -> Value {
+    const KEPT: [&str; 11] = [
+        "file",
+        "operation",
+        "baseline",
+        "code",
+        "reason_code",
+        "hunk_index",
+        "expected_range",
+        "candidate_ranges",
+        "near_miss",
+        "expected_version",
+        "actual_version",
+    ];
+    Value::Object(
+        KEPT.iter()
+            .filter_map(|key| Some((key.to_string(), diagnostic.get(*key)?.clone())))
+            .collect(),
+    )
+}
+
+/// 请求日志里补丁失败那一行的字段：`code=… reasons=…`。成功的不出这一行。
+///
+/// `reasons` 每个对不上的地方一条，是原因码加上差在哪（有的话），比如
+/// `context_drifted:trailing_whitespace`；没走到逐段比对的就是那一个原因码。
+/// 全文在 operations.jsonl，靠同一行里的 `operation_id` 对上。
+pub(crate) fn failure_log_fields(output: &Value) -> Option<String> {
+    if output.get("ok").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let code = output
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let details = output.pointer("/error/details");
+    let reasons = match details
+        .and_then(|details| details.get("diagnostics"))
+        .and_then(Value::as_array)
+    {
+        Some(list) => list
+            .iter()
+            .map(|diagnostic| {
+                let reason = diagnostic["reason_code"].as_str().unwrap_or("unknown");
+                match diagnostic
+                    .pointer("/near_miss/kind")
+                    .and_then(Value::as_str)
+                {
+                    Some(kind) => format!("{reason}:{kind}"),
+                    None => reason.to_string(),
+                }
+            })
+            .collect::<Vec<_>>(),
+        None => details
+            .and_then(|details| details.get("reason_code"))
+            .and_then(Value::as_str)
+            .map(|reason| vec![reason.to_string()])
+            .unwrap_or_default(),
+    };
+    let reasons = if reasons.is_empty() {
+        "-".to_string()
+    } else {
+        reasons.join(",")
+    };
+    Some(format!("code={code} reasons={reasons}"))
+}
+
 #[derive(Debug)]
 struct FilePatch {
     path: String,
@@ -575,10 +685,7 @@ enum HunkLine {
 }
 
 fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
-    if patch
-        .lines()
-        .any(|line| line.trim_end_matches('\r') == "*** Begin Patch")
-    {
+    if patch_format(patch) == "codex" {
         return parse_codex_patch(patch);
     }
 
@@ -680,6 +787,7 @@ fn check_declared_old_count(path: &str, hunk: &Hunk) -> Result<(), WorkspaceErro
         category: "validation",
         retryable: false,
         details: json!({
+            "reason_code": "hunk_count_mismatch",
             "path": path,
             "declared_old_lines": declared,
             "actual_old_lines": actual,
@@ -735,9 +843,12 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
         // 而磁盘上没挪（审查 P04）。
         if let Some(directive) = line.strip_prefix("*** ") {
             let name = directive.split(':').next().unwrap_or(directive).trim();
-            return Err(patch_failed(format!(
-                "*** {name}: is not something this patch format supports here; supported directives are *** Add File:, *** Update File:, *** Delete File:"
-            )));
+            return Err(patch_failed(
+                "unsupported_directive",
+                format!(
+                    "*** {name}: is not something this patch format supports here; supported directives are *** Add File:, *** Update File:, *** Delete File:"
+                ),
+            ));
         }
 
         if let Some(header) = line.strip_prefix("@@") {
@@ -777,6 +888,7 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
     // 应用一半就是把文件改坏。只有信封闭合了才算数。
     if !ended {
         return Err(patch_failed(
+            "envelope_not_closed",
             "the patch stops before *** End Patch, so it may have been cut short; nothing was applied. Send the whole envelope",
         ));
     }
@@ -826,7 +938,9 @@ fn to_original_line(index: usize, shift: isize) -> usize {
     ((index as isize - shift).max(0) as usize) + 1
 }
 
-fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, HunkMiss> {
+/// 失败时装箱：`HunkMiss` 带着候选位置和"差在哪"，不装箱的话每次成功返回也得
+/// 按它的大小留位置（clippy 的 result_large_err）。
+fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, Box<HunkMiss>> {
     let line_ending = if original.contains("\r\n") {
         "\r\n"
     } else {
@@ -854,7 +968,7 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, HunkMiss> {
                 .iter()
                 .position(|line| line.trim() == anchor)
             else {
-                return Err(HunkMiss {
+                return Err(Box::new(HunkMiss {
                     code: "PATCH_FAILED",
                     reason_code: "anchor_not_found",
                     message: format!("Hunk header did not match any line: @@ {anchor}"),
@@ -862,7 +976,8 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, HunkMiss> {
                     expected_range: None,
                     candidate_ranges: Vec::new(),
                     center_line: to_original_line(search_from, shift),
-                });
+                    near_miss: None,
+                }));
             };
             search_from += at + 1;
         }
@@ -896,7 +1011,7 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, HunkMiss> {
                     .map(|line| to_original_line(*line, shift).to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                return Err(HunkMiss {
+                return Err(Box::new(HunkMiss {
                     code: "PATCH_AMBIGUOUS",
                     reason_code: "context_ambiguous",
                     message: format!(
@@ -906,18 +1021,19 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, HunkMiss> {
                     expected_range: None,
                     candidate_ranges: ranges_at(&candidates, hunk_old.len(), shift),
                     center_line: to_original_line(candidates[0], shift),
-                });
+                    near_miss: None,
+                }));
             }
         }
         let Some(pos) = find_hunk_position(&lines, &hunk_old, search_from, expected) else {
-            return Err(context_miss(
+            return Err(Box::new(context_miss(
                 &lines,
                 &hunk_old,
                 search_from,
                 expected,
                 shift,
                 hunk_index,
-            ));
+            )));
         };
 
         let mut idx = pos;
@@ -1006,8 +1122,13 @@ fn context_miss(
             expected_range,
             center_line: ranges[0].0,
             candidate_ranges: ranges,
+            near_miss: None,
         };
     }
+
+    // 下面两种是整段在文件里精确找不到：算一下差在哪，日志靠它分清是比对太严
+    // 还是补丁写错了。
+    let near_miss = NearMiss::find(lines, hunk_old, |index| to_original_line(index, shift));
 
     // 退一步：整段对不上，那第一行呢。找得到就说明文件被改过、行号过期，
     // 模型重读那一段就能修好；找不到才是真的对不上。
@@ -1040,6 +1161,7 @@ fn context_miss(
             expected_range,
             center_line: ranges[0].0,
             candidate_ranges: ranges,
+            near_miss,
         };
     }
 
@@ -1053,6 +1175,7 @@ fn context_miss(
         center_line: expected_range
             .map(|(start, _)| start)
             .unwrap_or_else(|| to_original_line(search_from, shift)),
+        near_miss,
     }
 }
 
@@ -1331,19 +1454,25 @@ pub(crate) fn commit_staged_bytes(
         let backup = if path.exists() && path.is_file() {
             if faults::backup_read_fails(&path) {
                 cleanup_temporary_files(temporary_files.values());
-                return Err(patch_failed(format!(
-                    "cannot read {} to back it up, so nothing was changed",
-                    resolved.display
-                )));
+                return Err(patch_failed(
+                    "backup_unreadable",
+                    format!(
+                        "cannot read {} to back it up, so nothing was changed",
+                        resolved.display
+                    ),
+                ));
             }
             match fs::read(&path) {
                 Ok(bytes) => Some(bytes),
                 Err(err) => {
                     cleanup_temporary_files(temporary_files.values());
-                    return Err(patch_failed(format!(
-                        "cannot read {} to back it up ({err}), so nothing was changed",
-                        resolved.display
-                    )));
+                    return Err(patch_failed(
+                        "backup_unreadable",
+                        format!(
+                            "cannot read {} to back it up ({err}), so nothing was changed",
+                            resolved.display
+                        ),
+                    ));
                 }
             }
         } else {
@@ -1364,7 +1493,8 @@ pub(crate) fn commit_staged_bytes(
         backups.insert(path.clone(), backup);
         if let Some(bytes) = content {
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
+                fs::create_dir_all(parent)
+                    .map_err(|err| patch_failed("staging_failed", err.to_string()))?;
             }
             // 原文件的权限，好让打完补丁的脚本还是可执行的。文件不存在（新增）
             // 时是 None，临时文件就用新建文件的默认权限。
@@ -1380,9 +1510,10 @@ pub(crate) fn commit_staged_bytes(
             if let Err(err) = toexec_fs::write_durable(&temp, bytes, mode.as_ref()) {
                 // 还没有任何文件被换上去，所以没有要回滚的东西。
                 cleanup_temporary_files(temporary_files.values());
-                return Err(patch_failed(format!(
-                    "Failed to stage file: {err}. Nothing was changed"
-                )));
+                return Err(patch_failed(
+                    "staging_failed",
+                    format!("Failed to stage file: {err}. Nothing was changed"),
+                ));
             }
             temporary_files.insert(path.clone(), temp);
         }
@@ -1402,7 +1533,7 @@ pub(crate) fn commit_staged_bytes(
             let temp = temporary_files
                 .get(&path)
                 .cloned()
-                .ok_or_else(|| patch_failed("Staged file is missing"));
+                .ok_or_else(|| patch_failed("staging_failed", "Staged file is missing"));
             match temp {
                 // 注入失败的办法是把暂存文件换成一个不存在的路径，让
                 // `toexec_fs::replace` **真的**失败一次。以前是在调用之前直接
@@ -1432,9 +1563,12 @@ pub(crate) fn commit_staged_bytes(
                 cleanup_temporary_files(temporary_files.values());
                 let failed = restore_backups(&backups, &replaced);
                 if failed.is_empty() {
-                    return Err(patch_failed(format!(
-                        "Failed to write file: {err}. Everything this patch had changed was rolled back"
-                    )));
+                    return Err(patch_failed(
+                        "write_failed_rolled_back",
+                        format!(
+                            "Failed to write file: {err}. Everything this patch had changed was rolled back"
+                        ),
+                    ));
                 }
                 // 回滚也失败了：工作区现在是半新半旧，**不能**说已经回滚。
                 // 人得知道去看哪几个文件。
@@ -1724,12 +1858,15 @@ fn expected_versions(
     Ok(Some(map))
 }
 
-fn patch_failed(message: impl Into<String>) -> WorkspaceError {
-    WorkspaceError::Tool {
+/// 没走到逐段比对就失败了（补丁本身解析不了之类）。`reason_code` 和
+/// `details.diagnostics[].reason_code` 是同一套名字：日志按它分类，消息是给模型读的。
+fn patch_failed(reason_code: &'static str, message: impl Into<String>) -> WorkspaceError {
+    WorkspaceError::ToolDetails {
         code: "PATCH_FAILED",
         message: message.into(),
         category: "validation",
         retryable: false,
+        details: json!({ "reason_code": reason_code, "files_changed": false }),
     }
 }
 

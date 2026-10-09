@@ -731,20 +731,25 @@ fn dispatch_tool(
     }
     if let Some(operation) = operation {
         let outcome = outcome::classify(&output);
+        let mut result_summary = json!({
+            "ok": outcome.call_ok,
+            "tool": name,
+            "command": outcome.command,
+            // 只记码不记消息，和 record_rejection 一样：消息里可能带文件内容。
+            "error_code": output.pointer("/error/code"),
+            "affected_files": output.get("affected_files")
+        });
+        // 补丁失败光有错误码分不清是比对太严还是补丁写错了，诊断要一起留下。
+        if matches!(name, "apply_patch" | "patch_check") {
+            result_summary["patch"] = patch::operation_summary(args, &output);
+        }
         let _ = ctx.harness.record_operation(
             Some(&operation.id),
             task_id.as_deref(),
             name,
             outcome.state,
             operation_input(args),
-            json!({
-                "ok": outcome.call_ok,
-                "tool": name,
-                "command": outcome.command,
-                // 只记码不记消息，和 record_rejection 一样：消息里可能带文件内容。
-                "error_code": output.pointer("/error/code"),
-                "affected_files": output.get("affected_files")
-            }),
+            result_summary,
         );
     }
     record_execution_ledger(ctx, name, &effective_args, &output, task_id.as_deref());

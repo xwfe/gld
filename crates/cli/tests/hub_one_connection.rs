@@ -538,3 +538,121 @@ fn relayed_calls_log_which_tool_they_reach() {
     assert!(!log.contains("method=fake"), "换行伪造出了一行：{log}");
     assert!(!log.contains("secret-argument"), "参数不该进日志：{log}");
 }
+
+/// operations.jsonl 里带着这个 operation_id 的那一行（结束时记的那条，不是 started）。
+fn finished_operation(env: &Env, operation_id: &str) -> Value {
+    let root = env.home.path().join("harness").join("workspaces");
+    std::fs::read_dir(&root)
+        .expect("harness workspaces")
+        .flatten()
+        .filter_map(|dir| std::fs::read_to_string(dir.path().join("operations.jsonl")).ok())
+        .flat_map(|text| text.lines().map(str::to_string).collect::<Vec<_>>())
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .filter(|record| record["id"] == operation_id && record["kind"] != "started")
+        .last()
+        .unwrap_or_else(|| panic!("operations.jsonl 里没有 {operation_id}"))
+}
+
+/// 补丁失败时，请求日志记一行原因、operations.jsonl 记不含内容的诊断，两边用 operation_id 对上。
+/// 事后要分得清是"只差空白"（比对太严）还是补丁写错了；文件原文和补丁正文不能进这两处。
+#[test]
+fn a_failed_patch_leaves_its_reasons_in_the_logs_without_file_content() {
+    let hub = hub_with_two_members();
+    hub.env
+        .write("lib.rs", "fn a() {\n    let api_file_marker = 1;\n}\n");
+
+    // 上下文行尾多了空白：精确比对对不上，放宽到行尾空白就对上。
+    let patch = "*** Begin Patch\n*** Update File: lib.rs\n@@\n-    let api_file_marker = 1;   \n+    let patch_body_marker = 2;\n*** End Patch\n";
+    let failed = call(
+        &hub,
+        1,
+        "apply_patch",
+        json!({ "workspace": "api", "patch": patch }),
+    );
+    assert_eq!(failed["error"]["code"], "PATCH_FAILED", "{failed}");
+    let near_miss = &failed["error"]["details"]["diagnostics"][0]["near_miss"];
+    assert_eq!(near_miss["kind"], "trailing_whitespace", "{failed}");
+    assert_eq!(near_miss["start_line"], 2, "{failed}");
+    let operation_id = failed["operation_id"].as_str().expect("operation_id");
+
+    let log = request_log(&hub.env, "hub");
+    let line = log
+        .lines()
+        .find(|line| line.starts_with("[patch]"))
+        .unwrap_or_else(|| panic!("没有 [patch] 行：{log}"));
+    assert!(
+        line.ends_with(&format!(
+            "tool=apply_patch operation_id={operation_id} code=PATCH_FAILED reasons=context_drifted:trailing_whitespace"
+        )),
+        "{line}"
+    );
+
+    let record = finished_operation(&hub.env, operation_id);
+    let summary = &record["result_summary"]["patch"];
+    assert_eq!(summary["format"], "codex", "{record}");
+    assert_eq!(summary["patch_bytes"], patch.len(), "{record}");
+    assert_eq!(summary["problem_count"], 1, "{record}");
+    let diagnostic = &summary["diagnostics"][0];
+    assert_eq!(diagnostic["file"], "lib.rs", "{record}");
+    assert_eq!(diagnostic["reason_code"], "context_drifted", "{record}");
+    assert_eq!(diagnostic["hunk_index"], 0, "{record}");
+    assert_eq!(
+        diagnostic["near_miss"]["kind"], "trailing_whitespace",
+        "{record}"
+    );
+    for leaked in ["api_file_marker", "patch_body_marker"] {
+        assert!(
+            !record.to_string().contains(leaked),
+            "operations 里有内容：{record}"
+        );
+        assert!(!log.contains(leaked), "请求日志里有内容：{log}");
+    }
+
+    // 没走到逐段比对的失败也有原因码：信封没收尾。
+    let cut = call(
+        &hub,
+        2,
+        "apply_patch",
+        json!({ "workspace": "api", "patch": "*** Begin Patch\n*** Update File: lib.rs\n@@\n-x\n" }),
+    );
+    assert_eq!(
+        cut["error"]["details"]["reason_code"], "envelope_not_closed",
+        "{cut}"
+    );
+    let log = request_log(&hub.env, "hub");
+    assert!(
+        log.lines().any(
+            |line| line.starts_with("[patch]") && line.ends_with("reasons=envelope_not_closed")
+        ),
+        "{log}"
+    );
+
+    // 成功的不出 [patch] 行，但 operations 照样记写法和大小，才算得出失败率。
+    let fixed = "*** Begin Patch\n*** Update File: lib.rs\n@@\n-    let api_file_marker = 1;\n+    let api_file_marker = 2;\n*** End Patch\n";
+    let applied = call(
+        &hub,
+        3,
+        "apply_patch",
+        json!({ "workspace": "api", "patch": fixed }),
+    );
+    assert_eq!(applied["ok"], true, "{applied}");
+    let record = finished_operation(&hub.env, applied["operation_id"].as_str().expect("id"));
+    assert_eq!(
+        record["result_summary"]["patch"]["format"], "codex",
+        "{record}"
+    );
+    assert!(
+        record["result_summary"]["patch"]
+            .get("diagnostics")
+            .is_none(),
+        "{record}"
+    );
+    let log = request_log(&hub.env, "hub");
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with("[patch]"))
+            .count(),
+        2,
+        "{log}"
+    );
+}
