@@ -13,7 +13,7 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 - [本机装好的 MCP server](#本机装好的-mcp-server) · [项目怎么构建、怎么测](#项目怎么构建怎么测list_project_commands) · [装东西的命令要你点头](#装东西的命令要你点头)
 - [dev server 这类要一直开着的](#dev-server-这类要一直开着的service_port) · [用浏览器验页面](#用浏览器验页面单独配一个隔离的-playwright-mcp)
 - [命令的输出能读多久](#命令的输出能读多久stdin-怎么关) · [参数名写错了会被拒](#参数名写错了会被拒不会按默认值跑) · [读文件：超长的一行](#读文件一行比-max_bytes-还长的时候)
-- [文件版本：别盖掉别人的改动](#文件版本别让补丁盖掉别人的改动) · [Jupyter notebook](#jupyter-notebook按-cell-读按-cell-改)
+- [文件版本：别盖掉别人的改动](#文件版本别让补丁盖掉别人的改动) · [补丁对不上：报错和日志](#补丁对不上报错里有什么日志里留了什么) · [Jupyter notebook](#jupyter-notebook按-cell-读按-cell-改)
 
 ---
 
@@ -1135,6 +1135,114 @@ apply_patch patch=… expected_versions={"notes.md": "412-18d6b0…"}
 不对都是拒绝、不是覆盖；但操作系统层面没有"比对通过就锁住直到我写完"这种
 东西，另一个进程仍然可能刚好插在最后那几微秒里。要真正互斥，得让写方都走
 同一个 gld。
+
+---
+
+## 补丁对不上：报错里有什么，日志里留了什么
+
+AI 的补丁对不上时，gld **一个字节都不写**（报错里 `files_changed: false`），把每个对不上的地方
+列在 `details.diagnostics` 里，AI 照着重读、重做那一段就行。你这边想知道它为什么老失败，看日志：
+
+```bash
+# 最近几次补丁失败，各是什么原因（每次失败一行）
+grep '\[patch\]' ~/.config/gld/logs/hub/mcp-requests.log
+
+# 攒了一阵之后，数"差在哪"各有几次
+grep -ho '"near_miss":{[^}]*}' ~/.config/gld/harness/workspaces/*/operations.jsonl | grep -o '"kind":"[a-z_]*"' | sort | uniq -c | sort -rn
+
+# 数原因码。别写成 [a-z_]：notebook_not_utf8 带数字，会被漏掉
+grep -ho '"reason_code":"[a-z0-9_]*"' ~/.config/gld/harness/workspaces/*/operations.jsonl | sort | uniq -c | sort -rn
+```
+
+`[patch]` 那一行长这样：
+
+```text
+[patch] id=1 tool=apply_patch operation_id=a9cba8eac4334a0c925119503d4a75d6 code=PATCH_FAILED reasons=context_drifted:trailing_whitespace
+```
+
+`reasons` 是每个对不上的地方一条，用逗号隔开：冒号前是原因码（`reason_code`），冒号后是"差在哪"
+（`near_miss`，算了的才有）。补丁本身就坏了、没走到逐段比对的，只有一个原因码。
+
+0.8.3 的发行包还没有这些，之后的构建才记；更早的补丁失败在 operations 里只有 `error_code`。
+
+### 原因码和下一步
+
+| `reason_code` | 意思 | 下一步 |
+| --- | --- | --- |
+| `context_not_found` | 这一段的上下文在文件里哪儿都找不到 | 重读文件，照现在的内容重写这一段 |
+| `context_drifted` | 上下文的第一行还在，后面对不上：文件改过，或者 AI 拿的是旧内容 | 按诊断里的 `suggested_read_range` 重读那一段再改 |
+| `context_out_of_order` | 上下文在文件里，但在上一段的前面 | 同一个文件的几段按文件里的先后顺序写 |
+| `context_ambiguous`（错误码 `PATCH_AMBIGUOUS`） | 会删改行的一段，没写行号也没写锚点，上下文对得上好几处。gld 不猜，挑错一处就是改错地方 | 多带几行上下文，或者写成 `@@ -行号,行数 @@` |
+| `anchor_not_found` | `@@ 某一行` 写的那一行找不到 | 换一行确实存在的当锚点 |
+| `file_not_found`（错误码 `NOT_FOUND`） | 要改的文件不存在 | 新建文件用 `*** Add File:` |
+| `file_already_exists` | `*** Add File:` 的文件已经在了。Add 只新建，不覆盖 | 改用 `*** Update File:` |
+| `deleted_earlier_in_patch` | 同一个补丁前面删了它，后面又去改 | 删了重建用 Add |
+| `file_changed_since_read`（错误码 `FILE_VERSION_CONFLICT`） | 读它之后文件被写过，见[文件版本](#文件版本别让补丁盖掉别人的改动)。算完补丁、写下去之前那一刻才发现变了的（落盘前复核），错误码一样但没有原因码，`[patch]` 行里是 `reasons=-` | 重读再改 |
+| `hunk_count_mismatch` | `@@ -a,b @@` 里的 b 和这一段实际的旧行数（上下文加删除行）对不上 | 改对数字，或者写成不带数字的 `@@` |
+| `envelope_not_closed` | 有 `*** Begin Patch` 没有 `*** End Patch`，补丁可能半路被截断了 | 整个补丁重发 |
+| `unsupported_directive` | 用了 gld 不支持的 `***` 指令，比如 `*** Move to:` | 只用 Add / Update / Delete；挪文件就删了再建 |
+| `no_file_headers` | 一个文件头都没认出来，报错消息只有一句 `No files were modified.` | 检查补丁格式 |
+| `file_unreadable` | 读不出要改的文件：没权限，或者它不是 UTF-8 文本（二进制文件、GBK 编码的文件） | 补丁只改 UTF-8 文本。这类文件让 AI 用项目里的命令处理，或者你自己改 |
+| `backup_unreadable`、`staging_failed`、`write_failed_rolled_back` | 写盘时出错（权限、磁盘满），补丁本身没问题 | 看报错消息里的系统错误。`write_failed_rolled_back` 已经全部回滚 |
+| `notebook_edit_failed`、`notebook_not_utf8` | notebook 的 cell 编辑没成 | 看报错消息 |
+
+还有两种情况不在上表：
+
+- 回滚也没做完的，错误码是 `PATCH_ROLLBACK_INCOMPLETE`：项目里有文件可能已经是补丁改过的样子。
+  先去看报错里点名的文件，别直接重试。
+- 同一个文件前一段失败了，后面几段不再检查（它们要看见前一段的结果才判得准），列在 `details.not_checked`，
+  原因是 `earlier_failure_in_same_file`。这些段**不算通过**。
+
+`hunk_index` 从 0 数；报错消息里写的 `hunk #1` 是从 1 数的，说的是同一段。
+
+### 差在哪：`near_miss`
+
+gld 比对上下文是**逐字**的，差一个行尾空格也算对不上。`context_not_found` 和 `context_drifted` 这两种，
+gld 会放宽规则再找一次，结果写在那条诊断的 `near_miss` 里。它只是说明，**gld 不会按放宽的结果替你打上补丁**，
+补丁照样被拒。
+
+| `kind` | 意思 |
+| --- | --- |
+| `trailing_whitespace` | 去掉行尾空白，整段就对上了 |
+| `indentation` | 再去掉行首空白才对上：缩进不一样，或者 tab 和空格混着用 |
+| `punctuation` | 再把花引号 `“ ” ‘ ’`、长短破折号、不换行空格这类换成普通字符才对上 |
+| `partial` | 放宽了也对不上，内容确实不一样 |
+
+前三种带 `start_line`、`end_line`，是对上的那一处在文件里的行号。`partial` 带的是最像的那一处：
+`matched_lines` / `compared_lines` 是对上几行、一共比了几行（空行不算，空行到处都对得上），
+`start_line` 是那一处从文件第几行开始，`first_differing_line` 是这一段的旧内容（上下文加删除行）
+从第几行开始不一样。一行都对不上时 `start_line` 是 `null`。
+
+文件很大、这一段又很长（文件行数 × 这一段的行数超过 200 万）时不算，`near_miss` 不出现。
+
+**数这个是为了什么：**前三种占得多，说明模型其实写对了，是 gld 比得太严，该让比对放宽；`partial` 占得多，
+说明补丁真写错了，或者文件在 AI 读过之后变了，放宽比对也救不了。
+
+### 日志里记了什么，没记什么
+
+| 在哪 | 记什么 |
+| --- | --- |
+| 请求日志 `logs/hub/mcp-requests.log`；每个项目自己那份 `logs/<项目 id>/mcp-requests.log` 也有，行首多一个 `[hub]` | 失败时一行 `[patch]`：工具名、`operation_id`、错误码、`reasons`。成功的不记 |
+| `harness/workspaces/<哈希>/operations.jsonl` | 每次 `apply_patch` / `patch_check` 一行，`result_summary.patch` 里有补丁写法（`codex` 或 `unified`；只有 notebook 编辑时是 `none`）和字节数，成功的也记，才算得出失败率。失败时再加原因码、对不上几处，以及每处的文件、第几段、行号、`near_miss`、版本号 |
+
+**补丁正文、文件内容、报错消息、原文摘录（`actual_excerpt`）都不记。**operations 的记录会经
+`task_manage` 的 `operation_log` 回给 AI，规矩是只记码不记内容。代价是：日志能告诉你差在哪一类、
+哪个文件第几行，但复现不了当时那个补丁。
+
+拿 `[patch]` 行里的 `operation_id` 找完整记录：
+
+```bash
+grep -h a9cba8eac4334a0c925119503d4a75d6 ~/.config/gld/harness/workspaces/*/operations.jsonl
+```
+
+容易踩的几处：
+
+- **请求日志没有时间戳。**想知道是什么时候失败的，用 `operation_id` 到 operations.jsonl 里看 `created_at`
+  （毫秒时间戳）。
+- **请求日志超过 4 MiB 就轮转，只留一代**（见[日志有多大](daemon.md#日志有多大)），早一点的 `[patch]` 行会没了。
+  operations.jsonl 不轮转，数长期分布用它。
+- **`gld tool call` 调的补丁不出 `[patch]` 行**：那一行只在 MCP 的 HTTP 入口记，operations 照记。
+  拿命令行试的时候别以为是没记上。
 
 ---
 
