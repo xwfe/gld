@@ -40,7 +40,7 @@ MCP 转发的 3 个，开着隔离的 `browser`）、指纹 `5155ec6663bb33e2`�
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
 | 补丁失败的原因分布 | 本机已换上（2026-10-09），攒数据中 | 日用一阵后数 `[patch]` 行的 `near_miss.kind`：`trailing_whitespace` / `indentation` / `punctuation` 占得多，就照 Codex 的做法让比对逐级放宽，否则维持逐字比对。见审查 §22 |
-| SuperAssistant 接 DeepSeek 网页 | 本机已换上（2026-10-17），没实测 | 用户自己在终端 `gld grant browser …` 拿地址（地址就是凭据，不经过 AI），扩展选 Streamable HTTP 连上，在 DeepSeek 页面走一圈 `list_workspaces` → `workspace_context` → `read_file`，看结果填回、DeepSeek 接着说。报 `Failed to fetch` 且 `gld logs` 没有请求，先查 Chrome 的本地网络访问权限。结果记审查 |
+| SuperAssistant 接 DeepSeek 网页 | 本机已换上（2026-10-17），没实测 | 用户自己在终端 `gld grant browser web-mcp --all`（或点名项目）拿地址（地址就是凭据，不经过 AI），扩展选 Streamable HTTP 连上，在 DeepSeek 页面走一圈 `list_workspaces` → `workspace_context` → `read_file`，看结果填回、DeepSeek 接着说。报 `Failed to fetch` 且 `gld logs` 没有请求，先查 Chrome 的本地网络访问权限。结果记审查 |
 | ChatGPT 换版后第一次调用 | 等它下次被用到 | `gld logs` 里是原来的 `auth=oauth:hub:dcr-…`、没有 401，就收口；有 401 先看审查 §25 的回滚 |
 | 零中断升级（RFC-0008） | 草案，未实现 | 让在跑的命令和请求跨版本都不断。要不要做、先做哪段由用户定；先确认真实痛点（比如长跑的开发服务器被重启停掉）再立项 |
 

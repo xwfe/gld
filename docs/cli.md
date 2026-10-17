@@ -1042,20 +1042,21 @@ Options:
 ```text
 为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
 
-Usage: gld grant browser [OPTIONS] <NAME> <PROJECT>...
+Usage: gld grant browser [OPTIONS] <NAME> [PROJECT]...
 
 Arguments:
   <NAME>        名字，在 ls / rm 里用它认这一把
-  <PROJECT>...  开放的项目，至少一个
+  [PROJECT]...  开放的项目，至少一个；要全开就用 --all
 
 Options:
-      --ttl <DURATION>   有效期：正整数加 s/m/h，默认 8h，最长 24h；到期后重新创建 [default: 8h]
+      --all              开放服务里现有的全部项目。之后新加的项目不在里面，要用就删了重建
   -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
-      --origin <ORIGIN>  允许的请求 Origin，可重复；省略时允许 Chrome 商店版 SuperAssistant
+      --ttl <DURATION>   有效期：正整数加 s/m/h，默认 8h，最长 24h；到期后重新创建 [default: 8h]
       --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --write            能写文件、能跑命令。命令以你的账号执行，等于全权：只给你信得过的
+      --origin <ORIGIN>  允许的请求 Origin，可重复；省略时允许 Chrome 商店版 SuperAssistant
       --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --write            能写文件、能跑命令。命令以你的账号执行，等于全权：只给你信得过的
       --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help             Print help

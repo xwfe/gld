@@ -243,7 +243,7 @@ coding 会话采用前述 2 分钟 / 挂后台命令 10 分钟的规则。
 ### 只开几个项目：gld grant
 
 标准 OAuth / bearer 客户端用下面的 `grant add`。只能填一个 URL 的浏览器扩展（DeepSeek 网页上的 SuperAssistant）
-用 `gld grant browser web-mcp api --ttl 8h`：生成一个短期地址，默认只读、最长 24 小时，不动服务原来的 OAuth；
+用 `gld grant browser web-mcp api --ttl 8h`（`--all` 开服务里现有的全部项目）：生成一个短期地址，默认只读、最长 24 小时，不动服务原来的 OAuth；
 同样用 `grant ls` / `grant rm` 查看和撤销。这个地址只显示一次，`--reveal` 也找不回来。接法见
 [DeepSeek 网页与 SuperAssistant](connect-clients.md#deepseek-网页与-superassistant)。
 

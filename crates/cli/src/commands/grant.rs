@@ -7,7 +7,7 @@ use gld_daemon::Request;
 
 use super::Ctx;
 use crate::cli::GrantCmd;
-use crate::error::CliResult;
+use crate::error::{CliError, CliResult};
 use crate::output::mask;
 
 pub async fn run(ctx: &mut Ctx, command: GrantCmd) -> CliResult {
@@ -20,10 +20,18 @@ pub async fn run(ctx: &mut Ctx, command: GrantCmd) -> CliResult {
         GrantCmd::Browser {
             name,
             projects,
+            all,
             ttl,
             origin,
             write,
-        } => browser(ctx, name, projects, ttl, origin, write).await,
+        } => {
+            let projects = if all {
+                all_members(ctx).await?
+            } else {
+                projects
+            };
+            browser(ctx, name, projects, ttl, origin, write).await
+        }
         GrantCmd::List { reveal } => list(ctx, reveal).await,
         GrantCmd::Remove { name } => remove(ctx, name).await,
     }
@@ -125,6 +133,18 @@ async fn browser(
     ctx.out
         .note("查看授权和到期：gld grant ls。立即作废并停掉它起的命令：gld grant rm <名字>。");
     Ok(())
+}
+
+/// `--all` 在命令行这边展开成服务现有成员的 id：守护进程照旧逐个校验，IPC 不变，
+/// 在跑的守护进程不用重启就能用。展开的是此刻的名单，之后新加的项目不会自动进来。
+async fn all_members(ctx: &mut Ctx) -> CliResult<Vec<String>> {
+    let status: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+    if status.members.is_empty() {
+        return Err(CliError::new(
+            "服务里还没有项目，先 gld add <目录> 登记一个",
+        ));
+    }
+    Ok(status.members.into_iter().map(|member| member.id).collect())
 }
 
 async fn list(ctx: &mut Ctx, reveal: bool) -> CliResult {

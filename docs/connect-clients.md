@@ -87,11 +87,18 @@ DeepSeek 网页自己没有 MCP 连接器，靠 Chrome 扩展
 ### 接上
 
 1. 在本机终端生成地址。`web-mcp` 是这把授权的名字，在 `grant ls` / `grant rm` 里用它认；
-   后面跟要开放的项目名（`gld` 换成你的），可以列多个：
+   后面跟要开放的项目名，可以列多个，或者用 `--all` 开服务里现有的全部项目：
 
    ```bash
    gld grant browser web-mcp gld --ttl 8h
    ```
+
+   ```bash
+   gld grant browser web-mcp --all --ttl 8h
+   ```
+
+   `--all` 开的是此刻服务里的项目（`gld ls` 项目表那些），之后新登记的不会自动进来，要用就 `gld grant rm web-mcp` 再重建。
+   项目名和 `--all` 不能同时给。全开时默认照样只读；`--all --write` 等于把这些项目的改文件和跑命令全交给浏览器扩展。
 
    "本地连接地址"那一行形如 `http://127.0.0.1:28764/mcp/browser/<随机密钥>`，端口就是服务的端口（`gld ls` 里那个）。
    服务配了 HTTPS 公网地址时还会多一行"公网连接地址"；Cloudflare 临时地址不在此列。浏览器和 gld 在同一台机器就用本地地址。

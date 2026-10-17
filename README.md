@@ -68,7 +68,7 @@ gld share                     # Cloudflare 临时地址，要先装 cloudflared
 临时地址在服务重启后会变，ChatGPT 里的连接器就得删了重建；长期用请换固定域名。每种客户端具体怎么填、
 固定域名怎么配，见 [docs/connect-clients.md](docs/connect-clients.md)。
 
-**DeepSeek 网页**：装 Chrome 扩展 MCP SuperAssistant，`gld grant browser web-mcp my-project` 生成一个
+**DeepSeek 网页**：装 Chrome 扩展 MCP SuperAssistant，`gld grant browser web-mcp my-project`（全部项目用 `--all`）生成一个
 短期地址填进去，直接连这个服务，不用另装代理，已有的 ChatGPT 连接器不受影响。要 2026-10-17 之后的构建
 （0.8.3 发布包里没有），接法见 [DeepSeek 网页与 SuperAssistant](docs/connect-clients.md#deepseek-网页与-superassistant)。
 

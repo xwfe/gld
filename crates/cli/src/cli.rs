@@ -981,9 +981,16 @@ pub enum GrantCmd {
     Browser {
         /// 名字，在 ls / rm 里用它认这一把
         name: String,
-        /// 开放的项目，至少一个
-        #[arg(required = true, value_name = "PROJECT")]
+        /// 开放的项目，至少一个；要全开就用 --all
+        #[arg(
+            value_name = "PROJECT",
+            required_unless_present = "all",
+            conflicts_with = "all"
+        )]
         projects: Vec<String>,
+        /// 开放服务里现有的全部项目。之后新加的项目不在里面，要用就删了重建
+        #[arg(long)]
+        all: bool,
         /// 有效期：正整数加 s/m/h，默认 8h，最长 24h；到期后重新创建
         #[arg(long, default_value = "8h", value_name = "DURATION", value_parser = parse_browser_ttl)]
         ttl: u64,

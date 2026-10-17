@@ -496,3 +496,67 @@ fn browser_grant_cli_bounds_lifetime_hides_secrets_and_requires_write_opt_in() {
         "written by explicit grant\n"
     );
 }
+
+/// `--all` 展开成服务此刻的全部项目，之后新加的不自动进来；
+/// 和点名项目不能同时给，两样都不给也不行。
+#[test]
+fn browser_grant_all_opens_every_current_project_only() {
+    let env = Env::new();
+    let (port, _web) = two_projects(&env);
+
+    for args in [
+        vec!["grant", "browser", "web-mcp"],
+        vec!["grant", "browser", "web-mcp", "api", "--all"],
+    ] {
+        let output = env.gld(&args);
+        assert_eq!(output.status.code(), Some(2), "用法错误应退出 2：{args:?}");
+    }
+    assert_eq!(env.json(&["--json", "grant", "ls"]), json!([]));
+
+    let created = env.json(&["--json", "grant", "browser", "web-mcp", "--all"]);
+    assert_eq!(created["grant"]["readOnly"], true);
+    let mut granted: Vec<&str> = created["grant"]["workspaces"]
+        .as_array()
+        .expect("workspaces")
+        .iter()
+        .filter_map(|member| member["name"].as_str())
+        .collect();
+    granted.sort_unstable();
+    assert_eq!(granted, vec!["api", "web"], "{created}");
+
+    let later = tempfile::tempdir().expect("later dir");
+    env.ok(&[
+        "add",
+        later.path().to_str().expect("utf-8 path"),
+        "--name",
+        "later",
+    ]);
+    // 对照：新项目确实进了服务，现在再建一把 --all 会带上它。
+    let again = env.json(&["--json", "grant", "browser", "web-mcp-2", "--all"]);
+    assert_eq!(
+        again["grant"]["workspaces"]
+            .as_array()
+            .expect("workspaces")
+            .len(),
+        3,
+        "{again}"
+    );
+
+    let path = browser_path(&created);
+    let workspaces = call(port, &path, "list_workspaces", json!({}));
+    let mut names: Vec<&str> = workspaces["workspaces"]
+        .as_array()
+        .expect("workspaces")
+        .iter()
+        .filter_map(|workspace| workspace["name"].as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["api", "web"], "{workspaces}");
+    let read = call(
+        port,
+        &path,
+        "read_file",
+        json!({ "workspace": "web", "path": "only-web.txt" }),
+    );
+    assert!(read.to_string().contains("private web data"), "{read}");
+}
