@@ -1950,7 +1950,7 @@ Usage: gld daemon [OPTIONS] <COMMAND>
 Commands:
   start    在后台启动守护进程（已在运行则什么都不做）
   stop     请求守护进程退出，并等待它停掉所有服务
-  restart  停止后重新启动（升级二进制后用它）
+  restart  停止后重新启动（换完二进制用它）；服务断开片刻，在跑的命令会被停掉
   status   显示守护进程是否在运行、pid、运行时长、日志位置
   run      在前台运行守护进程（给 systemd / launchd 或排障用；Ctrl-C 优雅退出）
   logs     查看守护进程自身日志
@@ -2007,7 +2007,7 @@ Options:
 ## gld daemon restart
 
 ```text
-停止后重新启动（升级二进制后用它）
+停止后重新启动（换完二进制用它）；服务断开片刻，在跑的命令会被停掉
 
 Usage: gld daemon restart [OPTIONS]
 

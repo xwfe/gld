@@ -6,7 +6,7 @@
 //! | 1 | 一般错误（参数合法，但操作失败：端口冲突、工作区不存在……） |
 //! | 2 | 用法错误（clap 自动产生） |
 //! | 3 | 守护进程未运行（`gld daemon status` 等探测类命令用，方便脚本判断） |
-//! | 4 | 守护进程版本与命令行不一致，需要 `gld daemon restart` |
+//! | 4 | 守护进程版本与命令行不一致，这条命令没执行；换完二进制要 `gld daemon restart` |
 
 use gld_daemon::ClientError;
 

@@ -131,7 +131,7 @@ async fn status(paths: &DaemonPaths, out: Output) -> CliResult {
                 ]);
                 if !version_ok {
                     out.line(out.yellow(&format!(
-                        "命令行版本 {} 与守护进程不一致，请执行 gld daemon restart。",
+                        "命令行版本 {} 与守护进程不一致，守护进程还在跑旧代码。换完二进制要 gld daemon restart：服务会断开片刻，在跑的命令会被停掉，见 docs/install.md 的「升级」。",
                         gld_core::VERSION
                     )));
                 }

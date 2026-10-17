@@ -318,7 +318,7 @@ pub enum DaemonCmd {
         #[arg(long, default_value_t = 20, value_name = "SECS")]
         wait: u64,
     },
-    /// 停止后重新启动（升级二进制后用它）
+    /// 停止后重新启动（换完二进制用它）；服务断开片刻，在跑的命令会被停掉
     Restart {
         #[arg(long)]
         force: bool,
