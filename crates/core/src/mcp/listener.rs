@@ -515,8 +515,9 @@ async fn mcp_post(
                 ));
             }
             if response.is_null() {
-                // MCP 通知没有 JSON-RPC 响应。200 + JSON null 会被标准客户端
-                // 当成无效消息；202 空响应还能让它正常探测可选 GET 流。
+                // MCP 规范要求通知回 202、没有响应体。官方 TS SDK 1.25 收到 200 + null
+                // 只是丢掉响应体，但只在 202 后才去探测可选的 GET 推送流；按规范回，
+                // 少一处客户端之间的分歧。
                 StatusCode::ACCEPTED.into_response()
             } else {
                 Json(response).into_response()
