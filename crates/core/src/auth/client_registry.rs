@@ -1,12 +1,11 @@
 //! 动态注册（RFC 7591）拿到的客户端，落盘保存。
 //!
-//! 为什么要落盘：ChatGPT 这类客户端连上来时先注册、拿到一个 `dcr-…` 的
-//! client_id 存在它自己那边，之后一直拿这个 id 刷新令牌。注册表只放内存的话，
-//! 服务一重启表就空了，客户端拿着还没过期的 refresh_token 来续会被判成
-//! `invalid_client`——用户看到的是"用得好好的连接器突然要重连，配置还没动过"。
+//! ChatGPT 这类客户端会保存注册时拿到的 `dcr-…` client_id，以后继续使用。
+//! 只有注册表写入成功才确认注册；并发请求不能覆盖已经确认的客户端，容量满时也
+//! 不能淘汰旧 id。已有注册表读不动或损坏时保留原文件，暂时拒绝新注册。
 //!
-//! 落盘之后重启不再掉授权；就算这个文件丢了，刷新令牌也还能续（见
-//! `oauth_flow::refresh_token_exchange`），只是重新授权时要重新注册一次。
+//! 服务重启后读取同一份注册表；就算文件丢了，已有签名刷新令牌仍走原来的兼容
+//! 路径（见 `oauth_flow::refresh_token_exchange`），但不能据此找回未知的注册记录。
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,11 +17,19 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppResult;
 use crate::logs::append_profile_log;
 
-/// 一个作用域最多留多少个已注册客户端，超了按注册时间淘汰最旧的。
+/// 一个作用域最多接纳多少个已注册客户端；满了拒绝新注册，保留所有已发出的 id。
 ///
-/// 一个连接器只注册一次，50 个足够覆盖反复删了重建的情况；有上限是因为
-/// `/register` 不需要认证，没有上限就等于谁都能往这个文件里无限塞条目。
+/// `/register` 不需要认证，必须限制增长；容量限制不能变成淘汰已有连接器的入口。
 const MAX_CLIENTS: usize = 50;
+
+/// 注册失败时可安全返回给 HTTP 层的原因，不携带路径、凭据或底层 I/O 错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RegistrationError {
+    #[error("Client registration capacity has been reached; existing clients are preserved.")]
+    CapacityReached,
+    #[error("Client registration is temporarily unavailable.")]
+    Unavailable,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisteredClient {
@@ -38,77 +45,93 @@ pub struct RegisteredClient {
 
 #[derive(Default, Serialize, Deserialize)]
 struct RegistryFile {
-    #[serde(default)]
     clients: HashMap<String, RegisteredClient>,
 }
 
 /// 一个作用域（一个工作区的 MCP 服务、或它的 Actions 服务）的注册表。
 pub struct ClientRegistry {
-    /// `None` 表示只在内存里放着，给单元测试用。
+    /// `None` 只用于显式内存实例，或无法定位文件时的只读降级实例。
     path: Option<PathBuf>,
+    /// 定位、读取或解析失败的实例不可注册，避免覆盖未知的旧记录。
+    writable: bool,
     /// 写日志用的工作区 id；只记失败，成功路径不出声。
     log_scope: String,
     clients: Mutex<HashMap<String, RegisteredClient>>,
 }
 
 impl ClientRegistry {
-    /// 读某个作用域的注册表。文件不在、读不动、内容坏了，都降级成空表继续跑——
-    /// 注册表丢了只是让客户端多授权一次，不该连服务都起不来。
+    /// 读取注册表。只有文件明确不存在才从可写空表开始；其他读取失败保留原文件，
+    /// 让服务继续验证已有签名令牌，但拒绝新注册，等待恢复注册表后重新加载。
     pub fn load(scope: &str, log_scope: &str) -> Self {
-        let path = match registry_path(scope) {
-            Ok(path) => Some(path),
+        Self::load_path(registry_path(scope), log_scope)
+    }
+
+    fn load_path(path: AppResult<PathBuf>, log_scope: &str) -> Self {
+        let path = match path {
+            Ok(path) => path,
             Err(error) => {
                 append_profile_log(
                     log_scope,
                     "stderr.log",
-                    &format!("[oauth] 定位不到客户端注册表，本次只用内存：{error}"),
+                    &format!("[oauth] 定位不到客户端注册表，新注册已停用：{error}"),
                 );
-                None
+                return Self {
+                    path: None,
+                    writable: false,
+                    log_scope: log_scope.to_string(),
+                    clients: Mutex::new(HashMap::new()),
+                };
             }
         };
-        let clients = path
-            .as_ref()
-            .filter(|path| path.exists())
-            .map(|path| match fs::read_to_string(path) {
-                Ok(raw) => match serde_json::from_str::<RegistryFile>(&raw) {
-                    Ok(file) => file.clients,
-                    Err(error) => {
-                        append_profile_log(
-                            log_scope,
-                            "stderr.log",
-                            &format!(
-                                "[oauth] 客户端注册表 {} 解析失败（{error}），\
-                                 当成空表继续；已连的客户端需要重新授权一次。",
-                                path.display()
-                            ),
-                        );
-                        HashMap::new()
-                    }
-                },
+        let (clients, writable) = match fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<RegistryFile>(&raw) {
+                Ok(file) => (file.clients, true),
                 Err(error) => {
                     append_profile_log(
                         log_scope,
                         "stderr.log",
                         &format!(
-                            "[oauth] 客户端注册表 {} 读不动（{error}），当成空表继续。",
+                            "[oauth] 客户端注册表 {} 解析失败（{error}），保留原文件，\
+                             新注册已停用；恢复注册表后重新加载。",
                             path.display()
                         ),
                     );
-                    HashMap::new()
+                    (HashMap::new(), false)
                 }
-            })
-            .unwrap_or_default();
+            },
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && fs::symlink_metadata(&path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                (HashMap::new(), true)
+            }
+            Err(error) => {
+                append_profile_log(
+                    log_scope,
+                    "stderr.log",
+                    &format!(
+                        "[oauth] 客户端注册表 {} 读不动（{error}），保留原文件，\
+                         新注册已停用；恢复注册表后重新加载。",
+                        path.display()
+                    ),
+                );
+                (HashMap::new(), false)
+            }
+        };
         Self {
-            path,
+            path: Some(path),
+            writable,
             log_scope: log_scope.to_string(),
             clients: Mutex::new(clients),
         }
     }
 
-    /// 不落盘的注册表，给单元测试和"拿不到数据目录"的降级路径用。
+    /// 显式不落盘的注册表，给单元测试用。生产加载失败不走这条可写内存路径。
     pub fn in_memory() -> Self {
         Self {
             path: None,
+            writable: true,
             log_scope: String::new(),
             clients: Mutex::new(HashMap::new()),
         }
@@ -137,50 +160,46 @@ impl ClientRegistry {
         self.len() == 0
     }
 
-    /// 记一个新注册的客户端并立刻落盘。
-    ///
-    /// 写盘失败不影响本次注册——客户端已经拿到 client_id 了，这次授权照常能走完，
-    /// 代价只是下次重启后它要重新注册。所以这里记日志而不是返回错误。
-    pub fn insert(&self, client_id: String, client: RegisteredClient) {
-        let snapshot = {
-            let mut clients = self.clients.lock().expect("oauth clients lock");
-            clients.insert(client_id, client);
-            evict_oldest(&mut clients, MAX_CLIENTS);
-            clients.clone()
-        };
-        self.persist(&snapshot);
+    /// 先持久化，再发布新客户端。整个过程持锁，保证较旧的并发快照不会覆盖新注册。
+    /// 写入失败时内存和已有注册表不变，调用方不得返回注册成功。
+    pub fn insert(
+        &self,
+        client_id: String,
+        client: RegisteredClient,
+    ) -> Result<(), RegistrationError> {
+        let mut clients = self.clients.lock().expect("oauth clients lock");
+        if !self.writable {
+            return Err(RegistrationError::Unavailable);
+        }
+        if clients.len() >= MAX_CLIENTS && !clients.contains_key(&client_id) {
+            return Err(RegistrationError::CapacityReached);
+        }
+        let mut candidate = clients.clone();
+        candidate.insert(client_id, client);
+        self.persist(&candidate)?;
+        *clients = candidate;
+        Ok(())
     }
 
-    fn persist(&self, clients: &HashMap<String, RegisteredClient>) {
+    fn persist(
+        &self,
+        clients: &HashMap<String, RegisteredClient>,
+    ) -> Result<(), RegistrationError> {
         let Some(path) = self.path.as_ref() else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = write_registry(path, clients) {
+        write_registry(path, clients).map_err(|error| {
             append_profile_log(
                 &self.log_scope,
                 "stderr.log",
                 &format!(
-                    "[oauth] 客户端注册表写不进 {}（{error}），本次注册只留在内存里，\
-                     重启后这个客户端要重新授权。",
+                    "[oauth] 客户端注册表写不进 {}（{error}），本次注册未生效，\
+                     保留已有客户端。",
                     path.display()
                 ),
             );
-        }
-    }
-}
-
-/// 超出上限时，按注册时间从旧到新删到刚好等于上限。
-fn evict_oldest(clients: &mut HashMap<String, RegisteredClient>, max: usize) {
-    if clients.len() <= max {
-        return;
-    }
-    let mut by_age: Vec<(String, u64)> = clients
-        .iter()
-        .map(|(id, client)| (id.clone(), client.created_at))
-        .collect();
-    by_age.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    for (id, _) in by_age.into_iter().take(clients.len() - max) {
-        clients.remove(&id);
+            RegistrationError::Unavailable
+        })
     }
 }
 
@@ -270,17 +289,153 @@ mod tests {
     }
 
     #[test]
-    fn evict_oldest_keeps_the_newest_entries() {
-        let mut clients = HashMap::new();
-        for i in 0..5u64 {
-            clients.insert(format!("dcr-{i}"), client(i));
+    fn capacity_rejects_new_clients_without_evicting_existing_ids() {
+        let path = crate::home::test_scratch_dir("oauth-capacity").join("clients.json");
+        let registry = ClientRegistry::load_path(Ok(path.clone()), "capacity-test");
+        for i in 0..MAX_CLIENTS {
+            registry
+                .insert(format!("dcr-{i}"), client(i as u64))
+                .expect("register existing client");
         }
-        evict_oldest(&mut clients, 3);
-        assert_eq!(clients.len(), 3);
-        assert!(clients.contains_key("dcr-4"));
-        assert!(clients.contains_key("dcr-3"));
-        assert!(clients.contains_key("dcr-2"));
-        assert!(!clients.contains_key("dcr-0"));
+        let before = fs::read(&path).expect("original registry");
+        assert_eq!(
+            registry.insert("dcr-over-capacity".into(), client(100)),
+            Err(RegistrationError::CapacityReached)
+        );
+        assert_eq!(fs::read(&path).expect("preserved registry"), before);
+        assert!(!registry.contains("dcr-over-capacity"));
+        let reloaded = ClientRegistry::load_path(Ok(path), "capacity-test");
+        for i in 0..MAX_CLIENTS {
+            let id = format!("dcr-{i}");
+            assert!(registry.contains(&id), "missing in memory: {id}");
+            assert!(reloaded.contains(&id), "missing after reload: {id}");
+        }
+    }
+
+    #[test]
+    fn concurrent_registrations_all_survive_a_reload() {
+        use std::sync::{Arc, Barrier};
+
+        const COUNT: usize = 16;
+        let path = crate::home::test_scratch_dir("oauth-concurrent").join("clients.json");
+        let registry = Arc::new(ClientRegistry::load_path(
+            Ok(path.clone()),
+            "concurrent-test",
+        ));
+        registry
+            .insert("dcr-existing".into(), client(0))
+            .expect("existing client");
+        let ready = Arc::new(Barrier::new(COUNT));
+        let threads: Vec<_> = (0..COUNT)
+            .map(|i| {
+                let registry = registry.clone();
+                let ready = ready.clone();
+                std::thread::spawn(move || {
+                    ready.wait();
+                    registry
+                        .insert(format!("dcr-concurrent-{i}"), client(i as u64 + 1))
+                        .expect("successful registration must persist");
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("registration thread");
+        }
+
+        let reloaded = ClientRegistry::load_path(Ok(path), "concurrent-test");
+        assert_eq!(reloaded.len(), COUNT + 1);
+        assert!(reloaded.contains("dcr-existing"));
+        for i in 0..COUNT {
+            assert!(reloaded.contains(&format!("dcr-concurrent-{i}")));
+        }
+    }
+
+    #[test]
+    fn failed_persistence_preserves_memory_and_the_original_file() {
+        crate::home::isolate_for_tests();
+        let path = crate::home::test_scratch_dir("oauth-write-failure").join("clients.json");
+        let registry = ClientRegistry::load_path(Ok(path.clone()), "write-failure-test");
+        registry
+            .insert("dcr-existing".into(), client(7))
+            .expect("existing client");
+        let before = fs::read(&path).expect("original registry");
+        // 目录不可作为临时文件写入；即使用 root 跑测试也能可靠地制造 I/O 失败。
+        let blocked_tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        fs::create_dir(&blocked_tmp).expect("block temporary file");
+        assert_eq!(
+            registry.insert("dcr-new".into(), client(8)),
+            Err(RegistrationError::Unavailable)
+        );
+        assert_eq!(
+            registry.insert("dcr-existing".into(), client(99)),
+            Err(RegistrationError::Unavailable)
+        );
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.contains("dcr-new"));
+        assert_eq!(registry.get("dcr-existing").unwrap().created_at, 7);
+        assert_eq!(fs::read(&path).expect("preserved registry"), before);
+
+        fs::remove_dir(&blocked_tmp).expect("restore storage");
+        registry
+            .insert("dcr-retry".into(), client(9))
+            .expect("registration can retry after storage recovers");
+        let reloaded = ClientRegistry::load_path(Ok(path), "write-failure-test");
+        assert!(reloaded.contains("dcr-existing"));
+        assert!(reloaded.contains("dcr-retry"));
+        assert!(!reloaded.contains("dcr-new"));
+    }
+
+    #[test]
+    fn malformed_existing_registries_are_not_overwritten() {
+        crate::home::isolate_for_tests();
+        for (i, raw) in ["{broken", "{}", r#"{"clients":[]}"#].iter().enumerate() {
+            let path = crate::home::test_scratch_dir("oauth-malformed").join("clients.json");
+            fs::write(&path, raw).expect("malformed original registry");
+            let registry = ClientRegistry::load_path(Ok(path.clone()), "malformed-test");
+            assert_eq!(
+                registry.insert(format!("dcr-new-{i}"), client(1)),
+                Err(RegistrationError::Unavailable)
+            );
+            assert!(registry.is_empty(), "unknown records were not recovered");
+            assert_eq!(fs::read_to_string(path).expect("preserved original"), *raw);
+        }
+    }
+
+    #[test]
+    fn unreadable_existing_registry_disables_registration() {
+        crate::home::isolate_for_tests();
+        let path = crate::home::test_scratch_dir("oauth-unreadable").join("clients.json");
+        fs::create_dir(&path).expect("a directory cannot be read as registry JSON");
+        let marker = path.join("keep");
+        fs::write(&marker, "preserve").expect("original contents");
+        let registry = ClientRegistry::load_path(Ok(path.clone()), "unreadable-test");
+        assert_eq!(
+            registry.insert("dcr-new".into(), client(1)),
+            Err(RegistrationError::Unavailable)
+        );
+        assert!(registry.is_empty());
+        assert!(path.is_dir());
+        assert_eq!(
+            fs::read_to_string(marker).expect("preserved contents"),
+            "preserve"
+        );
+    }
+
+    #[test]
+    fn unresolved_registry_path_is_not_a_writable_memory_fallback() {
+        crate::home::isolate_for_tests();
+        let registry = ClientRegistry::load_path(
+            Err(crate::error::AppError::Message(
+                "unavailable registry path".into(),
+            )),
+            "path-failure-test",
+        );
+        assert_eq!(
+            registry.insert("dcr-new".into(), client(1)),
+            Err(RegistrationError::Unavailable)
+        );
+        assert!(registry.is_empty());
+        assert!(registry.path.is_none());
     }
 
     /// 文件里可能有 client_secret，别人读得到就等于能冒充那个客户端。
@@ -291,7 +446,9 @@ mod tests {
 
         crate::home::isolate_for_tests();
         let scope = "permission-test";
-        ClientRegistry::load(scope, scope).insert("dcr-1".into(), client(1));
+        ClientRegistry::load(scope, scope)
+            .insert("dcr-1".into(), client(1))
+            .expect("register client");
 
         let path = registry_path(scope).expect("路径");
         let mode = fs::metadata(&path).expect("元数据").permissions().mode();
@@ -303,19 +460,23 @@ mod tests {
     #[test]
     fn in_memory_registry_never_touches_disk() {
         let registry = ClientRegistry::in_memory();
-        registry.insert("dcr-1".into(), client(1));
+        registry
+            .insert("dcr-1".into(), client(1))
+            .expect("register in memory");
         assert!(registry.contains("dcr-1"));
         assert!(registry.path.is_none());
     }
 
-    /// 这条是整件事的核心：重启（等价于重新 `load` 一次）之后客户端还在，
-    /// 刷新令牌才不会被判成 invalid_client。
+    /// 重新加载后保留客户端注册元数据，原 client_id 仍可重新授权；
+    /// 签名 refresh token 的兼容路径另由 oauth_flow 测试覆盖。
     #[test]
     fn registry_survives_a_reload() {
         crate::home::isolate_for_tests();
         let scope = "reload-test";
         let registry = ClientRegistry::load(scope, scope);
-        registry.insert("dcr-persisted".into(), client(7));
+        registry
+            .insert("dcr-persisted".into(), client(7))
+            .expect("persist client");
 
         let reloaded = ClientRegistry::load(scope, scope);
         let found = reloaded.get("dcr-persisted").expect("客户端应当还在");

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::bearer::constant_time_eq_str;
-use super::client_registry::{ClientRegistry, RegisteredClient};
+use super::client_registry::{ClientRegistry, RegisteredClient, RegistrationError};
 use super::grant::{Grant, GrantBook, NoGrants};
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
@@ -53,6 +53,18 @@ fn registration_error(error: &str, description: &str) -> Response {
         axum::Json(json!({
             "error": error,
             "error_description": description
+        })),
+    )
+        .into_response()
+}
+
+fn registration_unavailable(error: RegistrationError) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::Json(json!({
+            "error": "temporarily_unavailable",
+            "error_description": error.to_string()
         })),
     )
         .into_response()
@@ -167,8 +179,12 @@ impl OAuthRuntime {
             .is_some_and(|expected| constant_time_eq_str(client_secret, expected))
     }
 
-    pub fn register(&self, client_id: String, client: RegisteredClient) {
-        self.clients.insert(client_id, client);
+    pub fn register(
+        &self,
+        client_id: String,
+        client: RegisteredClient,
+    ) -> Result<(), RegistrationError> {
+        self.clients.insert(client_id, client)
     }
 
     pub fn verify_access_token(&self, token: &str, server_url: &str) -> bool {
@@ -265,7 +281,7 @@ pub fn register_client(oauth: &OAuthRuntime, request: ClientRegistrationRequest)
     };
     let client_id = format!("dcr-{}", uuid::Uuid::new_v4().simple());
     let client_secret = (auth_method != "none").then(|| uuid::Uuid::new_v4().simple().to_string());
-    oauth.register(
+    if let Err(error) = oauth.register(
         client_id.clone(),
         RegisteredClient {
             redirect_uris: request.redirect_uris.clone(),
@@ -274,7 +290,9 @@ pub fn register_client(oauth: &OAuthRuntime, request: ClientRegistrationRequest)
             client_name: request.client_name.trim().to_string(),
             created_at: unix_now(),
         },
-    );
+    ) {
+        return registration_unavailable(error);
+    }
 
     let mut body = json!({
         "client_id": client_id,
@@ -1111,6 +1129,122 @@ mod tests {
             .to_string()
     }
 
+    fn confidential_registration(oauth: &OAuthRuntime) -> Response {
+        register_client(
+            oauth,
+            ClientRegistrationRequest {
+                redirect_uris: vec![REDIRECT_URI.into()],
+                token_endpoint_auth_method: "client_secret_post".into(),
+                grant_types: vec!["authorization_code".into(), "refresh_token".into()],
+                response_types: vec!["code".into()],
+                client_name: "private-registration-fixture".into(),
+            },
+        )
+    }
+
+    fn assert_registration_unavailable(response: Response, description: &str) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            body_json(response),
+            json!({
+                "error": "temporarily_unavailable",
+                "error_description": description
+            }),
+            "an unsuccessful registration must not expose a client id, secret, or I/O detail"
+        );
+    }
+
+    #[test]
+    fn registration_storage_failure_does_not_acknowledge_or_publish_a_client() {
+        crate::home::isolate_for_tests();
+        let scope = "oauth-http-write-failure";
+        let clients = Arc::new(ClientRegistry::load(scope, scope));
+        let oauth = runtime_with("chatgpt-client-test", clients.clone());
+        let existing_id = register(&oauth);
+        let base = "https://lb.example.com";
+        let (access, refresh) = authorize_and_exchange(&oauth, &existing_id, base);
+        let path = crate::home::data_home()
+            .expect("test home")
+            .join("data/oauth-clients")
+            .join(format!("{scope}.json"));
+        let before = std::fs::read(&path).expect("original registry");
+        let blocked_tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        std::fs::create_dir(&blocked_tmp).expect("force temporary write failure");
+
+        assert_registration_unavailable(
+            confidential_registration(&oauth),
+            "Client registration is temporarily unavailable.",
+        );
+        assert_eq!(
+            clients.len(),
+            1,
+            "the rejected registration must not enter memory"
+        );
+        assert!(clients.contains(&existing_id));
+        assert_eq!(std::fs::read(&path).expect("preserved registry"), before);
+
+        let after = runtime_with(
+            "chatgpt-client-test",
+            Arc::new(ClientRegistry::load(scope, scope)),
+        );
+        assert!(after.client_id_allowed(&existing_id));
+        assert!(after.verify_access_token(&access, base));
+        assert_eq!(
+            refresh_with(&after, &existing_id, refresh).status(),
+            StatusCode::OK
+        );
+        authorize_and_exchange(&after, &existing_id, base);
+        std::fs::remove_dir(blocked_tmp).expect("remove write blocker");
+        super::super::client_registry::remove_scope(scope).expect("clean registry");
+    }
+
+    #[test]
+    fn registration_capacity_preserves_existing_clients_and_returns_a_specific_error() {
+        let clients = Arc::new(ClientRegistry::in_memory());
+        let oauth = runtime_with("chatgpt-client-test", clients.clone());
+        let mut registered = Vec::new();
+        // 通过真实注册入口达到容量，不依赖测试专用的 HTTP 错误构造。
+        for _ in 0..50 {
+            registered.push(register(&oauth));
+        }
+        assert_registration_unavailable(
+            confidential_registration(&oauth),
+            "Client registration capacity has been reached; existing clients are preserved.",
+        );
+        assert_eq!(clients.len(), registered.len());
+        for id in &registered {
+            assert!(oauth.client_id_allowed(id));
+        }
+        authorize_and_exchange(&oauth, &registered[0], "https://lb.example.com");
+    }
+
+    #[test]
+    fn damaged_registry_returns_service_unavailable_without_overwriting_it() {
+        crate::home::isolate_for_tests();
+        let scope = "oauth-http-damaged-registry";
+        let path = crate::home::data_home()
+            .expect("test home")
+            .join("data/oauth-clients")
+            .join(format!("{scope}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("test registry directory");
+        let original = b"{private damaged registry fixture";
+        std::fs::write(&path, original).expect("damaged registry");
+        let clients = Arc::new(ClientRegistry::load(scope, scope));
+        let oauth = runtime_with("chatgpt-client-test", clients.clone());
+
+        assert_registration_unavailable(
+            confidential_registration(&oauth),
+            "Client registration is temporarily unavailable.",
+        );
+        assert!(clients.is_empty(), "unknown identities were not recovered");
+        assert_eq!(
+            std::fs::read(&path).expect("preserved damaged registry"),
+            original.as_slice()
+        );
+        super::super::client_registry::remove_scope(scope).expect("clean registry");
+    }
+
     #[test]
     fn token_exchange_without_client_secret() {
         let oauth = runtime("chatgpt-client-test");
@@ -1172,17 +1306,26 @@ mod tests {
 
     /// 重启服务不该让已经装好的连接器掉授权。
     ///
-    /// 这里用"同一份注册表 + 新的 OAuthRuntime"模拟重启：进程内的 pending 表、
-    /// 内存态全丢，只有落盘的注册表还在。
+    /// 重新从磁盘加载注册表，再构造 OAuthRuntime；不复用原来的注册表 Arc。
     #[test]
     fn restart_keeps_registered_clients_usable() {
-        let clients = Arc::new(ClientRegistry::in_memory());
-        let before = runtime_with("chatgpt-client-test", clients.clone());
+        crate::home::isolate_for_tests();
+        let scope = "oauth-restart-persisted";
+        let before = runtime_with(
+            "chatgpt-client-test",
+            Arc::new(ClientRegistry::load(scope, scope)),
+        );
         let client_id = register(&before);
-        let (_, refresh) = authorize_and_exchange(&before, &client_id, "https://lb.example.com");
+        let (access, refresh) =
+            authorize_and_exchange(&before, &client_id, "https://lb.example.com");
+        drop(before);
 
-        let after = runtime_with("chatgpt-client-test", clients);
+        let after = runtime_with(
+            "chatgpt-client-test",
+            Arc::new(ClientRegistry::load(scope, scope)),
+        );
         assert!(after.client_id_allowed(&client_id));
+        assert!(after.verify_access_token(&access, "https://lb.example.com"));
         let response = token_exchange(
             &after,
             &HeaderMap::new(),
@@ -1195,6 +1338,8 @@ mod tests {
             "https://lb.example.com",
         );
         assert_eq!(response.status(), StatusCode::OK);
+        authorize_and_exchange(&after, &client_id, "https://lb.example.com");
+        super::super::client_registry::remove_scope(scope).expect("clean registry");
     }
 
     /// 注册表整个丢了（文件损坏、从旧版本升上来）也要能续命，
