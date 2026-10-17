@@ -1307,3 +1307,143 @@ JavaScript in the Playwright server process and is RCE-equivalent"（实现是 N
 **本机换上（同日 23:37，用户批准）：**`eea0535` 的 release 构建，二进制和数据目录先备份到 `~/.local/opt/`（`gld-0.8.3-20261009-2336`、`gld-config-20261009-2336.tgz`，0600），写新文件再改名，去掉 35 个 `CLAUDE*` 变量重启。换之前没有在跑的命令。构建提交等于 HEAD；工具表 33 项、指纹 `5155ec6663bb33e2` 没变，ChatGPT 不用 Refresh；`gld ls`、`profiles.json` 和 `oauth-clients/hub.json` 按内容算的指纹不变；新守护进程 `CLAUDE*` 变量 0 个；`gld health` 四项 200。实机探针：在 gld 项目上 `gld tool call patch_check` 一个行尾多空格的补丁（只预检不写），回包和 operations.jsonl 都有 `context_drifted` 加 `near_miss: trailing_whitespace`，仓库没改动。
 
 **没验：**`[patch]` 那一行只在 MCP 的 HTTP 入口记，`gld tool call` 不经过它；实机上要等 ChatGPT 下一次补丁失败才看得到，现在只有集成测试的证据。
+
+## 23. SuperAssistant 直接连接 gld（2026-10-17）
+
+**需求与源码：**用户要求 DeepSeek 网页经 SuperAssistant 直接调用 gld，不再增加外部代理工具。本次修改基于
+`54bacbf126212fc4402cca84d677f5d899ced733` 的工作树，尚未提交、发布或安装；包版本仍为 0.8.3，不能把已有 0.8.3 发布包当成包含此功能。
+实现与验收在本机 Apple 芯片 macOS 上进行，没有新增依赖或修改 Cargo.lock。
+
+**客户端依据：**核对 SuperAssistant 0.6.0 对应提交 `c26168ee2c5708a3a65ef5afd88cda1a97c81734` 的
+[Streamable HTTP transport](https://github.com/srbhptl39/MCP-SuperAssistant/blob/c26168ee2c5708a3a65ef5afd88cda1a97c81734/chrome-extension/src/mcpclient/plugins/streamable-http/StreamableHttpPlugin.ts)：
+只向 `StreamableHTTPClientTransport` 传 URL，没有 OAuth authProvider 或自定义认证头。依赖锁定的 MCP SDK 1.25.2
+首次初始化可以提出 2025-11-25，接受协商到 gld 的 2025-06-18；通知后探测 GET 时接受 405。
+扩展的源码审查不等于已在 Chrome 和 DeepSeek 页面完成实测。
+
+| 改动 | 行为与边界 |
+| --- | --- |
+| `gld grant browser <名称> <项目> --ttl 8h` | 单独生成浏览器 URL 凭据，默认只读、8 小时，最长 24 小时；`--write` 显式选择，沿用普通 grant 的执行风险 |
+| `/mcp/browser/<密钥>` | 复用现有 Hub、工具、项目范围和主体隔离；不增加执行器、隧道或代理进程，标准 `/mcp` 保留原 OAuth/Bearer 认证 |
+| 凭据生命周期 | 原始随机值只在创建回包出现，数据文件仅存 SHA-256 摘要；每次请求重查记录、时间和 Origin，撤销或到期后下一次请求拒绝 |
+| Origin / CORS | 默认 Chrome 商店版扩展 Origin，支持重复 `--origin`；有 Origin 则精确匹配，重复/非法 Origin 拒绝；缺省 Origin 仍须持有密钥。OPTIONS 可预检，不执行工具 |
+| Streamable HTTP | 通知返回 202 空响应，工具结果返回 JSON；独立 GET 流和 DELETE 返回 405，不签发 MCP session；不支持后续动态工具通知 |
+| 旧通道隔离 | 浏览器记录留空普通口令和 bearer 字段，旧认证查找与 OAuth 的 by_id 显式排除浏览器记录；URL 密钥不能作为标准 `/mcp` 的 bearer 或 query token |
+| 日志与响应 | gld 不记录浏览器 URI/密钥/摘要，浏览器响应 no-store / no-referrer；旧 `/hub` 网关的 reqwest 错误移除 URL，避免上游失败时回显路径密钥 |
+| CLI / IPC | 新增独立 `AddBrowserGrant` 请求，协议 5 → 6；新 CLI 连旧 daemon 在创建授权前报告版本不匹配，不能静默生成永久授权 |
+
+`--write` 的命令仍以用户身份执行，工作区范围不是 OS 沙箱。URL 到期只影响后续请求认证，已经接受的命令仍遵循原有
+`timeout_ms`；主动 `grant rm` 才沿用现有会话终止逻辑。浏览器 URL 不自动续期、不能经 `grant ls --reveal` 恢复。
+SuperAssistant 会保存并可能在调试界面显示 URL，因此同机优先用生成的 loopback 地址；第三方反代的访问日志需隐藏密钥。
+
+**真实执行的验证：**所有测试使用隔离的 `GLD_HOME`，没有在真实数据目录创建或撤销 grant。
+
+| 命令 / 范围 | 结果 |
+| --- | --- |
+| `cargo --config 'env.GLD_HOME="target/test-home-browser-20261017"' test -p gld --test browser_grants --test scoped_grants --test oauth_connector_flow --locked` | 退出 0，8 项通过；真实 CLI 启动服务后进行 HTTP 往返，包括原 OAuth 授权与服务重启回归 |
+| 同一隔离配置下 `cargo test --workspace --all-targets --locked` | 退出 0，测试框架报告 933 passed / 0 failed / 0 ignored，42 个测试二进制结果；不是外部客户端或所有平台验收声明 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0，覆盖 CLI / core / daemon 与所有 target |
+| `cargo fmt --all -- --check`、`git diff --check` | 均退出 0 |
+| `scripts/gen-cli-docs.sh` | 退出 0，从真实 CLI 帮助重新生成 `docs/cli.md`，新增命令被文档门禁覆盖 |
+| `cargo build --release --locked` | 退出 0，优化构建完成；两个 build script 的调试符号剥离出现本机 rust-objcopy 缺 libLLVM.dylib 警告，没有修改系统工具链 |
+| `target/release/gld --home target/test-home-browser-20261017 grant browser --help` | 退出 0，release 二进制实际启动并正确显示新命令；没有创建授权 |
+
+`browser_grants.rs` 新增 3 个集成用例：初始化/通知/列工具/读文件、只读与越界硬拒绝、Origin 与无效协议头、
+GET/DELETE 405、预检、标准通道隔离、撤销与同名重建、到期、TTL 边界、持久化不留原密钥，以及显式 --write 的临时文件写入。
+core 另有 4 个新增单元用例覆盖密钥/到期边界、旧记录兼容、Origin 和公网基地址。
+
+构件：`target/release/gld`，13591984 字节，SHA-256 `786c8528459883cb61bfd20dd7cd409d16270bcc64a1b9cc82a54de3f6d4e66c`。
+它来自上述未提交工作树，摘要用于后续安装时核对同一个构件，不作为已发布包或来源证明。
+
+**实际服务与未验范围：**完工前通过 `server_info` 复核，当前连接仍是 0.8.3 / `eea05359c42b`，OAuth，33 个工具，
+指纹 `5155ec6663bb33e2`。没有替换运行二进制、重启服务、改真实凭据或隧道，没有执行 Git 提交、推送或发布。
+Chrome 扩展到 DeepSeek 当前页面的注入、调用、结果回填与继续对话尚未实测；这次没有安装或执行 SuperAssistant/其 JavaScript SDK。
+既有 ccnm / cloudflared 条件返回用例不凭 0 ignored 外推真实 SSH 或公网验收。
+本机升级和实际 browser grant 创建需按当前任务入口取得对应授权。
+
+接入步骤、只读切换到可写时替换 URL、扩展约 30 秒超时、`workspace_context` 与显式 workspace 的要求，
+已写入 [连接客户端](../connect-clients.md)；凭据与主体边界同步更新 [安全](../security.md)、[概念](../concepts.md) 和 RFC-0007 后续决定。
+
+## 24. 升级连续性要求与 OAuth 身份保护（2026-10-17）
+
+**用户要求：**每次正常升级都不能中断当前本机服务或已有 connector（包括 ChatGPT Web），必须保留原 client_id、
+授权、连接入口与多个项目。该要求优先于 §23 browser grant 的在线激活。此次没有获得或使用维护中断的例外，
+正式服务继续运行，不执行停止、重启、凭据再生成、真实 DCR 注册或 grant 创建/撤销。
+
+**源码与范围：**基于 `54bacbf126212fc4402cca84d677f5d899ced733` 的未提交工作树，在 §23 变更之上修复注册可靠性、
+CLI 提示和文档。包版本仍为 0.8.3，候选 daemon 协议 6；没有新增依赖或修改 Cargo.lock。
+本节构件取代 §23 的旧候选摘要，不能把正式 0.8.3 发布包当作包含这些修改。
+
+### 已核对的问题与修复
+
+| 原行为 | 当前候选源码的行为 |
+| --- | --- |
+| ClientRegistry 释放 mutex 后分别写快照；同进程复用临时文件名，并发快照可能覆盖已确认的注册 | 同一实例持锁完成候选表、保存、内存发布；旧快照不能在新注册之后回写 |
+| 注册落盘失败仅写日志，仍发布内存记录并返回 HTTP 201 | 保存成功才确认；失败保留原文件和内存，HTTP 503，不返回 client_id / secret 或底层 I/O 信息 |
+| 超过 50 条时淘汰最旧注册 | 保持容量上限但拒绝新增，所有既有 client_id 保留，不靠淘汰现有 connector 腾位置 |
+| 定位、读取或解析失败降为空表，后续注册可能覆盖原件 | 异常实例停用新注册；只允许明确不存在的文件从空表开始；损坏/错误结构原件保留 |
+| 新 CLI 版本不匹配提示一律 daemon restart | 原有不兼容拒绝行为保留，提示本次命令未执行、旧服务仍运行；restart 帮助明确会中断连接、隧道和命令 |
+
+源码入口是 `crates/core/src/auth/client_registry.rs`、`oauth_flow.rs`，
+以及 `crates/cli/src/backend.rs`、`commands/daemon.rs`、`cli.rs` 与 `error.rs`。
+DCR 失败采用 `temporarily_unavailable` 和固定描述，并加 `Cache-Control: no-store`。
+注册容量与存储异常分别提供固定描述；新注册失败不改变已经加载的合法客户端。
+正常旧注册文件格式、OAuth 签名、JWT、refresh 兼容、grant 范围与撤销逻辑未变。
+
+这些修复证明的是同一注册表实例的失败原子性与正常磁盘重载；没有新增跨进程注册事务、fsync 断电耐久性或丢失记录恢复。
+加载时已损坏的注册记录不能凭有效 token 找回；修复文件后当前仍需重新加载，没有新造在线重载接口。
+故障测试独立隔离日志目录，避免单独运行时依赖其他测试先隔离 GLD_HOME。
+
+### 现场证据与升级能力边界
+
+用户截图显示 SuperAssistant 选择传统 SSE，URI 为 `http://localhost:3006/sse`，报 `Failed to fetch`。
+它未显示 OAuth token 错误或 client_id 前后变化，不能作为已丢失 DCR 身份的证据。
+本轮发现的代码缺口是可能原因，不据此追认用户之前的具体故障根因。
+
+当前及旧 revision 的生命周期核对表明：daemon 单实例锁、Hub 端口、隧道、OAuth pending map、
+exec Child/stdin 与 workspace 执行状态均没有交接协议。restart 是 stop + start；
+App 正常 shutdown 也终止运行命令，监听约 3 秒后可能 abort。
+正常重启后沿用身份的测试不能证明在途调用、授权码、隧道或命令持续运行。
+
+[RFC-0008](../rfc/0008-continuous-upgrades.md) 定义 gld 内部稳定入口/隧道/认证与配置单写者，以及可替换执行代。
+第一阶段以整个 workspace 为所有权单位，避免只路由 session id 时漏记其他代的写入序号；
+长期命令使旧代继续保留，不能超时强杀。稳定宿主自身升级还须独立资源交接，worker 更替通过不能关闭整个要求。
+现有旧 0.8.3 没有预先提供交接接口，新二进制不能单方面无中断接管；严格不中断时保留旧 daemon，暂不激活本轮功能。
+
+### 实际执行的验证
+
+环境为本机 Apple 芯片 macOS。测试命令使用隔离的
+`GLD_HOME=target/test-home-smooth-20261017`，没有把故障注入或测试注册发到正式端点。
+
+| 命令 / 范围 | 结果 |
+| --- | --- |
+| `cargo --config 'env.GLD_HOME="target/test-home-smooth-20261017"' test -p gld-core auth:: --locked` | 退出 0，47 项认证测试通过 |
+| 同一隔离配置下 `cargo test --workspace --all-targets --locked` | 退出 0；42 个测试二进制结果，941 passed / 0 failed / 0 ignored / 0 filtered |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+| `cargo build --locked -p gld` 与 `scripts/gen-cli-docs.sh` | 均退出 0；真实候选 CLI 生成的帮助包含 restart 中断说明 |
+| 文档命令、消息、生成脚本、链接和锚点门禁 | 随全量测试通过；没有把新 RFC 里的方案当成已存在的 CLI |
+| `cargo build --release --locked` | 退出 0，2m 05s；沿用本机两条 rust-objcopy 缺 libLLVM.dylib 的 build-script 剥离警告，没有修改系统工具链 |
+| `target/release/gld --home target/test-home-smooth-20261017 daemon restart --help` | 退出 0；实际只显示帮助，没有运行 restart |
+| 只读 Python 标准库计算候选大小与 SHA-256 | 退出 0，结果见下方；已通过 check_command，没有放宽命令策略 |
+
+新增/强化用例包含并发注册后全部重载、满额保留旧 ID、保存失败保持文件与内存、损坏/不可读/错误结构保留原件、
+真实注册入口返回 503 且不含部分凭据。OAuth 重启单元测试从复用内存 Arc 改为真正重新加载磁盘，
+继续验证旧 client_id、原 access、原 refresh 和重新授权。全量还覆盖真实临时 daemon 的 browser grant、
+普通 grant 与 OAuth 连接器 HTTP 往返。测试框架的 0 ignored 不外推既有 ccnm/cloudflared 条件返回用例为真实 SSH 或公网验收。
+
+候选构件：`target/release/gld`，13591696 字节，SHA-256
+`960aa6c6d4f1652ae6041329ab87852b205d07fef468706d51e6b9dcf826030d`。它仍是未提交源码的本机构建，不是已发布或已安装产物。
+
+### 文档与在线结果
+
+README、安装、daemon、接入、排障、安全、概念、CLI 帮助及 RFC-0004 的后续决定已同步。
+[升级连续性](../development.md#升级连续性)明确要求每次跨版本复用原连接器、client_id、access/refresh token，
+验证切换期间的请求、授权码、命令、隧道与失败回退。现有 CI 尚未实现这套连续切换验收，
+文档门禁与当前测试全绿不能被写成“零中断升级已经交付”。当前排队只维护在
+[task_plan.md](../../task_plan.md)，browser grant 激活受该要求约束。
+
+完工前通过当前连接的 `server_info` 核对，正式服务仍为 0.8.3 / `eea05359c42b`、OAuth，
+33 项工具、指纹 `5155ec6663bb33e2`。本轮没有替换正式二进制、重启服务、改入口、改真实 OAuth 身份、
+提交/推送或发布；用户已有 `exports/` 未处理。Chrome 扩展与 DeepSeek 网页闭环仍未实测，
+新路由没有因构建成功而在旧 daemon 上生效。
+
