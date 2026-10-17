@@ -170,7 +170,12 @@ pub fn merge_source_lists(global: &[String], workspace: &[String]) -> Vec<String
 
 /// 在这个工具集下，扫描到的说明里哪几份真的会注入。
 ///
-/// compact 是默认工具集，它为了省 token 只保留工作区里的 AGENTS.md 一份。
+/// compact 是默认工具集，它为了省 token 只收两类：工作区里的 AGENTS.md 一份，
+/// 加上用户用 `--custom-instruction-paths` 点名的文件。各 IDE 自动扫到的那些
+/// （`.cursorrules`、`~/.claude/CLAUDE.md`……）不进：它们写给别的工具，量也不受控。
+/// 点名的不砍：以前连它也滤掉，经 gld 开发 gld 的 ChatGPT 一条用户规则都没拿到
+/// （审查 §26），和 2026-09-19 前 compact 下 Skill 整个不可用是同一个坑。
+///
 /// 这条规则以前只写在 `ToolContext::current_ai_instructions` 里，
 /// 而 `gld context` 自己扫一遍全报出来——两边口径不一致，命令就在撒谎。
 /// 现在两处都调这个函数。
@@ -181,15 +186,16 @@ pub fn effective_instructions(
     if tool_profile != "compact" {
         return documents.to_vec();
     }
+    let agents = documents.iter().position(|document| {
+        document.scope == "workspace"
+            && (document.path.ends_with("AGENTS.md")
+                || document.path.ends_with("AGENTS.override.md"))
+    });
     documents
         .iter()
-        .filter(|document| {
-            document.scope == "workspace"
-                && (document.path.ends_with("AGENTS.md")
-                    || document.path.ends_with("AGENTS.override.md"))
-        })
-        .take(1)
-        .cloned()
+        .enumerate()
+        .filter(|(index, document)| Some(*index) == agents || document.scope == "custom")
+        .map(|(_, document)| document.clone())
         .collect()
 }
 
@@ -440,25 +446,43 @@ pub fn discover_instructions(
         }
     }
 
-    let mut seen_paths = HashSet::new();
-    let mut seen_content = HashSet::new();
-    let mut result = Vec::new();
+    // 同一份文件（同路径或同内容）只留第一次出现的那条。点名的路径排在最后，
+    // 它若和前面自动扫到的重复（`~/.codex/AGENTS.md` 软链到它、`~/.claude/CLAUDE.md`
+    // 和它一字不差），就把留下的那条改成 custom：否则 compact 按作用域过滤时，
+    // 用户点名的说明会因为"已经扫到过"而被滤掉。
+    let mut seen_paths = HashMap::<String, usize>::new();
+    let mut seen_content = HashMap::<String, usize>::new();
+    let mut result: Vec<InstructionDocument> = Vec::new();
+    let promote = |result: &mut Vec<InstructionDocument>, index: usize, scope: &str| {
+        if scope == "custom" {
+            result[index].scope = "custom".into();
+        }
+    };
     for (provider, path, scope) in candidates {
         if !path.is_file() {
             continue;
         }
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
         let path_key = canonical.to_string_lossy().to_string();
-        if !seen_paths.insert(path_key) {
+        if let Some(&index) = seen_paths.get(&path_key) {
+            promote(&mut result, index, scope);
             continue;
         }
         let Ok(content) = fs::read_to_string(&canonical) else {
             continue;
         };
         let content = content.trim().to_string();
-        if content.is_empty() || !seen_content.insert(hex_hash(content.as_bytes())) {
+        if content.is_empty() {
             continue;
         }
+        let content_key = hex_hash(content.as_bytes());
+        if let Some(&index) = seen_content.get(&content_key) {
+            seen_paths.insert(path_key, index);
+            promote(&mut result, index, scope);
+            continue;
+        }
+        seen_paths.insert(path_key, result.len());
+        seen_content.insert(content_key, result.len());
         result.push(InstructionDocument {
             provider,
             path: display_path(workspace_root, &canonical),
@@ -1344,6 +1368,46 @@ mod tests {
 
         let scopes: Vec<&str> = docs.iter().map(|doc| doc.scope.as_str()).collect();
         assert_eq!(scopes, vec!["global", "workspace"], "{docs:?}");
+    }
+
+    /// compact 下：自动扫到的全局说明不进，用户点名的进——哪怕点名的正是自动扫到的
+    /// 那一份（同路径），或者是内容一字不差的另一份（`~/.claude/CLAUDE.md` 和
+    /// `~/.codex/AGENTS.md` 常常就是这样）。
+    #[test]
+    fn compact_keeps_named_instruction_files_even_when_they_duplicate_discovered_ones() {
+        let root = tempfile::tempdir().expect("root");
+        fs::write(root.path().join("AGENTS.md"), "workspace instructions").expect("agents");
+        let home = tempfile::tempdir().expect("home");
+        fs::create_dir_all(home.path().join(".codex")).expect("codex dir");
+        let global = home.path().join(".codex/AGENTS.md");
+        fs::write(&global, "global rules").expect("global");
+        let copy = home.path().join("rules-copy.md");
+        fs::write(&copy, "global rules\n").expect("copy");
+
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.path().to_path_buf()));
+        let injected = |custom: &str| {
+            let docs = discover_instructions(root.path(), &[], custom);
+            effective_instructions(&docs, "compact")
+                .into_iter()
+                .map(|doc| doc.content)
+                .collect::<Vec<_>>()
+        };
+        // 前提：不点名时自动发现确实扫到了它，后面两种才是"重复"。
+        let discovered = discover_instructions(root.path(), &[], "");
+        assert!(
+            discovered
+                .iter()
+                .any(|doc| doc.scope == "global" && doc.content == "global rules"),
+            "{discovered:?}"
+        );
+        let unnamed = injected("");
+        let same_path = injected("~/.codex/AGENTS.md");
+        let same_content = injected(copy.to_str().expect("utf-8 path"));
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+
+        assert_eq!(unnamed, vec!["workspace instructions"]);
+        assert_eq!(same_path, vec!["global rules", "workspace instructions"]);
+        assert_eq!(same_content, vec!["global rules", "workspace instructions"]);
     }
 
     #[test]

@@ -483,8 +483,8 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 
 省 token 不只体现在工具条数上。`compact` 下：
 
-- **说明文件只注入项目里的 `AGENTS.md`（或 `AGENTS.override.md`）一份**（经 `workspace_context` 给 AI），
-  `.cursorrules`、`CLAUDE.md`、全局说明都不进去；
+- **说明文件只注入项目里的 `AGENTS.md`（或 `AGENTS.override.md`）一份，加上你点名的文件**（经 `workspace_context` 给 AI）；
+  自动扫到的 `.cursorrules`、`CLAUDE.md`、各工具的全局说明都不进去；
 - **Skill 目录有字符上限**（约 1200 字符，大概 8–12 条，每条描述截到 120 字符），
   放不下的在末尾写明"还有几个"。`list_skills` / `get_skill` 两个工具照常暴露，
   AI 调一次就拿得到全部。
@@ -496,6 +496,17 @@ gld tool list -w api                # 看这个项目实际暴露了什么
 >
 > 目录里**项目自己的 skill 排在前面**，主目录里那批装给所有项目用的排后面：
 > 上限挤掉谁，得是通用的那些。
+
+**想让 ChatGPT 也守你给 Codex / Claude 写的那份规则**，把它点名：
+
+```bash
+gld settings runtime --custom-instruction-paths ~/.codex/AGENTS.md
+```
+
+多份用逗号隔开，可以写 `~/`；传 `""` 清空。点名的文件在任何工具集下都整份注入，所以别点太长的。
+改完不用重启，下一次 `workspace_context` 就带上，在跑的命令不受影响；`gld context` 里它打 `✓`。
+不点名就拿不到：连 gld 开发 gld 的 ChatGPT 就是这样，一条用户规则都没收到，提交和写文档全按它自己的习惯来（审查 §26）。
+点名只在 `--instruction-sources` 留空（默认，自动发现）或里面写了 `custom` 时生效。
 
 `gld context` 会把这件事标出来——打 `✓` 的才真的进去，打 `·` 的只是扫到了：
 

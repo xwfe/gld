@@ -290,6 +290,49 @@ fn context_marks_what_is_actually_injected() {
     );
 }
 
+/// 用 `--custom-instruction-paths` 点名的说明，compact 下也要真的进 `workspace_context`。
+///
+/// 以前它和 `.cursorrules` 一样被滤掉：用户的全局规则配了也白配，经 gld 开发 gld 的
+/// ChatGPT 一条规则都没拿到（审查 §26）。自动扫到的 IDE 文件照旧不进。
+#[test]
+fn compact_injects_explicitly_configured_instruction_files() {
+    let env = Env::new();
+    env.write("AGENTS.md", "AGENTS-MARKER-5d1c\n");
+    env.write(".cursorrules", "CURSOR-MARKER-0e7f\n");
+    let rules = tempfile::tempdir().expect("rules dir");
+    let rules_file = rules.path().join("RULES.md");
+    std::fs::write(&rules_file, "CUSTOM-MARKER-4a2b 每完成一步就提交\n").expect("rules file");
+    env.ok(&[
+        "settings",
+        "runtime",
+        "--custom-instruction-paths",
+        rules_file.to_str().expect("utf-8 path"),
+    ]);
+    let service = env.serve("ctx", "noauth");
+
+    let snapshot = env.json(&["--json", "context"]);
+    let injected = injected_paths(&snapshot);
+    assert!(
+        injected.iter().any(|path| path.ends_with("RULES.md")),
+        "点名的说明应当标成会注入：{injected:?}"
+    );
+    assert!(
+        injected.iter().any(|path| path.contains("AGENTS.md")),
+        "{injected:?}"
+    );
+    assert!(
+        !injected.iter().any(|path| path.contains(".cursorrules")),
+        "自动扫到的照旧不进：{injected:?}"
+    );
+
+    let text = model_context(&service);
+    assert!(
+        text.contains("CUSTOM-MARKER-4a2b") && text.contains("AGENTS-MARKER-5d1c"),
+        "点名的说明和 AGENTS.md 都该递给模型：{text}"
+    );
+    assert!(!text.contains("CURSOR-MARKER-0e7f"), "{text}");
+}
+
 fn instruction_paths(snapshot: &serde_json::Value) -> Vec<String> {
     snapshot["instructions"]
         .as_array()

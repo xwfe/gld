@@ -1595,10 +1595,10 @@ Options:
           关闭彩色输出（也可设置环境变量 NO_COLOR）
       --skill-sources <SKILL_SOURCES>
           全局 Skill 来源，逗号分隔
-      --custom-instruction-paths <CUSTOM_INSTRUCTION_PATHS>
-          
-      --custom-skill-paths <CUSTOM_SKILL_PATHS>
-          
+      --custom-instruction-paths <PATHS>
+          点名注入给所有项目的说明文件，逗号或换行分隔，可写 ~/；任何工具集都注入，传 "" 清空
+      --custom-skill-paths <PATHS>
+          额外的 Skill 目录，逗号或换行分隔，可写 ~/；传 "" 清空
       --hidden-skills <NAMES>
           本机装的 Skill 里不交给 AI 的，按名字，逗号分隔；传 "" 清空。项目自己的不受影响
   -h, --help

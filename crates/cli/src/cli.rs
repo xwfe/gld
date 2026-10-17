@@ -1159,9 +1159,11 @@ pub struct RuntimeSetArgs {
     /// 全局 Skill 来源，逗号分隔
     #[arg(long)]
     pub skill_sources: Option<String>,
-    #[arg(long)]
+    /// 点名注入给所有项目的说明文件，逗号或换行分隔，可写 ~/；任何工具集都注入，传 "" 清空
+    #[arg(long, value_name = "PATHS")]
     pub custom_instruction_paths: Option<String>,
-    #[arg(long)]
+    /// 额外的 Skill 目录，逗号或换行分隔，可写 ~/；传 "" 清空
+    #[arg(long, value_name = "PATHS")]
     pub custom_skill_paths: Option<String>,
     /// 本机装的 Skill 里不交给 AI 的，按名字，逗号分隔；传 "" 清空。项目自己的不受影响
     #[arg(long, value_name = "NAMES")]
