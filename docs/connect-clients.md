@@ -19,7 +19,7 @@ gld ls                     # 地址、凭据、项目表；加 --reveal 显示�
 用**本地地址** `http://127.0.0.1:<端口>/mcp`（默认端口 28764，`gld ls` 里那一行）。
 这些客户端和服务在同一台机器上，不需要隧道。
 
-**认证方式整个服务只有一种，本机客户端和 ChatGPT 共用**，默认是 oauth。只接本机客户端、不接 ChatGPT 的，
+**标准 `/mcp` 入口的认证方式整个服务只有一种，本机客户端和 ChatGPT 共用**，默认是 oauth。只接本机客户端、不接 ChatGPT 的，
 改成 bearer 最省事，少一次授权跳转：
 
 ```bash
@@ -68,6 +68,115 @@ Cursor（写进全局的 `~/.cursor/mcp.json`；项目里的 `.cursor/mcp.json` 
 > 先调用 list_workspaces，再分别对 api 和 web 调用 git_status，告诉我两个项目各自的分支和路径。
 
 两个结果路径不同就是通了。报错对照见 [troubleshooting.md](troubleshooting.md)。
+
+## DeepSeek 网页与 SuperAssistant
+
+DeepSeek 网页自己没有 MCP 连接器，靠 Chrome 扩展
+[MCP SuperAssistant](https://chromewebstore.google.com/detail/mcp-superassistant/kngiafgkdnlkgmefdafaibkibegkcaef)：
+扩展认出模型写出来的工具调用，替它请求 gld，再把结果填回对话。**它直接连你现有的 gld 服务**——同一个端口、
+同一批项目，不另起服务，也不用装扩展里提示的 `npx @srbhptl39/mcp-superassistant-proxy`；ChatGPT 等已经连好的
+连接器不受影响。
+
+> 要 2026-10-17 之后的构建才有 `gld grant browser`，0.8.3 发布包里没有。换二进制按[安装 · 升级](install.md#升级)走，
+> 命令行和守护进程都要是新的：只换命令行、守护进程还是旧的，会报版本不一致（退出码 4）。
+
+**为什么要单独发一个地址**：SuperAssistant 的连接设置只有 Connection Type 和 Server URI 两栏，填不了请求头，
+也不走 OAuth 授权（按 0.6.0 源码核对）。把标准 `/mcp` 地址填进去只会 401。`gld grant browser` 生成一个
+**凭据就在路径里**的地址 `/mcp/browser/<随机密钥>`，挂在同一个服务上：短期有效、只开你点名的项目、默认只读。
+
+### 接上
+
+1. 在本机终端生成地址（最后的 `gld` 是项目名，换成你的；可以列多个）：
+
+   ```bash
+   gld grant browser superassistant gld --ttl 8h
+   ```
+
+   "本地连接地址"那一行形如 `http://127.0.0.1:28764/mcp/browser/<随机密钥>`，端口就是服务的端口（`gld ls` 里那个）。
+   服务配了 HTTPS 公网地址时还会多一行"公网连接地址"；Cloudflare 临时地址不在此列。浏览器和 gld 在同一台机器就用本地地址。
+   **整串地址只显示这一次**，`gld grant ls --reveal` 也找不回来——数据文件里只存了它的 SHA-256 摘要。
+
+2. 在 DeepSeek 页面打开 SuperAssistant 侧栏 → Server Configuration：**Connection Type** 选 **Streamable HTTP**
+   （默认的 Server-Sent Events (SSE) 不行），**Server URI** 粘贴整串地址，再点连接。
+3. 连上以后工具列表里应该有 `list_workspaces`、`read_file` 等。在对话里用扩展的 Insert / Attach Instructions，
+   把工具说明放进这一轮对话。
+4. 先手动验一遍：调 `list_workspaces`，再对授权的项目调 `workspace_context` 和 `read_file`。看到真实的文件内容、
+   结果填回了对话、DeepSeek 接着往下说，才算通了；只显示 Connected 不算。
+
+首轮提示可以用这段（项目名按实际改）：
+
+> 先调用 list_workspaces，选中 gld 项目，再调用 workspace_context。后续操作遵循它返回的项目规则，
+> 每次项目工具调用都明确填写 workspace。长命令用 yield_time_ms=1000 返回 session_id，再用 read_output 读输出。
+> 需要危险操作确认时，依据我对该具体操作的授权处理。
+
+扩展不会把 gld 的 `initialize.instructions` 转给模型，所以 `workspace_context` 这一步不能省。
+工具名就是 `list_workspaces` 这些，不带 `gld.` 前缀；每次项目调用都要带 `workspace`，多个 DeepSeek 标签页共用一个扩展连接也一样。
+只读地址的工具比全权连接少，也没有本机 MCP 转发那几个。
+
+### 有效期、写权限和撤销
+
+默认只读、8 小时；`--ttl` 写正整数加 `s` / `m` / `h`，最长 24 小时。要改文件、跑命令时，另外建一把带 `--write` 的：
+
+```bash
+gld grant browser superassistant-write gld --ttl 2h --write
+```
+
+它和普通可写 grant 一样危险：命令以你的账号执行，**项目范围不是操作系统沙箱**，见 [security.md](security.md)。
+把新地址换进扩展、重连之后权限才切过去，原来的只读地址不会自己变成可写。用完就撤：
+
+```bash
+gld grant ls                       # 类型一栏写"浏览器 URL"，到期一栏是剩余时间
+gld grant rm superassistant-write  # 下一次请求起就 401，它起的命令一起停掉
+```
+
+到期后下一次请求被拒，不会自动续期。还要用就 `gld grant rm` 旧的、同名重建，再把新地址换进扩展。
+到期只拦后面的请求，已经在跑的命令照常跑到它自己的 `timeout_ms`；要立刻停就 `gld grant rm`。
+
+### Origin
+
+默认只放行商店版 SuperAssistant 的 Origin `chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef`。
+手动加载（开发者模式）的扩展 ID 不一样，用 `--origin` 列出实际的，可以写多次：
+
+```bash
+gld grant browser unpacked gld --ttl 1h --origin chrome-extension://abcdefghijklmnopabcdefghijklmnop
+```
+
+请求带 Origin 时必须在名单里；不带 Origin 的请求（非浏览器客户端）只凭地址里的密钥。
+别把 `https://chat.deepseek.com` 当成要放行的 Origin：请求是扩展后台发的，带的是扩展自己的 Origin。
+预检 OPTIONS 不看凭据，真正的 POST 每次都核对密钥、有效期和 Origin。
+
+### 地址就是凭据
+
+拿到整串地址的人就能用它，直到到期或被撤销。别贴进聊天、截图或公开 issue。gld 的请求日志不记它，
+响应禁止缓存；但 SuperAssistant 会把它存在扩展的本地存储里，调试日志和侧栏也可能显示。
+用公网连接地址时，地址会经过你的反向代理或隧道，让它们的访问日志别记 `/mcp/browser/` 后面那段。
+
+### 连不上先查这些
+
+| 现象 | 先检查 |
+| --- | --- |
+| 侧栏报 `SSE error: Failed to fetch`，地址是 `http://localhost:3006/sse` | 那是扩展的默认配置，指向它自家没启动的代理，和 gld 无关。按上面第 2 步改成 Streamable HTTP 和 gld 给的地址 |
+| 没有 `grant browser` 这条命令，或报版本不一致 | 命令行或守护进程还是旧版，见[安装 · 升级](install.md#升级) |
+| 地址确认无误，`gld logs` 里也看不到这次请求，扩展仍报 `Failed to fetch` | Chrome 142 起扩展访问本机、局域网地址可能要"本地网络访问"权限：`chrome://extensions` → MCP SuperAssistant → 详情 → 网站设置，把 Local network access 设成允许（Chrome 145 起拆成 Apps on device 和 Local network 两项，本机地址对应前者）。也可以改用公网连接地址 |
+| 401，`browser_grant_invalid` | 地址没贴全、已到期或已撤销，或者扩展的 Origin 不在名单里（手动加载的扩展要 `--origin`） |
+| 404 | 连到了旧版服务，或者反向代理没把整个 `/mcp/browser/…` 路径转过来 |
+| 显示已连接，但工具列表是空的 | 重连一次再看 `gld logs`；扩展会把 `tools/list` 失败显示成空列表 |
+| 能读文件，不能改、不能跑命令 | 只读地址就是这样；确实要写，另建 `--write` 的 |
+| 工具有结果，DeepSeek 不往下说 | 检查扩展是否注入了说明、结果是否填回并提交；HTTP 调用成功不等于网页这一圈走通了 |
+
+### 协议细节
+
+gld 用 MCP `2025-06-18` 回初始化，通知回 `202` 空响应，工具结果用 JSON 返回；独立的 GET 推送流和 DELETE 会话都回 `405`，
+这是无状态 Streamable HTTP 的正常做法，扩展用的 MCP SDK 认这个。没有传统 `/sse` 端点，也不推动态工具变更通知。
+
+扩展在页面里等一次工具调用最多 30 秒。长命令用 `exec_command` 的 `yield_time_ms=1000`（最多 10000）先拿回
+`session_id`，再用 `read_output` 读；别把命令总时长 `timeout_ms` 和单次等待 `yield_time_ms` 搞混。页面上超时不代表
+gld 那边命令停了，先看结果再决定，别直接重发写操作。
+
+依据：[SuperAssistant 的 Streamable HTTP 插件源码](https://github.com/srbhptl39/MCP-SuperAssistant/blob/c26168ee2c5708a3a65ef5afd88cda1a97c81734/chrome-extension/src/mcpclient/plugins/streamable-http/StreamableHttpPlugin.ts)、
+[MCP 2025-06-18 HTTP 传输](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)、
+[Chrome 本地网络访问](https://developer.chrome.com/blog/local-network-access)。
+真实二进制的 HTTP 往返由 `crates/cli/tests/browser_grants.rs` 覆盖；Chrome 扩展加 DeepSeek 页面的整圈实测记在[审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)里。
 
 ## ChatGPT（MCP 连接器）
 
@@ -213,7 +322,7 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
   就好了
 - `gld add` / `gld rm` / `gld set`（改项目，包括项目自己的 `tool-profile`）——服务每次调用都重新读项目表；
   项目的工具集只在调用时生效，服务发给客户端的工具表不变
-- `gld grant add`——已经连好的连接器不受影响
+- `gld grant add` / `gld grant browser`——已经连好的连接器不受影响
 - `gld secret regen oauth_password` / `gld secret set oauth_password`——口令只管"下次授权填什么"，
   已经授权过的照常能用。前提是固定公网地址：改凭据会重启服务，临时地址下地址跟着变，连接器要重建
 - 长时间不用：访问令牌 30 天有效，刷新令牌 90 天，期间用过一次就自动续上
@@ -306,6 +415,8 @@ Actions 那条线路的字段（端口、认证、隧道）写成 `actions.<字�
 | `oauth`（默认） | 授权页口令（PKCE + 动态注册；老客户端可填静态 Client ID） | ChatGPT、任何走标准 OAuth 的客户端 |
 | `bearer` | `Authorization: Bearer <bearer_token>` | 本机 / 可信网络里的 CLI 与编辑器 |
 | `noauth` | 无 | 只监听 127.0.0.1、没有公网入口的本机试用 |
+
+上表说的是标准 `/mcp` 入口。`gld grant browser` 发的浏览器地址和 oauth、bearer 并存，不改上表；noauth 下不能建 grant。
 
 改认证方式和改凭据（`gld secret set/regen`）都会自动重启服务，不需要手动 `gld restart`。
 

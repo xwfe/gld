@@ -5,6 +5,12 @@
 
 ## 1. 要解决什么
 
+**后续决定（2026-10-17）：浏览器专用短期 grant。** SuperAssistant 这类只能填 URL 的客户端带不了请求头、
+也不走 OAuth，于是加了 `gld grant browser`：范围和撤销规则沿用本文，`GrantRecord.browser` 存密钥的 SHA-256 摘要、
+到期时间和允许的 Origin，口令和 bearer 字段留空，这把密钥只在 `/mcp/browser/…` 认。默认 8 小时、最长 24 小时，
+到期拦后续请求，不自动续期，也不杀已起的命令。普通 OAuth / bearer grant 仍然不限期，本文"不做有效期"说的是它们。
+接法见[客户端文档](../connect-clients.md#deepseek-网页与-superassistant)，实测记录见审查 §23、§25。
+
 服务的凭据管它的**全部**项目：拿到口令或 bearer 令牌的人，连上来调一次 `list_workspaces` 就看到全部，
 每个都能读、能写、能跑命令。本机那台服务就是 7 个项目挂在同一个公网地址上。想给别人（或另一个
 客户端）只开其中一两个、或者只让看不让动，现在做不到，只能别把那几个项目加进来。

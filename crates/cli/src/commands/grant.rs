@@ -1,6 +1,8 @@
 //! `gld grant`：只开部分项目的凭据（RFC-0007）。
 
-use gld_core::app::{GrantDto, GrantRemoved, GrantSpec, HubStatusDto};
+use gld_core::app::{
+    BrowserGrantCreatedDto, BrowserGrantSpec, GrantDto, GrantRemoved, GrantSpec, HubStatusDto,
+};
 use gld_daemon::Request;
 
 use super::Ctx;
@@ -15,6 +17,13 @@ pub async fn run(ctx: &mut Ctx, command: GrantCmd) -> CliResult {
             projects,
             write,
         } => add(ctx, name, projects, write).await,
+        GrantCmd::Browser {
+            name,
+            projects,
+            ttl,
+            origin,
+            write,
+        } => browser(ctx, name, projects, ttl, origin, write).await,
         GrantCmd::List { reveal } => list(ctx, reveal).await,
         GrantCmd::Remove { name } => remove(ctx, name).await,
     }
@@ -70,6 +79,54 @@ async fn add(ctx: &mut Ctx, name: String, projects: Vec<String>, writable: bool)
     Ok(())
 }
 
+async fn browser(
+    ctx: &mut Ctx,
+    name: String,
+    projects: Vec<String>,
+    ttl_seconds: u64,
+    allowed_origins: Vec<String>,
+    writable: bool,
+) -> CliResult {
+    let created: BrowserGrantCreatedDto = ctx
+        .backend
+        .call_typed(Request::AddBrowserGrant {
+            spec: BrowserGrantSpec {
+                name,
+                workspaces: projects,
+                writable,
+                ttl_seconds,
+                allowed_origins,
+            },
+        })
+        .await?;
+    if ctx.out.json_or(&created) {
+        return Ok(());
+    }
+    ctx.out.line(format!(
+        "已建浏览器 grant「{}」：只开 {}，{}。",
+        created.grant.name,
+        projects_text(&created.grant),
+        access_text(&created.grant)
+    ));
+    let mut fields = vec![
+        ("本地连接地址", created.local_url),
+        ("到期", expiry_text(created.expires_at_unix_secs)),
+    ];
+    if let Some(url) = created.public_url {
+        fields.push(("公网连接地址", url));
+    }
+    ctx.out.kv(&fields);
+    ctx.out
+        .note("SuperAssistant 选择 Streamable HTTP，粘贴完整地址。同一台电脑用本地地址。");
+    ctx.out.note("完整 URL 就是凭据，只显示这一次；不要贴进对话、截图或访问日志。到期后重新创建并替换扩展里的 URL。");
+    if !created.grant.read_only {
+        ctx.out.note("这把能跑命令：它能以你的身份读到 gld 数据目录里的服务口令，等于全权。只给你信得过的客户端。");
+    }
+    ctx.out
+        .note("查看授权和到期：gld grant ls。立即作废并停掉它起的命令：gld grant rm <名字>。");
+    Ok(())
+}
+
 async fn list(ctx: &mut Ctx, reveal: bool) -> CliResult {
     let mut grants: Vec<GrantDto> = ctx.backend.call_typed(Request::ListGrants).await?;
     if !reveal {
@@ -94,15 +151,41 @@ async fn list(ctx: &mut Ctx, reveal: bool) -> CliResult {
                 grant.name.clone(),
                 projects_text(grant),
                 access_text(grant).to_string(),
+                if grant.browser.is_some() {
+                    "浏览器 URL"
+                } else {
+                    "OAuth / bearer"
+                }
+                .to_string(),
+                grant
+                    .browser
+                    .as_ref()
+                    .map(|browser| expiry_text(browser.expires_at_unix_secs))
+                    .unwrap_or_else(|| "不限期".into()),
                 grant.oauth_password.clone(),
                 grant.bearer_token.clone(),
             ]
         })
         .collect();
-    ctx.out
-        .table(&["名称", "项目", "权限", "授权口令", "Bearer 令牌"], &rows);
+    ctx.out.table(
+        &[
+            "名称",
+            "项目",
+            "权限",
+            "类型",
+            "到期",
+            "授权口令",
+            "Bearer 令牌",
+        ],
+        &rows,
+    );
     if !reveal {
-        ctx.out.note("已脱敏，--reveal 显示明文。");
+        ctx.out
+            .note("已脱敏，--reveal 显示普通 grant 的口令和令牌明文。");
+    }
+    if grants.iter().any(|grant| grant.browser.is_some()) {
+        ctx.out
+            .note("浏览器 URL 只在创建时显示；--reveal 也不能恢复。到期后删除并重新创建。");
     }
     Ok(())
 }
@@ -115,10 +198,17 @@ async fn remove(ctx: &mut Ctx, name: String) -> CliResult {
     if ctx.out.json_or(&removed) {
         return Ok(());
     }
-    ctx.out.line(format!(
-        "已作废「{}」：它的令牌下一次请求起就不能用，刷新也换不来新的。",
-        removed.grant.name
-    ));
+    if removed.grant.browser.is_some() {
+        ctx.out.line(format!(
+            "已作废「{}」：它的浏览器连接地址下一次请求起就不能用。",
+            removed.grant.name
+        ));
+    } else {
+        ctx.out.line(format!(
+            "已作废「{}」：它的令牌下一次请求起就不能用，刷新也换不来新的。",
+            removed.grant.name
+        ));
+    }
     if removed.stopped_commands > 0 {
         ctx.out.line(format!(
             "停掉了它起的 {} 条命令。",
@@ -150,5 +240,23 @@ fn access_text(grant: &GrantDto) -> &'static str {
         "只读"
     } else {
         "能写能跑命令（等于全权）"
+    }
+}
+
+fn expiry_text(expires_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let remaining = expires_at.saturating_sub(now);
+    if remaining == 0 {
+        "已过期".into()
+    } else {
+        format!(
+            "{}小时{}分{}秒后",
+            remaining / 3600,
+            remaining % 3600 / 60,
+            remaining % 60
+        )
     }
 }

@@ -1,17 +1,21 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::{
-    header::{AUTHORIZATION, CACHE_CONTROL, USER_AGENT, WWW_AUTHENTICATE},
-    HeaderMap, StatusCode,
+    header::{
+        ACCEPT, ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, REFERRER_POLICY,
+        USER_AGENT, WWW_AUTHENTICATE,
+    },
+    HeaderMap, HeaderName, Method, StatusCode,
 };
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, bearer_token, external_base_url,
@@ -321,8 +325,10 @@ async fn serve(
             get(oauth_authorize_get).post(oauth_authorize_post),
         )
         .route("/oauth/token", post(oauth_token_post))
-        .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(CorsLayer::permissive())
+        // 旧 OAuth 路由和浏览器能力 URL 各自鉴权；不把 URL 密钥接入 /mcp。
+        .merge(browser_router())
+        .with_state(state);
 
     append_profile_log(
         &profile_id,
@@ -382,6 +388,143 @@ fn resolve_oauth_base(state: &ListenerState, headers: &HeaderMap) -> String {
     external_base_url(headers, state.bind_port, &state.configured_public_url)
 }
 
+/// URL-only 客户端不一定实现 OAuth / 自定义认证头。独立短期 grant 复用现有
+/// Hub 和权限检查，不开无鉴权入口，也不维护另一套 MCP 会话或执行器。
+fn browser_router() -> Router<ListenerState> {
+    Router::new()
+        .route(
+            "/mcp/browser/{token}",
+            post(mcp_browser_post)
+                .get(mcp_browser_no_stream)
+                .delete(mcp_browser_no_stream),
+        )
+        .layer(
+            CorsLayer::new()
+                // 不用跨源 cookie。允许预检，实际请求逐次核验 grant 的 Origin。
+                // CORS 不是鉴权；含密钥的 URL 也必须通过有效期和项目范围检查。
+                .allow_origin(Any)
+                .allow_methods([Method::POST, Method::GET, Method::DELETE, Method::OPTIONS])
+                .allow_headers([
+                    CONTENT_TYPE,
+                    ACCEPT,
+                    AUTHORIZATION,
+                    HeaderName::from_static("mcp-session-id"),
+                    HeaderName::from_static("mcp-protocol-version"),
+                    HeaderName::from_static("last-event-id"),
+                ])
+                .expose_headers([
+                    HeaderName::from_static("mcp-session-id"),
+                    HeaderName::from_static("mcp-protocol-version"),
+                ]),
+        )
+        .layer(middleware::map_response(browser_response))
+}
+
+async fn browser_response(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, "no-store".parse().expect("static header"));
+    response.headers_mut().insert(
+        REFERRER_POLICY,
+        "no-referrer".parse().expect("static header"),
+    );
+    response
+}
+
+fn require_browser_auth(
+    state: &ListenerState,
+    headers: &HeaderMap,
+    token: &str,
+) -> Result<AuthContext, Box<Response>> {
+    let origin = headers.get(ORIGIN).map(|value| value.to_str());
+    // 非 UTF-8 / 重复 Origin 不能当成没有 Origin 放行。后台 fetch 可能省略
+    // Origin，缺省仍靠 URL 密钥鉴权；这不把 Origin 当作客户端身份证明。
+    let grant = if state.auth.auth_enabled()
+        && !matches!(origin, Some(Err(_)))
+        && headers.get_all(ORIGIN).iter().count() <= 1
+    {
+        state
+            .grants
+            .by_browser_token(token, origin.and_then(Result::ok))
+    } else {
+        None
+    };
+    match grant {
+        Some(grant) => {
+            Ok(AuthContext::new(Principal::SharedSecret, &state.scope).with_grant(Some(grant)))
+        }
+        None => {
+            // 不记录 URI、路径、密钥或摘要；失败原因也不泄露 grant 是否存在。
+            append_profile_log(
+                &state.scope,
+                "mcp-requests.log",
+                "[auth] rejected status=401 credential=browser_url （地址无效、过期、撤销或 Origin 不匹配）",
+            );
+            Err(Box::new((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": "browser_grant_invalid",
+                    "message": "浏览器连接地址无效、已过期、已撤销或 Origin 不匹配；请检查授权或重新创建连接地址"
+                })),
+            ).into_response()))
+        }
+    }
+}
+
+async fn mcp_browser_post(
+    State(state): State<ListenerState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let auth = match require_browser_auth(&state, &headers, &token) {
+        Ok(auth) => auth,
+        Err(response) => return *response,
+    };
+    if let Err(response) = require_browser_protocol(&headers) {
+        return *response;
+    }
+    dispatch_mcp(state, auth, body).await
+}
+
+fn require_browser_protocol(headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let versions = headers.get_all("mcp-protocol-version");
+    if versions.iter().count() <= 1
+        && headers
+            .get("mcp-protocol-version")
+            .is_none_or(|version| matches!(version.to_str(), Ok("2025-03-26" | "2025-06-18")))
+    {
+        // 首次 initialize 还没有版本头；params 中的新版本可以协商回 2025-06-18。
+        return Ok(());
+    }
+    Err(Box::new(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "unsupported_mcp_protocol_version",
+                "message": "请使用 initialize 协商后的 MCP-Protocol-Version"
+            })),
+        )
+            .into_response(),
+    ))
+}
+
+/// Streamable HTTP 的独立 GET 流是可选的。SDK 接受 405；保持无状态 JSON
+/// 传输，不能给 GET 返回 discovery JSON 冒充 SSE，也不签发可复用的 session。
+async fn mcp_browser_no_stream(
+    State(state): State<ListenerState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_browser_auth(&state, &headers, &token) {
+        return *response;
+    }
+    if let Err(response) = require_browser_protocol(&headers) {
+        return *response;
+    }
+    (StatusCode::METHOD_NOT_ALLOWED, [(ALLOW, "POST, OPTIONS")]).into_response()
+}
+
 async fn mcp_post(
     State(state): State<ListenerState>,
     headers: HeaderMap,
@@ -394,6 +537,11 @@ async fn mcp_post(
             return *response;
         }
     };
+    dispatch_mcp(state, auth, body).await
+}
+
+/// 两种入口只在鉴权处不同：日志、范围限制、工具执行及错误结构走同一条路径。
+async fn dispatch_mcp(state: ListenerState, auth: AuthContext, body: Value) -> Response {
     let method = body
         .get("method")
         .and_then(Value::as_str)

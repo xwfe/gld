@@ -7,7 +7,14 @@
 //!
 //! 这里只管"凭据 → 范围"。范围怎么落到项目列表和工具上在 [`crate::hub`]。
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+pub const DEFAULT_BROWSER_ORIGIN: &str = "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef";
+pub const DEFAULT_BROWSER_GRANT_TTL_SECONDS: u64 = 8 * 60 * 60;
+pub const MAX_BROWSER_GRANT_TTL_SECONDS: u64 = 24 * 60 * 60;
 
 use super::bearer::constant_time_eq_str;
 use crate::data::DataStore;
@@ -40,6 +47,44 @@ pub struct GrantRecord {
     pub bearer_token: String,
     #[serde(default)]
     pub created_at: String,
+    /// 浏览器专用短期钥匙。原始值只在创建时返回，不落盘。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<BrowserCredential>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserCredential {
+    pub token_sha256: String,
+    pub expires_at_unix_secs: u64,
+    pub allowed_origins: Vec<String>,
+}
+
+impl BrowserCredential {
+    pub fn new(token: &str, expires_at_unix_secs: u64, allowed_origins: Vec<String>) -> Self {
+        Self {
+            token_sha256: browser_token_hash(token),
+            expires_at_unix_secs,
+            allowed_origins,
+        }
+    }
+
+    fn matches(&self, token: &str, origin: Option<&str>, now: u64) -> bool {
+        !token.is_empty()
+            && now < self.expires_at_unix_secs
+            && origin.is_none_or(|offered| self.allowed_origins.iter().any(|item| item == offered))
+            && constant_time_eq_str(&browser_token_hash(token), &self.token_sha256)
+    }
+}
+
+fn browser_token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn unix_now() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|time| time.as_secs())
 }
 
 /// 验鉴权时去哪儿找 grant。
@@ -50,6 +95,10 @@ pub trait GrantBook: Send + Sync {
     fn by_password(&self, password: &str) -> Option<Grant>;
     /// bearer 请求头里的令牌是不是某个 grant 的。
     fn by_bearer_token(&self, token: &str) -> Option<Grant>;
+    /// 只供浏览器兼容路由使用。Origin 缺省的扩展后台请求仍靠能力令牌鉴权。
+    fn by_browser_token(&self, _token: &str, _origin: Option<&str>) -> Option<Grant> {
+        None
+    }
 }
 
 /// 不发 grant 的入口（工作区自己的监听器、GPT Actions）：谁都查不到。
@@ -87,13 +136,23 @@ impl StoredGrants {
 
 impl GrantBook for StoredGrants {
     fn by_id(&self, id: &str) -> Option<Grant> {
-        Self::find(|record| record.grant.id == id)
+        Self::find(|record| record.browser.is_none() && record.grant.id == id)
     }
     fn by_password(&self, password: &str) -> Option<Grant> {
         matching_secret(password, |record| &record.oauth_password)
     }
     fn by_bearer_token(&self, token: &str) -> Option<Grant> {
         matching_secret(token, |record| &record.bearer_token)
+    }
+
+    fn by_browser_token(&self, token: &str, origin: Option<&str>) -> Option<Grant> {
+        let now = unix_now()?;
+        Self::find(|record| {
+            record
+                .browser
+                .as_ref()
+                .is_some_and(|key| key.matches(token, origin, now))
+        })
     }
 }
 
@@ -104,7 +163,7 @@ fn matching_secret(offered: &str, secret: impl Fn(&GrantRecord) -> &String) -> O
     }
     StoredGrants::find(|record| {
         let expected = secret(record);
-        !expected.is_empty() && constant_time_eq_str(offered, expected)
+        record.browser.is_none() && !expected.is_empty() && constant_time_eq_str(offered, expected)
     })
 }
 
@@ -138,12 +197,88 @@ impl FixedGrants {
 #[cfg(test)]
 impl GrantBook for FixedGrants {
     fn by_id(&self, id: &str) -> Option<Grant> {
-        self.find(|record| record.grant.id == id)
+        self.find(|record| record.browser.is_none() && record.grant.id == id)
     }
     fn by_password(&self, password: &str) -> Option<Grant> {
-        self.find(|record| !password.is_empty() && record.oauth_password == password)
+        self.find(|record| {
+            record.browser.is_none() && !password.is_empty() && record.oauth_password == password
+        })
     }
+
     fn by_bearer_token(&self, token: &str) -> Option<Grant> {
-        self.find(|record| !token.is_empty() && record.bearer_token == token)
+        self.find(|record| {
+            record.browser.is_none() && !token.is_empty() && record.bearer_token == token
+        })
+    }
+
+    fn by_browser_token(&self, token: &str, origin: Option<&str>) -> Option<Grant> {
+        let now = unix_now()?;
+        self.find(|record| {
+            record
+                .browser
+                .as_ref()
+                .is_some_and(|key| key.matches(token, origin, now))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_key_checks_secret_expiry_and_present_origin() {
+        let key =
+            BrowserCredential::new("test-secret", 100, vec!["https://allowed.example".into()]);
+        assert!(key.matches("test-secret", None, 99));
+        assert!(key.matches("test-secret", Some("https://allowed.example"), 99));
+        assert!(!key.matches("test-secret", Some("https://other.example"), 99));
+        assert!(!key.matches("test-secret", Some("null"), 99));
+        assert!(!key.matches("test-secret", Some(""), 99));
+        assert!(!key.matches("test-secret", None, 100));
+        assert!(!key.matches("wrong", None, 99));
+        assert!(!key.matches("", None, 99));
+        assert!(!serde_json::to_string(&key).unwrap().contains("test-secret"));
+    }
+
+    #[test]
+    fn old_records_work_and_browser_records_have_no_legacy_channel() {
+        let old: GrantRecord = serde_json::from_value(serde_json::json!({
+            "id": "old", "name": "old", "workspaces": ["api"], "read_only": true,
+            "oauth_password": "old-password", "bearer_token": "old-bearer"
+        }))
+        .unwrap();
+        assert!(old.browser.is_none());
+        let browser = GrantRecord {
+            grant: Grant {
+                id: "browser".into(),
+                name: "browser".into(),
+                workspaces: vec!["api".into()],
+                read_only: true,
+            },
+            // 即使记录损坏写入了旧字段，browser 类型也不能进入永久认证通道。
+            oauth_password: "unexpected-password".into(),
+            bearer_token: "unexpected-bearer".into(),
+            created_at: String::new(),
+            browser: Some(BrowserCredential::new(
+                "url-key",
+                unix_now().unwrap() + 60,
+                vec![],
+            )),
+        };
+        let grants = FixedGrants::new(vec![old, browser]);
+        assert_eq!(grants.by_password("old-password").unwrap().id, "old");
+        assert_eq!(grants.by_bearer_token("old-bearer").unwrap().id, "old");
+        assert!(grants.by_id("browser").is_none());
+        assert!(grants.by_password("unexpected-password").is_none());
+        assert!(grants.by_bearer_token("unexpected-bearer").is_none());
+        assert!(grants.by_password("").is_none());
+        assert!(grants.by_bearer_token("").is_none());
+        assert_eq!(
+            grants.by_browser_token("url-key", None).unwrap().id,
+            "browser"
+        );
+        grants.revoke("browser");
+        assert!(grants.by_browser_token("url-key", None).is_none());
     }
 }

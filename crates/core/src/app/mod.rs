@@ -42,7 +42,10 @@ pub use doctor::{
     config_checks, port_check, service_checks, service_port_check, software_check, tunnel_check,
     Diagnosis, DoctorCheck, DoctorLevel, PortOccupant, SecretLookup, SERVICE_SCOPE,
 };
-pub use grant::{GrantDto, GrantMemberDto, GrantRemoved, GrantSpec};
+pub use grant::{
+    BrowserGrantCreatedDto, BrowserGrantInfoDto, BrowserGrantSpec, GrantDto, GrantMemberDto,
+    GrantRemoved, GrantSpec,
+};
 pub use hub::{CcnmMemberSpec, HubMemberDto, HubMembershipChange, HubStatusDto};
 pub use logs::LogChunk;
 pub use mcp::{McpServerDto, McpServersDto, McpTestDto};

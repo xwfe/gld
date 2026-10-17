@@ -179,6 +179,7 @@ pub async fn dispatch(
         }
         R::ListGrants => ok(&app.list_grants()?),
         R::AddGrant { spec } => ok(&app.add_grant(spec)?),
+        R::AddBrowserGrant { spec } => ok(&app.add_browser_grant(spec)?),
         R::RemoveGrant { selector } => {
             // 停命令要等子进程收尾（每条最多 1.5 秒），不能占异步 worker。
             let app = app.clone();

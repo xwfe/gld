@@ -977,7 +977,24 @@ pub enum GrantCmd {
         #[arg(long)]
         write: bool,
     },
-    /// 列出全部（默认脱敏，--reveal 显示口令和令牌）
+    /// 为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
+    Browser {
+        /// 名字，在 ls / rm 里用它认这一把
+        name: String,
+        /// 开放的项目，至少一个
+        #[arg(required = true, value_name = "PROJECT")]
+        projects: Vec<String>,
+        /// 有效期：正整数加 s/m/h，默认 8h，最长 24h；到期后重新创建
+        #[arg(long, default_value = "8h", value_name = "DURATION", value_parser = parse_browser_ttl)]
+        ttl: u64,
+        /// 允许的请求 Origin，可重复；省略时允许 Chrome 商店版 SuperAssistant
+        #[arg(long, value_name = "ORIGIN")]
+        origin: Vec<String>,
+        /// 能写文件、能跑命令。命令以你的账号执行，等于全权：只给你信得过的
+        #[arg(long)]
+        write: bool,
+    },
+    /// 列出全部（默认脱敏，--reveal 显示普通口令和令牌；浏览器 URL 只在创建时显示）
     #[command(visible_alias = "ls")]
     List {
         #[arg(long)]
@@ -989,6 +1006,28 @@ pub enum GrantCmd {
 }
 
 // ---------------------------------------------------------------- secret
+
+fn parse_browser_ttl(value: &str) -> Result<u64, String> {
+    let invalid = || "有效期要写正整数加 s/m/h，且不超过 24h，例如 30m、8h".to_string();
+    let value = value.trim();
+    let unit = value.chars().last().ok_or_else(invalid)?;
+    let factor = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        _ => return Err(invalid()),
+    };
+    let number = value.strip_suffix(unit).ok_or_else(invalid)?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|count| count.checked_mul(factor))
+        .filter(|seconds| *seconds > 0 && *seconds <= gld_core::auth::MAX_BROWSER_GRANT_TTL_SECONDS)
+        .ok_or_else(invalid)
+}
 
 /// 不带 `-w` 是服务的凭据；带了 `-w` 是那个项目自己的（GPT Actions 用的那些）。
 #[derive(Debug, Subcommand)]

@@ -30,6 +30,7 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld mcp test](#gld-mcp-test)
 - [gld grant](#gld-grant)
 - [gld grant add](#gld-grant-add)
+- [gld grant browser](#gld-grant-browser)
 - [gld grant list](#gld-grant-list)
 - [gld grant remove](#gld-grant-remove)
 - [gld logs](#gld-logs)
@@ -978,9 +979,10 @@ Options:
 Usage: gld grant [OPTIONS] <COMMAND>
 
 Commands:
-  add     发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
-  list    列出全部（默认脱敏，--reveal 显示口令和令牌） [alias: ls]
-  remove  作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉 [alias: rm]
+  add      发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
+  browser  为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
+  list     列出全部（默认脱敏，--reveal 显示普通口令和令牌；浏览器 URL 只在创建时显示） [alias: ls]
+  remove   作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉 [alias: rm]
 
 Options:
   -w, --workspace <WS>
@@ -1035,10 +1037,35 @@ Options:
   -V, --version         Print version
 ```
 
+## gld grant browser
+
+```text
+为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
+
+Usage: gld grant browser [OPTIONS] <NAME> <PROJECT>...
+
+Arguments:
+  <NAME>        名字，在 ls / rm 里用它认这一把
+  <PROJECT>...  开放的项目，至少一个
+
+Options:
+      --ttl <DURATION>   有效期：正整数加 s/m/h，默认 8h，最长 24h；到期后重新创建 [default: 8h]
+  -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --origin <ORIGIN>  允许的请求 Origin，可重复；省略时允许 Chrome 商店版 SuperAssistant
+      --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --write            能写文件、能跑命令。命令以你的账号执行，等于全权：只给你信得过的
+      --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
 ## gld grant list
 
 ```text
-列出全部（默认脱敏，--reveal 显示口令和令牌）
+列出全部（默认脱敏，--reveal 显示普通口令和令牌；浏览器 URL 只在创建时显示）
 
 Usage: gld grant list [OPTIONS]
 

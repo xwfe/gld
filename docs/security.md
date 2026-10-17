@@ -46,6 +46,22 @@ desktop-commander 就是以你的身份跑任意命令，开了不带 `cwd` 的 
 `--write` 的能跑命令，而命令能以你的身份读到数据目录里的服务口令（下面说的那几道门只管文件类
 工具），所以它等于全权。
 
+### 浏览器专用地址也是凭据
+
+`gld grant browser` 给只能填 URL 的客户端（SuperAssistant）发一个短期地址 `/mcp/browser/<随机密钥>`：
+只开点名的项目，默认只读，默认 8 小时、最长 24 小时。每次请求都重新核对密钥摘要、有效期、grant 还在不在、
+请求的 Origin；范围和工具权限跟普通 grant 一样。这把密钥只在 `/mcp/browser/…` 认，拿它当标准 `/mcp`
+的 bearer 令牌会 401。浏览器 grant 的口令和 bearer 字段是空的，就算回滚到不认识它的旧版本，也不会凭空多出一条能用的认证路径。
+
+原始地址只在创建时显示一次，数据文件里存的是 SHA-256 摘要，`grant ls --reveal` 找不回来。gld 的请求日志不记密钥和路径，
+这个入口的响应带 `Cache-Control: no-store` 和 `Referrer-Policy: no-referrer`。管不到的是客户端：SuperAssistant
+会把整串地址存下来，侧栏和调试日志也可能显示。别贴进对话或截图；走自建反代时让访问日志别记 `/mcp/browser/` 后面那段，
+跨机器只用 HTTPS。
+
+到期只拦后面的请求，不会杀掉之前起的命令；要立刻停，用 `gld grant rm`，它会一起停掉这把 grant 起的命令。
+带 `--write` 的照样能以你的账号跑命令，有效期短不等于有隔离。接法见
+[DeepSeek 网页与 SuperAssistant](connect-clients.md#deepseek-网页与-superassistant)。
+
 ### 读文件的范围：0.3.0 改了默认值
 
 桌面版和 0.3.0 之前的 gld，`read_file` / `list_dir` / `list_files` /
@@ -285,6 +301,7 @@ gld secret regen oauth_token_secret
 ## 密钥存在哪、丢了会怎样
 
 全部在 `~/.config/gld/data/profiles.json`，明文，文件权限 600（创建时就设好了）。
+浏览器 grant 例外：同一个文件里只存它的密钥摘要、到期时间和允许的 Origin，原始地址找不回来。
 服务一套（4 把，第一次起服务时生成；用了 Cloudflare 固定域名再加一个 Tunnel Token）+
 每个项目 7 把（GPT Actions 用的，以前单项目服务也用它们）+ 一个共享池。
 
@@ -365,12 +382,12 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
   根本不存在"长得一模一样。gld 重启后从运行记录读也是同一个规矩：记录里存的是
   主体标识（不含令牌），对不上就当没有。
 
-  分得开的：不同的 OAuth 客户端（每个注册客户端一个身份）；不同的 grant（bearer 的也算，
+  分得开的：不同的 OAuth 客户端（每个注册客户端一个身份）；不同的 grant（bearer、浏览器地址都算，
   每把 grant 一个身份）；服务和项目的 GPT Actions（两套凭据本来就不通）；命令行和任何网络连接。
 
   **分不开的**：`auth_type=noauth` 下连上来的所有人——匿名就是没身份，同一个
   端口上谁都是同一个主体；共用一条 bearer 令牌的多个客户端也一样。要让两个
-  客户端真的互相看不见对方的命令，得给它们各注册一个 OAuth 客户端。
+  客户端真的互相看不见对方的命令，得给它们各注册一个 OAuth 客户端，或者各发一把 grant。
 
 ## 相关文档
 

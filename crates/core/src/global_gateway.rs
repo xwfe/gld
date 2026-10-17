@@ -606,9 +606,10 @@ async fn forward(
         Err(error) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                format!("upstream unavailable: {error}"),
+                // 浏览器能力 URL 的路径含密钥，不能随 reqwest 错误回显。
+                format!("upstream unavailable: {}", error.without_url()),
             )
-                .into_response()
+                .into_response();
         }
     };
     let status = response.status();

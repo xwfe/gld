@@ -55,6 +55,7 @@ gld tool call exec_command cmd='cargo test'
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | ChatGPT 提示无法连接 | 填了 `127.0.0.1` 地址，或隧道没通 | 必须是公网 HTTPS；`gld health` 看“公网 /mcp”那一行 |
+| SuperAssistant 侧栏报 `SSE error: Failed to fetch`，地址是 `http://localhost:3006/sse` | 那是扩展的默认配置，指向它自家的代理，没启动就连不上，和 gld 无关 | 连接类型改成 Streamable HTTP，地址用 `gld grant browser` 给的；其他报错见[那一节的排障表](connect-clients.md#连不上先查这些) |
 | ChatGPT 新建连接器时注册失败，`/oauth/register` 回 503 `temporarily_unavailable` | 描述是 `…capacity has been reached…`：已经注册满 50 个客户端；描述是 `…temporarily unavailable.`：`data/oauth-clients/hub.json` 读不了、解析不了或写不进去 | 已经连着的连接器不受影响。满了说明反复删建过连接器，留着的 id 不会被挤掉，要腾位置只能手动编辑这个文件（先备份）；读写失败看 `gld logs` 里的 `[oauth]` 行，修好文件后 `gld restart` |
 | `gld health` 本地 /mcp 返回 502 | 环境里有 `HTTP_PROXY`，本地探测被代理吃了（0.3.0 起本地探测已绕过代理；旧版会有此问题） | 升级；或临时 `NO_PROXY=127.0.0.1` |
 | 公网 /mcp 显示 `FRP 未挂载代理（返回 frp 404 页）` | frps 收到请求但没有对应子域名的代理 | `gld status` 看公网入口那行有没有写隧道没起来的原因；`gld restart` |

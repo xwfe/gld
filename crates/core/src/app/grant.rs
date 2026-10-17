@@ -7,7 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::App;
-use crate::auth::{Grant, GrantRecord};
+use crate::auth::{
+    BrowserCredential, Grant, GrantRecord, DEFAULT_BROWSER_GRANT_TTL_SECONDS,
+    DEFAULT_BROWSER_ORIGIN, MAX_BROWSER_GRANT_TTL_SECONDS,
+};
 use crate::error::{AppError, AppResult};
 
 /// `gld grant add` 收到的参数。
@@ -21,6 +24,41 @@ pub struct GrantSpec {
     /// 口令，拿到全权，所以要显式要（`gld grant add --write`）。
     #[serde(default)]
     pub writable: bool,
+}
+
+/// 浏览器连接单独发短期钥匙；旧 AddGrant IPC 不接受这项操作。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserGrantSpec {
+    pub name: String,
+    pub workspaces: Vec<String>,
+    #[serde(default)]
+    pub writable: bool,
+    #[serde(default = "default_browser_ttl")]
+    pub ttl_seconds: u64,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+fn default_browser_ttl() -> u64 {
+    DEFAULT_BROWSER_GRANT_TTL_SECONDS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserGrantInfoDto {
+    pub expires_at_unix_secs: u64,
+    pub allowed_origins: Vec<String>,
+}
+
+/// 原始 URL 仅由创建操作返回，列表和删除回包没有它。
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserGrantCreatedDto {
+    pub grant: GrantDto,
+    pub local_url: String,
+    pub public_url: Option<String>,
+    pub expires_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,8 +80,10 @@ pub struct GrantDto {
     pub created_at: String,
     /// OAuth 授权页上填的口令。
     pub oauth_password: String,
-    /// bearer 认证时客户端带的令牌。
+    /// bearer 认证时客户端带的令牌；浏览器专用 grant 为空。
     pub bearer_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<BrowserGrantInfoDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +106,89 @@ impl App {
 
     /// 发一把新的。口令和令牌当场随机生成，两样都给：服务换认证方式时不用重发。
     pub fn add_grant(&self, spec: GrantSpec) -> AppResult<GrantDto> {
+        let (grant, members) = self.prepare_grant(spec)?;
+        let record = GrantRecord {
+            grant,
+            oauth_password: crate::data::random_secret(),
+            bearer_token: crate::data::random_secret(),
+            created_at: created_at(),
+            browser: None,
+        };
+        self.store_grant(&record)?;
+        Ok(grant_dto(&record, &members))
+    }
+
+    pub fn add_browser_grant(&self, spec: BrowserGrantSpec) -> AppResult<BrowserGrantCreatedDto> {
+        if spec.ttl_seconds == 0 || spec.ttl_seconds > MAX_BROWSER_GRANT_TTL_SECONDS {
+            return Err(AppError::Message(
+                "浏览器 grant 的有效期必须在 1 秒到 24 小时之间".into(),
+            ));
+        }
+        let offered_origins = if spec.allowed_origins.is_empty() {
+            vec![DEFAULT_BROWSER_ORIGIN.to_string()]
+        } else {
+            spec.allowed_origins
+        };
+        let mut allowed_origins = Vec::new();
+        for origin in offered_origins {
+            if !valid_browser_origin(&origin) {
+                return Err(AppError::Message(format!(
+                    "无效的浏览器 Origin「{origin}」：填写无路径、凭据或查询参数的 HTTPS、扩展 Origin 或本机 HTTP Origin"
+                )));
+            }
+            if !allowed_origins.contains(&origin) {
+                allowed_origins.push(origin);
+            }
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AppError::Message("系统时间早于 Unix 时间起点，不能创建短期凭据".into()))?
+            .as_secs();
+        let expires_at_unix_secs = now
+            .checked_add(spec.ttl_seconds)
+            .ok_or_else(|| AppError::Message("浏览器 grant 的到期时间溢出".into()))?;
+        let (grant, members) = self.prepare_grant(GrantSpec {
+            name: spec.name,
+            workspaces: spec.workspaces,
+            writable: spec.writable,
+        })?;
+        let settings = self.settings()?;
+        if settings.hub.local_port == 0 {
+            return Err(AppError::Message("服务端口必须在 1-65535".into()));
+        }
+        let token = crate::data::random_secret();
+        let local_url = format!(
+            "http://127.0.0.1:{}/mcp/browser/{token}",
+            settings.hub.local_port
+        );
+        // 只读受信的服务配置，不取请求 Host，也不启动或改变任何隧道。
+        let public_base = crate::hub::public_base_url(&settings);
+        let public_url = if public_base.is_empty() {
+            None
+        } else {
+            Some(browser_public_url(&public_base, &token)?)
+        };
+        let record = GrantRecord {
+            grant,
+            oauth_password: String::new(),
+            bearer_token: String::new(),
+            created_at: created_at(),
+            browser: Some(BrowserCredential::new(
+                &token,
+                expires_at_unix_secs,
+                allowed_origins,
+            )),
+        };
+        self.store_grant(&record)?;
+        Ok(BrowserGrantCreatedDto {
+            grant: grant_dto(&record, &members),
+            local_url,
+            public_url,
+            expires_at_unix_secs,
+        })
+    }
+
+    fn prepare_grant(&self, spec: GrantSpec) -> AppResult<(Grant, Vec<(String, String)>)> {
         let name = spec.name.trim().to_string();
         if name.is_empty() || name.chars().count() > 64 {
             return Err(AppError::Message(
@@ -103,26 +226,24 @@ impl App {
                 workspaces.push(id);
             }
         }
-        let record = GrantRecord {
-            grant: Grant {
+        Ok((
+            Grant {
                 id: uuid::Uuid::new_v4().simple().to_string(),
-                name: name.clone(),
+                name,
                 workspaces,
                 read_only: !spec.writable,
             },
-            oauth_password: crate::data::random_secret(),
-            bearer_token: crate::data::random_secret(),
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_millis().to_string())
-                .unwrap_or_else(|_| "0".into()),
-        };
-        // 查重和写入在同一次 with_data 里：两条并发的 add 不会建出两个同名的。
+            members,
+        ))
+    }
+
+    fn store_grant(&self, record: &GrantRecord) -> AppResult<()> {
+        // 查重和写入在同一次 with_data 里，浏览器和普通 grant 共享名字空间。
         self.with_data(|store| {
             if let Some(clash) = store
                 .grants()
                 .iter()
-                .find(|item| item.grant.name.eq_ignore_ascii_case(&name))
+                .find(|item| item.grant.name.eq_ignore_ascii_case(&record.grant.name))
             {
                 return Err(AppError::Message(format!(
                     "已经有一个叫「{}」的 grant 了。换个名字，或者先 gld grant rm {} 再建",
@@ -130,8 +251,7 @@ impl App {
                 )));
             }
             store.add_grant(record.clone())
-        })?;
-        Ok(grant_dto(&record, &members))
+        })
     }
 
     /// 作废一把：下一次请求起它的令牌 401，刷新也换不来新的；它起的命令一起停掉。
@@ -199,6 +319,77 @@ impl App {
     }
 }
 
+fn created_at() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_else(|_| "0".into())
+}
+
+fn loopback_url(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
+fn valid_browser_origin(origin: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(origin) else {
+        return false;
+    };
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let canonical = match url.scheme() {
+        "https" => url.origin().ascii_serialization(),
+        "http" if loopback_url(&url) => url.origin().ascii_serialization(),
+        "chrome-extension" | "moz-extension" if url.port().is_none() => {
+            let Some(host) = url.host_str() else {
+                return false;
+            };
+            if host.is_empty()
+                || !host
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+            {
+                return false;
+            }
+            format!("{}://{host}", url.scheme())
+        }
+        _ => return false,
+    };
+    // 逐字匹配序列化 origin：不接受通配符、null、路径、尾部 / 或默认端口写法。
+    origin == canonical
+}
+
+fn browser_public_url(base: &str, token: &str) -> AppResult<String> {
+    let url = reqwest::Url::parse(base).map_err(|_| {
+        AppError::Message("服务的公网地址不是有效 URL，不能生成浏览器接入地址".into())
+    })?;
+    if !(url.scheme() == "https" || (url.scheme() == "http" && loopback_url(&url)))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AppError::Message(
+            "浏览器接入只支持 HTTPS 或本机 HTTP 地址，公网地址不能带凭据、查询参数或片段".into(),
+        ));
+    }
+    Ok(format!(
+        "{}/mcp/browser/{token}",
+        base.trim_end_matches('/')
+    ))
+}
+
 /// 在服务成员里找：id、名称（不分大小写）、id 前缀（≥4 位）。只认服务里的——grant
 /// 开的是"经服务访问"的范围，登记了但不在服务里的项目经服务本来就进不去。
 fn resolve_member(members: &[(String, String)], selector: &str) -> AppResult<String> {
@@ -255,12 +446,68 @@ fn grant_dto(record: &GrantRecord, members: &[(String, String)]) -> GrantDto {
         created_at: record.created_at.clone(),
         oauth_password: record.oauth_password.clone(),
         bearer_token: record.bearer_token.clone(),
+        browser: record.browser.as_ref().map(|key| BrowserGrantInfoDto {
+            expires_at_unix_secs: key.expires_at_unix_secs,
+            allowed_origins: key.allowed_origins.clone(),
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_origins_are_exact_serialized_origins() {
+        for origin in [
+            DEFAULT_BROWSER_ORIGIN,
+            "moz-extension://12345678-1234-1234-1234-123456789abc",
+            "https://tools.example.test",
+            "https://tools.example.test:8443",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(valid_browser_origin(origin), "{origin}");
+        }
+        for origin in [
+            "*",
+            "null",
+            "",
+            "https://tools.example.test/",
+            "https://tools.example.test/path",
+            "https://tools.example.test?x=1",
+            "https://tools.example.test#x",
+            "https://user:password@tools.example.test",
+            "https://tools.example.test:443",
+            "http://tools.example.test",
+            "http://localhost.evil.test",
+            "chrome-extension://id/path",
+            "chrome-extension://id:8080",
+            "chrome-extension://*",
+            "file:///tmp",
+            " https://tools.example.test",
+        ] {
+            assert!(!valid_browser_origin(origin), "{origin}");
+        }
+    }
+
+    #[test]
+    fn browser_public_urls_preserve_configured_prefix_without_accepting_unsafe_bases() {
+        assert_eq!(
+            browser_public_url("https://hub.example/hub/", "test-key").unwrap(),
+            "https://hub.example/hub/mcp/browser/test-key"
+        );
+        assert!(browser_public_url("http://127.0.0.1:8080", "test-key").is_ok());
+        for base in [
+            "http://remote.example",
+            "https://user:pass@remote.example",
+            "https://remote.example?x=1",
+            "https://remote.example#frag",
+        ] {
+            assert!(browser_public_url(base, "test-key").is_err(), "{base}");
+        }
+    }
 
     fn members() -> Vec<(String, String)> {
         vec![

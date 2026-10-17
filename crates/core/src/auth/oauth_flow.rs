@@ -958,6 +958,7 @@ mod tests {
             oauth_password: password.into(),
             bearer_token: format!("{id}-bearer"),
             created_at: String::new(),
+            browser: None,
         }
     }
 

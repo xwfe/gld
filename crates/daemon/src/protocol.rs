@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use gld_core::app::{
-    CcnmMemberSpec, GlobalRuntimeSettingsDto, GrantSpec, PlanStepUpdate, WorkspaceCreateOptions,
-    WorkspaceTarget,
+    BrowserGrantSpec, CcnmMemberSpec, GlobalRuntimeSettingsDto, GrantSpec, PlanStepUpdate,
+    WorkspaceCreateOptions, WorkspaceTarget,
 };
 use gld_core::planning::{GoalStatus, PlanStatus, PlanningMode};
 use gld_core::runtime::ServiceKind;
@@ -33,7 +33,8 @@ use serde_json::Value;
 /// 4：加了 `served_tools`（`gld tool list --served`）。当时漏了递增，2026-09-23 真机
 ///    升级时新命令行连着旧守护进程，`--served` 报的是 `unknown variant`，不是"请重启"。
 /// 5：加了 `list_grants`、`add_grant`、`remove_grant`（`gld grant`，RFC-0007）。
-pub const PROTOCOL_VERSION: u32 = 5;
+/// 6：加了 `add_browser_grant`，与普通永久 grant 分开，旧守护进程不能静默降级。
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +240,9 @@ pub enum Request {
     ListGrants,
     AddGrant {
         spec: GrantSpec,
+    },
+    AddBrowserGrant {
+        spec: BrowserGrantSpec,
     },
     /// 作废一把，并停掉它起的命令：必须在守护进程里做，命令会话在这里。
     RemoveGrant {
