@@ -514,7 +514,13 @@ async fn mcp_post(
                     request_id, tool_name, is_error, status, termination_reason, exit_code
                 ));
             }
-            Json(response).into_response()
+            if response.is_null() {
+                // MCP 通知没有 JSON-RPC 响应。200 + JSON null 会被标准客户端
+                // 当成无效消息；202 空响应还能让它正常探测可选 GET 流。
+                StatusCode::ACCEPTED.into_response()
+            } else {
+                Json(response).into_response()
+            }
         }
         Err(error) => {
             let error_response = json!({
