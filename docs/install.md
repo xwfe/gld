@@ -86,14 +86,20 @@ gld --version
 
 ## 升级
 
-**ChatGPT 连接器不用删，也不用重新授权。** 升级只是换二进制、重启守护进程；连接器靠的口令、令牌签名
+**升级就是换二进制、重启守护进程。ChatGPT 连接器不用删，也不用重新授权。** 连接器靠的口令、令牌签名
 密钥、ChatGPT 动态注册的客户端（`data/oauth-clients/hub.json`）、公网地址都在数据目录 `~/.config/gld`
 和服务配置里，换二进制碰不到它们。**唯一可能要做的是点一次 Refresh**：新版改了工具表时 ChatGPT 不会
 自己重拉。要不要点，比一下升级前后的工具表指纹就知道（下面第 2 步和"换完核对"）。
 除了升级，还有哪些操作会碰到连接器，见[装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。
 
+**会断一下，很短，但在跑的命令会被停掉。** `gld daemon restart` 是先停再起，新旧进程之间没有交接：
+本机实测停到起 0.2–0.3 秒，这期间来的请求会失败，客户端再调一次就好；没回完的请求最多再等 3 秒就强断。
+守护进程拉起的命令（AI 用 `exec_command` 跑着的测试、开发服务器）会被停掉，不会自己回来，
+**所以挑没有命令在跑的时候升级**，第 2 步最后一行就是查这个的。
+命令和请求都不断的"零中断升级"现在做不到，设计在 [RFC-0008](rfc/0008-continuous-upgrades.md)，还没实现。
+
 本机从 0.6.0 起每次升级都逐项比对过口令、签名密钥、Client ID、ChatGPT 注册的客户端、公网地址、项目表的指纹，
-全部一致，守护进程重启 0.2–0.3 秒，ChatGPT 用原来注册的客户端直接连上（每次的记录在[审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)里）。
+全部一致，ChatGPT 用原来注册的客户端直接连上（每次的记录在[审查](reviews/2026-09-23-lifecycle-and-docs-audit.md)里）。
 
 ### 升级前先看两件事
 
@@ -114,6 +120,8 @@ gld ls > /tmp/gld-before.txt
 mkdir -p ~/.local/opt
 cp -p "$(command -v gld)" ~/.local/opt/gld-$(date +%Y%m%d-%H%M)
 tar -czf ~/.local/opt/gld-config-$(date +%Y%m%d-%H%M).tgz -C ~/.config --exclude gld/daemon.sock gld
+chmod 600 ~/.local/opt/gld-config-*.tgz          # 里面有明文口令和签名密钥
+pgrep -lP "$(gld daemon status | awk '$1=="pid"{print $2}')"   # 守护进程拉起的子进程，见下面
 
 # 3. 换二进制：先写成新文件，再改名盖上去
 GLD="$(command -v gld)"
@@ -125,6 +133,10 @@ gld daemon restart
 #    gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon
 ```
 
+**第 2 步最后一行没有输出，就是没有命令在跑，可以放心换。** 有输出时看进程名：`cloudflared` / `frpc`
+是 gld 自己起的隧道，重启后跟着服务回来；`npx`、`node` 这类多半是本机 MCP 转发，下次调用会重新拉起；
+其余的基本是正在跑的项目命令，等它跑完，或者确认可以停，再往下做。
+
 `gld tool list --served` 是 0.7.0 加的；从更老的版本升上来时没有它，第 2 步那行跳过，换完直接按
 "不一样"处理（点一次 Refresh 没有坏处）。
 
@@ -133,10 +145,8 @@ Mach-O 里写东西会让它的代码签名失效，之后每次 exec 都被 SIG
 而还在跑的老进程一切正常——症状是 `gld --version` 变成 `Killed: 9`。写新文件再
 改名换的是 inode，跑着的进程留着自己那份，下一次 exec 拿到的是完整、签名正确的。
 
-**中断有多久**：`gld daemon restart` 就是顺序的 stop + start，没有 fd 交接，所以新旧进程
-不会并存（单实例靠 `daemon.lock` 的 flock）。在途请求最多有 3 秒宽限，之后强断；服务起来
-就恢复。隧道是 gld 起的话跟着一起重起；自建反代 / 自己跑的 cloudflared 不受影响，只是那几秒
-回源会 502。MCP 服务会跟着守护进程自己回来；项目的 GPT Actions 要各自再
+**哪些会跟着回来**：MCP 服务连同 gld 自己起的隧道会跟着守护进程自己回来；自建反代 / 自己跑的
+cloudflared 不受影响，只是那零点几秒回源会 502。项目的 GPT Actions 要各自再
 `gld start -s actions`，见[守护进程 · 升级](daemon.md#升级)。
 
 ### 换完核对
@@ -156,10 +166,16 @@ gld health                               # 本地、公网 /mcp，OAuth 元数�
   新对话，做法和怎么核对见[点 Refresh](connect-clients.md#装好的连接器什么时候要动)。不点也能接着用，
   只是新加的工具和参数 AI 看不见。每一版的[发布说明](releases/)也会写这一版要不要点。
 
+**`gld ls` 里的 Client ID 不是 ChatGPT 用的那个。** ChatGPT 建连接器时自己注册了一个 `dcr-…` 开头的
+客户端，记在 `data/oauth-clients/hub.json`，`gld ls` 不显示它。升级不碰这个文件；想确认就在第 2 步和换完后各跑一次
+`shasum -a 256 ~/.config/gld/data/oauth-clients/hub.json`，两次一样就是它没动。最直接的证据是 ChatGPT
+下一次调用：`gld logs` 里那一行带着原来的 `auth=oauth:hub:dcr-…`，没有 401。
+
 **版本号没变时，命令行可能不提醒你重启。** 命令行只比版本号和协议号：两样都没变的新构建，换完二进制
 不重启，守护进程接着跑旧代码，**不报任何错**，只有新加的命令会报一句 `` unknown variant `…` ``
 （2026-09-23 升级时实际碰到的）。所以不管版本号变没变，换完都 `gld daemon restart`，再看上面那行
-构建提交。版本号或协议号变了的时候，命令行会直接拒绝并提示重启（退出码 4）。
+构建提交。版本号或协议号变了的时候，命令行会直接拒绝并提示重启（退出码 4），`gld daemon status` /
+`stop` / `restart` 不受影响，照常能用。
 
 只核对 `0.7.0` 这样的版本号不够，源码、构建、运行的服务、客户端拿到的工具表是四层不同的证据，见
 [生命周期指南](project-lifecycle.md#接入前先确认四层能力)。

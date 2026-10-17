@@ -172,6 +172,24 @@ scripts/package.sh          构建 + 打包发布件（CI 也调它）
 守护进程会把版本和协议版本报给命令行，不一致时命令行拒绝转发；
 改了 `Request` / `Response` 的形状记得把 `PROTOCOL_VERSION` 加一。
 
+## 升级连续性
+
+用户升级的做法是换二进制、`gld daemon restart`（[安装 · 升级](install.md#升级)）。改代码时守住下面几条，
+升级才是"连接器不用动"：
+
+- **身份和入口不变。** 不改数据目录布局、OAuth 签名密钥、`data/oauth-clients/hub.json` 的格式和内容、
+  服务端口和公网入口的保存方式。ChatGPT 存着注册时拿到的 `dcr-…` client_id 和令牌，这些对不上它就得重新授权或删了重建。
+- **旧数据新代码能读。** 新加的字段一律 `#[serde(default)]`；读不懂的文件保留原件、报错，不当空表写回去
+  （`profiles.json`、OAuth 注册表都是这样，见 [security.md](security.md#密钥存在哪丢了会怎样)）。
+- **工具表只加不改。** 删工具、改已有参数的含义，ChatGPT 缓存里的旧调用就会失败，Refresh 也救不回来；
+  新加工具、可选参数没问题，只是要用户点一次 Refresh 才看得见。
+- **改了 IPC 就把 `PROTOCOL_VERSION` 加一**（上一节），新命令行连旧守护进程时才会拒绝并提示重启，而不是报看不懂的 `unknown variant`。
+
+怎么验：本机按[安装 · 升级](install.md#升级)走一遍，比工具表指纹、`gld ls`、`hub.json` 的摘要，
+再让 ChatGPT 调一次，`gld logs` 里应该是原来那个 `auth=oauth:hub:dcr-…`、没有 401。
+
+重启那零点几秒会断，在跑的命令会被停掉；让在跑的命令和请求都不断的交接方案在 [RFC-0008](rfc/0008-continuous-upgrades.md)，还没实现。
+
 ## 打包与发布
 
 打包只有一份实现：`scripts/package.sh`。本地和 CI 跑的是同一个脚本，

@@ -316,7 +316,8 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
 **什么都不用做**：
 
 - 升级 gld，而且升级前后 `gld tool list --served` 的指纹没变（怎么比见[安装 · 升级](install.md#升级)）
-- `gld restart`、`gld stop` + `gld start`、守护进程重启——固定公网地址下没影响
+- `gld restart`、`gld stop` + `gld start`、守护进程重启——固定公网地址下没影响（服务断开零点几秒，在跑的命令会被停掉，
+  见[安装 · 升级](install.md#升级)）
 - 重启电脑：配了[开机自启](daemon.md#开机自启)就什么都不用管；没配的话守护进程不会自己回来，期间
   ChatGPT 只报连不上，**连接器不用删**，`gld daemon start` 一次（上次 `gld start` 过的服务会跟着回来）
   就好了
