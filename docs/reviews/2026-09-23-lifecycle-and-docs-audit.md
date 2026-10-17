@@ -1540,3 +1540,44 @@ grant 里存的是固定名单：之后新加的项目不自动开放。IPC 不�
 | `cargo clippy … -D warnings`、`cargo fmt --check`、`scripts/gen-cli-docs.sh` | 均通过；`docs/cli.md` 已重新生成 |
 | `git diff --stat 778fdd3..0b4cb59 -- crates/` | 只有 `crates/cli/src/cli.rs`、`commands/grant.rs` 和测试 |
 | 本机换命令行 | 备份 `~/.local/opt/gld-778fdd3-20261017-2356`，release 16,333,944 字节、SHA-256 `126699473d65ae90d74a69afaf89d4d28f3d6d25704794e8d62ad91403902287`，写新文件再改名；守护进程 pid 87812 前后不变，协议 6 与命令行匹配，`gld grant browser --help` 有 `--all`，health 正常 |
+
+## 26. 经 gld 开发 gld 的 ChatGPT 为什么没守用户规则（2026-10-18）
+
+**问题：**§23/§24 是网页端 ChatGPT 经 gld 直接开发的。§25 记了暴露的问题：把需求放大成"零中断"门禁并拒绝部署、
+文档满是空词、1700 行散在 29 个文件里一个没提交、往公开仓库写本机路径、没核实的说法写进注释。用户问这些能不能修。
+
+**根因：ChatGPT 收到的说明是空的。**当时 `gld context -w gld` 输出"说明文件（扫到 1，实际注入 0）"：
+
+| 规则在哪 | 为什么没送到 |
+| --- | --- |
+| 用户全局规则 `~/.config/ai-assistant/INSTRUCTIONS.md`（`~/.codex/AGENTS.md` 软链到它，和 `~/.claude/CLAUDE.md` 内容相同） | 被自动发现成 `codex/global`；compact 只注入工作区的 `AGENTS.md`，把它滤掉 |
+| `~/xdw/CLAUDE.md`（粒度提交、文档写法） | 在上级目录，gld 不扫上级 |
+| gld 仓库自己的约定 | 没有 `AGENTS.md` |
+| `--ai-instructions`、`--custom-instruction-paths` | 都没配；配了后者 compact 下也会被滤 |
+
+Claude Code 和 Codex 自己会读这些文件，所以同样的规则它们守得住，经 gld 进来的 ChatGPT 守不住。§25 列的大部分毛病
+（不提交、文档写法、本机路径）正好对应这几条没送到的规则。
+
+**修：**
+
+| 提交 | 内容 |
+| --- | --- |
+| `e8f7f36` | compact 下点名的说明（`--custom-instruction-paths`）也注入；点名的和自动扫到的重复（同路径或同内容）时把留下的那条升为 custom，不然会被去重后再按作用域滤掉；补上两个参数空着的帮助 |
+| `b360fc6` | 门禁 `docs_have_no_home_paths`：README、AGENTS.md、task_plan.md、docs 下全部 .md 不许出现 `/Users/<名>`、`/home/<名>`、`C:\Users\<名>`（占位名除外）；RFC-0002 的 12 处改成相对路径或 `~/xdw/…` |
+| `e0eb9ce` | 仓库根 `AGENTS.md`：gld 自己的约定（无痛升级的含义、改需求含义和不部署先问、要点头的操作、每步提交、公开仓库） |
+
+**验证：**
+
+| 命令 / 用例 | 结果 |
+| --- | --- |
+| 单测 `compact_keeps_named_instruction_files_even_when_they_duplicate_discovered_ones` | 通过：不点名时只注入工作区那份（前提断言：全局那份确实被扫到）；点名同路径、点名同内容的另一份，两种都注入 |
+| 集成测试 `compact_injects_explicitly_configured_instruction_files` | 通过：`gld settings runtime --custom-instruction-paths` 后 `gld context` 标 ✓，`workspace_context` 文本里有标记，`.cursorrules` 仍不进。临时换回旧 `agent_context.rs` 时它失败，报"注入的只有 [AGENTS.md]" |
+| `cargo test --workspace --all-targets --locked` | 退出 0，43 个测试二进制，946 passed / 0 failed / 0 ignored |
+| clippy `-D warnings`、`fmt --check`、`scripts/gen-cli-docs.sh` | 均通过 |
+| 在跑的旧守护进程上 `gld context -w gld` | 加了 `AGENTS.md` 之后显示"✓ [codex/workspace] AGENTS.md"：项目里这份旧代码本来就注入，不用部署 |
+
+**修不了的：**判断本身。规则送到只能降低跑偏的概率；部署、改需求含义仍要用户拍板，`AGENTS.md` 写明了这条。
+没做工具层提醒（比如回包里报未提交的改动量）：先看规则送到后还会不会攒大改动。
+
+**没部署：**点名注入要新守护进程，得换二进制、`gld daemon restart`，再执行
+`gld settings runtime --custom-instruction-paths ~/.codex/AGENTS.md`，等用户同意。改这项设置不重启服务，上下文重建也不停命令。
