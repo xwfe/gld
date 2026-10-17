@@ -186,7 +186,7 @@ ccnm 在 MCP 初始化前就获取 writer guard，`read_output` 又依赖该连�
 
 ## 6. WebCodex 只读参考已落地
 
-本机交互 shell 中 `gc1` 是 `git clone --depth=1` 的别名。本轮使用该展开式完成浅克隆，位置 `/Users/bing/xdw/webcodex`，HEAD 为 `e11cb3e4c96b8b4fa9f84ca59fa072ca0bb0b2ae`，origin 为用户给定仓库；工作区干净。
+本机交互 shell 中 `gc1` 是 `git clone --depth=1` 的别名。本轮使用该展开式完成浅克隆，位置 `~/xdw/webcodex`，HEAD 为 `e11cb3e4c96b8b4fa9f84ca59fa072ca0bb0b2ae`，origin 为用户给定仓库；工作区干净。
 
 这是 main 的源码快照，不是旧 RFC 的固定发布版实验。未运行 Cargo metadata、构建、测试、服务或安装脚本；未引入其任何运行依赖。
 
@@ -330,12 +330,12 @@ gld 这一侧的现状：Web AI 端在 macOS 上跨两台真机验过（上面�
 
 ### 本轮源码定位
 
-- gld hub 本地绑定：`/Users/bing/xdw/gld/crates/core/src/hub/mod.rs:101-118`、`:301-326`、`:353-388`、`:411-435`；成员配置：`/Users/bing/xdw/gld/crates/core/src/settings/model.rs:87-108`。
-- 鉴权与调用上下文：`/Users/bing/xdw/gld/crates/core/src/mcp/listener.rs:70-83`、`:369-403`、`:568-589`。
-- ccnm 公共 bridge：`/Users/bing/xdw/ccnm/docs/protocol/remote-workspace-mcp-v1.md:65-96`；writer 获取：`/Users/bing/xdw/ccnm/crates/ccnm-core/src/mcp/server.rs:304-327`；心跳：同文件 `:943-968`。
-- 共享 reader 切口：`/Users/bing/xdw/gld/crates/core/src/tools/file.rs:631-734`、`/Users/bing/xdw/ccnm/crates/ccnm-core/src/mcp/read.rs:292-332`。
-- WebCodex 独立进程组件：`/Users/bing/xdw/webcodex/crates/webcodex-process/Cargo.toml:1-25`；真实进程 ignored 测试：`/Users/bing/xdw/webcodex/crates/webcodex-process/tests/managed_child.rs:234-258`。
-- 纯 patch 参考：`/Users/bing/xdw/webcodex/crates/webcodex-core/src/apply_patch_shared.rs:782-808`；句柄输入读取：`/Users/bing/xdw/webcodex/crates/webcodex-workspace/src/file_read_range.rs:411-442`。
+- gld hub 本地绑定：`crates/core/src/hub/mod.rs:101-118`、`:301-326`、`:353-388`、`:411-435`；成员配置：`crates/core/src/settings/model.rs:87-108`。
+- 鉴权与调用上下文：`crates/core/src/mcp/listener.rs:70-83`、`:369-403`、`:568-589`。
+- ccnm 公共 bridge：`~/xdw/ccnm/docs/protocol/remote-workspace-mcp-v1.md:65-96`；writer 获取：`~/xdw/ccnm/crates/ccnm-core/src/mcp/server.rs:304-327`；心跳：同文件 `:943-968`。
+- 共享 reader 切口：`crates/core/src/tools/file.rs:631-734`、`~/xdw/ccnm/crates/ccnm-core/src/mcp/read.rs:292-332`。
+- WebCodex 独立进程组件：`~/xdw/webcodex/crates/webcodex-process/Cargo.toml:1-25`；真实进程 ignored 测试：`~/xdw/webcodex/crates/webcodex-process/tests/managed_child.rs:234-258`。
+- 纯 patch 参考：`~/xdw/webcodex/crates/webcodex-core/src/apply_patch_shared.rs:782-808`；句柄输入读取：`~/xdw/webcodex/crates/webcodex-workspace/src/file_read_range.rs:411-442`。
 
 这些是源码事实与方案，不是本轮运行了上述能力的声明。
 
