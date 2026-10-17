@@ -1447,3 +1447,82 @@ README、安装、daemon、接入、排障、安全、概念、CLI 帮助及 RFC
 提交/推送或发布；用户已有 `exports/` 未处理。Chrome 扩展与 DeepSeek 网页闭环仍未实测，
 新路由没有因构建成功而在旧 daemon 上生效。
 
+## 25. SuperAssistant 接入复核、文档纠偏与本机升级（2026-10-17 晚）
+
+**要求：**用户让核对 §23/§24 的改动能不能让 DeepSeek 网页经 SuperAssistant 调 gld、能不能复用本机现有的服务（Hub）无痛升级，
+然后帮着升级、完善文档、粒度提交。用户在会话中途补了一张扩展侧栏截图（`Server-Sent Events (SSE)` + `http://localhost:3006/sse`，
+报 `SSE error: Failed to fetch`）。
+
+### SuperAssistant 源码复核（v0.6.0 = `c26168e`）
+
+| 看了什么 | 结论 |
+| --- | --- |
+| `chrome-extension/src/background/index.ts` 引入 `createMcpClient` | MCP 客户端跑在扩展后台 service worker，请求带扩展自己的 Origin，不是 `https://chat.deepseek.com` |
+| `chrome-extension/manifest.ts` 的 `host_permissions` | 只有各聊天站点（含 `*.chat.deepseek.com`），没有 localhost / 127.0.0.1，所以连 gld 是受 CORS 约束的跨源请求，gld 必须回预检和 `Access-Control-Allow-Origin`；§23 的实现做了 |
+| `pages/content/src/plugins/adapters/deepseek.adapter.ts` | 有 DeepSeek 页面适配 |
+| `ServerStatus.tsx` 的 Connection Type | 只有 SSE / WebSocket / Streamable HTTP 三项加一个 Server URI，没有填请求头的地方；截图里的 3006 是默认值，指向扩展自家的代理 |
+| `pages/content/src/core/mcp-client.ts` 的 `mcp:call-tool` | 页面等一次工具调用 30 秒 |
+| 全仓库搜 `getInstructions` | 不读服务端 `instructions`，`workspace_context` 那一步省不了 |
+| `pnpm-lock.yaml` | MCP SDK 实际是 1.25.2（`package.json` 写 `^1.20.2`，提交说明写"降到 1.20.2"，以锁文件为准） |
+| npm 上 SDK 1.25.2 的 `dist/esm/client/streamableHttp.js` | 对通知的非 202 响应只丢掉响应体、不报错；只在 202 之后探测 GET 推送流，405 视为不支持 |
+
+最后一条说明 `98a4ef7` 的提交说明和注释"SDK 会把 null 当无效消息"说过头了，`813b90b` 单独更正（没 amend）。改 202 本身仍然对：规范要求。
+
+**Chrome 本地网络访问：**Chrome 142 起公网来源访问本机/局域网要权限（[官方博客](https://developer.chrome.com/blog/local-network-access)）；
+第三方报告扩展 Origin 被当成公网来源，要到扩展的网站设置里放行。官方没写扩展的规则，这次也没实测，
+所以只写进排障表：`Failed to fetch` 且 `gld logs` 没有这次请求时先查它，或改用公网地址。
+
+### 文档与提示纠偏
+
+§24 把"在跑的命令和请求都不断"定成每次升级的必过门禁，install / daemon / troubleshooting / development 里能照做的升级步骤和
+"版本不一致就 `gld daemon restart`"被换成"保留旧服务、不要重启"，CLI 提示也一样，用户手上没有任何可操作的升级路径。
+这和用户一直认可的"无感知升级"（连接器身份、授权、地址不动，重启零点几秒，见本审查各次升级记录）不一致，用户这次也明确要升级。
+处理：升级步骤和排障处理改回原样，补上"重启会停掉在跑的命令、先用 `pgrep -lP` 查"和"`gld ls` 的 Client ID 不是 ChatGPT 的 `dcr-…`、怎么核对它"；
+`daemon.md` 与 RFC-0004 恢复原文；CLI 提示改回给出 `gld daemon restart` 并说明代价；RFC-0008 保留为未实现的设计草案，
+改掉其中"不能为启用功能重启"等结论。§23/§24 本身作为当时的记录保留，以本节为准。
+
+### 提交
+
+| 提交 | 内容 |
+| --- | --- |
+| `98a4ef7` | 通知回 202 空响应 |
+| `813b90b` | 更正上一条的注释和说法 |
+| `3b1b853` | OAuth 动态注册写盘成功才算数（§24 的修复）及其安全、排障文档 |
+| `74f544d` | `gld grant browser`（§23 的功能）及其接入、安全、概念文档 |
+| `0f6722d` | CLI 版本不一致提示 |
+| `778fdd3` | 升级文档、RFC-0008 |
+
+同一文件里混着两件事的，按中间版本暂存拆开；`3b1b853` 在临时 worktree 里单独编译，`gld-core` 认证单测 45 项通过（最终版 47 项，多的是浏览器 grant 的）。
+
+### 实际执行的验证
+
+本机 Apple 芯片 macOS，cargo 1.98.0，测试用隔离的 `GLD_HOME=target/test-home-claude-20261017`。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --workspace --all-targets --locked`（拆提交前的工作树，代码和 `778fdd3` 只差一条注释） | 退出 0，42 个测试二进制，941 passed / 0 failed / 0 ignored |
+| 文档改完后 `docs_commands_exist`、`docs_links_resolve`、`naming_is_consistent`、`messages_name_real_commands`、`aliases_are_consistent`、`doctor_fixes_are_real_commands`、`docs_generation` | 退出 0，15 项通过 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` | 均退出 0 |
+| `scripts/gen-cli-docs.sh` | 重新生成 `docs/cli.md`；这道门禁只测脚本出错时不覆盖原文件，不比内容，改了帮助要手动跑 |
+| `cargo build --release --locked -p gld`（HEAD = `778fdd3`） | 退出 0，2m 14s；照旧有 rust-objcopy 缺 libLLVM.dylib 的剥离警告。产物 16,333,752 字节，SHA-256 `68f3f1582e8851ab923779ed400e8bdd5d8c6687e2f0fe23f84fa98602148850` |
+
+### 本机升级（23:29）
+
+- **升级前**：守护进程 pid 50858 没有子进程（没有在跑的命令，隧道也不归它管），最近一次 MCP 请求 22:53。
+  对旧服务用无效密钥 POST `/mcp/browser/…` 回 404（路由不存在）。
+- **备份**：上一个在用二进制 `~/.local/opt/gld-eea0535-20261017-2329`（摘要与在用一致）、数据目录 `gld-config-20261017-2329.tgz`（0600）。
+- **切换**：写新文件再改名；去掉本会话的 36 个 `CLAUDE*` 变量后 `gld daemon restart`，命令耗时 0.24 秒，新 pid 87812，自动恢复 1 个服务。
+- **核对**：协议 5 → 6，构建提交 `778fdd359240`；工具表 33 项、指纹 `5155ec6663bb33e2` 没变，ChatGPT 不用 Refresh；
+  `gld ls` 逐字一致；`profiles.json`、`oauth-clients/hub.json` 排好键再哈希前后一致；新进程 `CLAUDE*` 变量 0 个；`gld health` 四项 200。
+- **新路由**：无效密钥 POST 本地 `127.0.0.1:28767` 和公网入口都回 401 `browser_grant_invalid`（自建入口转发了整段路径）；
+  预检回 `content-type,accept,authorization,mcp-session-id,mcp-protocol-version,last-event-id`；标准 `/mcp` 不带凭据仍 401；
+  请求日志只记 `credential=browser_url`，搜不到探测用的密钥。
+
+**回滚**：备份二进制按"写新文件再改名"放回，再 `gld daemon restart`，协议回到 5。之后建的浏览器 grant 旧版会忽略
+`browser` 字段，口令和 bearer 为空，旧通道用不了它。
+
+**没验的：**
+- ChatGPT 连接器换版后的第一次真实调用：等它下次被用到，看 `gld logs` 里是不是原来的 `auth=oauth:hub:dcr-…`、有没有 401。
+  签名密钥和注册表没变，按以往各次升级预期能直接用，但这次还没有证据。
+- 没有建真实的浏览器 grant：地址就是凭据，留给用户自己在终端建，不经过 AI。所以 Chrome 扩展连上、DeepSeek 页面整圈、
+  Chrome 本地网络访问会不会拦 127.0.0.1，都还没实测。
