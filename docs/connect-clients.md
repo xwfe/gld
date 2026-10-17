@@ -86,10 +86,11 @@ DeepSeek 网页自己没有 MCP 连接器，靠 Chrome 扩展
 
 ### 接上
 
-1. 在本机终端生成地址（最后的 `gld` 是项目名，换成你的；可以列多个）：
+1. 在本机终端生成地址。`web-mcp` 是这把授权的名字，在 `grant ls` / `grant rm` 里用它认；
+   后面跟要开放的项目名（`gld` 换成你的），可以列多个：
 
    ```bash
-   gld grant browser superassistant gld --ttl 8h
+   gld grant browser web-mcp gld --ttl 8h
    ```
 
    "本地连接地址"那一行形如 `http://127.0.0.1:28764/mcp/browser/<随机密钥>`，端口就是服务的端口（`gld ls` 里那个）。
@@ -118,7 +119,7 @@ DeepSeek 网页自己没有 MCP 连接器，靠 Chrome 扩展
 默认只读、8 小时；`--ttl` 写正整数加 `s` / `m` / `h`，最长 24 小时。要改文件、跑命令时，另外建一把带 `--write` 的：
 
 ```bash
-gld grant browser superassistant-write gld --ttl 2h --write
+gld grant browser web-mcp-write gld --ttl 2h --write
 ```
 
 它和普通可写 grant 一样危险：命令以你的账号执行，**项目范围不是操作系统沙箱**，见 [security.md](security.md)。
@@ -126,7 +127,7 @@ gld grant browser superassistant-write gld --ttl 2h --write
 
 ```bash
 gld grant ls                       # 类型一栏写"浏览器 URL"，到期一栏是剩余时间
-gld grant rm superassistant-write  # 下一次请求起就 401，它起的命令一起停掉
+gld grant rm web-mcp-write         # 下一次请求起就 401，它起的命令一起停掉
 ```
 
 到期后下一次请求被拒，不会自动续期。还要用就 `gld grant rm` 旧的、同名重建，再把新地址换进扩展。
