@@ -1526,3 +1526,17 @@ README、安装、daemon、接入、排障、安全、概念、CLI 帮助及 RFC
   签名密钥和注册表没变，按以往各次升级预期能直接用，但这次还没有证据。
 - 没有建真实的浏览器 grant：地址就是凭据，留给用户自己在终端建，不经过 AI。所以 Chrome 扩展连上、DeepSeek 页面整圈、
   Chrome 本地网络访问会不会拦 127.0.0.1，都还没实测。
+
+### 补充：示例名改成 web-mcp，加 `--all`（23:5x）
+
+用户觉得示例名 `superassistant` 太长，改成 `web-mcp`（`0c77868`，只改文档）；又要一次开放全部已登记项目，
+加 `gld grant browser <名字> --all`（`0b4cb59`）。`--all` 在命令行这边用 `HubStatus` 的成员名单展开成 id 再发给守护进程，
+grant 里存的是固定名单：之后新加的项目不自动开放。IPC 不变，所以只换命令行、不重启守护进程。
+
+| 验证 | 结果 |
+| --- | --- |
+| 新集成测试 `browser_grant_all_opens_every_current_project_only` | 通过：两种用法错误退出 2；`--all` 开到 api、web；新加项目后再建一把 `--all` 是 3 个（对照），旧的那把 `list_workspaces` 仍只有 api、web，能读 web 的文件 |
+| `cargo test --workspace --all-targets --locked` | 退出 0，42 个测试二进制，942 passed / 0 failed / 0 ignored |
+| `cargo clippy … -D warnings`、`cargo fmt --check`、`scripts/gen-cli-docs.sh` | 均通过；`docs/cli.md` 已重新生成 |
+| `git diff --stat 778fdd3..0b4cb59 -- crates/` | 只有 `crates/cli/src/cli.rs`、`commands/grant.rs` 和测试 |
+| 本机换命令行 | 备份 `~/.local/opt/gld-778fdd3-20261017-2356`，release 16,333,944 字节、SHA-256 `126699473d65ae90d74a69afaf89d4d28f3d6d25704794e8d62ad91403902287`，写新文件再改名；守护进程 pid 87812 前后不变，协议 6 与命令行匹配，`gld grant browser --help` 有 `--all`，health 正常 |
