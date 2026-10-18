@@ -13,15 +13,60 @@ const MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
 
 const USER_ONLY_NOTE: &str = "this skill is marked disable-model-invocation: its author wants a person to start it. Follow it only if the user asked for this skill by name; if you picked it yourself, stop and ask the user first";
 
-pub fn list_skills(ctx: &ToolContext, _args: &Value) -> Result<Value, WorkspaceError> {
+pub fn list_skills(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let scan = ctx.current_skill_scan();
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty());
+    let Some(query) = query else {
+        return Ok(tool_ok(json!({
+            "skills": scan.skills.iter().map(|skill| &skill.descriptor).collect::<Vec<_>>(),
+            "count": scan.skills.len(),
+            // 扫到了却没收进来的，各带原因。不列的话，作者只会看到"AI 不用我的
+            // skill"，而不知道是 frontmatter 写坏了。
+            "skipped": scan.skipped,
+        })));
+    };
+    let matched = search(scan.skills.iter().map(|skill| &skill.descriptor), query);
     Ok(tool_ok(json!({
-        "skills": scan.skills.iter().map(|skill| &skill.descriptor).collect::<Vec<_>>(),
-        "count": scan.skills.len(),
-        // 扫到了却没收进来的，各带原因。不列的话，作者只会看到"AI 不用我的
-        // skill"，而不知道是 frontmatter 写坏了。
-        "skipped": scan.skipped,
+        "query": query,
+        "count": matched.len(),
+        "total": scan.skills.len(),
+        "skills": matched,
     })))
+}
+
+/// 按词找 skill：名字或描述里出现任何一个词就算，出现的词多的排前面，一样多保持扫描顺序。
+///
+/// 英文词要从词头开始对（`rust` 不算进 `trust`），中文没有词边界，按子串对。
+/// compact 档的目录只列名字（`render_skill_catalog_for_profile`），描述靠这里查。
+fn search<'a>(
+    skills: impl Iterator<Item = &'a crate::agent_context::SkillDescriptor>,
+    query: &str,
+) -> Vec<&'a crate::agent_context::SkillDescriptor> {
+    let words = query
+        .split_whitespace()
+        .map(|word| {
+            let escaped = regex::escape(word);
+            let pattern = if word.is_ascii() {
+                format!(r"(?i)\b{escaped}")
+            } else {
+                format!("(?i){escaped}")
+            };
+            regex::Regex::new(&pattern).expect("escaped pattern is valid")
+        })
+        .collect::<Vec<_>>();
+    let mut scored = skills
+        .filter_map(|skill| {
+            let text = format!("{} {}", skill.name, skill.description);
+            let score = words.iter().filter(|word| word.is_match(&text)).count();
+            (score > 0).then_some((score, skill))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, skill)| skill).collect()
 }
 
 pub fn get_skill(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -195,6 +240,36 @@ mod tests {
     use super::*;
     use crate::agent_context::{AgentContextRuntimeConfig, SkillDescriptor, SkillEntry};
     use crate::tools::ToolContext;
+
+    fn descriptor(name: &str, description: &str) -> SkillDescriptor {
+        SkillDescriptor {
+            id: format!("id-{name}"),
+            name: name.into(),
+            description: description.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 英文按词头对、中文按子串对，对上的词多的排前面。
+    #[test]
+    fn search_matches_word_starts_and_ranks_by_how_many_words_hit() {
+        let skills = [
+            descriptor("brandkit", "Builds trust with a premium brand"),
+            descriptor("systematic-debugging", "Debug failing tests step by step"),
+            descriptor("vitest", "Write tests with Vitest"),
+            descriptor("调试助手", "帮你系统地调试程序"),
+        ];
+        let names = |query: &str| {
+            search(skills.iter(), query)
+                .into_iter()
+                .map(|skill| skill.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(names("rust").is_empty(), "rust 不该对上 trust");
+        assert_eq!(names("debug test"), ["systematic-debugging", "vitest"]);
+        assert_eq!(names("DEBUGGING"), ["systematic-debugging"]);
+        assert_eq!(names("调试"), ["调试助手"]);
+    }
 
     #[test]
     fn get_skill_loads_body_on_demand() {

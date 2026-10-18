@@ -390,7 +390,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "list_skills",
         "List skills",
-        "List skills discovered from the enabled IDE and coding-agent providers. Skill bodies are loaded separately on demand. Files that look like skills but could not be taken in are listed under skipped, with the reason. Skills with disableModelInvocation are for the user to start: use one only when the user asks for it by name.",
+        "List skills discovered from the enabled IDE and coding-agent providers; pass query (e.g. \"debug test\") to search names and descriptions instead of listing all. Skill bodies are loaded separately on demand. Files that look like skills but could not be taken in are listed under skipped, with the reason. Skills with disableModelInvocation are for the user to start: use one only when the user asks for it by name.",
         true,
         false,
         false,
@@ -1061,7 +1061,12 @@ pub fn input_schema(name: &str) -> Value {
         "task_manage" => task_manage_schema(),
         "list_skills" => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to look for in skill names and descriptions, e.g. \"debug test\". Skills matching more of the words come first. Leave it out to list every skill."
+                }
+            },
             "additionalProperties": false
         }),
         "get_skill" => json!({
