@@ -175,3 +175,25 @@ fn without_a_workspace_every_absolute_path_counts_as_outside() {
         gld_core::tools::policy::PolicyReason::WorkspacePathProtected
     );
 }
+
+/// 写文件的样子以前漏认了几种：`open(` 里有括号、追加模式、改名、touch。认出来才会去查路径。
+#[cfg(unix)]
+#[test]
+fn more_ways_of_writing_are_recognised() {
+    let fx = fixture();
+    for script in [
+        // 以前 `open\([^)]*` 碰到 expanduser 的 `)` 就停，根本不算写文件。
+        "import os; open(os.path.expanduser('~/x.txt'), 'w').write('x')",
+        "open('/tmp/gld-policy-probe.txt', 'a').write('x')",
+        "open('/tmp/gld-policy-probe.txt', mode='r+').write('x')",
+        "import os; os.rename('notes.md', '/tmp/gld-policy-probe.txt')",
+        "import shutil; shutil.copy('notes.md', '/tmp/gld-policy-probe.txt')",
+        "from pathlib import Path; Path('/tmp/gld-policy-probe.txt').touch()",
+    ] {
+        assert_external(&fx, script);
+    }
+    // 读外面的文件不归这条管。
+    assert_allowed(&fx, "print(open('/etc/hosts').read())");
+    // 文件名里带 w 不是写模式。
+    assert_allowed(&fx, "print(open('/etc/w.txt').read())");
+}

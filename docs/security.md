@@ -130,8 +130,8 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 子进程那一层更保守：命令文本里出现删除或递归清空 `.git` / `.github` 一律拒，
 因为从命令文本里分不清"改一行 workflow"和"把 `.github` 删掉"。
 
-解释器往 Workspace 外面写也拦一道：命令文本像在写文件（`open(…, 'w')`、`write_text`、
-`shutil.rmtree`、`fs.writeFileSync` 这类），又带着外面的路径——`../`、`~/`、不在 Workspace 里的
+解释器往 Workspace 外面写也拦一道：命令文本像在写文件（`open(…, 'w')` 和 `'a'`、`'x'`、`'r+'` 模式、`write_text`、
+`os.rename`、`shutil.copy` / `rmtree`、`Path(…).touch()`、`fs.writeFileSync` / `appendFileSync` 这类），又带着外面的路径——`../`、`~/`、不在 Workspace 里的
 绝对路径——就报 `WORKSPACE_PATH_PROTECTED`。Workspace 里面的绝对路径照常放行（比如测试用的
 `<仓库>/target/test-home`）；绝对路径经过 Workspace 里的软链指到外面的，算外面。
 

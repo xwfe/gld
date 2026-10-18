@@ -760,7 +760,7 @@ fn dangerous_command_pattern() -> &'static regex::Regex {
 fn interpreter_mutation_pattern() -> &'static regex::Regex {
     INTERPRETER_MUTATION_PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r#"(?i)(shutil\.(rmtree|move)|os\.(remove|unlink|rmdir)|pathlib\.[^\s;]+\.(unlink|rename)|write_text|write_bytes|fs\.(writefile|writefilesync|unlink|rm)|set-content|out-file|new-item|files?\.(write|delete)|open\([^)]*['\"]w)"#,
+            r#"(?i)(shutil\.(rmtree|move|copy\w*)|os\.(remove|unlink|rmdir|removedirs|rename|renames|replace|makedirs|mkdir)|\.(unlink|rename|touch|mkdir|rmdir|symlink_to|hardlink_to)\(|write_text|write_bytes|fs\.(writefile|writefilesync|appendfile|appendfilesync|unlink|unlinksync|rm|rmsync|rename|renamesync|copyfile|copyfilesync|mkdir|mkdirsync|createwritestream)|set-content|out-file|new-item|files?\.(write|delete)|\bopen\([^;\n]*?['\"](r\+|[wax])b?t?\+?['\"])"#,
         )
         .expect("valid regex")
     })
