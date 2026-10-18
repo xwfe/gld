@@ -2,6 +2,14 @@
 //!
 //! 这条是文本启发式，不是沙箱；这里钉住的是它别把常见写法误判成"外部路径"，
 //! 也别漏掉明摆着往外写的。
+//!
+//! **整个文件只在 unix 上编译**：大部分用例写的是 unix 路径、用了软链。只给用例加 `#[cfg(unix)]`
+//! 不够——辅助函数和夹具字段在 Windows 上就成了没人用的，CI 的 Windows 编译检查开着 `-D warnings`
+//! 直接报错（2026-10-18 推送后就是这么红的，审查 §36）。Windows 那一路的路径识别由
+//! `tools/command_paths.rs` 的单测在任何平台上跑。
+
+#![cfg(unix)]
+
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -79,7 +87,6 @@ fn ordinary_write_scripts_are_not_mistaken_for_external_paths() {
     assert_allowed(&fx, "open('f.txt', 'w').write('https://example.com/x')");
 }
 
-#[cfg(unix)]
 #[test]
 fn absolute_paths_inside_the_workspace_are_allowed() {
     let fx = fixture();
@@ -107,7 +114,6 @@ fn absolute_paths_inside_the_workspace_are_allowed() {
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "ok");
 }
 
-#[cfg(unix)]
 #[test]
 fn writes_that_leave_the_workspace_are_still_rejected() {
     let fx = fixture();
@@ -138,7 +144,6 @@ fn writes_that_leave_the_workspace_are_still_rejected() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn symlinks_inside_the_workspace_that_point_outside_count_as_outside() {
     let fx = fixture();
@@ -177,7 +182,6 @@ fn without_a_workspace_every_absolute_path_counts_as_outside() {
 }
 
 /// 写文件的样子以前漏认了几种：`open(` 里有括号、追加模式、改名、touch。认出来才会去查路径。
-#[cfg(unix)]
 #[test]
 fn more_ways_of_writing_are_recognised() {
     let fx = fixture();
