@@ -1964,3 +1964,43 @@ Skills、转发、浏览器的配法和边界原来就写在 concepts.md 和 sec
 
 **清理：**停掉隔离服务（它起的 Playwright 进程跟着退了；还在跑的三个 `@playwright/mcp` 是 Claude Code 自己 10-11、10-15 起的，没动），
 删掉临时数据目录和项目，`~/.cache/gld-browser` 里删掉这次新增的 7 个文件（2 张截图、3 份快照、2 份 console 日志）。常驻服务 pid 没变。
+
+## 35. `gld --version` 带上构建提交，三台换成 `f9400f7`（2026-10-18）
+
+**起因：**§32 换完二进制，用户看 `gld --version` 还是 `gld 0.8.3`，问"本机上的版本未变？这正常吗"。正常：版本号只在发版时改，
+没发版的构建全报同一个号；可命令行自己给不出别的线索，只有 `gld tool list --served` 能看到构建提交，而那要守护进程在跑，另外两台没有。
+用户让改了验过再三台都装。
+
+**改了什么：**
+
+| 提交 | 内容 |
+| --- | --- |
+| `abaaef8` | 构建提交号导出成 `gld_core::BUILD_COMMIT`（`build.rs` 嵌的环境变量只在 gld-core 里看得到），`server_info` 改读它 |
+| `f9400f7` | `gld --version` 和子命令的 `--version` 打成 `gld 0.8.3 (f9400f7ade51)`；拿不到 git 时只有版本号。`scripts/package.sh` 原来要求输出恰好是 `gld <版本>`，改成两种都认；`install.md`「换完核对」加 `gld --version` 一行 |
+
+验证：新增 `version_output.rs`（格式，以及在 git 检出里括号里就是 HEAD）；`package.sh` 的判断用 bash 单独喂了 5 种输出
+（两种通过、版本不对和格式坏的拒）；`gen-cli-docs.sh` 重新生成 `docs/cli.md` 没有差异（帮助文本没变）。
+
+| 平台 | 全仓结果（`f9400f7`） |
+| --- | --- |
+| 本机 Mac | 49 个测试二进制，983 passed / 0 failed，clippy、fmt 通过 |
+| Linux 服务器（普通账号） | 49 个测试二进制，982 passed / 0 failed（少的一条是只在 macOS 编译的那条） |
+
+**换装：**
+
+| 机器 | 之前 | 之后 |
+| --- | --- | --- |
+| 本机 | `gld 0.8.3`，服务构建提交 `4a6d0983a19b` | `gld 0.8.3 (f9400f7ade51)`，sha256 `5bbe4c54…`；守护进程重启，pid 21527 → 74288 |
+| 另一台 Mac | `4a6d098` 那份 | `gld 0.8.3 (f9400f7ade51)`，sha256 `5bbe4c54…`，和本机同一份 |
+| Linux 服务器普通账号、root | `ce36f73` 构建 | 两个账号都是 `gld 0.8.3 (f9400f7ade51)`，sha256 `3d1cd09c…`（在服务器上从同一个提交构建） |
+
+本机照 [安装 · 升级](../install.md#升级) 做：换之前守护进程没有子进程，请求日志最后一条是 15:13（17 分钟前）；备份
+`~/.local/opt/gld-4a6d098-20261018-1528` 和 `gld-config-20261018-1528.tgz`（0600）；去掉 `CLAUDE*` 变量后重启。换完：工具表 33 个、
+指纹 `59951e97a502352e` **没变，不用 Refresh**；`profiles.json`、`oauth-clients/hub.json` 的指纹和换之前一样（`profiles.json` 和 §32 时
+不同，是因为 §32 写了 `custom-instruction-paths`，这次以换之前那一刻为准）；`gld ls` 一样；`gld health` 没有失败项；新守护进程环境里
+`CLAUDE*` 变量 0 个；`gld context -w gld` 两份说明仍都打 ✓。
+
+**顺带确认了 §32 要用户做的 Refresh：**请求日志 `2026-10-18T06:13:55Z`（本机 15:13:55）原注册客户端 `dcr-63f31361…`
+重拉了 `tools/list`，回包 43880 字节：ChatGPT 已经拿到 §31 的新工具描述和 `read_file ranges`、`list_skills query`。
+
+**没做：**没推送、没发版（用户定了等 ChatGPT 在新版上跑完一轮再说）；另外两台仍只有命令行，没起守护进程。
