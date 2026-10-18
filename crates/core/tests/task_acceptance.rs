@@ -84,6 +84,143 @@ fn rejected_codes(output: &Value) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn finish_retry_returns_the_completed_receipt_without_rewriting_events() {
+    let fx = fixture();
+    let task = start_task(&fx.ctx);
+    let passed = session_id(&exec(&fx.ctx, PASSING));
+    let args = json!({"action": "finish", "task_id": task,
+        "evidence_session_ids": [passed], "summary": "已交付"});
+    let first = call_tool(&fx.ctx, "task_manage", &args);
+    assert_eq!(first["task"]["status"], "completed", "{first}");
+    let before = fx
+        .ctx
+        .harness
+        .list_events(&task, 0, usize::MAX)
+        .unwrap()
+        .into_items();
+    let again = call_tool(&fx.ctx, "task_manage", &args);
+    assert_eq!(
+        again["ok"], true,
+        "丢失回包后重试不该报状态转换错误：{again}"
+    );
+    assert_eq!(again["finished"], true);
+    assert_eq!(again["already_finished"], true);
+    assert_eq!(again["verification_required"], false);
+    assert_eq!(again["task"], first["task"]);
+    let after = fx
+        .ctx
+        .harness
+        .list_events(&task, 0, usize::MAX)
+        .unwrap()
+        .into_items();
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+}
+
+#[test]
+fn finish_retry_never_revalidates_new_content_or_closes_a_new_task() {
+    let fx = fixture();
+    let old = start_task(&fx.ctx);
+    let passed = session_id(&exec(&fx.ctx, PASSING));
+    assert_eq!(
+        finish(&fx.ctx, &old, &[&passed])["task"]["status"],
+        "completed"
+    );
+    fs::write(fx.workspace.join("README.md"), "后来改的\n").unwrap();
+    let new = start_task(&fx.ctx);
+    let again = finish(&fx.ctx, &old, &[]);
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["already_finished"], true);
+    assert!(!again["change_summary"]["risks"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(fx.ctx.harness.current_task().unwrap().unwrap().id, new);
+    let invalid = finish(&fx.ctx, &old, &["not-the-accepted-session"]);
+    assert_eq!(invalid["ok"], false, "不能把新的证据当成已验收：{invalid}");
+    assert_eq!(
+        fx.ctx.harness.task(&old).unwrap().status,
+        gld_core::harness::model::TaskStatus::Completed
+    );
+}
+
+#[test]
+fn finish_retry_keeps_unverified_distinct_from_verified() {
+    let fx = fixture();
+    let task = start_task(&fx.ctx);
+    let args = json!({"action": "finish", "task_id": task, "allow_unverified": true});
+    assert_eq!(
+        call_tool(&fx.ctx, "task_manage", &args)["task"]["status"],
+        "completed_unverified"
+    );
+    let again = call_tool(&fx.ctx, "task_manage", &args);
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["task"]["status"], "completed_unverified");
+    assert_eq!(again["finished"], true);
+    assert_eq!(again["already_finished"], true);
+    assert_eq!(finish(&fx.ctx, &task, &["invented"])["ok"], false);
+}
+
+#[test]
+fn completed_receipt_survives_an_unavailable_change_summary() {
+    let fx = fixture();
+    let task = start_task(&fx.ctx);
+    let passed = session_id(&exec(&fx.ctx, PASSING));
+    assert_eq!(
+        finish(&fx.ctx, &task, &[&passed])["task"]["status"],
+        "completed"
+    );
+    // 只破坏隔离 fixture 的事件读取；任务记录本身依然完整。
+    let events = fx
+        .ctx
+        .harness
+        .store_root()
+        .join("workspaces")
+        .join(fx.ctx.harness.workspace_id())
+        .join("events")
+        .join(format!("{task}.jsonl"));
+    fs::remove_file(&events).unwrap();
+    fs::create_dir(&events).unwrap();
+    let again = finish(&fx.ctx, &task, &[]);
+    assert_eq!(again["ok"], true, "摘要故障不能伪装成任务没有完成：{again}");
+    assert_eq!(again["task"]["status"], "completed");
+    assert_eq!(again["finished"], true);
+    assert_eq!(again["change_summary_available"], false);
+    assert!(again["change_summary"].is_null());
+    assert!(!again["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn finish_marks_waiting_and_reports_unresolved_steps_without_inventing_completion() {
+    let fx = fixture();
+    let task = start_task(&fx.ctx);
+    let updated = call_tool(
+        &fx.ctx,
+        "task_manage",
+        &json!({
+            "action": "update", "task_id": task, "pending_steps": ["用户另行部署"]
+        }),
+    );
+    assert_eq!(updated["ok"], true);
+    let waiting = finish(&fx.ctx, &task, &[]);
+    assert_eq!(waiting["finished"], false);
+    assert_eq!(waiting["verification_required"], true);
+    let passed = session_id(&exec(&fx.ctx, PASSING));
+    let done = finish(&fx.ctx, &task, &[&passed]);
+    assert_eq!(done["finished"], true);
+    assert_eq!(done["verification_required"], false);
+    assert_eq!(done["task"]["pending_steps"], json!(["用户另行部署"]));
+    assert!(done["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v.as_str().unwrap_or("").contains("pending_steps")));
+    assert!(done["next"].as_str().unwrap().contains("无需"));
+}
+
 /// 反例（审查 D03）：命令退出 7，工具 ok=true、CLI 退出 0，台账却记 completed、last_error 为空。
 #[test]
 fn 命令退出非零时台账记失败而不是完成() {

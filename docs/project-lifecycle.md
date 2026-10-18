@@ -97,6 +97,17 @@ Planning 台账（`planning_manage action=state` 的 `execution`）
 确认放弃正式验收才收成 `completed_unverified`；**不能把这个状态说成验证全过，
 也不能反过来说完全没测过**。
 
+看 `finish` 回包的 `finished` 和 `task.status`：`finished=false`、`verification_required=true`
+表示还在等证据；`finished=true` 表示任务已结束，报告结果与限制即可，不用继续轮询。
+收尾前用 `action=update` 更新步骤；`pending_steps` 还留着时会给出警告，不会擅自把它们算成已完成。
+
+只有收尾回包丢失时，可以用同一个 `task_id` 重试 `finish`（不带证据，或沿用已接受的证据）。
+`already_finished=true` 表示读取已保存的终态：不重复写验收、说明或状态事件，也不关闭后来开的任务。
+它不是对后续修改的再次验收；不能借重试追加新证据或把 `completed_unverified` 升成 `completed`。
+状态已保存而附加说明或改动摘要读写失败时，回包保留终态并列出 `warnings`；
+`summary_recorded=false` 表示本次没有写入说明，`change_summary_available=false` 表示摘要不可用，
+不是“没有改动”或“没有风险”。确实要追查详情再调用 `action=change_summary`。
+
 `pause` 之后写入和执行会被拒（`TASK_PAUSED`），但它不停已经在跑的命令。任务结束前
 检查自己启动的命令是否还在运行，明确由谁接管或正常停止；不要结束其他主体的进程。
 

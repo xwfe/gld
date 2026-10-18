@@ -138,35 +138,64 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
             }),
         });
     }
-    // 证据被拒时上面已经返回了：说明只跟着真正生效的 finish 记。
+    // 终态已经落盘。附加摘要失败只能报附加信息不完整，不能把完成伪装成失败；
+    // 重试只读已有结果，不重复追加 summary 事件。
+    let mut warnings = result.warnings;
     let summary_recorded = match args
         .get("summary")
         .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
+        .filter(|text| !text.trim().is_empty() && !result.already_finished)
     {
-        Some(text) => {
-            ctx.harness
-                .record_summary(task_id, text)
-                .map_err(map_error)?;
-            true
-        }
+        Some(text) => match ctx.harness.record_summary(task_id, text) {
+            Ok(()) => true,
+            Err(error) => {
+                warnings.push(format!("任务状态已保存，但 summary 未写入：{error}"));
+                false
+            }
+        },
         None => false,
     };
-    let summary = change_summary(ctx, &json!({"task_id": task_id}))?;
+    let (summary, summary_available) = match change_summary(ctx, &json!({"task_id": task_id})) {
+        Ok(summary) => (summary, true),
+        Err(error) => {
+            warnings.push(format!("任务状态已保存，但改动摘要暂时不可读：{error}；需要详情时再读 task_manage action=change_summary"));
+            (Value::Null, false)
+        }
+    };
+    let finished = matches!(
+        result.task.status,
+        TaskStatus::Completed | TaskStatus::CompletedUnverified
+    );
+    if finished && !result.task.pending_steps.is_empty() {
+        warnings.push(format!(
+            "pending_steps 仍记录了 {} 项；收尾不会把它们自动当作已完成，请在交付说明中保留这些待办或说明其实际状态",
+            result.task.pending_steps.len()
+        ));
+    }
     let mut value = json!({
         "task": task_view(&result.task)?,
+        "finished": finished,
+        "already_finished": result.already_finished,
+        "verification_required": result.task.status == TaskStatus::Verifying,
         "change_summary": summary,
+        "change_summary_available": summary_available,
         "summary_recorded": summary_recorded
     });
     if result.task.status == TaskStatus::Verifying {
-        value["verification_required"] = json!(true);
         value["evidence_candidates"] = json!(result.candidates);
         value["next"] = json!(
             "任务等待验收。用 exec_command 跑测试（任务期间起的、退出 0、跑完之后没再改文件），再 finish 带 evidence_session_ids=[它的 session_id]；确认放弃正式验收才用 allow_unverified=true"
         );
     }
-    if !result.warnings.is_empty() {
-        value["warnings"] = json!(result.warnings);
+    if finished {
+        value["next"] = json!(if result.already_finished {
+            "这是已保存的收尾结果，不是对后来改动的重新验收。此任务无需再次 finish 或轮询；向用户报告结果及 warnings / risks 即可"
+        } else {
+            "此任务已结束，无需再次 finish 或轮询；向用户报告交付结果、验收状态及 warnings / risks 即可"
+        });
+    }
+    if !warnings.is_empty() {
+        value["warnings"] = json!(warnings);
     }
     Ok(value)
 }

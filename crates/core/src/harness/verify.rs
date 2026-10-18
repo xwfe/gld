@@ -57,6 +57,8 @@ pub struct EvidenceCandidate {
 
 pub struct FinishResult {
     pub task: TaskSession,
+    /// 只读重放已经保存的终态，不是又验收了一次当前工作区。
+    pub already_finished: bool,
     pub verification: Vec<VerificationRecord>,
     /// 非空时任务状态没动。
     pub rejected: Vec<EvidenceProblem>,
@@ -83,6 +85,53 @@ impl Harness {
     ) -> HarnessResult<FinishResult> {
         let _lock = self.store.lock(&self.workspace_id)?;
         let task = self.task(task_id)?;
+        if allow_unverified && !evidence_session_ids.is_empty() {
+            return Err(HarnessError::new(
+                "INVALID_ARGUMENT",
+                "evidence_session_ids 和 allow_unverified 只能给一个",
+            ));
+        }
+        if matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::CompletedUnverified
+        ) {
+            // 回包丢了时调用方会重试。只重放已有结果：不改状态、不重复写事件，
+            // 也不碰后来开始的新任务。不同验收方式、新证据不借重试混进旧任务。
+            if (task.status == TaskStatus::Completed && allow_unverified)
+                || (task.status == TaskStatus::CompletedUnverified
+                    && !evidence_session_ids.is_empty())
+            {
+                return Err(HarnessError::new(
+                    "INVALID_TASK_TRANSITION",
+                    "任务已经结束，重试不能改变已保存的验收方式",
+                ));
+            }
+            let verification = if evidence_session_ids.is_empty() {
+                Vec::new()
+            } else {
+                let events = self.list_events(&task.id, 0, usize::MAX)?.into_items();
+                let records = verification_records(&events);
+                if evidence_session_ids.iter().any(|id| {
+                    !records
+                        .iter()
+                        .any(|record| record.session_id.as_ref() == Some(id))
+                }) {
+                    return Err(HarnessError::new(
+                        "INVALID_TASK_TRANSITION",
+                        "任务已经结束，不能追加新的验收证据；不带证据可读取已保存的终态",
+                    ));
+                }
+                records
+            };
+            return Ok(FinishResult {
+                task,
+                already_finished: true,
+                verification,
+                rejected: Vec::new(),
+                candidates: Vec::new(),
+                warnings: Vec::new(),
+            });
+        }
         if !matches!(task.status, TaskStatus::Active | TaskStatus::Verifying) {
             return Err(HarnessError::new(
                 "INVALID_TASK_TRANSITION",
@@ -92,16 +141,11 @@ impl Harness {
                 ),
             ));
         }
-        if allow_unverified && !evidence_session_ids.is_empty() {
-            return Err(HarnessError::new(
-                "INVALID_ARGUMENT",
-                "evidence_session_ids 和 allow_unverified 只能给一个",
-            ));
-        }
         if allow_unverified {
             let task = self.set_status(task, TaskStatus::CompletedUnverified)?;
             return Ok(FinishResult {
                 task,
+                already_finished: false,
                 verification: Vec::new(),
                 rejected: Vec::new(),
                 candidates: Vec::new(),
@@ -128,6 +172,7 @@ impl Harness {
             };
             return Ok(FinishResult {
                 task,
+                already_finished: false,
                 verification: Vec::new(),
                 rejected: Vec::new(),
                 candidates,
@@ -158,6 +203,7 @@ impl Harness {
             return Ok(FinishResult {
                 candidates: candidates(&events, &current),
                 task,
+                already_finished: false,
                 verification: Vec::new(),
                 rejected,
                 warnings: Vec::new(),
@@ -210,6 +256,7 @@ impl Harness {
         let task = self.set_status(task, TaskStatus::Completed)?;
         Ok(FinishResult {
             task,
+            already_finished: false,
             verification: records,
             rejected: Vec::new(),
             candidates: Vec::new(),
