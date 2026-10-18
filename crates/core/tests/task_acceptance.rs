@@ -757,3 +757,49 @@ fn 重试收尾补写第一次没写进去的_summary() {
     assert_eq!(third["summary_recorded"], false, "{third}");
     assert_eq!(events_of_kind(&fx.ctx, &task, "task_summary").len(), 1);
 }
+
+/// finish 回包只带精简的改动摘要；完整的（哈希、大小、事件）在 action=change_summary。
+#[test]
+fn finish_回包只带精简的改动摘要() {
+    let fx = fixture();
+    let task = start_task(&fx.ctx);
+    let made = exec(
+        &fx.ctx,
+        "python3 -c \"[open('f%02d.txt' % i, 'w').write('x' * 100) for i in range(60)]\"",
+    );
+    assert_eq!(made["command_ok"], true, "{made}");
+    let passed = session_id(&exec(&fx.ctx, PASSING));
+    let done = finish(&fx.ctx, &task, &[&passed]);
+    assert_eq!(done["task"]["status"], "completed", "{done}");
+
+    let summary = &done["change_summary"];
+    assert_eq!(summary["total_changed_files"], 60, "{summary}");
+    let files = summary["files"].as_array().unwrap();
+    assert_eq!(files.len(), 50, "最多列 50 个");
+    assert_eq!(
+        files[0].as_object().unwrap().len(),
+        2,
+        "只留 path、status：{}",
+        files[0]
+    );
+    assert!(summary.get("evidence").is_none(), "事件留给 change_summary");
+    assert!(summary["detail"]
+        .as_str()
+        .unwrap()
+        .contains("change_summary"));
+    assert_eq!(summary["verification"].as_array().unwrap().len(), 1);
+
+    let full = call_tool(
+        &fx.ctx,
+        "task_manage",
+        &json!({"action": "change_summary", "task_id": task}),
+    );
+    assert_eq!(full["files"].as_array().unwrap().len(), 60, "{full}");
+    let size = |value: &Value| serde_json::to_vec(value).unwrap().len();
+    assert!(
+        size(summary) * 3 < size(&full),
+        "{} vs {}",
+        size(summary),
+        size(&full)
+    );
+}

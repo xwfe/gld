@@ -157,7 +157,7 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
         None => false,
     };
     let (summary, summary_available) = match change_summary(ctx, &json!({"task_id": task_id})) {
-        Ok(summary) => (summary, true),
+        Ok(summary) => (compact_summary(summary), true),
         Err(error) => {
             warnings.push(format!("任务状态已保存，但改动摘要暂时不可读：{error}；需要详情时再读 task_manage action=change_summary"));
             (Value::Null, false)
@@ -199,6 +199,34 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
         value["warnings"] = json!(warnings);
     }
     Ok(value)
+}
+
+/// finish 回包里的改动摘要只留收尾要用的：改了几个文件、是哪些、验收记录、风险。
+///
+/// 完整版带每个文件的哈希和大小、最多 100 条事件，一次能有几十 KB：2026-10-18 ChatGPT
+/// 一次 finish 回了 47 KB（审查 §28），MCP 还要把它放两遍。收尾这一步该轻，细节留给
+/// `action=change_summary`。
+fn compact_summary(mut full: Value) -> Value {
+    const FILES: usize = 50;
+    let files = full["files"]
+        .as_array()
+        .map(|files| {
+            files
+                .iter()
+                .take(FILES)
+                .map(|file| json!({"path": file["path"], "status": file["status"]}))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "task_id": full["task_id"].take(),
+        "objective": full["objective"].take(),
+        "total_changed_files": full["total_changed_files"].take(),
+        "files": files,
+        "verification": full["verification"].take(),
+        "risks": full["risks"].take(),
+        "detail": "每个文件的哈希、大小和任务事件：task_manage action=change_summary"
+    })
 }
 
 /// 任务里已经有 `task_summary` 事件。读不出来按"有"算：宁可少补一条，也不重复写。

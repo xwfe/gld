@@ -685,7 +685,8 @@ SHA-256 指纹和 HEAD）。只多了提交不算变：分支没换、文件没�
 **看回包的 `finished` 判断结没结束**：`true` 是已经收成 `completed` 或 `completed_unverified`，
 把结果和 `warnings` 报给用户就行，别再调 `finish`、别轮询；`false` 加 `verification_required: true`
 是还在 `verifying`，等你带证据再来。`pending_steps` 里还有没做完的步骤也能收尾，`warnings` 会提一句，
-gld 不会替你把它们算成做完了。
+gld 不会替你把它们算成做完了。回包里的 `change_summary` 是精简版：改了几个文件、前 50 个的路径和状态、验收记录、风险；
+每个文件的哈希、大小和任务事件调 `action=change_summary` 看。
 
 **回包丢了可以重试**：对已经结束的任务再调一次 `finish`（不带证据，或带当初被接受的那几个
 `session_id`），回 `already_finished: true` 和存着的结局，不再记事件，也不碰之后开的新任务。
