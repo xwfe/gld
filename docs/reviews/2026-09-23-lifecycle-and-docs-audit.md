@@ -1614,3 +1614,68 @@ gld 死锁；之前只归因于 Agent 工作流也不充分。本轮检查源码
 新行为尚未通过正在使用的 ChatGPT 连接器实测；上线需要用户批准后按既有升级流程执行。
 这些修复减少收尾失败和重复回传，不能保证模型一定及时给出最后回复，也不是强断电事务保证。
 当前状态及上线待办只维护在 `task_plan.md`；用法见 [收尾与交接](../project-lifecycle.md#收尾与交接如实写)。
+
+## 28. 复核 §27 的三个提交，和这轮暴露的 gld 不足（2026-10-18）
+
+**要求：**用户让 review ChatGPT 经 gld 做的三个提交（§27），从中找 gld 作为开发工具的不足，并说清 Skills、MCP、
+浏览器现在用得怎样。三个提交直接提在 main 上，没有分支或 worktree 要合并。
+
+### 三个提交改得怎样
+
+| 提交 | 改得对的 | 不足 |
+| --- | --- | --- |
+| `8fb5e31` | 已结束的任务再 `finish` 只回存着的结局，不再记事件；换验收方式、带新证据照样拒。5 条新测试覆盖了重试、新任务不受影响、事件读不出来 | 三件事（重试、附加信息失败降级、`pending_steps` 警告和新字段）放在一个提交；第一次 `summary` 没写进去的，重试不补写；字段说明写进了 `project-lifecycle.md`，工具规则本来在 `concepts.md`。记录里找不到 `finish` 真被重试过：这是预防性修复，不是对某次故障的复现 |
+| `63719bc` | 实测（隔离 `GLD_HOME`，直连模式）：20 KB 的命令交给 `check_command`，回包 4408 字节，`command` 截到 2048；3.5 KB 的合法命令照常执行，回显截到 2048 | 能省的不多：`exec_command` 超过 4000 字节在策略层就拒，回包本来就不带命令（实测 644 字节）；只有 `check_command` 拒绝时和 2–4 KB 的合法命令变小。每个 exec / check 回包多两个字段 |
+| `19e07b1` | 证据表每条都带 session id，和运行记录对得上：`task_acceptance` 11:02 退出 101、11:03 通过；`command_echo` 11:06、11:08 两次 101，11:09 通过 | 否定句一串接一串（"没有新增……不约束……也不是……"）；"起因"那句不通顺 |
+
+三个提交说明都只有一行、没有类型前缀，仓库最近 40 个提交里 36 个是 `类型(范围): …`。和 §25 比是大进步：
+先写会失败的测试、用隔离的 `GLD_HOME`、每步提交、没有自己部署。
+
+**跟进：**`6ae9793` 把收尾和命令长度的规则收回 `concepts.md` 一处，补上 4000 字节上限怎么绕；`7c62262` 在
+`AGENTS.md` 写明提交格式、一件事一提交到什么粒度、工具规则写在哪。
+
+**复核：**`19e07b1` 上 `cargo test --workspace --all-targets --locked` 44 个测试二进制，954 passed / 0 failed / 0 ignored；
+clippy `-D warnings`、`fmt --check` 通过。两个文档提交之后跑了 `docs_links_resolve`、`docs_have_no_home_paths`、
+`docs_commands_exist`，通过。
+
+### 这一轮 ChatGPT 怎么用的 gld
+
+数据来自 hub 请求日志（次数、字节）、`operations.jsonl`、运行记录和任务事件。
+
+- 10:57:12–11:21:22，103 次调用，1 个任务，一次 `finish` 就收成 `completed`（带 test、clippy、fmt 三条证据）。
+- 按工具：`exec_command` 25、`read_file` 21、`search_text` 12、`write_stdin` 12、`task_manage` 10、`apply_patch` 7、
+  `git_diff` 4、`git_status` 3，其余各 1–2 次。
+- `list_skills` / `get_skill`、MCP 转发、浏览器、`planning_manage`、`list_project_commands`、`check_command` 都是 0 次。
+- 工具报错 2 次：`FILE_VERSION_CONFLICT`（补丁带的是自己改之前的文件版本）、`WORKSPACE_PATH_PROTECTED`（见下表第 3 条）。
+- 回包共 1,100,540 字节，`read_file` 占 42%；那一次 `finish` 回了 47,440 字节。
+- 提交都是 `exec_command` 跑 `git add <文件>` 加 `git commit -m <一行>`。提交前的检查一次比一次少：
+  第 1 次看了 status 和 diff，第 2 次只看 diff，第 3 次没看。
+
+### 暴露的 gld 不足
+
+按浪费多少排：
+
+| 不足 | 证据 | 可以怎么改 |
+| --- | --- | --- |
+| 1. AI 自己 `git commit` 之后，下一次写之前要 `refresh_baseline` 两次（先看、再接纳） | `Harness::check_baseline` 只要 HEAD 变了就报 `BASELINE_STALE`。3 次接纳记录的 `changes` 都是空的、指纹没变，只有 HEAD 变了。3 次提交多花 6 次调用 | 任务期间 gld 自己跑的命令让 HEAD 前进、文件指纹和记账一致时，把新 HEAD 直接记上账 |
+| 2. 只改文档也要重跑全仓 test | 证据要求跑完之后工作区没变。`19e07b1` 只改 2 个 .md，test 91 秒、clippy 6 秒又跑了一遍 | 这是验收规则的取舍；要不要按路径放宽，由用户定 |
+| 3. 工作区里面的绝对路径被当成外部路径 | `command_contains_external_path` 见到 `/` 开头就算外部；命令里同时有写文件的操作时整条拒。11:11:21 被拒的那条没留原文，它写的用途是"在隔离 GLD_HOME 完整执行……日志只放 target"，前后命令用的都是 `target/` 下的绝对路径，多半撞的是这条（推断） | 先解析路径，落在工作区里就不算外部 |
+| 4. `read_file` 一次只读一个文件 | 3 次改用 `python3 -c` 一次读 15 段。这些读被记成命令，算进任务的写操作 | 让 `read_file` 一次收多段 |
+| 5. 命令默认 1 秒就转后台 | `yield_time_ms` 默认 1000、最大 30000，它一直用默认值。14 条 cargo 里 7 条 20 秒内结束，仍各多轮询一次；9 条后台命令共轮询 12 次 | 工具说明里提示跑测试时给大 `yield_time_ms` |
+| 6. 回包偏大 | `finish` 带完整 `change_summary`，47 KB；每个回包的 JSON 在 text 和 `structuredContent` 各放一份（MCP 规范为兼容旧客户端建议这么做） | `finish` 只给计数和风险，细节留给 `action=change_summary` |
+| 7. 记录不全，事后查不清 | `operations.jsonl` 只记补丁、命令和 Git 工具（`should_log_operation`），103 次里记了 41 次；请求日志没有时间戳；被拒的命令不留原文；`run.json` 的命令只存前 500 字符 | 请求日志加时间戳 |
+| 8. 用户全局规则还没送到 | `gld context -w gld`：`INSTRUCTIONS.md` 打 ·（扫到没注入），只有仓库 `AGENTS.md` 打 ✓ | 部署 `e8f7f36`（§26），等用户点头 |
+| 9. Skill 目录对这个项目没用 | 扫到 94 个，compact 目录按扫描顺序只列 5 个（launch-software-factory、generate-design、planning-with-files、utools-plugin-development、ui-ux-pro-max），都和 Rust 无关；另有 18 个同内容的重复被 ✗ | 按项目语言挑，或在项目里放自己的 skill |
+
+### Skills、MCP、浏览器现在怎样
+
+- **Skills**：`list_skills` 列、`get_skill` 读正文和 skill 目录里的文本附件，gld 不执行 skill 里的脚本。
+  compact 档只在 `workspace_context` 里给一段 1200 字符的目录（上面第 9 条），其余要 AI 自己调 `list_skills`。
+- **MCP 转发**：`gld mcp on <名>` 点名才转，AI 那边只多 `list_mcp_tools`、`call_mcp_tool`、`read_mcp_result` 三个工具。
+  本机配置里约 30 个 server，只开了 `browser`。只转工具，不转 resources 和 prompts；grant 用不了转发。
+- **浏览器**：能用，靠转发的 Playwright MCP（`--isolated --headless`，只放本机地址，`cwd` 限在 `~/.cache/gld-browser`）。
+  做法是 `exec_command` 带 `service_port` 起服务，再 `call_mcp_tool server=browser` 调 `browser_navigate`、`browser_snapshot`、
+  `browser_click`、`browser_console_messages`、`browser_take_screenshot`，§20 实测过。截图存在 `~/.cache/gld-browser`，
+  不进项目、不当验收证据。`gld grant browser` 是给浏览器扩展发连接地址（§23），和"让 AI 操作浏览器"是两回事。
+
+**没做：**上表的代码改动都没动，没部署，没推送。
