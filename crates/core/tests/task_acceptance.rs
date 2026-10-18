@@ -682,3 +682,59 @@ fn 回包之后才落地的提交不自动记账() {
     assert_eq!(next["error"]["code"], "BASELINE_STALE", "{next}");
     assert!(events_of_kind(&fx.ctx, &task_id, "head_advanced").is_empty());
 }
+
+/// "跑测试 → 提交 → finish"：提交没改文件，测的就是现在这份内容，证据照样认（审查 §30）。
+#[test]
+fn 只多了提交时之前跑的证据照样认() {
+    let fx = git_fixture();
+    let task_id = start_task(&fx.ctx);
+    assert_eq!(patch_readme(&fx.ctx, "初始内容", "改过")["ok"], true);
+    let tested = session_id(&exec(&fx.ctx, PASSING));
+    assert_eq!(exec(&fx.ctx, "git add README.md")["command_ok"], true);
+    assert_eq!(exec(&fx.ctx, "git commit -q -m edit")["command_ok"], true);
+
+    let done = finish(&fx.ctx, &task_id, &[&tested]);
+    assert_eq!(done["task"]["status"], "completed", "{done}");
+    // 要说清楚：证据跑在提交之前。
+    assert!(
+        done["warnings"].as_array().is_some_and(|warnings| warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("提交之前"))),
+        "{done}"
+    );
+}
+
+/// HEAD 往回走（`reset --soft`）不是"只多了提交"：接纳之后，之前的证据照旧不认。
+#[test]
+fn head_往回走之后之前的证据不认() {
+    let fx = git_fixture();
+    let task_id = start_task(&fx.ctx);
+    assert_eq!(patch_readme(&fx.ctx, "初始内容", "改过")["ok"], true);
+    assert_eq!(exec(&fx.ctx, "git add README.md")["command_ok"], true);
+    assert_eq!(exec(&fx.ctx, "git commit -q -m edit")["command_ok"], true);
+    let tested = session_id(&exec(&fx.ctx, PASSING));
+    assert_eq!(
+        exec(&fx.ctx, "git reset -q --soft HEAD~1")["command_ok"],
+        true
+    );
+
+    let review = call_tool(
+        &fx.ctx,
+        "task_manage",
+        &json!({"action": "refresh_baseline", "task_id": task_id}),
+    );
+    let fingerprint = review["current"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let accepted = call_tool(
+        &fx.ctx,
+        "task_manage",
+        &json!({"action": "refresh_baseline", "task_id": task_id,
+            "accept_fingerprint": fingerprint, "reason": "测试：撤回提交"}),
+    );
+    assert_eq!(accepted["accepted"], true, "{accepted}");
+
+    let rejected = finish(&fx.ctx, &task_id, &[&tested]);
+    assert_eq!(rejected_codes(&rejected), ["EVIDENCE_STALE"], "{rejected}");
+}

@@ -660,7 +660,8 @@ task_manage action=finish task_id=<id> evidence_session_ids=["<session_id>"]
 
 `finish` 不会替你跑测试。它只收**这个任务期间用 `exec_command` 起的、退出 0 的命令**当证据，
 而且要求：命令跑的时候 gld 没往工作区写过东西，跑完之后工作区也没再变（比的是逐文件
-SHA-256 指纹和 HEAD）。全部满足才进 `completed`，证据记进 `change_summary.verification`
+SHA-256 指纹和 HEAD）。只多了提交不算变：分支没换、文件没变、HEAD 只往前走，"跑测试 → 提交 → `finish`"
+照样认，回包 `warnings` 会写一句它跑在提交之前；HEAD 往回走（`reset`）、换了分支要重跑。全部满足才进 `completed`，证据记进 `change_summary.verification`
 （命令原文、退出码、当时的指纹）。有一条不满足就整个拒收，报 `VERIFICATION_REJECTED`，
 任务状态不动，`details.rejected` 逐条说原因：
 

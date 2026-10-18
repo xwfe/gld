@@ -10,6 +10,7 @@
 //! 让看的人判断。
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -18,7 +19,7 @@ use uuid::Uuid;
 use super::model::{
     CommandOutcome, HarnessEvent, TaskSession, TaskStatus, VerificationRecord, WorktreePosition,
 };
-use super::scan::{changed_files, git_position, scan_worktree, timestamp};
+use super::scan::{changed_files, git_is_ancestor, git_position, scan_worktree, timestamp};
 use super::state::Harness;
 use super::store::{HarnessError, HarnessResult};
 
@@ -164,7 +165,7 @@ impl Harness {
             fingerprint: scan.fingerprint(),
         };
         if evidence_session_ids.is_empty() {
-            let candidates = candidates(&events, &current);
+            let candidates = candidates(&self.workspace_root, &events, &current);
             let task = if task.status == TaskStatus::Active {
                 self.set_status(task, TaskStatus::Verifying)?
             } else {
@@ -194,14 +195,14 @@ impl Harness {
             if !seen.insert(session_id.as_str()) {
                 continue;
             }
-            match accept_evidence(&task, &events, session_id, &current) {
+            match accept_evidence(&self.workspace_root, &task, &events, session_id, &current) {
                 Ok(record) => records.push(record),
                 Err(problem) => rejected.push(problem),
             }
         }
         if !rejected.is_empty() {
             return Ok(FinishResult {
-                candidates: candidates(&events, &current),
+                candidates: candidates(&self.workspace_root, &events, &current),
                 task,
                 already_finished: false,
                 verification: Vec::new(),
@@ -225,6 +226,14 @@ impl Harness {
                     record.command,
                     record.changed_during_run.len(),
                     record.changed_during_run.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            if record.head != current.head {
+                warnings.push(format!(
+                    "命令 {} 跑在提交之前（HEAD {} → {}），之后的提交没改文件，证据照样算数",
+                    record.command,
+                    short_head(record.head.as_deref()),
+                    short_head(current.head.as_deref())
                 ));
             }
         }
@@ -362,6 +371,7 @@ fn find_evidence(events: &[HarnessEvent], session_id: &str) -> Option<CommandEvi
 }
 
 fn accept_evidence(
+    root: &Path,
     task: &TaskSession,
     events: &[HarnessEvent],
     session_id: &str,
@@ -417,7 +427,7 @@ fn accept_evidence(
             "没有记录命令结束时的工作区".into(),
         ));
     };
-    if end != current {
+    if !same_content(root, end, current) {
         return Err(problem(
             "EVIDENCE_STALE",
             "命令结束之后工作区又变了，它测的不是现在的内容；重跑一次".into(),
@@ -440,7 +450,30 @@ fn accept_evidence(
     })
 }
 
-fn candidates(events: &[HarnessEvent], current: &WorktreePosition) -> Vec<EvidenceCandidate> {
+/// 证据结束时和现在测的是不是同一份内容。位置完全一样当然算；只多了提交也算：分支没换、
+/// 文件指纹没变、现在的 HEAD 是那时 HEAD 往前走出来的。"跑测试 → 提交 → finish"
+/// 就是这样，以前整体比位置，提交没改文件也报 `EVIDENCE_STALE`，只能提交后再跑一遍（审查 §30）。
+///
+/// HEAD 往回走、换分支照旧不认：测试可能读 Git 历史（版本号、`git describe`），只放过最常见的那一种。
+fn same_content(root: &Path, end: &WorktreePosition, current: &WorktreePosition) -> bool {
+    if end == current {
+        return true;
+    }
+    match (end.head.as_deref(), current.head.as_deref()) {
+        (Some(then), Some(now)) => {
+            end.fingerprint == current.fingerprint
+                && end.branch == current.branch
+                && git_is_ancestor(root, then, now)
+        }
+        _ => false,
+    }
+}
+
+fn candidates(
+    root: &Path,
+    events: &[HarnessEvent],
+    current: &WorktreePosition,
+) -> Vec<EvidenceCandidate> {
     let mut sessions: Vec<&str> = Vec::new();
     for event in events {
         if event.kind != "operation_finished" || event.tool_name.as_deref() != Some("exec_command")
@@ -460,7 +493,10 @@ fn candidates(events: &[HarnessEvent], current: &WorktreePosition) -> Vec<Eviden
             let evidence = find_evidence(events, session_id)?;
             let fresh = evidence.command.passed()
                 && evidence.command.workspace_writes_since_start == Some(0)
-                && evidence.end.as_ref() == Some(current);
+                && evidence
+                    .end
+                    .as_ref()
+                    .is_some_and(|end| same_content(root, end, current));
             fresh.then(|| EvidenceCandidate {
                 session_id: session_id.to_string(),
                 command: evidence.command_text,
@@ -468,4 +504,8 @@ fn candidates(events: &[HarnessEvent], current: &WorktreePosition) -> Vec<Eviden
         })
         .take(CANDIDATES)
         .collect()
+}
+
+fn short_head(head: Option<&str>) -> &str {
+    head.map_or("（无）", |head| head.get(..12).unwrap_or(head))
 }
