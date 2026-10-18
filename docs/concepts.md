@@ -691,7 +691,7 @@ gld 不会替你把它们算成做完了。
 `session_id`），回 `already_finished: true` 和存着的结局，不再记事件，也不碰之后开的新任务。
 这时的 `change_summary` 按**现在**的工作区算：收尾后又改过文件，`risks` 会写"最后一次验收之后工作区又变了"，
 重试不替后来的改动做验收。重试时换验收方式（`completed` ↔ `completed_unverified`）或带新证据报
-`INVALID_TASK_TRANSITION`；后来的改动要验，开新任务。第一次的 `summary` 没写进去的，重试也不补写。
+`INVALID_TASK_TRANSITION`；后来的改动要验，开新任务。第一次的 `summary` 没写进去（或没带），重试带上会补写一次；已经有了就不再追加。
 
 **状态存上了、附带的没存上**：`summary` 写失败或改动摘要读不出来时，任务照样是结束状态，
 回包 `summary_recorded: false` / `change_summary_available: false` 并在 `warnings` 里说原因。

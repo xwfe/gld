@@ -738,3 +738,22 @@ fn head_往回走之后之前的证据不认() {
     let rejected = finish(&fx.ctx, &task_id, &[&tested]);
     assert_eq!(rejected_codes(&rejected), ["EVIDENCE_STALE"], "{rejected}");
 }
+
+/// 第一次收尾没带上 summary（或没写进去），重试时补写一次；已经有了就不再追加。
+#[test]
+fn 重试收尾补写第一次没写进去的_summary() {
+    let fx = fixture();
+    let task = start_task(&fx.ctx);
+    let passed = session_id(&exec(&fx.ctx, PASSING));
+    assert_eq!(
+        finish(&fx.ctx, &task, &[&passed])["task"]["status"],
+        "completed"
+    );
+    let with_summary = json!({"action": "finish", "task_id": task, "summary": "补上的交接说明"});
+    let again = call_tool(&fx.ctx, "task_manage", &with_summary);
+    assert_eq!(again["already_finished"], true, "{again}");
+    assert_eq!(again["summary_recorded"], true, "{again}");
+    let third = call_tool(&fx.ctx, "task_manage", &with_summary);
+    assert_eq!(third["summary_recorded"], false, "{third}");
+    assert_eq!(events_of_kind(&fx.ctx, &task, "task_summary").len(), 1);
+}

@@ -138,13 +138,14 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
             }),
         });
     }
-    // 终态已经落盘。附加摘要失败只能报附加信息不完整，不能把完成伪装成失败；
-    // 重试只读已有结果，不重复追加 summary 事件。
+    // 终态已经落盘。附加摘要失败只能报附加信息不完整，不能把完成伪装成失败。
+    // 重试时已经有 summary 就不再追加；第一次没写进去的，重试补上。
     let mut warnings = result.warnings;
     let summary_recorded = match args
         .get("summary")
         .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty() && !result.already_finished)
+        .filter(|text| !text.trim().is_empty())
+        .filter(|_| !result.already_finished || !has_summary(ctx, task_id))
     {
         Some(text) => match ctx.harness.record_summary(task_id, text) {
             Ok(()) => true,
@@ -198,6 +199,18 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
         value["warnings"] = json!(warnings);
     }
     Ok(value)
+}
+
+/// 任务里已经有 `task_summary` 事件。读不出来按"有"算：宁可少补一条，也不重复写。
+fn has_summary(ctx: &ToolContext, task_id: &str) -> bool {
+    ctx.harness
+        .list_events(task_id, 0, usize::MAX)
+        .map(|log| {
+            log.into_items()
+                .iter()
+                .any(|event| event.kind == "task_summary")
+        })
+        .unwrap_or(true)
 }
 
 fn refresh_baseline(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
