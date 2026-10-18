@@ -39,13 +39,12 @@ MCP 转发的 3 个，开着隔离的 `browser`）、指纹 `5155ec6663bb33e2`�
 
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
-| 补丁失败的原因分布 | 本机已换上（2026-10-09），攒数据中 | 日用一阵后数 `[patch]` 行的 `near_miss.kind`：`trailing_whitespace` / `indentation` / `punctuation` 占得多，就照 Codex 的做法让比对逐级放宽，否则维持逐字比对。见审查 §22 |
+| 补丁失败的原因分布 | 2026-10-18 数过一次，维持逐字比对 | 30 个原因里缩进 2 个、行尾空格和标点 0 个，没有放宽的依据；最多的是版本冲突（18 个），`3eb5fe4` 已处理（审查 §31）。再攒一阵，`indentation` 等明显变多再议 |
 | SuperAssistant 接 DeepSeek 网页 | 本机已换上（2026-10-17），没实测 | 用户自己在终端 `gld grant browser web-mcp --all`（或点名项目）拿地址（地址就是凭据，不经过 AI），扩展选 Streamable HTTP 连上，在 DeepSeek 页面走一圈 `list_workspaces` → `workspace_context` → `read_file`，看结果填回、DeepSeek 接着说。报 `Failed to fetch` 且 `gld logs` 没有请求，先查 Chrome 的本地网络访问权限。结果记审查 |
-| ChatGPT 换版后第一次调用 | 等它下次被用到 | `gld logs` 里是原来的 `auth=oauth:hub:dcr-…`、没有 401，就收口；有 401 先看审查 §25 的回滚 |
 | 用户规则送到 ChatGPT | 源码已改（`e8f7f36`，2026-10-18），没部署 | 用户同意后换二进制、`gld daemon restart`，再 `gld settings runtime --custom-instruction-paths ~/.codex/AGENTS.md`；`gld context -w gld` 里它打 ✓ 就算上线。之后看 ChatGPT 下一轮开发是否按步提交、文档是否照规则写，没改善再考虑工具层提醒（比如回包里报未提交改动量）。见审查 §26 |
 | 零中断升级（RFC-0008） | 草案，未实现 | 让在跑的命令和请求跨版本都不断。要不要做、先做哪段由用户定；先确认真实痛点（比如长跑的开发服务器被重启停掉）再立项 |
 | 任务收尾与大输入回传 | 源码已修，未部署（2026-10-18） | `8fb5e31`、`63719bc`：收尾可只读重试、附加摘要失败不覆盖终态、命令回显有界；新增 8 条回归先失败后通过，全仓 test / clippy / fmt 通过，见审查 §27，复核见 §28。用户批准后按既有升级流程换二进制、重启守护进程，再从连接器验收；后台写入基线复核保持不变 |
-| 经 gld 开发时的摩擦（审查 §28） | 两条源码已修，没部署（2026-10-18） | 工作区里面的绝对路径不算外部路径：`44d4679`，见审查 §29。任务里经 gld 提交、HEAD 只往前走、文件没变时直接记账，不用再两次 `refresh_baseline`：`ad22e83`，见审查 §30。随下次换二进制上线，上线后看 ChatGPT 提交之后还有没有 `refresh_baseline`、`WORKSPACE_PATH_PROTECTED`。还剩：`read_file` 一次读多段、`finish` 回包瘦身、请求日志加时间戳。两条验收规则的取舍由用户定：只改文档也要重跑全仓；提交之后，提交前跑的测试不能再当证据（§30） |
+| 经 gld 开发时的摩擦（审查 §28） | 源码已修，没部署（2026-10-18） | §28 列的 9 条和复核时另查出的 4 条：能改的都改了（§29、§30、§31），全仓 982 passed / 0 failed。没改的三条各有原因写在 §31：每个回包 JSON 放两份（MCP 规范建议的兼容做法）、读工具不进任务记账、只改文档也要重跑全仓（验收规则的取舍，等用户定）。上线随下次换二进制，换完 ChatGPT 连接器点一次 Refresh 才看得到 `read_file ranges`、`list_skills query` 和新的工具描述。之后看下一轮：提交后还有没有 `refresh_baseline`、每秒轮询、`python3 -c` 读文件、`FILE_VERSION_CONFLICT` |
 
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
 

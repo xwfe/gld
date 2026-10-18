@@ -1784,3 +1784,58 @@ clippy `-D warnings`、`fmt --check` 通过。两个文档提交之后跑了 `do
 用合并提交合进 main，没有改写分支上的提交。冲突只在文档：两边都追加了 §29，这一节改成 §30；`task_plan.md` 那一行合成一条。
 合并后的树上 `cargo test --workspace --all-targets --locked` 45 个测试二进制，963 passed / 0 failed（§29 之后 959，多的是这节的 4 条），
 clippy `-D warnings`、`fmt --check` 通过。
+
+## 31. §28 暴露的问题逐条修完（2026-10-18）
+
+**要求：**用户看完 §28 的复核说"从中暴露出的 gld 问题都要修复"。§29、§30 修了第 3、第 1 条，这一节是剩下的，
+外加复核途中又查出来的几处。每条都先写会失败的测试（标了"对照"的是换回旧代码跑过），再改，一件事一个提交。
+
+### 改了什么
+
+| §28 的条目 | 提交 | 改成什么样 |
+| --- | --- | --- |
+| 2. 提交之后提交前的证据不认（§30 发现） | `c94454d` | 只多了提交也算同一份内容：分支没换、文件指纹没变、HEAD 只往前走。"跑测试 → 提交 → `finish`"照样收，`warnings` 写一句它跑在提交之前。HEAD 往回走、换分支照旧要重跑。对照：旧代码报 `EVIDENCE_STALE` |
+| 2. 只改文档也要重跑全仓 | 没改 | 这是验收规则的取舍：gld 的文档也有测试（链接、路径门禁），放宽"改了 .md 不算变"会让证据说不清测的是什么。等用户定 |
+| 3. 写文件的识别漏判（§29 记了没改） | `99104ed` | `open(` 里带括号、`'a'` `'x'` `'r+'` 模式、`os.rename`、`shutil.copy`、`Path.touch`、`fs.appendFileSync` 等都认得出；`open('/etc/w.txt')` 这种读不算。对照：旧正则漏掉 `open(os.path.expanduser('~/x'), 'w')` |
+| 3. Windows 上 `'\n'` 误判、`policy.rs` 过长（§29 记了没改） | `a955313` | 路径判断搬进 `tools/command_paths.rs`（`policy.rs` 回到 992 行）；Windows 上 `\` 开头的要像路径（`\\server` 或后面还有分隔符）才算。单测在 Mac 上把 Windows 那一路也跑一遍 |
+| 4. `read_file` 一次一个文件 | `86b5e98` | `read_file` 收 `ranges`：最多 20 段、合计 256 KiB，按顺序回 `results`，一段失败不影响别的段 |
+| 5. 默认 1 秒转后台、反复轮询 | `e105426` | 根因是 `write_stdin` 不管命令结没结束都睡满 `yield_time_ms`，AI 只敢用 1 秒。现在结束就返回；"还在跑"的提示、`command_summary`、两个工具的描述都写明"`write_stdin` 留空、`yield_time_ms` 给 30000"。对照：旧代码的提示还是"继续读取 session" |
+| 6. `finish` 回包 47 KB | `12f2fc2` | `finish` 里的 `change_summary` 只留改了几个文件、前 50 个的路径和状态、验收记录、风险；完整的在 `action=change_summary` |
+| 6. 每个回包 JSON 放两份 | 没改 | MCP 规范（2025-06-18 版 Tools 一节，这次查过原文）写的是"为了向后兼容，返回 structured content 的工具 SHOULD 同时在 TextContent 里放一份序列化 JSON"。去掉会让不读 `structuredContent` 的客户端什么都拿不到 |
+| 7. 请求日志没有时间 | `de2f484` | `mcp-requests.log` 每行开头加 UTC 时间，和守护进程日志同一个格式（格式化函数从 gld-daemon 搬进 core，仍只有一份） |
+| 7. 其余记录缺口 | 没改 | `operations.jsonl` 只记补丁、命令、Git（读工具不进任务记账，是原来的设计）；被拒命令不留原文、`run.json` 命令只存 500 字符，都是为了不把内容和密钥写进日志。有了时间之后，请求日志能对上几点调了什么 |
+| 8. 用户全局规则送不到 | 没改 | 源码早改好了（`e8f7f36`），要换二进制、重启守护进程、点名配置，等用户点头 |
+| 9. Skill 目录对项目没用 | `7f85030`、`ac57eb5`、`b5e79f7` | compact 目录里装在本机的 skill 只列名字（几十个都装得下，项目自己的照旧带描述）；`list_skills` 收 `query` 按词查名字和描述，英文按词头、中文按子串。`b5e79f7` 是补 `7f85030` 漏过的 clippy：那次检查命令把 clippy 的退出码吞了，我没看到就提交了 |
+
+复核时另外查出来的：
+
+| 问题 | 提交 | 改成什么样 |
+| --- | --- | --- |
+| 补丁失败最多的一类是版本冲突（请求日志 30 个原因里 18 个 `file_changed_since_read`）；`operations.jsonl` 里还留着的 9 次，gld 都在之前 35 秒到 6 分钟内写过同一个文件 | `3eb5fe4` | 带的版本落后、但中间全是同一个调用方经 gld 写的，放行并在 `warnings` 说明；换了调用方、gld 之外改过、gld 重启过照旧拒。对照：旧代码报 `FILE_VERSION_CONFLICT` |
+| 重试 `finish` 补不上第一次没写进去的 summary | `0a6f76b` | 任务里还没有 `task_summary` 就补写一次，有了不追加。对照：旧代码 `summary_recorded=false` |
+| 命令超长的报错不说上限 | `c5f06b1` | 消息写明这条多少字节、上限 4000，建议写成文件再跑、大段数据走 `stdin` |
+| ChatGPT 撞到 gld 的毛病只绕不报 | `0ee05f3` | 写明在这个仓库里 gld 自己的工具问题就是缺陷，绕过去要在交付说明里写出来 |
+
+补丁失败原因的分布顺带看了：30 个原因里缩进 2 个、`partial` 8 个、版本冲突 18 个、其他 2 个，行尾空格和标点 0 个。
+§22 说的"照 Codex 逐级放宽比对"现在没有依据，维持逐字比对。
+
+### 验证
+
+全仓结果见下表；每条的单测和对照写在各自提交说明里。
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo test --workspace --all-targets --locked`（隔离 `GLD_HOME`） | `0ee05f3` 上 48 个测试二进制，982 passed / 0 failed / 0 ignored（§30 合并后 963，多的 19 条是这一节的） |
+| clippy `-D warnings`、`fmt --check` | 通过（`7f85030` 那次漏过的已由 `b5e79f7` 补上） |
+
+### 上线要注意
+
+- 都只改了源码，没换本机二进制、没重启守护进程、没推送。
+- 工具描述和输入表变了（`exec_command`、`write_stdin`、`read_file`、`list_skills`）：换完二进制，ChatGPT 要在连接器设置里
+  点一次 Refresh 才看得到 `ranges`、`query` 和新描述；不点照样能用，只是用旧的那套。连接器不用删、不用重新授权。
+- 新行为都没经 ChatGPT 连接器实测。下一轮经 gld 开发时看：提交之后还有没有 `refresh_baseline`、有没有每秒轮询、
+  还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 还多不多。
+
+**顺带收口的待办：**"ChatGPT 换版后第一次调用"（§25 换上 `778fdd3` 之后）。2026-10-18 10:57 起 ChatGPT 的调用都是原注册客户端
+`oauth:hub:dcr-63f31361…`，没有要求重新授权，请求日志里没有 OAuth 的 401；附近那两条 401 是 `credential=browser_url`（地址无效或过期）
+和 curl 没带凭据，和连接器无关。
