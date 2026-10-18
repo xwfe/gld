@@ -65,7 +65,7 @@ fn search<'a>(
             (score > 0).then_some((score, skill))
         })
         .collect::<Vec<_>>();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().map(|(_, skill)| skill).collect()
 }
 
