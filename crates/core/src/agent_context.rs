@@ -812,7 +812,17 @@ pub fn render_skill_catalog_for_profile(skills: &[SkillEntry], tool_profile: &st
 
     let mut out = String::from("Available skills are loaded on demand. Use list_skills to inspect them and get_skill with a skill id to load the full SKILL.md.\n");
     let mut listed = 0;
-    for skill in skills.iter().take(50) {
+    // compact 档：项目自己的带描述，装在本机的只列名字。以前一律带描述，1200 字符只装得下
+    // 前 5 个（按扫描顺序，和项目无关）：gld 这个 Rust 项目拿到的是 5 个前端、设计类 skill，
+    // 剩下 89 个模型不会自己想起来（审查 §28）。只列名字能装下几十个，描述用 list_skills query 查。
+    let (described, named): (Vec<&SkillEntry>, Vec<&SkillEntry>) = if compact {
+        skills
+            .iter()
+            .partition(|skill| skill.descriptor.scope == "workspace")
+    } else {
+        (skills.clone(), Vec::new())
+    };
+    for skill in described.iter().take(50) {
         let description = skill
             .descriptor
             .description
@@ -831,6 +841,32 @@ pub fn render_skill_catalog_for_profile(skills: &[SkillEntry], tool_profile: &st
         }
         out.push_str(&line);
         listed += 1;
+    }
+    if let (Some(budget), false) = (budget, named.is_empty()) {
+        if listed == described.len() {
+            let mut line = String::from("Installed on this machine (names only; list_skills query=<words> searches their descriptions, get_skill name=<name> loads one): ");
+            let mut count = 0;
+            for skill in &named {
+                let piece = if count == 0 {
+                    skill.descriptor.name.clone()
+                } else {
+                    format!(", {}", skill.descriptor.name)
+                };
+                if listed + count > 0
+                    && out.chars().count() + line.chars().count() + piece.chars().count() + 1
+                        > budget
+                {
+                    break;
+                }
+                line.push_str(&piece);
+                count += 1;
+            }
+            if count > 0 {
+                out.push_str(&line);
+                out.push('\n');
+                listed += count;
+            }
+        }
     }
     if listed < skills.len() {
         out.push_str(&format!(
@@ -1463,9 +1499,15 @@ mod tests {
         for profile in ["compact", "advanced"] {
             let catalog = render_skill_catalog_for_profile(&skills, profile);
             assert_eq!(catalog.listed, 2, "{profile}: {}", catalog.text);
-            assert!(catalog.text.contains("- review:"), "{}", catalog.text);
-            assert!(!catalog.text.contains("- deploy:"), "{}", catalog.text);
-            assert!(!catalog.text.contains("- twice:"), "{}", catalog.text);
+            // compact 档里不在项目里的只列名字，advanced 带描述。
+            let review = if profile == "compact" {
+                "review"
+            } else {
+                "- review:"
+            };
+            assert!(catalog.text.contains(review), "{}", catalog.text);
+            assert!(!catalog.text.contains("deploy"), "{}", catalog.text);
+            assert!(!catalog.text.contains("twice"), "{}", catalog.text);
             assert!(
                 catalog
                     .text
@@ -1655,6 +1697,70 @@ mod tests {
             release.descriptor.description
         );
         assert!(!release.descriptor.description.starts_with('>'));
+    }
+
+    /// compact 档里装在本机的 skill 只列名字：几十个都装得下，不再是按扫描顺序挑前 5 个带描述的
+    /// （审查 §28：gld 项目拿到的 5 个全是前端、设计类）。项目自己的照旧带描述、排在前面。
+    #[test]
+    fn the_compact_catalog_names_machine_wide_skills_instead_of_describing_five() {
+        let entry = |name: String, scope: &str| SkillEntry {
+            descriptor: SkillDescriptor {
+                id: format!("id-{name}"),
+                description: "D".repeat(200),
+                provider: "codex".into(),
+                path: format!(".agents/skills/{name}/SKILL.md"),
+                scope: scope.into(),
+                name,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut skills = vec![entry("project-only".into(), "workspace")];
+        skills.extend((0..60).map(|index| entry(format!("skill-{index:02}"), "global")));
+
+        let compact = render_skill_catalog_for_profile(&skills, "compact");
+        assert!(
+            compact.text.contains("- project-only: DDD"),
+            "{}",
+            compact.text
+        );
+        assert!(compact.text.contains("names only"), "{}", compact.text);
+        assert!(
+            compact.text.contains("skill-00, skill-01"),
+            "{}",
+            compact.text
+        );
+        assert!(
+            !compact.text.contains("id-skill-00"),
+            "本机的不带描述和 id：{}",
+            compact.text
+        );
+        assert!(
+            compact.listed >= 40,
+            "listed {}：{}",
+            compact.listed,
+            compact.text
+        );
+        assert!(
+            compact.text.chars().count() <= COMPACT_SKILL_CATALOG_CHARS + 200,
+            "{}",
+            compact.text
+        );
+        if compact.listed < skills.len() {
+            assert!(
+                compact.text.contains("more not listed here"),
+                "{}",
+                compact.text
+            );
+        }
+
+        // advanced 档不变：都带描述。
+        let advanced = render_skill_catalog_for_profile(&skills, "advanced");
+        assert!(
+            advanced.text.contains("- skill-00: DDD"),
+            "{}",
+            advanced.text
+        );
     }
 
     /// compact 档的目录有字符预算：放不下的不是丢掉不提，而是明说还有几个、
