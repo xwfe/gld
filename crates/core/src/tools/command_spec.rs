@@ -78,10 +78,7 @@ impl CommandSpec {
             ));
         }
         if cmd.len() > MAX_COMMAND_BYTES {
-            return Err(PolicyError::new(
-                PolicyReason::CommandTooLong,
-                "Command is too long",
-            ));
+            return Err(too_long(cmd.len()));
         }
         // 拆词放到后面（`validate` 里 shell 语法检测之后）才做：先报"有非法
         // 操作符"比先报"引号没配对"更接近真实原因。这里只留原文。
@@ -126,10 +123,7 @@ impl CommandSpec {
         }
         let display = shell_words::join(parts.iter().map(String::as_str));
         if display.len() > MAX_COMMAND_BYTES {
-            return Err(PolicyError::new(
-                PolicyReason::CommandTooLong,
-                "Command is too long",
-            ));
+            return Err(too_long(display.len()));
         }
         Ok(Self {
             parts,
@@ -180,6 +174,14 @@ impl CommandSpec {
 /// 一条命令最长多少字节。两种形式同一个上限——`argv` 形式量的是合成之后的
 /// 那一行，不然拆成一千格就能绕过去。
 const MAX_COMMAND_BYTES: usize = 4_000;
+
+/// 报错里写明多长、上限多少：只说"太长"，AI 不知道该砍到多少，只能反复试（审查 §28）。
+fn too_long(bytes: usize) -> PolicyError {
+    PolicyError::new(
+        PolicyReason::CommandTooLong,
+        format!("Command is {bytes} bytes; the limit is {MAX_COMMAND_BYTES}"),
+    )
+}
 
 #[cfg(test)]
 mod tests {

@@ -1074,7 +1074,7 @@ stdout / stderr 各留最后 1 MiB；超了 32 条先收结束得最早的，还
 
 ### 命令行多长算太长
 
-`cmd`（或 `argv` 拼起来）最长 **4000 字节**，超了不执行，报 `POLICY_REJECTED`、`details.reason: command_too_long`。
+`cmd`（或 `argv` 拼起来）最长 **4000 字节**，超了不执行，报 `POLICY_REJECTED`、`details.reason: command_too_long`，消息里写着这条有多少字节。
 中文一个字占 3 字节，emoji 占 4 字节，一段 1500 字的中文就超了。别把几千字节的脚本塞进 `python3 -c`：
 
 - 脚本：先 `apply_patch` 存成项目里的文件，再 `exec_command argv=["python3","scripts/x.py"]`。

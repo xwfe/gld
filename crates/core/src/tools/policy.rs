@@ -212,7 +212,7 @@ impl PolicyReason {
             Self::ConflictingCommandForms => {
                 "cmd 和 argv 只给一个：一行命令用 cmd，参数里带引号、换行或 | 的用 argv"
             }
-            Self::CommandTooLong => "命令太长，拆成几条或写成工作区里的脚本",
+            Self::CommandTooLong => "命令行最长 4000 字节：脚本先用 apply_patch 存成工作区里的文件再跑，大段数据用 exec_command 的 stdin 传",
             Self::ExternalExecution => "把 filesystem_scope 设为 workspace，在当前 Workspace 内执行",
             Self::WorkdirOutsideWorkspace => "workdir 只能是 Workspace 内的相对路径",
             Self::ShellSyntaxRejected => {

@@ -74,3 +74,27 @@ fn ordinary_commands_keep_their_exact_echo() {
     assert_eq!(result["command_bytes"], "git --version".len());
     assert_eq!(result["command_truncated"], false);
 }
+
+#[test]
+fn a_command_that_is_too_long_says_how_long_and_what_to_do_instead() {
+    common::isolate_data_home();
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let ctx = ToolContext::for_test(workspace, temp.path().join("harness")).unwrap();
+    let script = format!("print('{}')", "x".repeat(5000));
+    let result = call_tool(
+        &ctx,
+        "exec_command",
+        &json!({ "argv": ["python3", "-c", script] }),
+    );
+    assert_eq!(
+        result["error"]["details"]["reason"], "command_too_long",
+        "{result}"
+    );
+    let message = result["error"]["message"].as_str().unwrap();
+    assert!(message.contains("the limit is 4000"), "{message}");
+    assert!(message.contains("bytes"), "{message}");
+    let suggestion = result["error"]["details"]["suggestion"].as_str().unwrap();
+    assert!(suggestion.contains("stdin"), "{suggestion}");
+}
