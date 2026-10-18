@@ -70,6 +70,13 @@ CLI、库和常规后端项目，已有工具足以支持人工监督下的读�
 `command_ok` / `exit_code`，回包顶层的 `command_summary` 用一句话写着命令成没成（失败的以 `command FAILED` 开头；根本没起来的——找不到程序、脚本没可执行位——以 `command was NOT started` 开头，后面跟原因）。
 带 `service_port` 起的服务不会自己结束，别等它 `running: false`：看 `service.ready`，用完 `kill_session`，这时写
 `service stopped`，不算失败（见[服务模式](concepts.md#dev-server-这类要一直开着的service_port)）。
+
+`exec_command` / `check_command` 的 `command` 是显示用回显，最多 2048 字节（含截断标记）；
+`command_bytes` 是回显原文的字节数，`command_truncated` 说明是否截短。真正执行的参数没有截短，
+原有 4000 字节命令上限、stdout / stderr 限额与验收规则不变。大脚本先保存到项目再执行；
+确有大数据要输入时用 `stdin`，不要塞进命令行再让预检反复回传。该限制不控制客户端展示的工具请求正文，
+也不是整个回包的总字节上限；gld 没有新增通用二进制上传下载接口。
+
 Planning 台账（`planning_manage action=state` 的 `execution`）
 按命令终态记：`failed` / `timed_out` / `cancelled` / `running` / `unknown`，`last_error` 写明退出码；
 后台命令的终态在 `read_output` 读到时补回（gld 退出时停掉的 `interrupted` 记 `cancelled`，没来得及记

@@ -476,6 +476,9 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
 pub fn call_tool_as(ctx: &ToolContext, caller: &Caller, name: &str, args: &Value) -> Value {
     let operation_id = Uuid::new_v4().simple().to_string();
     let mut output = dispatch_tool(ctx, caller, name, args, &operation_id);
+    if matches!(name, "exec_command" | "check_command") {
+        limit_command_echo(&mut output);
+    }
     if let Some(object) = output.as_object_mut() {
         // 内层已经写进去的就是这一个（`record_operation` 收的就是它），
         // 这里只负责补上那些没走到记账就返回的路径。
@@ -484,6 +487,28 @@ pub fn call_tool_as(ctx: &ToolContext, caller: &Caller, name: &str, args: &Value
             .or_insert_with(|| Value::String(operation_id.clone()));
     }
     output
+}
+
+/// max_output_bytes 管 stdout/stderr，不管命令原文。尤其预检拒绝超长输入时，
+/// command_echo 仍会原样回传。只限制最后的展示字段，执行、策略与审计都不改。
+fn limit_command_echo(output: &mut Value) {
+    const MAX_BYTES: usize = 2048;
+    const SUFFIX: &str = "... [truncated]";
+    let Some(Value::String(command)) = output.get_mut("command") else {
+        return;
+    };
+    let bytes = command.len();
+    let truncated = bytes > MAX_BYTES;
+    if truncated {
+        let mut end = MAX_BYTES - SUFFIX.len();
+        while !command.is_char_boundary(end) {
+            end -= 1;
+        }
+        command.truncate(end);
+        command.push_str(SUFFIX);
+    }
+    output["command_bytes"] = json!(bytes);
+    output["command_truncated"] = json!(truncated);
 }
 
 fn dispatch_tool(
