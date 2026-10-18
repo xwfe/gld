@@ -1053,7 +1053,7 @@ fn the_builtin_ls_resolves_relative_paths_against_workdir() {
 /// 区别（方案 B 的 GitHub 两行、审查 A05）。名单是允许制，没列的一律拒。
 ///
 /// 用夹具里的假 `gh`（`tools/gh`）：预检要在 PATH 上找到程序才回 allow，以前用的是机器上
-/// 装的那个，没装 `gh` 的机器（2026-10-18 的 hpsrv）上这条就挂（审查 §33）。假 `gh` 是
+/// 装的那个，没装 `gh` 的机器（2026-10-18 的一台 Debian 服务器）上这条就挂（审查 §33）。假 `gh` 是
 /// sh 脚本，所以只在 unix 上跑。
 #[cfg(unix)]
 #[test]
@@ -1616,7 +1616,7 @@ fn versions_round_trip_from_patch_check_through_apply_patch() {
         &ctx,
         "patch_check",
         // 长度也换：版本号是大小加修改时间，Linux 上时间戳 4 毫秒才走一格（CONFIG_HZ=250），
-        // 等长的两次写入落在同一格里版本号就一样（2026-10-18 hpsrv 上 5 次挂 3 次，审查 §33）。
+        // 等长的两次写入落在同一格里版本号就一样（2026-10-18 一台 Debian 服务器上 5 次挂 3 次，审查 §33）。
         json!({"patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+second\n"}),
     );
     assert_ok(&checked);
