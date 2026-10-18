@@ -1051,10 +1051,15 @@ fn the_builtin_ls_resolves_relative_paths_against_workdir() {
 ///
 /// 一个字段名就能把 `gh run view` 变成 `gh run rerun`，而"首个单词是 gh"看不出
 /// 区别（方案 B 的 GitHub 两行、审查 A05）。名单是允许制，没列的一律拒。
+///
+/// 用夹具里的假 `gh`（`tools/gh`）：预检要在 PATH 上找到程序才回 allow，以前用的是机器上
+/// 装的那个，没装 `gh` 的机器（2026-10-18 的 hpsrv）上这条就挂（审查 §33）。假 `gh` 是
+/// sh 脚本，所以只在 unix 上跑。
+#[cfg(unix)]
 #[test]
 fn enabling_gh_opens_read_only_diagnostics_only() {
-    let fx = tiny_js_fixture();
-    let ctx = common::ctx_with_allowed_commands(&fx.root, "gh");
+    let fx = repo_maintenance_fixture();
+    let ctx = common::ctx_with_allowed_commands_and_path(&fx.root, "gh", &fx.root.join("tools"));
 
     for allowed in [
         "gh run list",
