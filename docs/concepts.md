@@ -723,6 +723,20 @@ History 档案（`docs/history-session/`）计入指纹，但 history 工具写�
 "不存在"悄悄略过：`task_manage action=status` 回 `baseline_complete: false` 和
 `unreadable_paths`，验收时回包 `warnings` 也会点名。
 
+**任务里用 `exec_command` 提交，不用再接纳**：写前检查除了指纹还比分支和 HEAD。`git commit` 回包时，
+如果 HEAD 只是在原分支上往前走了、文件和上次记账一样，gld 把新 HEAD 直接记上账，下一次写照常进行；
+任务事件（`task_manage action=events`）里多一条 `head_advanced`，记着是哪条命令（`session_id`、命令原文）
+把 HEAD 从哪挪到哪。`git add` 只动暂存区，不算改文件，分两条跑没关系。下面这些照旧报 `BASELINE_STALE`，
+按下一段先看再接纳：
+
+- 不是经 gld 提交的：你在终端里提交、别的工具提交。
+- 一条命令里 HEAD 和文件一起变了：`git pull`、`git merge`、`git reset --hard`，或者提交钩子顺手格式化了文件。
+- 换了分支（`git checkout -b`、`git switch`），或者改写了历史（`--amend`、`reset --soft`、`rebase`）。
+- 命令转了后台、回包之后才提交的（`yield_time_ms` 默认 1 秒，钩子跑得久就会这样）。想省这一步，提交时把
+  `yield_time_ms` 给够，让它在回包前跑完。
+
+gld 分不清"这条命令跑的那几秒里别人也提交了"：那次提交也会记在这条命令头上，拿 `head_advanced` 里的命令原文核对。
+
 **报了 `FILE_CHANGED_EXTERNALLY` / `BASELINE_STALE` 之后怎么恢复**：先看，再接纳。
 
 ```text

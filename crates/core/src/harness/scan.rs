@@ -246,7 +246,22 @@ pub(super) fn changed_files(
         .collect()
 }
 
+/// `descendant` 是不是从 `ancestor` 往前走出来的（同一个提交也算）。git 报错算不是。
+pub(super) fn git_is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> bool {
+    git_output(root, &["merge-base", "--is-ancestor", ancestor, descendant])
+        .is_some_and(|output| output.status.success())
+}
+
 fn git_value(root: &Path, args: &[&str]) -> Option<String> {
+    let output = git_output(root, args)?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<std::process::Output> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(root).args(args);
     #[cfg(windows)]
@@ -256,12 +271,7 @@ fn git_value(root: &Path, args: &[&str]) -> Option<String> {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!value.is_empty()).then_some(value)
+    cmd.output().ok()
 }
 
 pub(super) fn timestamp() -> String {

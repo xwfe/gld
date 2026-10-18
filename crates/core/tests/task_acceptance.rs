@@ -5,7 +5,8 @@
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use gld_core::tools::{call_tool, ToolContext};
 use serde_json::{json, Value};
@@ -33,6 +34,53 @@ fn fixture() -> Fixture {
         workspace,
         _temp: temp,
     }
+}
+
+/// 同 `fixture`，但工作区是有一个提交的 Git 仓库。
+fn git_fixture() -> Fixture {
+    let fx = fixture();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "test@example.com"],
+        &["config", "user.name", "test"],
+        // 本机全局配置开了签名的话，测试里的提交会去找密钥。
+        &["config", "commit.gpgsign", "false"],
+        &["add", "README.md"],
+        &["commit", "-q", "-m", "init"],
+    ] {
+        git(&fx.workspace, args);
+    }
+    fx
+}
+
+/// 不经 gld 直接跑 git，当成"任务之外的人"。
+fn git(workspace: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(workspace)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(output.status.success(), "git {args:?}：{output:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn patch_readme(ctx: &ToolContext, from: &str, to: &str) -> Value {
+    call_tool(
+        ctx,
+        "apply_patch",
+        &json!({"patch": format!("--- a/README.md\n+++ b/README.md\n@@\n-{from}\n+{to}\n")}),
+    )
+}
+
+fn events_of_kind(ctx: &ToolContext, task_id: &str, kind: &str) -> Vec<Value> {
+    ctx.harness
+        .list_events(task_id, 0, usize::MAX)
+        .expect("events")
+        .into_items()
+        .into_iter()
+        .filter(|event| event.kind == kind)
+        .map(|event| serde_json::to_value(event).expect("event json"))
+        .collect()
 }
 
 /// 跑完才回来：台账、退出码、拿 session_id 当证据，都要命令已经结束。
@@ -511,4 +559,126 @@ fn 外部修改之后能先看再接纳() {
     assert_eq!(accepted["ok"], true, "{accepted}");
     assert_eq!(accepted["accepted"], true);
     assert_eq!(exec(&fx.ctx, PASSING)["ok"], true);
+}
+
+/// 反例（审查 §28 第 1 条）：AI 用 exec_command 提交之后，下一次写报 `BASELINE_STALE`，
+/// 每次提交都要 refresh_baseline 先看、再接纳，多两次调用，接纳记录里的 changes 却是空的。
+#[test]
+fn gld_跑的提交只让_head_前进时直接记账() {
+    let fx = git_fixture();
+    let task_id = start_task(&fx.ctx);
+    let before = git(&fx.workspace, &["rev-parse", "HEAD"]);
+    assert_eq!(patch_readme(&fx.ctx, "初始内容", "改过")["ok"], true);
+
+    assert_eq!(exec(&fx.ctx, "git add README.md")["command_ok"], true);
+    let committed = exec(&fx.ctx, "git commit -q -m edit");
+    assert_eq!(committed["command_ok"], true, "{committed}");
+    let session = session_id(&committed);
+    let after = git(&fx.workspace, &["rev-parse", "HEAD"]);
+    assert_ne!(before, after);
+
+    let next = patch_readme(&fx.ctx, "改过", "再改");
+    assert_eq!(next["ok"], true, "提交之后直接能写：{next}");
+    let status = call_tool(&fx.ctx, "task_manage", &json!({"action": "status"}));
+    assert_eq!(status["baseline_matches"], true, "{status}");
+
+    // 记账要留痕：哪条命令把 HEAD 从哪挪到哪。
+    let advanced = events_of_kind(&fx.ctx, &task_id, "head_advanced");
+    assert_eq!(advanced.len(), 1, "{advanced:?}");
+    assert_eq!(
+        advanced[0]["input_summary"]["payload"]["session_id"],
+        session.as_str()
+    );
+    assert_eq!(advanced[0]["result_summary"]["before"], before.as_str());
+    assert_eq!(advanced[0]["result_summary"]["after"], after.as_str());
+    assert!(events_of_kind(&fx.ctx, &task_id, "baseline_refreshed").is_empty());
+
+    // 证据照样认：命令结束时的位置就是记账后的位置。
+    let fresh = session_id(&exec(&fx.ctx, PASSING));
+    assert_eq!(
+        finish(&fx.ctx, &task_id, &[&fresh])["task"]["status"],
+        "completed"
+    );
+}
+
+/// 不经 gld 的提交照旧要先看再接纳；之后 gld 起的命令也不能顺手把它记上账。
+#[test]
+fn 任务之外的提交照旧报_baseline_stale() {
+    let fx = git_fixture();
+    let task_id = start_task(&fx.ctx);
+    git(
+        &fx.workspace,
+        &["commit", "-q", "--allow-empty", "-m", "outside"],
+    );
+
+    let patched = patch_readme(&fx.ctx, "初始内容", "改过");
+    assert_eq!(patched["error"]["code"], "BASELINE_STALE", "{patched}");
+    let blocked = exec(&fx.ctx, PASSING);
+    assert_eq!(blocked["error"]["code"], "BASELINE_STALE", "{blocked}");
+    assert!(events_of_kind(&fx.ctx, &task_id, "head_advanced").is_empty());
+}
+
+/// gld 跑的一条命令让 HEAD 动了，但不只是"在原分支上往前提交、文件没变"：照旧要先看再接纳。
+#[test]
+fn head_变了又不只是往前提交时照旧报_baseline_stale() {
+    // 每种情况：任务开始前另开的 `other` 分支上提交什么，再让 gld 跑哪条命令。
+    for (what, other_changes_readme, cmd) in [
+        // 文件也跟着变了，像 pull、reset --hard。
+        ("快进合并带进文件改动", true, "git merge -q --ff-only other"),
+        // HEAD 往前、文件没变，但换了分支：不在这次范围，照旧报。
+        ("换到前面的分支", false, "git checkout -q -b topic other"),
+        // 改写历史：新 HEAD 不在旧 HEAD 之后。
+        (
+            "amend",
+            false,
+            "git commit -q --amend --allow-empty -m rewritten",
+        ),
+    ] {
+        let fx = git_fixture();
+        git(&fx.workspace, &["checkout", "-q", "-b", "other"]);
+        if other_changes_readme {
+            fs::write(fx.workspace.join("README.md"), "别的分支改的\n").expect("write");
+            git(&fx.workspace, &["commit", "-q", "-am", "other"]);
+        } else {
+            git(
+                &fx.workspace,
+                &["commit", "-q", "--allow-empty", "-m", "other"],
+            );
+        }
+        git(&fx.workspace, &["checkout", "-q", "-"]);
+
+        let task_id = start_task(&fx.ctx);
+        let ran = exec(&fx.ctx, cmd);
+        assert_eq!(ran["command_ok"], true, "{what}：{ran}");
+        let next = exec(&fx.ctx, PASSING);
+        assert_eq!(next["error"]["code"], "BASELINE_STALE", "{what}：{next}");
+        assert!(
+            events_of_kind(&fx.ctx, &task_id, "head_advanced").is_empty(),
+            "{what}"
+        );
+    }
+}
+
+/// 转了后台、回包之后才提交的，不自动记账：那段时间里别人在终端提交也是这个样子，
+/// 分不清是谁。读到它结束之后，下一次写照旧报 `BASELINE_STALE`。
+#[cfg(unix)]
+#[test]
+fn 回包之后才落地的提交不自动记账() {
+    let fx = git_fixture();
+    let task_id = start_task(&fx.ctx);
+    let output = call_tool(
+        &fx.ctx,
+        "exec_command",
+        &json!({
+            "cmd": "python3 -c \"import subprocess,time; time.sleep(0.3); subprocess.run(['git','commit','-q','--allow-empty','-m','late'], check=True)\"",
+            "yield_time_ms": 0
+        }),
+    );
+    assert_eq!(output["status"], "running", "{output}");
+    let read = wait_until_finished(&fx.ctx, &session_id(&output));
+    assert_eq!(read["command_ok"], true, "{read}");
+
+    let next = patch_readme(&fx.ctx, "初始内容", "改过");
+    assert_eq!(next["error"]["code"], "BASELINE_STALE", "{next}");
+    assert!(events_of_kind(&fx.ctx, &task_id, "head_advanced").is_empty());
 }
