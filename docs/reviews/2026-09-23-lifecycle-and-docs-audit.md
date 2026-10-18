@@ -1581,3 +1581,36 @@ Claude Code 和 Codex 自己会读这些文件，所以同样的规则它们守�
 
 **没部署：**点名注入要新守护进程，得换二进制、`gld daemon restart`，再执行
 `gld settings runtime --custom-instruction-paths ~/.codex/AGENTS.md`，等用户同意。改这项设置不重启服务，上下文重建也不停命令。
+
+## 27. 任务收尾回包恢复与命令回显（2026-10-18）
+
+**起因：**一次文件交付已经落盘、任务也已经完成，但 ChatGPT 没有及时给出最后回复。这个现象本身不能证明
+gld 死锁；之前只归因于 Agent 工作流也不充分。本轮检查源码、添加反例，再修复能复现的服务端问题。
+
+| 提交 | 查到的问题与修复 |
+| --- | --- |
+| `8fb5e31` | 已完成任务再次 `finish` 原来报 `INVALID_TASK_TRANSITION`。现在同任务可只读重放终态，不重复写验收、说明或状态事件，不关闭后来开的任务；新证据或改变验收方式仍拒绝。增加 `finished`、`already_finished`、明确的 `verification_required` 和结束提示 |
+| `8fb5e31` | 状态已保存后，附加说明或改动摘要的读写失败原来会把整个调用报错。现在保留已保存的任务状态，附加信息失败用 `warnings`、`summary_recorded`、`change_summary_available` 说明。待办保留原值并警告，不把未做的步骤自动算作完成 |
+| `63719bc` | `check_command` 拒绝超长命令后仍完整回显输入；`max_output_bytes` 只限制标准输出和错误输出。现在公开调用的命令回显最多 2048 字节，保留 UTF-8 边界，并返回 `command_bytes` / `command_truncated`。实际执行参数、原有 4000 字节命令上限不变 |
+
+**验证：**Mac 本地源码测试，使用 `target/test-home-finish-recovery` 下隔离的 `GLD_HOME`，没有改真实服务数据。
+
+| 检查 | 结果 |
+| --- | --- |
+| `task_acceptance` 新增 5 条 | 修复前 5 条失败、原有 7 条通过；修复后全过。覆盖重复收尾不重写事件、新任务不受旧任务重试影响、验收方式不能互换、事件文件不可读时仍返回已保存终态、待办不被伪造为完成 |
+| `command_echo` 新增 3 条 | 在既有命令长度限制下先复现回显过长与元数据缺失，再修复通过；检查中文/emoji 截断、实际执行仍收到完整数据、普通命令回显不变。超长预检仍被原策略拒绝 |
+| 收尾与存储相关测试 | `task_acceptance`、`harness_tool_contract`、`harness_storage` 共 36 条通过 |
+| 命令回显与工具契约 | `command_echo`、`call_tool_contract` 共 81 条通过 |
+| `cargo test --workspace --all-targets --locked` | `63719bc` 上退出 0；会话 `d180dbc9-5438-481d-a100-935a9eec1f41` |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0；会话 `092c3b2f-3f82-474d-af5a-67322cc8be38` |
+| `cargo fmt --all -- --check` | 退出 0；会话 `3e5175b3-8aa5-49d8-8fab-4a8740bcb6aa` |
+
+**保留的边界：**后台命令写文件后的基线复核是既有的安全取舍（§11），没有去掉；各动作参数校验也没放宽。
+没有新增通用制品上传下载接口。命令回显限制不约束客户端展示的请求正文，也不是整个回包的总字节上限。
+重复收尾只返回历史结果，不证明后来改过的工作区又通过了测试；证据内容是否充分仍由操作者判断。
+本轮没有修改守护进程 Request/Response 类型、CLI 帮助或工具输入表，不需要协议版本迁移。
+
+**部署与未验证项：**本轮只修改并提交源码，没有替换已安装二进制、重启服务、改授权、推送或发版。
+新行为尚未通过正在使用的 ChatGPT 连接器实测；上线需要用户批准后按既有升级流程执行。
+这些修复减少收尾失败和重复回传，不能保证模型一定及时给出最后回复，也不是强断电事务保证。
+当前状态及上线待办只维护在 `task_plan.md`；用法见 [收尾与交接](../project-lifecycle.md#收尾与交接如实写)。
