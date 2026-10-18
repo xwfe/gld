@@ -19,6 +19,11 @@
 ## 改代码
 
 - 每做完一个能单独验证的小步就提交，一个提交一件事，说明写"为什么"。别攒一大片不提交的改动。
+  三个行为改动（比如重试、报错降级、新提示字段）是三个提交，不是一个。
+- 提交说明照仓库历史的格式：标题 `类型(范围): 一句话`，类型用 `fix` / `feat` / `docs` / `test`；空一行写
+  为什么改、怎么验的。只有一行标题的提交，过几周没人看得懂当时为什么这么改。
+- 改了工具的行为或回包字段，同一个提交里改 `docs/concepts.md` 对应那一节（工具规则只写在那里）；
+  `docs/project-lifecycle.md` 只写做法、链过去，不再抄一份字段说明。
 - 改了守护进程 `Request` / `Response` 的形状，把 `PROTOCOL_VERSION` 加一；改了命令行帮助，跑 `scripts/gen-cli-docs.sh`
   （门禁不比对内容，忘了跑不会报错）。
 - 测试用隔离的 `GLD_HOME`，别碰 `~/.config/gld`。收尾跑 `cargo test --workspace --all-targets --locked`、
