@@ -100,6 +100,8 @@ pub fn apply_patch(
     let mut baselines: HashMap<String, Baseline> = HashMap::new();
     // 每个被碰到的文件当时的版本号，patch_check 会把它交回给模型。
     let mut observed: serde_json::Map<String, Value> = serde_json::Map::new();
+    // expected_versions 落后、但中间全是这个调用方自己经 gld 写的：放行，在 warnings 里说一声。
+    let mut version_notes: Vec<String> = Vec::new();
 
     for fp in &file_patches {
         ws.reject_unsafe_text(&fp.path)?;
@@ -153,6 +155,11 @@ pub fn apply_patch(
                 operation_label(fp),
                 &state,
                 &expected_versions,
+                &|then, now| {
+                    ctx.runtime
+                        .wrote_since(caller, &resolved.display, then, now)
+                },
+                &mut version_notes,
             ) {
                 diagnostics.push(diagnostic);
                 failed_files.insert(resolved.display.clone());
@@ -318,9 +325,17 @@ pub fn apply_patch(
         }
 
         let state = crate::tools::workspace::file_state(&resolved.path);
-        if let Some(diagnostic) =
-            version_precondition(&resolved.display, "update", &state, &expected_versions)
-        {
+        if let Some(diagnostic) = version_precondition(
+            &resolved.display,
+            "update",
+            &state,
+            &expected_versions,
+            &|then, now| {
+                ctx.runtime
+                    .wrote_since(caller, &resolved.display, then, now)
+            },
+            &mut version_notes,
+        ) {
             diagnostics.push(diagnostic);
             continue;
         }
@@ -430,6 +445,12 @@ pub fn apply_patch(
                 let version = ws.resolve_for_write(path).ok().and_then(|resolved| {
                     crate::tools::workspace::current_file_version(&resolved.path)
                 });
+                ctx.runtime.record_own_write(
+                    caller,
+                    path,
+                    observed.get(path).and_then(Value::as_str),
+                    version.as_deref(),
+                );
                 (path.clone(), version_value(version))
             })
             .collect::<serde_json::Map<_, _>>();
@@ -444,8 +465,9 @@ pub fn apply_patch(
             "files_deleted": files_deleted,
             "file_versions": new_versions,
             "recovery": "git",
-            "warnings": sensitive_write_warnings(&order)
+            "warnings": version_notes
                 .into_iter()
+                .chain(sensitive_write_warnings(&order))
                 .chain(commands_still_running_warnings(ctx, caller))
                 .collect::<Vec<_>>()
         })));
@@ -464,7 +486,10 @@ pub fn apply_patch(
         // 有人动过这些文件就会被拒——**预检通过不是通行证**，它只说明"刚才
         // 这一刻能过"（审查 C3）。
         "observed_versions": observed,
-        "warnings": sensitive_write_warnings(&order)
+        "warnings": version_notes
+            .into_iter()
+            .chain(sensitive_write_warnings(&order))
+            .collect::<Vec<_>>()
     })))
 }
 
@@ -1766,11 +1791,17 @@ fn state_version(state: &FileState) -> Option<String> {
 /// 最后一行是这次收口的重点：读不出属性不等于文件不在。把它当成"不在"，
 /// 一个"这路径应当是空的"前置条件就会在文件其实还在的时候放行。没给前置
 /// 条件也照样拒——状态都问不出来，后面的落盘复核同样没法做。
+///
+/// 带的版本对不上、但从那个版本到现在全是这个调用方自己经 gld 写的（`self_written`），
+/// 不算冲突：它只是没换上自己上次 `apply_patch` 回的新版本号，没人动过它改的东西。
+/// 放行，在 `notes` 里留一句。
 fn version_precondition(
     display: &str,
     operation: &'static str,
     state: &FileState,
     expected_versions: &Option<HashMap<String, Option<String>>>,
+    self_written: &dyn Fn(&str, &str) -> bool,
+    notes: &mut Vec<String>,
 ) -> Option<Diagnostic> {
     if let FileState::Unknown(reason) = state {
         return Some(Diagnostic::version_conflict(
@@ -1785,6 +1816,14 @@ fn version_precondition(
     }
     let expected = expected_versions.as_ref()?.get(display)?;
     let actual = state_version(state);
+    if let (Some(then), Some(now)) = (expected, &actual) {
+        if then != now && self_written(then, now) {
+            notes.push(format!(
+                "{display}: expected_versions 带的 {then} 是你自己上次改它之前的版本；之后只有你经 gld 的写入，按现在的 {now} 处理。下次直接用 apply_patch 回包 file_versions 里的版本"
+            ));
+            return None;
+        }
+    }
     (expected != &actual).then(|| {
         Diagnostic::version_conflict(
             version_conflict_message(display, expected, &actual),

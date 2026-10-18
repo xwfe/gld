@@ -132,7 +132,18 @@ pub struct WorkspaceRuntime {
     lock_file: Option<PathBuf>,
     /// 运行记录的位置：(`GLD_HOME/runs`, 项目 id)。`None` 是找不到数据目录，命令只留在内存里。
     runs: Option<(PathBuf, String)>,
+    /// 每个文件最近一段连续由 gld 写出来的版本，和写它的是谁。见 [`WorkspaceRuntime::wrote_since`]。
+    own_writes: Mutex<HashMap<String, OwnWrites>>,
 }
+
+/// 同一个调用方经 gld 接连写同一个文件留下的版本，旧的在前，最后一个是现在磁盘上的。
+struct OwnWrites {
+    writer: Caller,
+    versions: Vec<String>,
+}
+
+/// 一个文件最多记多少个版本。够一轮对话里改同一个文件几十次。
+const OWN_WRITE_VERSIONS: usize = 32;
 
 /// 排障时想知道的就这两件：跨进程那把锁落在哪个文件，以及这个目录上有几个
 /// 主体还挂着会话。**不派生 `Debug`**：里面的 `SessionStore` 一路连着
@@ -274,6 +285,65 @@ impl WorkspaceRuntime {
     /// 于是这个数字就不能用来判断"我的结果还作不作数"了。
     pub fn record_write(&self) {
         self.writes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 记下 `caller` 经 gld 把 `path` 从 `before` 写成了 `after`。
+    ///
+    /// 接得上（上一笔是同一个调用方写的、写出来的正是这次的 `before`）就接在后面；
+    /// 接不上（中间有人在 gld 之外改过、换了人写、新建的文件）就从这一笔重新记。
+    pub fn record_own_write(
+        &self,
+        caller: &Caller,
+        path: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) {
+        let mut writes = self
+            .own_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(after) = after else {
+            writes.remove(path);
+            return;
+        };
+        let continues = writes.get(path).is_some_and(|known| {
+            &known.writer == caller && known.versions.last().map(String::as_str) == before
+        });
+        if !continues {
+            writes.insert(
+                path.to_string(),
+                OwnWrites {
+                    writer: caller.clone(),
+                    versions: before.into_iter().map(str::to_string).collect(),
+                },
+            );
+        }
+        let known = writes.get_mut(path).expect("just inserted");
+        known.versions.push(after.to_string());
+        if known.versions.len() > OWN_WRITE_VERSIONS {
+            let extra = known.versions.len() - OWN_WRITE_VERSIONS;
+            known.versions.drain(..extra);
+        }
+    }
+
+    /// `path` 从版本 `then` 变成现在的 `now`，是不是全是 `caller` 自己经 gld 写的。
+    ///
+    /// 补丁带的 `expected_versions` 对不上时问这个：AI 改完一个文件，下一个补丁还带着改之前
+    /// 的版本号，是最常见的补丁失败——记录里 9 次版本冲突全是这样，gld 几分钟前刚写过同一个
+    /// 文件（审查 §31）。这时没人动过它改的东西，拒了只会让它白重读一遍。别人写过、gld 之外
+    /// 改过、gld 重启过（这张表只在内存里），都答"不是"，照旧拒。
+    pub fn wrote_since(&self, caller: &Caller, path: &str, then: &str, now: &str) -> bool {
+        let writes = self
+            .own_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writes.get(path).is_some_and(|known| {
+            &known.writer == caller
+                && known.versions.last().map(String::as_str) == Some(now)
+                && known.versions[..known.versions.len() - 1]
+                    .iter()
+                    .any(|version| version == then)
+        })
     }
 
     /// 落盘计数器本身，交给新起的命令记下"我起来时是多少"。
@@ -572,6 +642,7 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
             runs: crate::home::data_home()
                 .ok()
                 .map(|home| (home.join("runs"), crate::tools::runs::project_id(key))),
+            own_writes: Mutex::new(HashMap::new()),
         })
     }))
 }
