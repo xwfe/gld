@@ -1874,3 +1874,49 @@ clippy `-D warnings`、`fmt --check` 通过。
 
 **没验的：**新行为都没经 ChatGPT 连接器实测（等用户下次用）。回滚：`~/.local/opt/gld-0b4cb59-20261018-1419` 换回 `~/.local/bin/gld`
 再 `gld daemon restart`（命令行和守护进程一起回到 `0b4cb59` / `778fdd3` 那一版的行为，数据目录不用动）。
+
+## 33. 三台都装上，Linux 服务器上跑全仓查出两条依赖环境的测试（2026-10-18）
+
+**要求：**用户说"完成通过后，三机都安装"。三台指的和 ccnm 一样：本机、另一台 Mac、一台 Linux 服务器。用户选了**不发版、本机构建**
+（不推送、不打 tag），Linux 服务器上给普通账号和 root 各装一份。
+
+### 装在哪
+
+| 机器 | 位置 | 二进制 | 怎么装的 |
+| --- | --- | --- | --- |
+| 本机 Mac | `~/.local/bin/gld`，守护进程常驻 | `4a6d098` release，sha256 `14b64fee…` | §32 |
+| 另一台 Mac（macOS 26.3 arm64） | `~/.local/bin/gld`，登录 shell 的 PATH 里有 | 同一份，`14b64fee…` | scp 过去写 `.new` 再改名；ad-hoc 签名在，没有隔离属性 |
+| Linux 服务器（Debian 13 x86_64） | 普通账号和 root 各自的 `~/.local/bin/gld` | `ce36f73` 在服务器上构建，`b52cb78c…` | 本机 `git bundle` 传过去（构建提交号要从 git 读），在普通账号的 `~/gld-src/gld` 里构建，`install` 给两个账号 |
+
+`ce36f73` 和 `4a6d098` 之间只差文档提交，两份二进制的代码一样，只有嵌进去的构建提交号不同。
+服务器上的 root 原来不把 `~/.local/bin` 放进 PATH：root 的 `.profile` 先备份成 `.profile.bak-20261018`，末尾加了和普通账号
+`.profile` 同一种写法的四行。三台都只装了命令行，没起守护进程、没加项目、没碰数据目录。
+
+**冒烟：**另一台 Mac、服务器的 root 和普通账号各用临时 `GLD_HOME` 加临时 git 仓库跑了一遍 `read_file ranges`（两段按顺序回来）和
+`exec_command git --version`（`command_ok: true`），跑完删掉临时目录，三处的 `~/.config/gld` 都没有生成。
+
+### Linux 服务器上全仓测试
+
+用普通账号跑（root 读得到 0000 权限的文件，权限类测试会误报），`--no-fail-fast`（不加的话第一个挂的测试二进制后面都不跑）。
+
+| 轮 | 结果 |
+| --- | --- |
+| `ce36f73` | 48 个测试二进制，980 passed / 1 failed：`enabling_gh_opens_read_only_diagnostics_only` |
+| 修了上一条之后单跑 `call_tool_contract` | `versions_round_trip_from_patch_check_through_apply_patch` 挂，连跑 5 次挂 3 次 |
+| `25a5e2c`（两条都修了） | 48 个测试二进制，**981 passed / 0 failed**；那条版本测试连跑 10 次 10 次过 |
+
+本机 `e7a20a9`：48 个测试二进制，982 passed / 0 failed，clippy、fmt 通过。多出来的 1 条是只在 macOS 上编译的
+`platform::macos::process::tests::process_image_path_reads_current_process`，两边测试名清单逐条比过，只差这一条。
+
+### 查出来的两条
+
+| 测试 | 为什么挂 | 修 |
+| --- | --- | --- |
+| `enabling_gh_opens_read_only_diagnostics_only` | 断言 `gh run list` 预检回 allow，而预检要在 PATH 上找到程序：它依赖机器装了 `gh`。CI 的 ubuntu 镜像和本机都有，这台服务器没有，报 `program_not_found` | `2e92c06`：用 repo-maintenance 夹具里的假 `gh`（`tools/gh`）放到 PATH 前面，加 `#[cfg(unix)]`。本机把 `gh` 从 PATH 里拿掉跑也过 |
+| `versions_round_trip_from_patch_check_through_apply_patch` | 版本号是大小加修改时间。这台服务器（内核 6.12，`CONFIG_HZ=250`，临时目录在 tmpfs）上文件时间戳 4 毫秒一格，"one" 改成 "two" 是等长写入，落在同一格里版本号就一样（实测两次都是 `4-18df894cdac02d20`） | `25a5e2c`：改成 "one" → "second"，长度也变，和别的写版本测试同一个办法 |
+
+第二条也是产品层面的事实：**Linux 上版本号分不清几毫秒内的等长改动**。正常交替改文件间隔远大于 4 毫秒，碰不上。
+版本号格式没改：它和 ccnm 的 `version_of` 必须一字不差（审查 2026-09-19 那份里定的），要加 inode 之类得 gld、ccnm 一起改，
+排进 task_plan 等用户定。限制写进了 [concepts.md「文件版本」](../concepts.md#文件版本别让补丁盖掉别人的改动)（`74319e2`、`e7a20a9`）。
+
+**没做：**没推送、没发版；另外两台上没有守护进程，所以 ChatGPT 连不到它们，那两台上的 gld 目前只能命令行用。
