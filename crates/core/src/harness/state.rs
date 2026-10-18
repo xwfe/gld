@@ -11,7 +11,9 @@ use super::model::{
     WorkspaceHarnessState, WorktreePosition, SCHEMA_VERSION,
 };
 pub use super::scan::capture_baseline;
-use super::scan::{changed_files, file_states, git_position, scan_worktree, timestamp};
+use super::scan::{
+    changed_files, file_states, git_is_ancestor, git_position, scan_worktree, timestamp,
+};
 use super::store::{HarnessError, HarnessResult, HarnessStore, LogPage, Unreadable};
 
 /// 状态、错误里最多列几个没读到的文件。完整名单在 `project_state` / `refresh_baseline`。
@@ -32,6 +34,13 @@ pub struct ExpectedRefresh {
     pub position: WorktreePosition,
     /// 和上一次记账相比变了的文件。
     pub changed: Vec<String>,
+}
+
+/// 刚回包的一条 exec_command，记账时用来认它带来的提交。
+pub struct CommandRun<'a> {
+    pub session_id: &'a str,
+    /// 已脱敏、截短的命令原文。
+    pub command: &'a str,
 }
 
 /// 这个任务从开始到现在改了什么，以及算的时候工作区在哪。
@@ -277,7 +286,16 @@ impl Harness {
     }
 
     /// 把当前工作区记成任务的预期状态。gld 自己写完文件、跑完命令之后调。
-    pub fn refresh_expected_state(&self, task_id: &str) -> HarnessResult<ExpectedRefresh> {
+    ///
+    /// `run` 是刚回包的那条 exec_command，别的写操作传 `None`。它让 HEAD 在原分支上
+    /// 往前走、文件和上次记账一样（就是 `git commit` 的样子）时，新 HEAD 也记上账，
+    /// 再记一条 `head_advanced` 事件。以前只记文件，AI 每提交一次，下一次写就报
+    /// `BASELINE_STALE`，要 refresh_baseline 先看再接纳，多两次调用（审查 §28）。
+    pub fn refresh_expected_state(
+        &self,
+        task_id: &str,
+        run: Option<&CommandRun>,
+    ) -> HarnessResult<ExpectedRefresh> {
         let _lock = self.store.lock(&self.workspace_id)?;
         let mut task = self.task(task_id)?;
         let previous = self.expected_entries(&task)?.0;
@@ -292,12 +310,52 @@ impl Harness {
             head,
             fingerprint: scan.fingerprint(),
         };
+        let advanced_from = match run {
+            Some(_) if self.committed_in_place(&task, &position) => {
+                std::mem::replace(&mut task.baseline.head, position.head.clone())
+            }
+            _ => None,
+        };
         task.expected_fingerprint = position.fingerprint.clone();
         task.updated_at = timestamp();
         self.store.save_task(&task)?;
         self.store
             .save_expected_entries(&self.workspace_id, task_id, &scan.entries)?;
+        if let (Some(run), Some(before)) = (run, advanced_from) {
+            self.record_event(
+                task_id,
+                "head_advanced",
+                Some("exec_command"),
+                json!({"session_id": run.session_id, "command": run.command}),
+                json!({
+                    "ok": true,
+                    "branch": position.branch,
+                    "before": before,
+                    "after": position.head
+                }),
+            )?;
+        }
         Ok(ExpectedRefresh { position, changed })
+    }
+
+    /// 上次记账之后只多了提交：分支没换，新 HEAD 是从旧 HEAD 往前走出来的，文件也没变。
+    ///
+    /// 能这么认，是因为命令起跑前的写前检查确认过 HEAD 还是记账时那个，所以这次挪动发生在
+    /// gld 跑这条命令期间。分不清的是同一段时间里别的命令（gld 并发跑的另一条、别人在终端里
+    /// 跑的）提交的，也会算到这条命令头上，事件里留着命令原文给人核对。
+    ///
+    /// 不算的照旧报 `BASELINE_STALE`：文件也变了（pull、merge、reset --hard）、换了分支、
+    /// 改写了历史（amend、reset --soft、rebase）。后台命令回包之后才提交的，这里看不到，
+    /// 也照旧报——那段时间和"别人提交"更分不开。gld 在命令跑到一半时重启，这里根本不会被调到，
+    /// 同样照旧报；判断只用任务文件里存的 HEAD 和指纹，没有只在内存里的状态。
+    fn committed_in_place(&self, task: &TaskSession, now: &WorktreePosition) -> bool {
+        let (Some(old), Some(new)) = (task.baseline.head.as_deref(), now.head.as_deref()) else {
+            return false;
+        };
+        old != new
+            && now.branch == task.baseline.branch
+            && now.fingerprint == task.expected_fingerprint
+            && git_is_ancestor(&self.workspace_root, old, new)
     }
 
     /// 任务此刻记账的位置。写前检查通过之后，工作区就是这个样子。
@@ -831,7 +889,9 @@ mod tests {
 
         // gld 自己的写入记了账，之后的外部改动只该列出 b.txt。
         fs::write(workspace.path().join("a.txt"), "a2\n").expect("file");
-        harness.refresh_expected_state(&task.id).expect("refresh");
+        harness
+            .refresh_expected_state(&task.id, None)
+            .expect("refresh");
         fs::write(workspace.path().join("b.txt"), "外部\n").expect("external");
 
         let review = harness

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::harness::model::{CommandOutcome, WorktreePosition};
+use crate::harness::state::CommandRun;
 use crate::harness::CommandEvidence;
 use crate::planning::{
     CommandLedger, ExecutionLedgerUpdate, GoalStatus, PlanStatus, PlanningMode, PlanningService,
@@ -234,18 +235,11 @@ fn record_tracked_operation(
     output: &Value,
 ) {
     let outcome = outcome::classify(output);
-    // 调用本身成了（命令哪怕退出非零）就说明是 gld 让它跑的，它写的东西记上账；
-    // 调用都没成（参数、策略、起不来）就什么也没写。
-    let refreshed = outcome
-        .call_ok
-        .then(|| ctx.harness.refresh_expected_state(task_id).ok())
-        .flatten();
-    let evidence = (name == "exec_command")
+    let command = (name == "exec_command")
         .then_some(outcome.command.as_ref())
         .flatten()
-        .filter(|command| command.session_id.is_some())
-        .map(|command| {
-            let finished = !command.is_running();
+        .and_then(|command| {
+            let session_id = command.session_id.as_deref()?;
             let mut text = output
                 .get("command")
                 .and_then(Value::as_str)
@@ -254,20 +248,38 @@ fn record_tracked_operation(
                 .take(COMMAND_TEXT_CHARS)
                 .collect::<String>();
             crate::tools::history::redact_text(&mut text);
-            CommandEvidence {
-                command: command.clone(),
-                command_text: Some(text),
-                start: Some(start),
-                end: refreshed
-                    .as_ref()
-                    .filter(|_| finished)
-                    .map(|refresh| refresh.position.clone()),
-                changed_during_run: refreshed
-                    .filter(|_| finished)
-                    .map(|refresh| refresh.changed)
-                    .unwrap_or_default(),
-            }
+            Some((command, session_id, text))
         });
+    // 调用本身成了（命令哪怕退出非零）就说明是 gld 让它跑的，它写的东西记上账；
+    // 调用都没成（参数、策略、起不来）就什么也没写。
+    let run = command.as_ref().map(|(_, session_id, text)| CommandRun {
+        session_id,
+        command: text,
+    });
+    let refreshed = outcome
+        .call_ok
+        .then(|| {
+            ctx.harness
+                .refresh_expected_state(task_id, run.as_ref())
+                .ok()
+        })
+        .flatten();
+    let evidence = command.map(|(command, _, text)| {
+        let finished = !command.is_running();
+        CommandEvidence {
+            command: command.clone(),
+            command_text: Some(text),
+            start: Some(start),
+            end: refreshed
+                .as_ref()
+                .filter(|_| finished)
+                .map(|refresh| refresh.position.clone()),
+            changed_during_run: refreshed
+                .filter(|_| finished)
+                .map(|refresh| refresh.changed)
+                .unwrap_or_default(),
+        }
+    });
     let _ = ctx.harness.record_event(
         task_id,
         "operation_finished",
@@ -751,7 +763,7 @@ fn dispatch_tool(
         // 否则下一次 exec_command / apply_patch 会把它当成外部修改而拒绝执行——
         // 症状是"存了个检查点，然后就什么都干不了了"。
         if let Ok(Some(task)) = ctx.harness.current_task() {
-            let _ = ctx.harness.refresh_expected_state(&task.id);
+            let _ = ctx.harness.refresh_expected_state(&task.id, None);
         }
     }
     if let Some(operation) = operation {
