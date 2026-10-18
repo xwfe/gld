@@ -1679,3 +1679,46 @@ clippy `-D warnings`、`fmt --check` 通过。两个文档提交之后跑了 `do
   不进项目、不当验收证据。`gld grant browser` 是给浏览器扩展发连接地址（§23），和"让 AI 操作浏览器"是两回事。
 
 **没做：**上表的代码改动都没动，没部署，没推送。
+
+## 29. 解释器写文件的路径判断：Workspace 里面的绝对路径放行（2026-10-18）
+
+**起因：**§28 表里第 3 条。动手前在 `19e07b1` 的调试版上实测（隔离 `GLD_HOME`，直连模式，`check_command` / `exec_command`），
+旧判断的误判比 §28 估的多，还有一处漏判。下面都是 argv 形式的 `python3 -c`：
+
+| 脚本 | 旧 | 新 |
+| --- | --- | --- |
+| `open('a.txt','w').write('hi')`（单引号，写相对路径） | 拒 | 放行 |
+| `open("e.txt","w").write(str(4 / 2))`（除法） | 拒 | 放行 |
+| `open("<Workspace>/f.txt","w").write("hi")` | 拒 | 放行 |
+| `open("/tmp/x","w")`、`open("../g.txt","w")` | 拒 | 拒 |
+| `import shutil; shutil.rmtree("/")` | **放行**（`check_command` 回 allow） | 拒 |
+
+原因：旧代码先把 `\` 全换成 `/`，再把引号或空白后面跟着非双引号的 `/` 都当绝对路径。argv 里的单引号被
+`shell_words::join` 写成 `'\''`，换完成了 `'/'`；`4 / 2` 空格后面就是 `/`；`"/"` 的 `/` 后面紧跟双引号，没认出来。
+
+**改了什么（`44d4679`）：**`command_contains_external_path` 先挑出像路径的片段，再逐个判断：
+
+- 引号里的取到同一个引号为止；不在引号里的 `/` 要紧跟名字字符（`a / b`、`a // b` 不算）。
+- `../`、`~/`、Unix 上的盘符路径算外面；绝对路径从最长的已存在那一级 canonicalize，按路径组件和 Workspace 根比。
+  软链指到外面的、悬空软链、`/a/gld2` 这种兄弟目录都算外面。
+- 不知道 Workspace 时（不带 Workspace 调 `validate_tool_arguments`）绝对路径一律算外面，和以前一样。
+- Unix 上 `\` 不当分隔符。Windows 上 `\` 开头且后面跟名字字符的仍算外面，所以那边 `'\n'` 还会误判，没在 Windows 上跑过。
+- 顺带收紧：引号里单独的 `/`、引号里的 `..`、`~/`、反引号和 `(` `=` `,` 后面的路径。代价是 `'/'.join(parts)`
+  加写文件会被拒（以前双引号版本放行）；`docs/security.md` 写了这条规则和绕法，这条规则以前文档里没写。
+
+**验证：**
+
+| 检查 | 结果 |
+| --- | --- |
+| 新增 `crates/core/tests/command_write_paths.rs` 5 条 | 换回旧 `policy.rs` 跑：3 条失败（单引号、Workspace 内绝对路径、`rmtree("/")`），2 条通过（软链、不带 Workspace）；新代码 5 条全过 |
+| `call_tool_security` | 28 条通过 |
+| `cargo test --workspace --all-targets --locked` | 45 个测试二进制，959 passed / 0 failed |
+| clippy `-D warnings`、`fmt --check` | 通过 |
+
+**没做：**
+
+- 写文件的正则 `open\([^)]*['"]w` 碰到第一个 `)` 就停，`open(os.path.expanduser('~/x'), 'w')` 根本不算写文件，
+  路径判断轮不到它。这是另一处漏判，测试里换了写法，规则没改。
+- 相对路径经过 Workspace 里的软链写到外面，照样看不出来（以前也看不出）。
+- `policy.rs` 改完 1084 行，超过 800 行该评估拆分了；路径判断这三个函数可以单独成一个模块，这次没拆。
+- 没部署：要换二进制、`gld daemon restart`，等用户点头。
