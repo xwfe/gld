@@ -1839,3 +1839,38 @@ clippy `-D warnings`、`fmt --check` 通过。
 **顺带收口的待办：**"ChatGPT 换版后第一次调用"（§25 换上 `778fdd3` 之后）。2026-10-18 10:57 起 ChatGPT 的调用都是原注册客户端
 `oauth:hub:dcr-63f31361…`，没有要求重新授权，请求日志里没有 OAuth 的 401；附近那两条 401 是 `credential=browser_url`（地址无效或过期）
 和 curl 没带凭据，和连接器无关。
+
+## 32. 本机换上 `4a6d098`，用户全局规则开始送到 ChatGPT（2026-10-18 14:2x）
+
+**要求：**用户看完 §31 让部署："先查没有在跑的命令，换二进制，重启守护进程，再配 custom-instruction-paths"。
+
+**做了什么**（照 [安装 · 升级](../install.md#升级)）：
+
+1. `cargo build --release --locked -p gld`，2 分 06 秒。`rust-objcopy` 去符号失败的警告照旧（工具链的问题，产物 16 MB 没去符号，和之前一样）。
+2. 备份到 `~/.local/opt/`：换之前的命令行二进制 `gld-0b4cb59-20261018-1419`，数据目录 `gld-config-20261018-1419.tgz`（`chmod 600`，里面有明文凭据）。
+3. 换之前查：守护进程（pid 87812）`pgrep -lP` 没有子进程；请求日志最后一次写是 12:59，80 分钟没人用。
+4. 写新文件再改名换掉 `~/.local/bin/gld`，去掉本会话的 `CLAUDE*` 变量后 `gld daemon restart`，新 pid 21527，1 个服务恢复。
+5. `gld settings runtime --custom-instruction-paths ~/.codex/AGENTS.md`。注入前查过这份文件：唯一一个像邮箱的串是规则正文里的占位
+   `user@example.com`，没有密钥类字样。
+
+**换完核对：**
+
+| 项 | 换之前 | 换之后 |
+| --- | --- | --- |
+| 服务构建提交（`gld tool list --served`） | `778fdd359240` | `4a6d0983a19b`，等于 HEAD |
+| 工具表 | 33 个，指纹 `5155ec6663bb33e2` | 33 个，指纹 `59951e97a502352e`：变了，原因是 §31 改了 `exec_command`、`write_stdin`、`read_file`、`list_skills` 的描述和输入表 |
+| 凭据（排好键的 JSON 取 SHA-256 前 16 位） | `profiles.json` `1f8bfa4a…`、`oauth-clients/hub.json` `984f8cea…` | 一样 |
+| `gld ls` | | 和换之前逐字一样 |
+| `gld health` | | 没有失败项，本地和公网 `/mcp`、OAuth 两份元数据都是 200 |
+| 新守护进程环境里的 `CLAUDE*` 变量 | | 0 个 |
+| `gld context -w gld` 说明文件 | 扫到 2，注入 1（全局规则打 ·） | 扫到 2，注入 2：`[codex/custom] INSTRUCTIONS.md` 和仓库 `AGENTS.md` 都打 ✓ |
+| `gld context -w gld` Skill 目录 | 列了 5 个 | 列了 52 个 |
+
+经守护进程实调（本机调用方，只读）：`read_file ranges` 两段按顺序回来；`list_skills query="debug test"` 回 94 个里的 10 个，
+`systematic-debugging` 排第一。`workspace_context` 是 hub 层的工具，`gld tool call` 调不到，注入以 `gld context` 的 ✓ 为准。
+
+**要用户做的：**工具表指纹变了，ChatGPT 不会自己重拉。到 ChatGPT 的连接器设置里点一次 Refresh、再开新对话，才看得到
+`ranges`、`query` 和新的工具描述；不点也照样能用旧的那套。连接器不用删、不用重新授权、地址没变。
+
+**没验的：**新行为都没经 ChatGPT 连接器实测（等用户下次用）。回滚：`~/.local/opt/gld-0b4cb59-20261018-1419` 换回 `~/.local/bin/gld`
+再 `gld daemon restart`（命令行和守护进程一起回到 `0b4cb59` / `778fdd3` 那一版的行为，数据目录不用动）。
