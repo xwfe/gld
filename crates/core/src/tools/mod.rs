@@ -1,5 +1,6 @@
 pub(crate) mod args;
 pub mod caller;
+mod command_paths;
 pub mod command_spec;
 pub mod context;
 pub mod dispatch;
