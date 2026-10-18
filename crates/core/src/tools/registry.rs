@@ -896,7 +896,7 @@ fn compact_description<'a>(name: &str, fallback: &'a str) -> &'a str {
         "history_session_validate" => "Validate or rebuild history indexes without deleting archives.",
         "history_session_search" => "Search indexed session archives and return bounded matches.",
         "history_session_read" => "Read a bounded UTF-8 page from one selected session archive.",
-        "read_file" => "Read a bounded UTF-8 text range from a workspace file.",
+        "read_file" => "Read a bounded UTF-8 text range from a workspace file, or several files / ranges at once with ranges.",
         "search_text" | "grep_text" => "Search workspace text with bounded previews.",
         "apply_patch" => "Apply a workspace patch and return a change summary.",
         "exec_command" => "Run an allowed workspace command with bounded output. It returns as soon as the command exits or yield_time_ms passes; for tests and builds pass yield_time_ms up to 30000 instead of polling.",
@@ -1324,6 +1324,22 @@ pub fn input_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "minLength": 1 },
+                "ranges": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "Read several files or line ranges in one call instead of one call each. Give this instead of path / start_line / end_line. Each item is read like its own read_file with the same max_bytes, results come back in order under results, and one item failing does not stop the others. At most 256 KiB in total; items past that come back skipped.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "minLength": 1 },
+                            "start_line": { "type": "integer", "minimum": 1 },
+                            "end_line": { "type": "integer", "minimum": 1 }
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                },
                 "start_line": { "type": "integer", "minimum": 1, "default": 1 },
                 "end_line": { "type": "integer", "minimum": 1 },
                 "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 32768 },
@@ -1333,7 +1349,6 @@ pub fn input_schema(name: &str) -> Value {
                     "description": "Read from this absolute byte offset instead of by line. Only needed when a single line is longer than max_bytes: paging by line then skips the rest of that line, and the result says so with skipped_bytes plus the next_start_byte to resume from. Line numbers come back null in this mode — counting them would mean rescanning the file from the start."
                 }
             },
-            "required": ["path"],
             "additionalProperties": false
         }),
         "list_dir" => json!({

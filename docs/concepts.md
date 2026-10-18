@@ -12,7 +12,7 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 - [历史会话档案](#历史会话档案与-history-context) · [Durable Task 的工作区基线](#durable-task-的工作区基线)
 - [本机装好的 MCP server](#本机装好的-mcp-server) · [项目怎么构建、怎么测](#项目怎么构建怎么测list_project_commands) · [装东西的命令要你点头](#装东西的命令要你点头)
 - [dev server 这类要一直开着的](#dev-server-这类要一直开着的service_port) · [用浏览器验页面](#用浏览器验页面单独配一个隔离的-playwright-mcp)
-- [命令的输出能读多久](#命令的输出能读多久stdin-怎么关) · [参数名写错了会被拒](#参数名写错了会被拒不会按默认值跑) · [读文件：超长的一行](#读文件一行比-max_bytes-还长的时候)
+- [命令的输出能读多久](#命令的输出能读多久stdin-怎么关) · [参数名写错了会被拒](#参数名写错了会被拒不会按默认值跑) · [一次读几段](#一次读几段read_file-的-ranges) · [读文件：超长的一行](#读文件一行比-max_bytes-还长的时候)
 - [文件版本：别盖掉别人的改动](#文件版本别让补丁盖掉别人的改动) · [补丁对不上：报错和日志](#补丁对不上报错里有什么日志里留了什么) · [Jupyter notebook](#jupyter-notebook按-cell-读按-cell-改)
 
 ---
@@ -1117,6 +1117,19 @@ exec_command cmd="cargo build" timeout=600000
 `patch_check` 自己定死的 `true`，收进来只会让人以为能关掉。
 
 ---
+
+## 一次读几段：`read_file` 的 `ranges`
+
+要看好几个文件、或者同一个文件的几段，一次调用就行，别一个文件调一次，也别绕去 `python3 -c` 读：
+
+```text
+read_file ranges=[{"path": "src/a.rs", "start_line": 10, "end_line": 80}, {"path": "src/b.rs"}]
+```
+
+- 每一项按一次单独的 `read_file` 读（同样的 `max_bytes`），结果按顺序放在 `results` 里，各带自己的 `version`。
+- 一项读不了（不存在、在 Workspace 外面）只在那一项里报 `ok: false`，别的照常给。
+- 最多 20 项、加起来最多 256 KiB；读满了，后面的项标 `skipped: true`，分开再读。
+- 给了 `ranges` 就别再给顶层的 `path` / `start_line` / `end_line`，两种一起给报 `INVALID_ARGUMENT`。
 
 ## 读文件：一行比 `max_bytes` 还长的时候
 

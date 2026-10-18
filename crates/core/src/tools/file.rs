@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use toexec_text::{next_line, LineLimits};
 use walkdir::WalkDir;
 
-use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceError};
+use crate::tools::workspace::{relative_display, tool_err, tool_ok, Workspace, WorkspaceError};
 
 const BINARY_PEEK_BYTES: usize = 8192;
 
@@ -34,7 +34,97 @@ const BINARY_SNIFF_BYTES: u64 = 4096;
 /// 4096 字节的预览，搜到了也看不出什么。
 const SEARCH_LINE_KEEP: usize = 1024 * 1024;
 
+/// 一次最多读几段。
+const MAX_RANGES: usize = 20;
+/// 一次调用里所有段加起来最多读多少字节。
+const RANGES_TOTAL_BYTES: usize = 256 * 1024;
+
+/// `read_file` 带 `ranges`：一次读几个文件或几段行。每段按一次单独的 `read_file` 读
+/// （同样的 `max_bytes`），按顺序放进 `results`；一段读不了（不存在、越界）只在那一段里报，
+/// 不影响别的段。读满 256 KiB 后剩下的段标 `skipped`。
+///
+/// 以前一次只能读一个文件，ChatGPT 就改用 `python3 -c` 一次读十几段：读操作被记成命令、
+/// 算进任务的写操作，还绕开了读工具的路径限制（审查 §28）。
+fn read_file_ranges(
+    ws: &Workspace,
+    args: &Value,
+    max_bytes: usize,
+) -> Result<Value, WorkspaceError> {
+    for key in ["path", "start_line", "end_line", "start_byte"] {
+        if args.get(key).is_some() {
+            return Err(WorkspaceError::invalid_argument(format!(
+                "{key} 和 ranges 不能一起给：读一段用 path，读几段把 path / start_line / end_line 写进 ranges 的每一项"
+            )));
+        }
+    }
+    let ranges = args
+        .get("ranges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| WorkspaceError::invalid_argument("ranges must be an array"))?;
+    if ranges.is_empty() || ranges.len() > MAX_RANGES {
+        return Err(WorkspaceError::invalid_argument(format!(
+            "ranges 要有 1 到 {MAX_RANGES} 项，给了 {}",
+            ranges.len()
+        )));
+    }
+    let mut used = 0usize;
+    let mut results = Vec::with_capacity(ranges.len());
+    for (index, item) in ranges.iter().enumerate() {
+        let Some(object) = item.as_object() else {
+            return Err(WorkspaceError::invalid_argument(format!(
+                "ranges[{index}] must be an object with path, and optionally start_line / end_line"
+            )));
+        };
+        if let Some(key) = object
+            .keys()
+            .find(|key| !matches!(key.as_str(), "path" | "start_line" | "end_line"))
+        {
+            return Err(WorkspaceError::invalid_argument(format!(
+                "ranges[{index}] 只收 path、start_line、end_line，多了 {key}"
+            )));
+        }
+        let path = object.get("path").and_then(Value::as_str).unwrap_or("");
+        if used >= RANGES_TOTAL_BYTES {
+            results.push(json!({
+                "ok": false,
+                "path": path,
+                "skipped": true,
+                "reason": format!("这次调用已经读了 {RANGES_TOTAL_BYTES} 字节，剩下的分开再读")
+            }));
+            continue;
+        }
+        let one = json!({
+            "path": path,
+            "start_line": object.get("start_line"),
+            "end_line": object.get("end_line"),
+        });
+        match read_one(ws, &one, max_bytes.min(RANGES_TOTAL_BYTES - used)) {
+            Ok(value) => {
+                used += value["bytes_read"].as_u64().unwrap_or(0) as usize;
+                results.push(value);
+            }
+            Err(error) => {
+                let mut value = tool_err(error);
+                value["path"] = json!(path);
+                results.push(value);
+            }
+        }
+    }
+    Ok(tool_ok(json!({
+        "results": results,
+        "bytes_read": used,
+    })))
+}
+
 pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
+    let max_bytes = crate::tools::args::bounded(args, "read_file", "max_bytes") as usize;
+    if args.get("ranges").is_some() {
+        return read_file_ranges(ws, args, max_bytes);
+    }
+    read_one(ws, args, max_bytes)
+}
+
+fn read_one(ws: &Workspace, args: &Value, max_bytes: usize) -> Result<Value, WorkspaceError> {
     let path = args
         .get("path")
         .and_then(Value::as_str)
@@ -50,7 +140,6 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
             retryable: false,
         });
     }
-    let max_bytes = crate::tools::args::bounded(args, "read_file", "max_bytes") as usize;
     let start_line = args
         .get("start_line")
         .and_then(Value::as_u64)

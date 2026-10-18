@@ -940,6 +940,13 @@ fn apply_default_cwd(ctx: &ToolContext, name: &str, args: &Value) -> Value {
             if let Some(path) = effective.get("path").and_then(Value::as_str) {
                 effective["path"] = Value::String(prefix_relative_path(&base, path));
             }
+            if let Some(ranges) = effective.get_mut("ranges").and_then(Value::as_array_mut) {
+                for item in ranges {
+                    if let Some(path) = item.get("path").and_then(Value::as_str) {
+                        item["path"] = Value::String(prefix_relative_path(&base, path));
+                    }
+                }
+            }
         }
         "git_diff" => {
             if let Some(path) = effective.get("path").and_then(Value::as_str) {
