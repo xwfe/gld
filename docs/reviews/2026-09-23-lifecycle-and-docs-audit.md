@@ -1920,3 +1920,47 @@ clippy `-D warnings`、`fmt --check` 通过。
 排进 task_plan 等用户定。限制写进了 [concepts.md「文件版本」](../concepts.md#文件版本别让补丁盖掉别人的改动)（`74319e2`、`e7a20a9`）。
 
 **没做：**没推送、没发版；另外两台上没有守护进程，所以 ChatGPT 连不到它们，那两台上的 gld 目前只能命令行用。
+
+## 34. 确认 Skills、本机 MCP 转发、浏览器在当前版本上能用（2026-10-18）
+
+**要求：**用户要求必须确认三件事：gld 对 Skills、MCP 的使用如何；gld 能不能调浏览器操作；文档要写全。
+§28 只读了文档和源码，这一节是在本机跑着的 `4a6d098` 上实调。
+
+**怎么测的：**另起一个隔离的服务，不碰常驻服务和 ChatGPT 连接器：临时 `GLD_HOME`、随机端口、bearer 认证、只听 127.0.0.1，
+`gld mcp on browser`（读的是本机同一份 `~/.codex/config.toml` 里的 `[mcp_servers.browser]`），加一个只有一个静态页面的临时项目，
+页面埋了一个 bug：点按钮会调不存在的 `rendr()`。再用脚本照 ChatGPT 的方式经 `/mcp` 发 JSON-RPC：`initialize`、`tools/list`、`tools/call`。
+
+| 调用 | 结果 |
+| --- | --- |
+| `tools/list` | 33 个工具，含 `list_mcp_tools`、`call_mcp_tool`、`read_mcp_result` |
+| `workspace_context` 的 `skills` | 1433 字符，装在本机的那批只列名字（§31 的新目录） |
+| `list_skills query="debug test"` | 94 个里的 10 个，`systematic-debugging` 排第一 |
+| `get_skill name=systematic-debugging` | 回正文（`# Systematic Debugging` 开头） |
+| `get_skill … file=SKILL.md`（主目录里自动发现的 skill 的附件） | `INVALID_ARGUMENT`，消息写明"来源配置之后才给读文件"：设计如此（security.md 写了） |
+| `list_mcp_tools server=browser` | 24 个工具，没有 `browser_run_code_unsafe` |
+| `exec_command` 带 `service_port` 起 `python3 -m http.server` | `running`，`service.ready: true` |
+| `call_mcp_tool browser_navigate` | 打开了，页面标题对 |
+| `browser_snapshot` → `browser_click target=<ref>` | 点上了；回包里写着 `Console: 1 errors` |
+| `browser_console_messages` | `ReferenceError: rendr is not defined`，行号也对 |
+| 点击后再 `browser_snapshot` | 有"新的一项" |
+| `browser_take_screenshot` | PNG 回到结果里（约 10 KB），截图上能看到新加的那一项 |
+| 按名字调 `browser_run_code_unsafe` | `MCP_TOOL_UNKNOWN`，没执行 |
+| `kill_session` | `service stopped`，正常结束 |
+
+第一次点击时我按老参数名传了 `ref`，报 `Invalid arguments … expected string … at target`。这台的 Playwright MCP 仍是 0.0.83（npx 缓存里只有这一版），
+concepts.md 早写了"0.0.83 起叫 `target`，先 `list_mcp_tools` 看一眼再调"：不是上游变了，是我没先看参数。
+
+**结论：**
+
+- **Skills**：AI 能经 `workspace_context` 看到目录、用 `list_skills query` 按词找、用 `get_skill` 读正文。gld 不执行 skill 里的脚本；
+  主目录里自动发现的 skill 默认不给读附件。这一轮 ChatGPT 开发 gld 时一次都没调 skill（§28），原因是当时目录里列的 5 个都和项目无关，
+  §31 改了目录，要等下一轮看它用不用。
+- **MCP**：本机配好的 server 要 `gld mcp on` 点名才转，AI 那边只多三个中转工具；本机现在只开了 `browser`，其余约 30 个都关着。
+- **浏览器**：能操作，靠转发的 Playwright MCP（隔离、无头、只放本机地址）。ChatGPT 2026-10-08 用它修过页面 bug（§20），这次在当前版本上
+  又走通了一遍。截图、快照存在 `~/.cache/gld-browser`，不在项目里。`gld grant browser` 是给浏览器扩展发连接地址，和"AI 操作浏览器"不是一回事。
+
+**文档：**README 的"能做什么"补了 Skills 和本机 MCP 一条（`06fb257`）；concepts.md 浏览器一节记了这次复测（`0f734d9`）。
+Skills、转发、浏览器的配法和边界原来就写在 concepts.md 和 security.md，这次核对过没有和实测对不上的地方。
+
+**清理：**停掉隔离服务（它起的 Playwright 进程跟着退了；还在跑的三个 `@playwright/mcp` 是 Claude Code 自己 10-11、10-15 起的，没动），
+删掉临时数据目录和项目，`~/.cache/gld-browser` 里删掉这次新增的 7 个文件（2 张截图、3 份快照、2 份 console 日志）。常驻服务 pid 没变。
