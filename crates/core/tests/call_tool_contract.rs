@@ -1615,7 +1615,9 @@ fn versions_round_trip_from_patch_check_through_apply_patch() {
     let checked = invoke(
         &ctx,
         "patch_check",
-        json!({"patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+two\n"}),
+        // 长度也换：版本号是大小加修改时间，Linux 上时间戳 4 毫秒才走一格（CONFIG_HZ=250），
+        // 等长的两次写入落在同一格里版本号就一样（2026-10-18 hpsrv 上 5 次挂 3 次，审查 §33）。
+        json!({"patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+second\n"}),
     );
     assert_ok(&checked);
     let observed = checked["observed_versions"].clone();
@@ -1625,14 +1627,14 @@ fn versions_round_trip_from_patch_check_through_apply_patch() {
         &ctx,
         "apply_patch",
         json!({
-            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+two\n",
+            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-one\n+second\n",
             "expected_versions": observed
         }),
     );
     assert_ok(&applied);
     assert_eq!(
         fs::read_to_string(dir.path().join("notes.md")).unwrap(),
-        "two\n"
+        "second\n"
     );
 
     // 写完给的是新版本：接着改同一个文件不用再 read_file 一遍。
@@ -1646,7 +1648,7 @@ fn versions_round_trip_from_patch_check_through_apply_patch() {
         &ctx,
         "apply_patch",
         json!({
-            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-two\n+three\n",
+            "patch": "--- a/notes.md\n+++ b/notes.md\n@@\n-second\n+three\n",
             "expected_versions": {"notes.md": after}
         }),
     );
