@@ -92,8 +92,9 @@ BUILT="target/${TARGET}/release/${BIN}"
 HOST="$(rustc -vV | awk '/^host:/ {print $2}')"
 if [[ "$TARGET" == "$HOST" ]]; then
   REPORTED="$("$BUILT" --version)"
-  if [[ "$REPORTED" != "${BIN} ${CARGO_VERSION}" ]]; then
-    echo "版本对不上：二进制报的是「${REPORTED}」，应为「${BIN} ${CARGO_VERSION}」" >&2
+  # 从 git 检出构建时后面带构建提交：`gld 0.8.3 (4a6d0983a19b)`；从 tarball 构建只有版本号。
+  if [[ "$REPORTED" != "${BIN} ${CARGO_VERSION}" && "$REPORTED" != "${BIN} ${CARGO_VERSION} ("*")" ]]; then
+    echo "版本对不上：二进制报的是「${REPORTED}」，应为「${BIN} ${CARGO_VERSION}」（可以带括号里的构建提交）" >&2
     exit 1
   fi
 fi

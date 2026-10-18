@@ -152,8 +152,9 @@ cloudflared 不受影响，只是那零点几秒回源会 502。项目的 GPT Ac
 ### 换完核对
 
 ```bash
+gld --version                            # 命令行这份：gld 0.8.3 (4a6d0983a19b)，括号里是构建提交
 gld daemon status                        # pid 变了，运行时长从头算，协议号是新版的
-gld tool list --served | head -1         # "构建提交"要等于你编译的那个：git rev-parse --short=12 HEAD
+gld tool list --served | head -1         # 服务那份的"构建提交"，要和上面括号里的、和你编译的 git rev-parse --short=12 HEAD 一样
 gld tool list --served | sed -n 2p | diff /tmp/gld-tools-before.txt - && echo "工具表没变，ChatGPT 什么都不用做"
 gld ls | diff /tmp/gld-before.txt -      # Client ID、口令（脱敏后的前后几位）、公网地址、项目表都不该变
 gld health                               # 本地、公网 /mcp，OAuth 元数据都是 ✓
@@ -176,6 +177,8 @@ gld health                               # 本地、公网 /mcp，OAuth 元数�
 （2026-09-23 升级时实际碰到的）。所以不管版本号变没变，换完都 `gld daemon restart`，再看上面那行
 构建提交。版本号或协议号变了的时候，命令行会直接拒绝并提示重启（退出码 4），`gld daemon status` /
 `stop` / `restart` 不受影响，照常能用。
+
+**`gld --version` 的版本号没发版就不变**，换没换上看括号里的构建提交：没发版的构建都报同一个号（2026-10-18 换完用户以为没换上）。从源码 tarball 编译的没有 git，括号那段就没有。
 
 只核对 `0.7.0` 这样的版本号不够，源码、构建、运行的服务、客户端拿到的工具表是四层不同的证据，见
 [生命周期指南](project-lifecycle.md#接入前先确认四层能力)。

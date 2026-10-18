@@ -39,10 +39,23 @@ const AFTER_HELP: &str = "\
 
 更多：docs/cli.md（完整命令参考）、docs/daemon.md（后台进程说明）";
 
+/// `gld --version` 的那一行：版本号后面带构建提交，`gld 0.8.3 (4a6d0983a19b)`。
+///
+/// 版本号只在发版时改，没发版的构建全报同一个号，光看它分不清跑的是哪份代码
+/// （2026-10-18 换了二进制，用户看 `gld --version` 没变，问是不是没换上，审查 §35）。
+/// 不知道提交（从 tarball 编译）就只有版本号。`scripts/package.sh` 认这两种写法。
+fn version_text() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| match gld_core::BUILD_COMMIT {
+        Some(commit) => format!("{} ({commit})", env!("CARGO_PKG_VERSION")),
+        None => env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "gld",
-    version,
+    version = version_text(),
     about = "把本地项目变成 AI 可通过 MCP 直接开发的工作区：一个服务，多个项目，常驻后台",
     long_about = "gld 在后台跑一个 MCP Streamable HTTP 服务，把登记进来的项目目录都挂在它下面：\
 客户端只配一条连接，AI 每次调用用 workspace 参数选项目，项目之间互不串。\
