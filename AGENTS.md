@@ -29,6 +29,9 @@
 - 测试用隔离的 `GLD_HOME`，别碰 `~/.config/gld`。收尾跑 `cargo test --workspace --all-targets --locked`、
   `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`。
 - 写进注释和提交说明的事实（"某 SDK 会怎样"）先核对源码或实测；没核对就写明没核对。
+- 你是经 gld 在开发 gld：gld 自己的工具报错、逼你绕路、让你多调好几次，都是这个项目的缺陷。绕过去可以，
+  但要在交付说明里写出来（哪个工具、什么报错、你怎么绕的），最好追加进审查。2026-10-18 那轮撞到了
+  `WORKSPACE_PATH_PROTECTED` 误判和每次提交后要两次 `refresh_baseline`，都只绕没报（审查 §28）。
 
 ## 写文档
 
