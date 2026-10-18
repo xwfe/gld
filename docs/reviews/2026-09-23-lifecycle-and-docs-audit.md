@@ -1679,3 +1679,60 @@ clippy `-D warnings`、`fmt --check` 通过。两个文档提交之后跑了 `do
   不进项目、不当验收证据。`gld grant browser` 是给浏览器扩展发连接地址（§23），和"让 AI 操作浏览器"是两回事。
 
 **没做：**上表的代码改动都没动，没部署，没推送。
+
+## 29. 任务里经 gld 提交，不再要两次 refresh_baseline（2026-10-18）
+
+**要求：**修 §28 不足第 1 条，先写会失败的测试再改。第 3 条（工作区里面的绝对路径）另做；第 2 条是验收规则的取舍，
+由用户定，这次没碰。
+
+### 改了什么
+
+`ad22e83`：`exec_command` 回包记账（`Harness::refresh_expected_state`）时，下面四条都满足，就把新 HEAD 记进任务基线，
+再记一条 `head_advanced` 任务事件（`session_id`、脱敏截短的命令原文、分支、前后 HEAD）：
+
+1. 现在有 HEAD，和任务记的不一样；
+2. 分支和任务记的一样；
+3. 文件指纹和上次记账一样；
+4. 任务记的旧 HEAD 是新 HEAD 的祖先（`git merge-base --is-ancestor`）。
+
+能这么认，是因为 `exec_command` 起跑前的写前检查确认过 HEAD 还是记账时那个，挪动只能发生在这次调用期间。
+`apply_patch` 和 history 工具的记账不走这条，它们不会动 HEAD。规则写在 `concepts.md`「工作区指纹」。
+
+### 想过的情况
+
+| 情况 | 结果 | 依据 |
+| --- | --- | --- |
+| 先 `git add`、再 `git commit`，分两条跑 | 直接记账，下一次 `apply_patch` 成功，`finish` 照常收 | 测试 `gld_跑的提交只让_head_前进时直接记账`；`.git/` 不计入指纹 |
+| 不经 gld 的提交（测试里直接调 git） | 照旧 `BASELINE_STALE`，之后 gld 起的命令也带不进来 | 写前检查在命令起跑前就拒；测试 `任务之外的提交照旧报_baseline_stale` |
+| 一条命令里文件也变了（`git merge --ff-only` 带进文件改动） | 照旧报 | 条件 3 |
+| 换到前面的分支（`git checkout -b topic other`，HEAD 往前、文件没变） | 照旧报 | 条件 2；换分支不在这次范围 |
+| `git commit --amend` | 照旧报 | 条件 4 |
+| 转了后台、回包之后才落地的提交 | 照旧报 | 回包时 HEAD 还没动。读到它结束（`observe_command`）时不补认：从回包到读到结束可以隔任意久，那段时间里别人的提交分不开。测试 `回包之后才落地的提交不自动记账` |
+| gld 在命令跑到一半时重启 | 照旧报 | 记账在回包时才做；判断只读任务文件里存的 HEAD 和指纹，没有只在内存里的状态 |
+| 命令跑的那几秒里，别处（终端、IDE）也提交了 | 记在这条命令头上 | 分不清，事件里留着命令原文给人核对。gld 自己别的会话的写这时要等工作区写锁（`exec.rs` 测试 `a_foreground_command_holds_the_write_lock_while_it_waits`），挡不住的是 gld 之外的 git 和 gld 转了后台还在跑的命令 |
+
+三条反例测试改代码前就通过（原来的行为本来就保守），留着是为了挡住这次的放宽放过头。逐个把条件 2、3、4 换成 `true`
+重跑 `head_变了又不只是往前提交时照旧报_baseline_stale`，三次都失败，分别卡在换分支（多出 `head_advanced` 事件）、
+快进合并、amend 那一例。
+
+### 发现但没改：提交之后，提交前跑的测试不能再当验收证据
+
+证据结束时的位置带 HEAD，`finish` 拿它和现在的位置整体比（`verify.rs` 的 `accept_evidence`：`end != current` 就报
+`EVIDENCE_STALE`）。所以"跑测试 → 提交 → `finish` 带那次测试"会被拒，要在提交之后再跑一遍，哪怕提交没改任何文件。
+用一条临时测试实测过（改 README → 跑 `git --version` 记 session → `git add`、`git commit` → `finish` 带它），回
+`EVIDENCE_STALE`，消息是"命令结束之后工作区又变了"，而文件其实没动，只有 HEAD 变了；临时测试没留在仓库里。
+这和第 2 条（只改文档也要重跑全仓）是同一类验收规则的取舍，放不放宽由用户定，这次没改。
+
+### 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 改代码前跑 4 条新测试 | `gld_跑的提交只让_head_前进时直接记账` 失败，报 `BASELINE_STALE`（即本条不足）；3 条反例通过 |
+| 改代码后 `task_acceptance` | 16 passed / 0 failed |
+| `cargo test --workspace --all-targets --locked`（隔离 `GLD_HOME`，`ad22e83`） | 44 个测试二进制，958 passed / 0 failed / 0 ignored（§28 是 954，多的是这 4 条） |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+
+**没做：**没换本机二进制、没重启守护进程、没推送；提交在分支 `claude/elegant-wright-5812fc` 上，没合进 main。
+新行为没经 ChatGPT 连接器实测。没改守护进程 Request/Response、命令行帮助和工具输入表；`exec_command` 回包形状没变，
+多出来的只有任务事件里的 `head_advanced`。
