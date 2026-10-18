@@ -32,12 +32,50 @@ pub fn log_dir_for_profile(profile_id: &str) -> PathBuf {
 }
 
 /// 往工作区日志追加一行。写不进去就静默放弃——记日志失败不该影响正在跑的服务。
+///
+/// 每行前面加 UTC 时间（`2026-10-18T02:05:54Z `）。以前没有，事后查"那次调用是几点"只能
+/// 拿行号去和别的记录对（审查 §28）。
 pub fn append_profile_log(profile_id: &str, file_name: &str, line: &str) {
     let log_dir = log_dir_for_profile(profile_id);
     if fs::create_dir_all(&log_dir).is_err() {
         return;
     }
-    append_line(&log_dir.join(file_name), line);
+    append_line(
+        &log_dir.join(file_name),
+        &format!("{} {line}", utc_timestamp()),
+    );
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ`（UTC）。手写 civil-from-days，避免只为时间戳引一个 crate；
+/// 守护进程日志也用它（`gld-daemon` 的 `logging::timestamp`）。
+pub fn utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format_unix(secs)
+}
+
+pub fn format_unix(secs: u64) -> String {
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (year, month, day) = civil_from_days(days as i64);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+// Howard Hinnant 的 days → (y, m, d) 算法。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// 往指定文件追加一行，必要时先轮转。
@@ -77,6 +115,13 @@ fn rotate(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_known_instants() {
+        assert_eq!(format_unix(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_unix(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(format_unix(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
 
     fn write_bytes(path: &Path, count: usize) {
         fs::write(path, "x".repeat(count)).expect("write");

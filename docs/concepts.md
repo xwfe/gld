@@ -1299,7 +1299,7 @@ gld 会放宽规则再找一次，结果写在那条诊断的 `near_miss` 里。
 
 | 在哪 | 记什么 |
 | --- | --- |
-| 请求日志 `logs/hub/mcp-requests.log`；每个项目自己那份 `logs/<项目 id>/mcp-requests.log` 也有，行首多一个 `[hub]` | 失败时一行 `[patch]`：工具名、`operation_id`、错误码、`reasons`。成功的不记 |
+| 请求日志 `logs/hub/mcp-requests.log`；每个项目自己那份 `logs/<项目 id>/mcp-requests.log` 也有，时间后面多一个 `[hub]` | 失败时一行 `[patch]`：工具名、`operation_id`、错误码、`reasons`。成功的不记 |
 | `harness/workspaces/<哈希>/operations.jsonl` | 每次 `apply_patch` / `patch_check` 一行，`result_summary.patch` 里有补丁写法（`codex` 或 `unified`；只有 notebook 编辑时是 `none`）和字节数，成功的也记，才算得出失败率。失败时再加原因码、对不上几处，以及每处的文件、第几段、行号、`near_miss`、版本号 |
 
 **补丁正文、文件内容、报错消息、原文摘录（`actual_excerpt`）都不记。**operations 的记录会经
@@ -1314,8 +1314,8 @@ grep -h a9cba8eac4334a0c925119503d4a75d6 ~/.config/gld/harness/workspaces/*/oper
 
 容易踩的几处：
 
-- **请求日志没有时间戳。**想知道是什么时候失败的，用 `operation_id` 到 operations.jsonl 里看 `created_at`
-  （毫秒时间戳）。
+- **请求日志每行开头是 UTC 时间**（`2026-10-18T02:05:54Z`，本机 +9 区就加 9 小时）。这之前的版本没有，
+  老日志里要知道时间，用 `operation_id` 到 operations.jsonl 里看 `created_at`（毫秒时间戳）。
 - **请求日志超过 4 MiB 就轮转，只留一代**（见[日志有多大](daemon.md#日志有多大)），早一点的 `[patch]` 行会没了。
   operations.jsonl 不轮转，数长期分布用它。
 - **`gld tool call` 调的补丁不出 `[patch]` 行**：那一行只在 MCP 的 HTTP 入口记，operations 照记。

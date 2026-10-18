@@ -576,10 +576,17 @@ fn a_failed_patch_leaves_its_reasons_in_the_logs_without_file_content() {
     let operation_id = failed["operation_id"].as_str().expect("operation_id");
 
     let log = request_log(&hub.env, "hub");
-    let line = log
+    // 每行开头是 UTC 时间，后面才是内容（审查 §28：以前没有时间，事后查不清几点）。
+    let (stamp, line) = log
         .lines()
-        .find(|line| line.starts_with("[patch]"))
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, rest)| rest.starts_with("[patch]"))
         .unwrap_or_else(|| panic!("没有 [patch] 行：{log}"));
+    assert_eq!(stamp.len(), "2026-10-18T02:05:54Z".len(), "{stamp}");
+    assert!(
+        stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T',
+        "{stamp}"
+    );
     assert!(
         line.ends_with(&format!(
             "tool=apply_patch operation_id={operation_id} code=PATCH_FAILED reasons=context_drifted:trailing_whitespace"
@@ -622,7 +629,7 @@ fn a_failed_patch_leaves_its_reasons_in_the_logs_without_file_content() {
     let log = request_log(&hub.env, "hub");
     assert!(
         log.lines().any(
-            |line| line.starts_with("[patch]") && line.ends_with("reasons=envelope_not_closed")
+            |line| line.contains(" [patch] ") && line.ends_with("reasons=envelope_not_closed")
         ),
         "{log}"
     );
@@ -650,7 +657,7 @@ fn a_failed_patch_leaves_its_reasons_in_the_logs_without_file_content() {
     let log = request_log(&hub.env, "hub");
     assert_eq!(
         log.lines()
-            .filter(|line| line.starts_with("[patch]"))
+            .filter(|line| line.contains(" [patch] "))
             .count(),
         2,
         "{log}"
