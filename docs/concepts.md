@@ -958,7 +958,7 @@ arguments={"url":"http://127.0.0.1:5179/"}` → `browser_snapshot` 给出页面�
 
 **实测（2026-10-08，Playwright MCP 0.0.83，经 gld 的 `/mcp`）：**打开服务模式起的页面、点按钮、读到 console 里的报错、
 截图（PNG 直接回到对话里）都通；`https://example.com` 被拦（`ERR_BLOCKED_BY_CLIENT`），`file:///etc/hosts` 被拦，上传 `cwd`
-以外的文件被拒。2026-10-18 在 `4a6d098` 上用同一个 Playwright MCP 版本复测一遍：经 `/mcp` 走`list_mcp_tools`（24 个，没有 `browser_run_code_unsafe`）→ 起服务 → 打开页面 → 点按钮 → console 读到 `ReferenceError` → 截图，都通；按名字调 `browser_run_code_unsafe` 报 `MCP_TOOL_UNKNOWN`（审查 §34）。
+以外的文件被拒。2026-10-18 在 `4a6d098` 上用同一个 Playwright MCP 版本复测一遍：经 `/mcp` 走 `list_mcp_tools`（24 个，没有 `browser_run_code_unsafe`）→ 起服务 → 打开页面 → 点按钮 → console 读到 `ReferenceError` → 截图，都通；按名字调 `browser_run_code_unsafe` 报 `MCP_TOOL_UNKNOWN`（审查 §34）。
 
 **管不到的：**
 - `--allowed-origins` 不是安全边界，Playwright 自己的说明写着它不管重定向；它防的是 AI 手滑打开外网。
