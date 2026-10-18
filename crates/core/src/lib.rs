@@ -13,6 +13,11 @@
 //! 所有持久化数据都放在 [`home::data_home`] 返回的目录下（默认 `~/.config/gld`，
 //! 可用环境变量 `GLD_HOME` 覆盖）。
 
+/// 构建那一刻 HEAD 指着的提交（`build.rs` 嵌进来的，12 位）。从 tarball 编译、`.git` 不在、
+/// 机器上没装 git，就是 `None`：**说不知道，不拿版本号顶替**。`gld --version` 和
+/// `server_info` 的 `build_commit` 都读它。
+pub const BUILD_COMMIT: Option<&str> = option_env!("GLD_BUILD_COMMIT");
+
 pub mod actions;
 pub mod agent_context;
 pub mod app;

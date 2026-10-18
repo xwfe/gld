@@ -585,7 +585,7 @@ pub fn server_snapshot() -> Value {
         //
         // 从 tarball 编译、`.git` 不在、机器上没装 git，这里就是 null：
         // **说不知道，不拿版本号顶替**。
-        "build_commit": option_env!("GLD_BUILD_COMMIT")
+        "build_commit": crate::BUILD_COMMIT
             .map(Value::from)
             .unwrap_or(Value::Null),
         // 和 ccnm 共用的那几个 crate 实际链进来的是哪一份。
