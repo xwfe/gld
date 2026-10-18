@@ -436,7 +436,9 @@ pub fn validate_command_for_workspace(
             "禁止删除或递归清空 .git/.github",
         ));
     }
-    if interpreter_mutation_pattern().is_match(command) && command_contains_external_path(command) {
+    if interpreter_mutation_pattern().is_match(command)
+        && command_contains_external_path(command, workspace.map(Workspace::root))
+    {
         return Err(PolicyError::new(
             PolicyReason::WorkspacePathProtected,
             "workspace scope 禁止通过子进程写入 Workspace 外部路径",
@@ -761,16 +763,99 @@ fn interpreter_mutation_pattern() -> &'static regex::Regex {
     })
 }
 
-fn command_contains_external_path(command: &str) -> bool {
-    let normalized = command.replace('\\', "/");
-    normalized.contains("../")
-        || normalized.contains("..\\")
-        || regex::Regex::new(r#"(?i)(^|["'\s])/[^"]"#)
-            .expect("valid regex")
-            .is_match(&normalized)
-        || regex::Regex::new(r"(?i)\b[A-Z]:/")
-            .expect("valid regex")
-            .is_match(&normalized)
+/// 命令文本里有没有指向 Workspace 外面的路径：`../` 跳出去、`~/` 家目录、
+/// 不在 Workspace 里的绝对路径（`root` 为 `None` 时绝对路径一律算外面）。
+///
+/// 只是文本启发式，不是沙箱：只在命令同时像在写文件时才查（见调用处），
+/// 写成脚本文件再跑就看不见了。
+///
+/// 以前是先把 `\` 全换成 `/`、再把引号或空白后面的任何 `/` 当绝对路径，于是
+/// argv 里一个单引号（`shell_words::join` 写成 `'\''`）、`4 / 2`、Workspace 里面的
+/// 绝对路径都被拒，反而 `shutil.rmtree("/")` 放行了（审查 §28）。
+fn command_contains_external_path(command: &str, root: Option<&Path>) -> bool {
+    if command.contains("../") || command.contains("..\\") {
+        return true;
+    }
+    path_like_tokens(command)
+        .into_iter()
+        .any(|token| !root.is_some_and(|root| absolute_path_inside(token, root)))
+}
+
+/// 挑出像路径的片段：前面是开头、空白、引号或 `(` `=` `,` `[` `{`，本身以 `/`、`~/`、
+/// 盘符（`C:/`、`C:\`）开头，Windows 上 `\` 开头的也算；引号里的 `..` 也算。
+///
+/// 引号后面的取到同一个引号为止，所以 `"/"` 和带空格的路径都认得出；不在引号里的，
+/// `/` 后面得紧跟名字字符，不然 `a / b`、`a // b` 这种除法会被当成根目录。
+/// Unix 上 `\` 不是分隔符：`'\n'` 和 `'\''` 不是路径。
+fn path_like_tokens(command: &str) -> Vec<&str> {
+    let backslash_separates = cfg!(windows);
+    let is_separator = |ch: char| ch == '/' || (backslash_separates && ch == '\\');
+    let is_name =
+        |ch: Option<char>| ch.is_some_and(|ch| ch.is_alphanumeric() || "_.~-$@+%".contains(ch));
+    let mut tokens = Vec::new();
+    let mut prev: Option<char> = None;
+    for (start, ch) in command.char_indices() {
+        let before = prev.replace(ch);
+        let quote = before.filter(|p| matches!(p, '"' | '\'' | '`'));
+        let at_boundary = match before {
+            None => true,
+            Some(p) => {
+                quote.is_some() || p.is_whitespace() || matches!(p, '(' | '=' | ',' | '[' | '{')
+            }
+        };
+        if !at_boundary {
+            continue;
+        }
+        let rest = &command[start..];
+        let end = match quote {
+            Some(q) => rest.find(q),
+            None => rest.find(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}')
+            }),
+        }
+        .unwrap_or(rest.len());
+        let token = &rest[..end];
+        let mut chars = token.chars();
+        let second = chars.clone().nth(1);
+        let path_like = match chars.next() {
+            Some('/') => quote.is_some() || is_name(second),
+            Some('\\') if backslash_separates => is_name(second) || second == Some('\\'),
+            Some('~') => second.is_some_and(is_separator) || (quote.is_some() && second.is_none()),
+            Some('.') => quote.is_some() && token == "..",
+            Some(letter) if letter.is_ascii_alphabetic() => {
+                second == Some(':') && token[2..].starts_with(['/', '\\'])
+            }
+            _ => false,
+        };
+        if path_like {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// 绝对路径是不是落在 Workspace 里面。从最长的已经存在的那一级 canonicalize，
+/// 所以软链指到外面的、悬空的软链都算外面；`starts_with` 按路径组件比，
+/// `/a/gld2` 不算在 `/a/gld` 里。`root` 是 [`Workspace::root`]，已经 canonicalize 过。
+fn absolute_path_inside(token: &str, root: &Path) -> bool {
+    let path = Path::new(token);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return false;
+    }
+    let mut existing = path;
+    while std::fs::symlink_metadata(existing).is_err() {
+        match existing.parent() {
+            Some(parent) => existing = parent,
+            None => return false,
+        }
+    }
+    existing
+        .canonicalize()
+        .is_ok_and(|real| real.starts_with(root))
 }
 
 fn command_targets_protected_repository_asset(command: &str) -> bool {

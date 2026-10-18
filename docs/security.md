@@ -130,6 +130,16 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 子进程那一层更保守：命令文本里出现删除或递归清空 `.git` / `.github` 一律拒，
 因为从命令文本里分不清"改一行 workflow"和"把 `.github` 删掉"。
 
+解释器往 Workspace 外面写也拦一道：命令文本像在写文件（`open(…, 'w')`、`write_text`、
+`shutil.rmtree`、`fs.writeFileSync` 这类），又带着外面的路径——`../`、`~/`、不在 Workspace 里的
+绝对路径——就报 `WORKSPACE_PATH_PROTECTED`。Workspace 里面的绝对路径照常放行（比如测试用的
+`<仓库>/target/test-home`）；绝对路径经过 Workspace 里的软链指到外面的，算外面。
+
+- 引号里单独一个 `/` 按根目录算，所以 `'/'.join(parts)` 加写文件会被拒：换成 `os.sep`，
+  或者把脚本存成项目里的文件再跑。
+- 它只看命令文本：脚本存成文件再跑就看不见了，相对路径经过软链出去也看不出来。
+  它防的是顺手写错地方，不是存心绕过。
+
 ### 项目命令拿不到名字像密钥的环境变量
 
 **怎么查扣了哪些：**`gld tool call check_exec_environment -w <项目>`，看 `withheld_environment.names`（只列名字，不给值）。
