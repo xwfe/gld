@@ -681,6 +681,21 @@ SHA-256 指纹和 HEAD）。全部满足才进 `completed`，证据记进 `chang
 `allow_unverified=true`，收成 `completed_unverified`——它只说明没有被接受的证据，
 不代表没测过。
 
+**看回包的 `finished` 判断结没结束**：`true` 是已经收成 `completed` 或 `completed_unverified`，
+把结果和 `warnings` 报给用户就行，别再调 `finish`、别轮询；`false` 加 `verification_required: true`
+是还在 `verifying`，等你带证据再来。`pending_steps` 里还有没做完的步骤也能收尾，`warnings` 会提一句，
+gld 不会替你把它们算成做完了。
+
+**回包丢了可以重试**：对已经结束的任务再调一次 `finish`（不带证据，或带当初被接受的那几个
+`session_id`），回 `already_finished: true` 和存着的结局，不再记事件，也不碰之后开的新任务。
+这时的 `change_summary` 按**现在**的工作区算：收尾后又改过文件，`risks` 会写"最后一次验收之后工作区又变了"，
+重试不替后来的改动做验收。重试时换验收方式（`completed` ↔ `completed_unverified`）或带新证据报
+`INVALID_TASK_TRANSITION`；后来的改动要验，开新任务。第一次的 `summary` 没写进去的，重试也不补写。
+
+**状态存上了、附带的没存上**：`summary` 写失败或改动摘要读不出来时，任务照样是结束状态，
+回包 `summary_recorded: false` / `change_summary_available: false` 并在 `warnings` 里说原因。
+这时 `change_summary` 是 `null`，意思是"没读到"，不是"没改动"；要细节再调 `action=change_summary`。
+
 证据能证明"这条命令在现在这份文件上跑过、退出 0"，证明不了这条命令测到了该测的东西：
 `true` 也退出 0。所以记录里留着命令原文，给看的人判断。命令运行时自己改了文件
 （测试缓存、快照）照样收，但回包 `warnings` 和 `change_summary.risks` 会点名是哪些文件。
@@ -1040,6 +1055,18 @@ stdout / stderr 各留最后 1 MiB；超了 32 条先收结束得最早的，还
 对面不读的话写满就卡住；到点报 `STDIN_WRITE_TIMEOUT`，并**说清写进去了多少
 字节**（`details.bytes_written`）——"写了一半"和"一个字节都没写"，接下来该做的
 事不一样。
+
+### 命令行多长算太长
+
+`cmd`（或 `argv` 拼起来）最长 **4000 字节**，超了不执行，报 `POLICY_REJECTED`、`details.reason: command_too_long`。
+中文一个字占 3 字节，emoji 占 4 字节，一段 1500 字的中文就超了。别把几千字节的脚本塞进 `python3 -c`：
+
+- 脚本：先 `apply_patch` 存成项目里的文件，再 `exec_command argv=["python3","scripts/x.py"]`。
+- 数据：用 `exec_command` 的 `stdin` 喂，比如 `argv=["python3","scripts/x.py"]` 加 `stdin="<数据>"`。
+
+回包里的 `command` 只是回显给人看的，超过 2048 字节会截短、末尾带 `... [truncated]`；`command_bytes`
+是原文多少字节，`command_truncated` 说截没截。截的只是回显，真正执行的是完整命令。`check_command` 也一样，
+所以拿超长命令去预检，回包不会跟着变大。
 
 ## 参数名写错了会被拒，不会按默认值跑
 

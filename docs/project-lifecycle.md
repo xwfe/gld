@@ -71,11 +71,8 @@ CLI、库和常规后端项目，已有工具足以支持人工监督下的读�
 带 `service_port` 起的服务不会自己结束，别等它 `running: false`：看 `service.ready`，用完 `kill_session`，这时写
 `service stopped`，不算失败（见[服务模式](concepts.md#dev-server-这类要一直开着的service_port)）。
 
-`exec_command` / `check_command` 的 `command` 是显示用回显，最多 2048 字节（含截断标记）；
-`command_bytes` 是回显原文的字节数，`command_truncated` 说明是否截短。真正执行的参数没有截短，
-原有 4000 字节命令上限、stdout / stderr 限额与验收规则不变。大脚本先保存到项目再执行；
-确有大数据要输入时用 `stdin`，不要塞进命令行再让预检反复回传。该限制不控制客户端展示的工具请求正文，
-也不是整个回包的总字节上限；gld 没有新增通用二进制上传下载接口。
+命令行最长 4000 字节。大段脚本先存成项目里的文件再跑，大段数据用 `stdin` 喂，
+别塞进 `python3 -c`（见[命令行多长算太长](concepts.md#命令行多长算太长)）。
 
 Planning 台账（`planning_manage action=state` 的 `execution`）
 按命令终态记：`failed` / `timed_out` / `cancelled` / `running` / `unknown`，`last_error` 写明退出码；
@@ -104,16 +101,10 @@ Planning 台账（`planning_manage action=state` 的 `execution`）
 确认放弃正式验收才收成 `completed_unverified`；**不能把这个状态说成验证全过，
 也不能反过来说完全没测过**。
 
-看 `finish` 回包的 `finished` 和 `task.status`：`finished=false`、`verification_required=true`
-表示还在等证据；`finished=true` 表示任务已结束，报告结果与限制即可，不用继续轮询。
-收尾前用 `action=update` 更新步骤；`pending_steps` 还留着时会给出警告，不会擅自把它们算成已完成。
-
-只有收尾回包丢失时，可以用同一个 `task_id` 重试 `finish`（不带证据，或沿用已接受的证据）。
-`already_finished=true` 表示读取已保存的终态：不重复写验收、说明或状态事件，也不关闭后来开的任务。
-它不是对后续修改的再次验收；不能借重试追加新证据或把 `completed_unverified` 升成 `completed`。
-状态已保存而附加说明或改动摘要读写失败时，回包保留终态并列出 `warnings`；
-`summary_recorded=false` 表示本次没有写入说明，`change_summary_available=false` 表示摘要不可用，
-不是“没有改动”或“没有风险”。确实要追查详情再调用 `action=change_summary`。
+收尾前用 `action=update` 把步骤记准。`finish` 回包 `finished: true` 就是结束了，把结果、
+`warnings` 和剩下的 `pending_steps` 报给用户，别再轮询；回包丢了可以用同一个 `task_id` 重试，
+拿回的是存着的结局，不是对后来改动的验收。各字段的意思见
+[任务怎么收尾](concepts.md#任务怎么收尾带证据才算-completed)。
 
 `pause` 之后写入和执行会被拒（`TASK_PAUSED`），但它不停已经在跑的命令。任务结束前
 检查自己启动的命令是否还在运行，明确由谁接管或正常停止；不要结束其他主体的进程。
