@@ -64,8 +64,8 @@ CLI、库和常规后端项目，已有工具足以支持人工监督下的读�
 覆盖外部修改的风险，但它是可选的大小/修改时间令牌，不是内容哈希或强 CAS；客户端
 未暴露它时要明确记录这一限制，重新读取上下文，不宣称已经使用该保护。
 
-长命令在返回 `running` 后还没有完成；用 `read_output` 继续读到 `running: false`，
-它会回 `termination_reason`、`exit_code`、`command_ok`。**不能只看工具的 `ok` 或 CLI
+长命令在返回 `running` 后还没有完成。要等它结束，调 `write_stdin`（`chars` 留空）带 `yield_time_ms: 30000`：
+命令一结束就返回，最多等 30 秒，别用默认的 1 秒反复问；只想看已有输出用 `read_output`。读到 `running: false` 时它会回 `termination_reason`、`exit_code`、`command_ok`。**不能只看工具的 `ok` 或 CLI
 自身退出码**：命令退出 7 时工具 `ok` 仍是 true、`gld tool call` 仍退出 0，要看
 `command_ok` / `exit_code`，回包顶层的 `command_summary` 用一句话写着命令成没成（失败的以 `command FAILED` 开头；根本没起来的——找不到程序、脚本没可执行位——以 `command was NOT started` 开头，后面跟原因）。
 带 `service_port` 起的服务不会自己结束，别等它 `running: false`：看 `service.ready`，用完 `kill_session`，这时写

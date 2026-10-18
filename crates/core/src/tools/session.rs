@@ -753,6 +753,7 @@ fn snapshot_value(parts: Snapshot<'_>, max_output_bytes: usize) -> Value {
             "unknown" => "gld 没来得及记下结局：进程可能已经结束，也可能还在跑（看 pid）；先核对现状，别直接重跑",
             "exited" => "检查 exit_code 和 stderr",
             "crashed" => "检查 stderr 后重试或恢复工作区",
+            _ if parts.running => "还在跑：要等它结束就调 write_stdin（chars 留空）带 yield_time_ms=30000，结束了立刻返回，最多等 30 秒；service_port 起的服务不会自己结束，看 service.ready",
             _ => "继续读取 session 或等待进程结束",
         },
         "exit_code": parts.exit_code,
@@ -1490,9 +1491,31 @@ pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     }
 
     let yield_ms = crate::tools::args::bounded(args, "write_stdin", "yield_time_ms");
-    std::thread::sleep(std::time::Duration::from_millis(yield_ms));
-    crate::async_rt::block_on(session.refresh_status());
+    crate::async_rt::block_on(wait_for_exit(
+        &session,
+        std::time::Duration::from_millis(yield_ms),
+    ));
     Ok(tool_ok(session.snapshot(max_output_bytes)))
+}
+
+/// 等到命令结束或者到点，先到哪个算哪个。
+///
+/// 以前不管命令结没结束都睡满 `yield_time_ms`，等 30 秒就真等 30 秒，AI 只好用默认的 1 秒反复问：
+/// 2026-10-18 一轮 9 条后台命令轮询了 12 次（审查 §28）。现在结束了就返回，交互式会话照旧等满。
+async fn wait_for_exit(session: &ExecSession, limit: std::time::Duration) {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        session.refresh_status().await;
+        if session.has_exited() {
+            session.wait_for_readers().await;
+            return;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        tokio::time::sleep((deadline - now).min(std::time::Duration::from_millis(20))).await;
+    }
 }
 
 pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {

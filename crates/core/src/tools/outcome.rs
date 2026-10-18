@@ -148,7 +148,7 @@ pub fn command_summary(output: &Value) -> Option<String> {
             service_port.unwrap_or_default()
         ),
         "running" => {
-            "command is still running; read_output for more, kill_session to stop it".into()
+            "command is still running; write_stdin with empty chars and yield_time_ms up to 30000 waits for it and returns when it exits, kill_session stops it".into()
         }
         _ => format!(
             "command FAILED: {} (the tool call itself worked; see exit_code / command_ok)",
