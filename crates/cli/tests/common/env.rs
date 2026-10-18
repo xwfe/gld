@@ -139,6 +139,12 @@ pub const UNTIL_EXIT: &str = "yield_time_ms:=30000";
 const PORT_LOW: u16 = 20000;
 /// 上界。Linux 默认从 32768 起自动分配，留一点余量。
 const PORT_SPAN: u32 = 12000;
+/// gld 自己的默认端口：hub 28764、全局入口 28765、工作区 MCP 从 28766 往上自动分配
+/// （`settings/model.rs`、`workspace/resources.rs`）。这些号写进配置时还没人在听，"连一下"查不出来，
+/// 测试拿到其中一个再手动设成别的服务的端口，gld 就报"端口已经是全局入口的本地端口"
+/// "与工作区的 MCP 服务重复"。起点按 pid 错开，所以只在某些 CI 机器上红：2026-10-18 那次推送，
+/// ubuntu 撞了 28765、macOS 撞了 28766（审查 §36）。整段跳过，留足余量。
+const GLD_DEFAULT_PORTS: std::ops::RangeInclusive<u16> = 28700..=28899;
 
 /// 一个空闲的本地端口，从 20000–32000 里挑。
 ///
@@ -183,10 +189,13 @@ pub fn free_port() -> u16 {
 
     for _ in 0..PORT_SPAN {
         let port = PORT_LOW + (next.fetch_add(1, Ordering::Relaxed) % PORT_SPAN) as u16;
+        if GLD_DEFAULT_PORTS.contains(&port) {
+            continue;
+        }
         let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         if TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_err() {
             return port;
         }
     }
-    panic!("20000–32000 之间没有一个空闲端口");
+    panic!("20000–32000（跳过 28700–28899）之间没有一个空闲端口");
 }
