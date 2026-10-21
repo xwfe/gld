@@ -30,7 +30,7 @@ server, all your projects behind it, one connection per client. Docs are in Chin
 - **先弄清项目怎么构建、怎么测**：列出项目里写好的命令和 CI 实际跑的步骤，AI 不用翻文档猜。
 - **起 dev server、用浏览器看页面**：起服务时告诉 gld 端口，端口连得上它才回话，最多开 1 小时；再配一个隔离的浏览器，
   AI 就能打开页面、点按钮、看 console 报错、截图（[怎么配](docs/concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。
-- **用本机装好的 Skills 和 MCP server**：Claude Code、Codex 这些装在本机或项目里的 skill，AI 能按名字或关键词查、读正文（[怎么用](docs/concepts.md#compact-还会砍掉注入给-ai-的说明skill-目录只给一段)）；本机配好的 MCP server 点名开了才转给 AI（[本机 MCP](docs/concepts.md#本机装好的-mcp-server)）。skill 里的脚本 gld 不替你跑，只给 AI 读。
+- **用本机装好的 Skills 和 MCP server**：Claude Code、Codex 这些装在本机或项目里的 skill（含 Claude Code 开着的插件带的），AI 能按名字或关键词查、读正文（[扫哪些目录、怎么用](docs/concepts.md#本机和项目里的-skill)）；本机配好的 MCP server 点名开了才转给 AI（[本机 MCP](docs/concepts.md#本机装好的-mcp-server)）。skill 里的脚本 gld 不替你跑，只给 AI 读。
 - **要紧的操作停下来问你**：装依赖、装工具（`pnpm install`、`pip install`、`cargo install`……）、`rm -rf` 这类命令不带确认参数
   就不放行，提醒 AI 先问你。
 - **给别人只开几个项目**：`gld grant` 发一份只能访问指定项目的凭据，默认只读，随时作废。

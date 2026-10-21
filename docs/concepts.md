@@ -298,6 +298,74 @@ OAuth 的在授权页填 **grant 的口令**（不是服务口令），bearer �
 
 ---
 
+## 本机和项目里的 Skill
+
+**先看 AI 拿到了哪些：**
+
+```bash
+gld context -w api
+```
+
+Skill 那一段每行是 `[来源/作用域] 名字  路径`。`✓` 进了给 AI 的目录；`·` 扫到了、目录里放不下（compact 有字数上限，见[上面](#compact-还会砍掉注入给-ai-的说明skill-目录只给一段)），AI 调 `list_skills` 照样拿得到；`◦` 只在用户点名时用；`✗` 没收进来，原因写在后面。
+
+AI 那边：连上时拿到的说明里、`workspace_context` 的结果里都带一段目录，`list_skills query="debug test"` 按词查，`get_skill name=<名字>` 读正文，`get_skill` 加 `file` 读 skill 目录里的脚本、参考文件。**gld 不替 AI 跑 skill 里的脚本**，只给它读。
+
+### 从哪些目录找
+
+默认（`--skill-sources` 没设，或设成 `auto`）下表全扫，每个目录往下看 4 层；另外项目里任何位置的 `SKILL.md` 也算（往下 8 层，跳过 `.git`、`node_modules`、`target`、`dist`、`vendor`、`.venv` 这类目录）。
+
+| 来源 | 主目录里 | 项目里 |
+| --- | --- | --- |
+| codex | `~/.agents/skills`、`~/.codex/skills` | `.agents/skills`、`.codex/skills` |
+| claude | `~/.claude/skills`、`~/.agents/skills`，加上开着的 [Claude Code 插件](#claude-code-插件带的-skill)里的 | `.claude/skills`、`.agents/skills` |
+| cursor | `~/.cursor/skills`、`~/.agents/skills` | `.cursor/skills`、`.agents/skills` |
+| copilot | `~/.github/skills`、`~/.claude/skills`、`~/.agents/skills` | 同左的相对目录 |
+| opencode | `~/.opencode/skills`、`~/.config/opencode/skills`、`~/.claude/skills`、`~/.agents/skills` | `.opencode/skills`、`.claude/skills`、`.agents/skills` |
+| zcode | `~/.zcode/skills` | `.zcode/skills` |
+| reasonix | `~/.reasonix/skills`、`~/.agents/skills`、`~/.agent/skills`、`~/.claude/skills` | 同左的相对目录 |
+
+- **只要某几家**：`gld cfg runtime --skill-sources claude,codex`。这时只扫列出来的几行，项目里别处的 `SKILL.md` 不再扫；主目录里 skill 的附件反而能读了（明确配置的来源才给，见[读附件](#skill-里的脚本和参考文件)）。
+- **再加几个目录**：`gld cfg runtime --custom-skill-paths ~/team-skills`（逗号分隔，传 `""` 清空）。默认的自动发现下直接生效；设了 `--skill-sources` 的话要把 `custom` 也列进去。
+- **一个都不要**：`gld cfg runtime --skill-sources disabled`。
+
+**同一个 skill 出现好几次是正常的。**`~/.agents/skills` 同时算好几家，同一个文件只算一次；不同文件内容一字不差的（skills CLI 装进 `~/.codex/skills` 和 `~/.claude/skills` 的同一份），只留先扫到的那份（按上表从上往下，插件的排在所有目录后面），其余打 `✗` 写 "same content as"——不是坏了。
+
+### 主目录里链到别处的 skill
+
+**也算**（`~/.claude/skills/x -> ~/code/skills/x`，自己写的 skill 常这么放，skills CLI 也把每个都从 `~/.agents/skills` 链进来）：2026-09-22 之前 gld 扫描不跟链接，这种 skill 整个看不见，原生客户端却看得见。项目里的链接照旧不跟：仓库里一个指到外面的链接，不该让 gld 替它读项目外的文件。
+
+### Claude Code 插件带的 skill
+
+**也算，但只算开着的。**想看哪些插件开着：`claude plugin list`，`enabled: true` 的那些里带的 skill gld 都认。规则和 Claude Code 自己一样：
+
+- 开没开看 `enabledPlugins` 里是不是 `true`：先看 `~/.claude/settings.json`，项目里的 `.claude/settings.json`、`.claude/settings.local.json` 能把它盖掉（后者优先）。所以在项目里关掉的插件，这个项目里 gld 也不给。
+- 装在哪看 `~/.claude/plugins/installed_plugins.json`。只给某个项目装的（scope 是 project / local），只在那个项目里算。
+- 读插件里的 `skills/<名字>/SKILL.md`，加上插件 `plugin.json` 和市场条目里 `skills` 点名的目录。插件依赖（`node_modules` 里）自带的 SKILL.md 不算。
+- 名字照 Claude Code 的叫法带插件名：`exa:search`、`frontend-design:frontend-design`。`gld context` 里记成 `claude/global`，路径在 `~/.claude/plugins/cache/…` 下；`--hidden-skills` 要写这个全名。
+- 和主目录 skills 目录里内容一字不差的，只留主目录那份，插件那份打 `✗`。附件照主目录 skill 的规矩。
+
+不算的：关掉的、装了但从没开过的（`claude plugin list` 里 `enabled: false`）、`~/.claude/plugins/marketplaces/` 里的（那是市场上所有**能装**的插件，不是你装了的）。还没读的：企业 managed 策略里的开关（策略强关的插件，你自己设置里开着的话 gld 照样给）、插件的 `commands/`（老式斜杠命令，不是 SKILL.md）、从 claude.ai 同步来的插件。
+
+> 2026-10-21 之前 gld 一个插件 skill 都不认。这台开发机 `~/.claude/plugins/` 下有 71 个 SKILL.md，可绝大多数在 `marketplaces/`（没装）、关掉的插件、插件依赖里；Claude Code 真正加载的只有开着的 exa、frontend-design 带的 3 个，gld 看不见（审查 §37）。
+
+### 写坏了的、只给用户点名用的
+
+写坏了的 SKILL.md（引号没闭合、没写描述、描述超过 1024 字符）不进目录，但也不会悄悄消失：`gld context` 打 `✗` 并写出原因，AI 调 `list_skills` 也在 `skipped` 里看得到。
+
+frontmatter 写了 `disable-model-invocation: true`（`yes`、`on`、`1` 也算）的 skill，**不进目录，AI 不会自己用它**；你在对话里点它的名字（"用 deploy 那个 skill"），AI 才去 `get_skill` 加载，正文前面还带一句"用户点名才照做"。`gld context` 里打 `◦`。
+
+为什么不像原生 Claude Code 那样整个藏起来：原生是靠你敲 `/deploy` 启动的，gld 没有斜杠命令（ChatGPT、Codex 也没有），藏起来就谁都用不了了。`user-invocable` 管的正是那个斜杠菜单，gld 里没有这个菜单，所以它不起作用。
+
+### Skill 里的脚本和参考文件
+
+AI 用 `get_skill` 加 `file` 读，只限这个 skill 自己的目录。项目里的直接能读；主目录里的（含插件带的）默认只给正文、不给文件，AI 会拿到 `filesUnavailable` 和原因。要给：`gld cfg runtime --skill-sources claude`（换成它实际的来源）明确配置，或者 `gld set <项目> confine-reads=false`。边界见[安全](security.md)那一节。
+
+### 藏掉某个装好的 skill
+
+`gld cfg runtime --hidden-skills pdf,pptx`（按 `gld context` 里显示的名字，不分大小写；传 `""` 清空）。藏掉的和没装一样：目录里没有、`list_skills` 不列、`get_skill` 拿不到，`skipped` 里也不提。只管主目录和自定义路径里的，项目自己的 skill 由项目决定。
+
+---
+
 ## 本机装好的 MCP server
 
 在 Claude Code、Codex 里装好的 MCP server（context7、deepwiki、exa……），gld 可以经服务
@@ -524,29 +592,7 @@ Skill（扫到 14，目录里列了 9）
   · [claude/global] brainstorm  ~/.claude/skills/brainstorm/SKILL.md
 ```
 
-写坏了的 SKILL.md（引号没闭合、没写描述、描述超过 1024 字符）不进目录，但也不会悄悄消失：`gld context` 打 `✗` 并写出原因，AI 调 `list_skills` 也在 `skipped` 里看得到。
-
-frontmatter 写了 `disable-model-invocation: true`（`yes`、`on`、`1` 也算）的 skill，**不进目录，AI 不会自己用它**；你在对话里点它的名字（"用 deploy 那个 skill"），AI 才去 `get_skill` 加载，正文前面还带一句"用户点名才照做"。`gld context` 里打 `◦`。
-
-为什么不像原生 Claude Code 那样整个藏起来：原生是靠你敲 `/deploy` 启动的，gld 没有斜杠命令（ChatGPT、Codex 也没有），藏起来就谁都用不了了。`user-invocable` 管的正是那个斜杠菜单，gld 里没有这个菜单，所以它不起作用。
-
-skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读——只限这个 skill 自己的目录。主目录里的用户级 skill 默认只给正文不给文件，来源明确配置之后才给，边界见[安全](security.md)那一节。
-
-主目录里**链到别处的 skill 也算**（`~/.claude/skills/x -> ~/code/skills/x`，自己写的 skill 常这么放，skills CLI 也把每个都从 `~/.agents/skills` 链进来）：2026-09-22 之前 gld 扫描不跟链接，这种 skill 整个看不见，原生客户端却看得见。项目里的链接照旧不跟。
-
-**Claude Code 插件带的 skill 也算，但只算开着的。**想看哪些插件开着：`claude plugin list`，`enabled: true` 的那些里带的 skill gld 都认。具体规则和 Claude Code 自己一样：
-
-- 开没开看 `enabledPlugins` 里是不是 `true`：先看 `~/.claude/settings.json`，项目里的 `.claude/settings.json`、`.claude/settings.local.json` 能把它盖掉（后者优先）。所以在项目里关掉的插件，这个项目里 gld 也不给。
-- 装在哪看 `~/.claude/plugins/installed_plugins.json`。只给某个项目装的（scope 是 project / local），只在那个项目里算。
-- 读插件里的 `skills/<名字>/SKILL.md`，加上插件 `plugin.json` 和市场条目里 `skills` 点名的目录。插件依赖（`node_modules` 里）自带的 SKILL.md 不算。
-- 名字照 Claude Code 的叫法带插件名：`exa:search`、`frontend-design:frontend-design`。`gld context` 里记成 `claude/global`，路径在 `~/.claude/plugins/cache/…` 下；`--hidden-skills` 要写这个全名。
-- 和 `~/.claude/skills` 等目录里内容一字不差的，只留主目录那份，插件那份打 `✗` 写"same content as"。附件照主目录 skill 的规矩：auto 扫到的不给文件。
-
-不算的：关掉的、装了但从没开过的（`claude plugin list` 里 `enabled: false`）、`~/.claude/plugins/marketplaces/` 里的（那是市场上所有**能装**的插件，不是你装了的）。还没读的：企业 managed 策略里的开关（策略强关的插件，你自己设置里开着的话 gld 照样给）、插件的 `commands/`（老式斜杠命令，不是 SKILL.md）、从 claude.ai 同步来的插件。
-
-> 2026-10-21 之前 gld 一个插件 skill 都不认。这台开发机 `~/.claude/plugins/` 下有 71 个 SKILL.md，可绝大多数在 `marketplaces/`（没装）、关掉的插件、插件依赖里；Claude Code 真正加载的只有开着的 exa、frontend-design 带的 3 个，gld 看不见（审查 §37）。
-
-**不想让某个装好的 skill 出现**：`gld cfg runtime --hidden-skills pdf,pptx`（按名字，不分大小写；传 `""` 清空）。藏掉的和没装一样：目录里没有、`list_skills` 不列、`get_skill` 拿不到，`skipped` 里也不提。只管主目录和自定义路径里的，项目自己的 skill 由项目决定。
+Skill 那几行里另外两种标记（`◦` 用户点名才用、`✗` 没收进来），以及 gld 从哪些目录找 skill，见[本机和项目里的 Skill](#本机和项目里的-skill)。
 
 要让它们全部进去：`gld set <项目> tool-profile=advanced`。
 代价是工具从 30 个涨到 56 个，加上多出来的说明和完整 Skill 目录，
