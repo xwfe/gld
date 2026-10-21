@@ -534,6 +534,18 @@ skill 目录里的脚本、参考文件，AI 用 `get_skill` 加 `file` 读—�
 
 主目录里**链到别处的 skill 也算**（`~/.claude/skills/x -> ~/code/skills/x`，自己写的 skill 常这么放，skills CLI 也把每个都从 `~/.agents/skills` 链进来）：2026-09-22 之前 gld 扫描不跟链接，这种 skill 整个看不见，原生客户端却看得见。项目里的链接照旧不跟。
 
+**Claude Code 插件带的 skill 也算，但只算开着的。**想看哪些插件开着：`claude plugin list`，`enabled: true` 的那些里带的 skill gld 都认。具体规则和 Claude Code 自己一样：
+
+- 开没开看 `enabledPlugins` 里是不是 `true`：先看 `~/.claude/settings.json`，项目里的 `.claude/settings.json`、`.claude/settings.local.json` 能把它盖掉（后者优先）。所以在项目里关掉的插件，这个项目里 gld 也不给。
+- 装在哪看 `~/.claude/plugins/installed_plugins.json`。只给某个项目装的（scope 是 project / local），只在那个项目里算。
+- 读插件里的 `skills/<名字>/SKILL.md`，加上插件 `plugin.json` 和市场条目里 `skills` 点名的目录。插件依赖（`node_modules` 里）自带的 SKILL.md 不算。
+- 名字照 Claude Code 的叫法带插件名：`exa:search`、`frontend-design:frontend-design`。`gld context` 里记成 `claude/global`，路径在 `~/.claude/plugins/cache/…` 下；`--hidden-skills` 要写这个全名。
+- 和 `~/.claude/skills` 等目录里内容一字不差的，只留主目录那份，插件那份打 `✗` 写"same content as"。附件照主目录 skill 的规矩：auto 扫到的不给文件。
+
+不算的：关掉的、装了但从没开过的（`claude plugin list` 里 `enabled: false`）、`~/.claude/plugins/marketplaces/` 里的（那是市场上所有**能装**的插件，不是你装了的）。还没读的：企业 managed 策略里的开关（策略强关的插件，你自己设置里开着的话 gld 照样给）、插件的 `commands/`（老式斜杠命令，不是 SKILL.md）、从 claude.ai 同步来的插件。
+
+> 2026-10-21 之前 gld 一个插件 skill 都不认。这台开发机 `~/.claude/plugins/` 下有 71 个 SKILL.md，可绝大多数在 `marketplaces/`（没装）、关掉的插件、插件依赖里；Claude Code 真正加载的只有开着的 exa、frontend-design 带的 3 个，gld 看不见（审查 §37）。
+
 **不想让某个装好的 skill 出现**：`gld cfg runtime --hidden-skills pdf,pptx`（按名字，不分大小写；传 `""` 清空）。藏掉的和没装一样：目录里没有、`list_skills` 不列、`get_skill` 拿不到，`skipped` 里也不提。只管主目录和自定义路径里的，项目自己的 skill 由项目决定。
 
 要让它们全部进去：`gld set <项目> tool-profile=advanced`。

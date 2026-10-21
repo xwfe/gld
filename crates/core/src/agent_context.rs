@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
@@ -519,6 +520,7 @@ pub fn scan_skills_hiding(
 ) -> SkillScan {
     let (sources, auto_enabled) = effective_sources(sources);
     let mut roots = Vec::<(String, PathBuf, &'static str)>::new();
+    let mut claude_plugins = false;
     for raw_source in &sources {
         let provider = normalize_provider(raw_source);
         match provider.as_str() {
@@ -534,6 +536,7 @@ pub fn scan_skills_hiding(
                 }
             }
             "claude" => {
+                claude_plugins = true;
                 for root in [".claude/skills", ".agents/skills"] {
                     add_home_skill_root(&mut roots, &provider, root);
                     add_skill_root(
@@ -627,6 +630,25 @@ pub fn scan_skills_hiding(
     for (provider, root, scope) in roots {
         collect_skill_candidates(&mut candidates, &provider, &root, scope, 4);
     }
+    // 插件的排在主目录各 skills 根后面：同内容的两份只留先扫到的，留下的该是
+    // 用户自己放进 `~/.claude/skills` 那份。
+    if let (true, Some(home)) = (claude_plugins, home_dir()) {
+        for skill in claude_plugin_skills(&home, Some(workspace_root)) {
+            candidates.push(Candidate {
+                provider: "claude".into(),
+                // 根取安装目录的上一级：只装一个 skill 的插件 SKILL.md 就在安装目录里，
+                // 它的附件目录就是整个插件目录——那是它自己的，不算放宽。
+                root: skill
+                    .install
+                    .parent()
+                    .unwrap_or(&skill.install)
+                    .to_path_buf(),
+                path: skill.skill_md,
+                scope: "global",
+                plugin: Some(skill.plugin),
+            });
+        }
+    }
     if auto_enabled {
         collect_auto_workspace_skills(&mut candidates, workspace_root);
     }
@@ -681,12 +703,18 @@ pub fn scan_skills_hiding(
                 continue;
             }
         };
+        // Claude Code 把插件里的 skill 叫 `插件名:skill 名`（`/exa:search`），照叫：
+        // 不带前缀的话，几个插件各有一个 `search` 就只能靠 id 分。
+        let name = match &candidate.plugin {
+            Some(plugin) => format!("{plugin}:{}", parsed.name),
+            None => parsed.name,
+        };
         // 藏掉的和没装一样：不进 skipped——那一栏是给模型看的，写进去等于
         // 又把名字告诉了它。
         if candidate.scope != "workspace"
             && hidden
                 .iter()
-                .any(|name| name.trim().eq_ignore_ascii_case(&parsed.name))
+                .any(|hidden| hidden.trim().eq_ignore_ascii_case(&name))
         {
             continue;
         }
@@ -700,7 +728,7 @@ pub fn scan_skills_hiding(
         result.push(SkillEntry {
             descriptor: SkillDescriptor {
                 id,
-                name: parsed.name,
+                name,
                 description: parsed.description,
                 provider: candidate.provider,
                 path,
@@ -731,6 +759,8 @@ struct Candidate {
     path: PathBuf,
     scope: &'static str,
     root: PathBuf,
+    /// 从 Claude Code 插件里来的，插件叫什么。
+    plugin: Option<String>,
 }
 
 /// 附件能读的目录：SKILL.md 所在的目录，但必须在发现它的根**里面**、且不是
@@ -1038,9 +1068,210 @@ fn collect_skill_candidates(
                 path: path.to_path_buf(),
                 scope,
                 root: root.to_path_buf(),
+                plugin: None,
             });
         }
     }
+}
+
+/// Claude Code 插件里的一个 SKILL.md。
+struct PluginSkill {
+    /// plugin.json 的 `name`，没写就用插件 id `@` 前面那段——Claude Code 拿前者
+    /// 给 skill 加前缀（plugins-reference「Entry name and manifest name」）。
+    plugin: String,
+    skill_md: PathBuf,
+    /// `installed_plugins.json` 记的 installPath。
+    install: PathBuf,
+}
+
+/// Claude Code 自己会加载的那些插件 skill：开着的、装着的。
+///
+/// - 开没开看 `enabledPlugins`：用户级 `~/.claude/settings.json`，再被项目的
+///   `.claude/settings.json`、`.claude/settings.local.json` 依次盖掉（官方
+///   plugins/loading「Find where a plugin is enabled」的优先级）。值是 `true` 或版本约束
+///   数组算开（2.1.304 二进制里的 schema 允许 `boolean` 和 `string[]`，数组是"带版本
+///   约束地开"，没实测过）。没写的不算开：官方文档说 `defaultEnabled` 默认 true，但
+///   2.1.304 的 `claude plugin list` 把装了没写开关的报成 `enabled: false`，照实际行为来。
+///   managed 策略文件不读：策略强关的插件这里还会算开。
+/// - 装在哪看 `~/.claude/plugins/installed_plugins.json`。**不扫 `marketplaces/`**：那是
+///   市场上所有能装的插件，不是用户装了的。
+///
+/// 没有 workspace 时（`gld context --global`）只看用户级开关和用户级安装。
+fn claude_plugin_skills(home: &Path, workspace_root: Option<&Path>) -> Vec<PluginSkill> {
+    let claude = home.join(".claude");
+    let mut settings = vec![claude.join("settings.json")];
+    if let Some(root) = workspace_root {
+        settings.push(root.join(".claude/settings.json"));
+        settings.push(root.join(".claude/settings.local.json"));
+    }
+    // BTreeMap：几个插件之间按 id 排，扫描结果不随 JSON 里的顺序变。
+    let mut enabled = std::collections::BTreeMap::<String, bool>::new();
+    for path in settings {
+        let Some(Value::Object(plugins)) =
+            read_json(&path).and_then(|settings| settings.get("enabledPlugins").cloned())
+        else {
+            continue;
+        };
+        for (id, value) in plugins {
+            match value {
+                Value::Bool(on) => enabled.insert(id, on),
+                Value::Array(_) => enabled.insert(id, true),
+                _ => None,
+            };
+        }
+    }
+
+    let plugins_root = claude.join("plugins");
+    let installed = read_json(&plugins_root.join("installed_plugins.json"));
+    let marketplaces = read_json(&plugins_root.join("known_marketplaces.json"));
+    let mut result = Vec::new();
+    for id in enabled.into_iter().filter(|(_, on)| *on).map(|(id, _)| id) {
+        let Some(install) = installed
+            .as_ref()
+            .and_then(|installed| installed.get("plugins")?.get(&id))
+            .and_then(|records| plugin_install_path(records, workspace_root))
+        else {
+            continue;
+        };
+        let (entry_name, marketplace) = id.split_once('@').unwrap_or((&id, ""));
+        let manifest = read_json(&install.join(".claude-plugin/plugin.json"));
+        let entry = marketplaces
+            .as_ref()
+            .and_then(|known| known.get(marketplace)?.get("installLocation")?.as_str())
+            .and_then(|location| {
+                read_json(&Path::new(location).join(".claude-plugin/marketplace.json"))
+            })
+            .and_then(|market| {
+                market
+                    .get("plugins")?
+                    .as_array()?
+                    .iter()
+                    .find(|entry| entry.get("name").and_then(Value::as_str) == Some(entry_name))
+                    .cloned()
+            });
+        let plugin = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.get("name")?.as_str())
+            .unwrap_or(entry_name)
+            .to_string();
+        for skill_md in plugin_skill_files(&install, manifest.as_ref(), entry.as_ref()) {
+            result.push(PluginSkill {
+                plugin: plugin.clone(),
+                skill_md,
+                install: install.clone(),
+            });
+        }
+    }
+    result
+}
+
+/// 一个插件装在哪。`installed_plugins.json` 里一个 id 对应一串记录（用户级一条、
+/// 给某个项目装的各一条，scope 是 project / local 的带 `projectPath`）：给这个项目
+/// 装的优先，其次是不分项目的。
+fn plugin_install_path(records: &Value, workspace_root: Option<&Path>) -> Option<PathBuf> {
+    // 第 2 版是数组；第 1 版一个 id 只有一条，是对象。
+    let records: Vec<&Value> = match records {
+        Value::Array(records) => records.iter().collect(),
+        record => vec![record],
+    };
+    let per_project = |record: &Value| {
+        matches!(
+            record.get("scope").and_then(Value::as_str),
+            Some("project" | "local")
+        )
+    };
+    let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let this_project = |record: &Value| {
+        let Some(root) = workspace_root else {
+            return false;
+        };
+        record
+            .get("projectPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| real(Path::new(path)) == real(root))
+    };
+    records
+        .iter()
+        .find(|record| per_project(record) && this_project(record))
+        .or_else(|| records.iter().find(|record| !per_project(record)))
+        .and_then(|record| record.get("installPath")?.as_str())
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+/// 一个插件里 Claude Code 会加载的 SKILL.md，规则照官方 plugins-reference：
+///
+/// - 默认看 `skills/<名字>/SKILL.md`。插件依赖（`node_modules/…/SKILL.md`）不算——
+///   exa 插件就带着两个，Claude Code 不认。
+/// - plugin.json 的 `skills`、市场条目的 `skills` 是**加**上去的目录，每个要么下面是
+///   一个个 `<名字>/SKILL.md`，要么自己就放着 SKILL.md。
+/// - 市场条目的 source 是整个市场仓库（`./`）又点了 `skills` 时，只认点名的，不看默认
+///   `skills/`：anthropics/skills 一个仓库拆成好几个插件就是这么写的，不这样的话装一个
+///   会把同仓库别的插件的 skill 全带进来。
+/// - 上面都没有、插件根上直接放着 SKILL.md 的，整个插件就是一个 skill。
+/// - 解析后跑到插件目录外面的（`..`、链接）不认，Claude Code 也不加载。
+fn plugin_skill_files(
+    install: &Path,
+    manifest: Option<&Value>,
+    entry: Option<&Value>,
+) -> Vec<PathBuf> {
+    let named = |source: Option<&Value>| -> Vec<String> {
+        match source.and_then(|source| source.get("skills")) {
+            Some(Value::String(path)) => vec![path.clone()],
+            Some(Value::Array(paths)) => paths
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let (from_manifest, from_entry) = (named(manifest), named(entry));
+    let whole_marketplace = entry
+        .and_then(|entry| entry.get("source")?.as_str())
+        .is_some_and(|source| matches!(source.trim_end_matches('/'), "" | "."));
+    let mut dirs = Vec::new();
+    if !(whole_marketplace && !from_entry.is_empty()) {
+        dirs.push("skills".to_string());
+    }
+    dirs.extend(from_manifest.iter().chain(&from_entry).cloned());
+
+    let Ok(real_install) = install.canonicalize() else {
+        return Vec::new();
+    };
+    let inside = |path: &Path| {
+        path.canonicalize()
+            .is_ok_and(|real| real.starts_with(&real_install))
+    };
+    let mut files = Vec::new();
+    for dir in dirs {
+        let dir = install.join(dir.trim_start_matches("./"));
+        if !dir.is_dir() {
+            continue;
+        }
+        if dir.join("SKILL.md").is_file() {
+            files.push(dir.join("SKILL.md"));
+            continue;
+        }
+        let mut found = fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|child| child.path().join("SKILL.md"))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        found.sort();
+        files.extend(found);
+    }
+    if from_manifest.is_empty() && from_entry.is_empty() && !install.join("skills").exists() {
+        files.push(install.join("SKILL.md"));
+    }
+    files.retain(|path| path.is_file() && inside(path));
+    files
+}
+
+fn read_json(path: &Path) -> Option<Value> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
 fn collect_auto_workspace_skills(candidates: &mut Vec<Candidate>, workspace_root: &Path) {
@@ -1057,6 +1288,7 @@ fn collect_auto_workspace_skills(candidates: &mut Vec<Candidate>, workspace_root
                 path: path.to_path_buf(),
                 scope: "workspace",
                 root: workspace_root.to_path_buf(),
+                plugin: None,
             });
         }
     }
@@ -1251,6 +1483,14 @@ fn discover_global_skill_paths(home: &Path, provider: &str) -> Vec<String> {
             let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             let key = canonical.to_string_lossy().to_string();
             if seen.insert(key) {
+                result.push(display_home_path(home, &canonical));
+            }
+        }
+    }
+    if provider == "claude" {
+        for skill in claude_plugin_skills(home, None) {
+            let canonical = skill.skill_md.canonicalize().unwrap_or(skill.skill_md);
+            if seen.insert(canonical.to_string_lossy().to_string()) {
                 result.push(display_home_path(home, &canonical));
             }
         }
@@ -1911,6 +2151,277 @@ mod tests {
                 .iter()
                 .map(|s| &s.descriptor.name)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        fs::write(path, text).expect("write");
+    }
+
+    fn write_skill(dir: &Path, name: &str) {
+        write(
+            &dir.join("SKILL.md"),
+            &format!("---\nname: {name}\ndescription: The {name} flow\n---\nSteps for {name}.\n"),
+        );
+    }
+
+    /// 照 Claude Code 2.1.304 落在主目录里的样子造插件：`enabledPlugins` 记开没开，
+    /// `installed_plugins.json` 记装在哪，文件在 `cache/<市场>/<插件>/<版本>/`。
+    /// `marketplaces/` 里是市场上所有能装的，不是装了的。
+    fn plugin_home() -> tempfile::TempDir {
+        let home = tempfile::tempdir().expect("home");
+        let plugins = home.path().join(".claude/plugins");
+        let install = |name: &str| plugins.join("cache/market").join(name).join("1.0.0");
+        let records = ["tools", "off", "idle"]
+            .iter()
+            .map(|name| {
+                format!(
+                    r#""{name}@market": [{{"scope": "user", "installPath": {:?}, "version": "1.0.0"}}]"#,
+                    install(name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        write(
+            &plugins.join("installed_plugins.json"),
+            &format!(r#"{{"version": 2, "plugins": {{{records}}}}}"#),
+        );
+        write(
+            &home.path().join(".claude/settings.json"),
+            r#"{"enabledPlugins": {"tools@market": true, "off@market": false, "gone@market": true}}"#,
+        );
+        write_skill(&install("tools").join("skills/review"), "review");
+        // 插件依赖里带的 SKILL.md，Claude Code 不认（只看 skills/ 和 plugin.json 点名的）。
+        write_skill(
+            &install("tools").join("node_modules/dep/skills/nested"),
+            "nested",
+        );
+        write(
+            &install("tools").join(".claude-plugin/plugin.json"),
+            r#"{"name": "tools", "skills": ["./extra"]}"#,
+        );
+        write_skill(&install("tools").join("extra/more"), "more");
+        write_skill(&install("off").join("skills/silent"), "silent");
+        write_skill(&install("idle").join("skills/waiting"), "waiting");
+        write_skill(
+            &plugins.join("marketplaces/market/plugins/other/skills/listed"),
+            "listed",
+        );
+        home
+    }
+
+    fn names_in(home: &Path, workspace: &Path, sources: &[String]) -> Vec<String> {
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.to_path_buf()));
+        let skills = discover_skills(workspace, sources, "");
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        skills
+            .into_iter()
+            .map(|skill| skill.descriptor.name)
+            .collect()
+    }
+
+    /// Claude Code 插件带的 skill：开着的、装着的才进来，名字照 Claude Code 的叫法带插件名前缀。
+    /// 关掉的（`false`）、装了没写开关的、写了开关没装的、市场里没装的、插件依赖里的都不进。
+    #[test]
+    fn a_skill_from_an_enabled_claude_code_plugin_is_found_and_others_are_not() {
+        let home = plugin_home();
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.path().to_path_buf()));
+        let scan = scan_skills(workspace.path(), &[AUTO_SOURCE.into()], "");
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+
+        let mut names = scan
+            .skills
+            .iter()
+            .map(|skill| skill.descriptor.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["tools:more", "tools:review"],
+            "{:?}",
+            scan.skipped
+        );
+        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
+        let review = scan
+            .skills
+            .iter()
+            .find(|skill| skill.descriptor.name == "tools:review")
+            .expect("review");
+        assert_eq!(review.descriptor.provider, "claude");
+        assert_eq!(review.descriptor.scope, "global");
+        assert!(
+            review
+                .descriptor
+                .path
+                .contains(".claude/plugins/cache/market/tools/1.0.0/skills/review"),
+            "{}",
+            review.descriptor.path
+        );
+        // 附件目录是这个 skill 自己的；自动发现的照旧不算明确授权（读不读由 get_skill 判）。
+        assert!(review
+            .dir
+            .as_ref()
+            .is_some_and(|dir| dir.ends_with("skills/review")));
+        assert!(!review.explicit_source);
+
+        // 只开 codex 时不扫 Claude Code 的插件。
+        assert!(names_in(home.path(), workspace.path(), &["codex".into()]).is_empty());
+        // 明确配了 claude 也扫。
+        assert_eq!(
+            names_in(home.path(), workspace.path(), &["claude".into()]).len(),
+            2
+        );
+    }
+
+    /// 开关照 Claude Code 的优先级合并：用户级 < 项目 `.claude/settings.json` <
+    /// 项目 `.claude/settings.local.json`，后面的说了算。
+    #[test]
+    fn a_project_can_turn_a_claude_code_plugin_on_or_off() {
+        let home = plugin_home();
+        let workspace = tempfile::tempdir().expect("workspace");
+        write(
+            &workspace.path().join(".claude/settings.json"),
+            r#"{"enabledPlugins": {"idle@market": true, "off@market": true}}"#,
+        );
+        write(
+            &workspace.path().join(".claude/settings.local.json"),
+            r#"{"enabledPlugins": {"tools@market": false, "off@market": false}}"#,
+        );
+        assert_eq!(
+            names_in(home.path(), workspace.path(), &[AUTO_SOURCE.into()]),
+            vec!["idle:waiting"]
+        );
+    }
+
+    /// 插件 skill 走和主目录 skill 一样的规则：同内容只留先扫到的那份（主目录的
+    /// 先扫），`--hidden-skills` 按带前缀的全名藏。
+    #[test]
+    fn a_plugin_skill_is_deduplicated_and_hidden_like_any_installed_skill() {
+        let home = plugin_home();
+        let installed = home
+            .path()
+            .join(".claude/plugins/cache/market/tools/1.0.0/skills/review/SKILL.md");
+        let copy = home.path().join(".claude/skills/review/SKILL.md");
+        write(
+            &copy,
+            &fs::read_to_string(&installed).expect("plugin skill"),
+        );
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(home.path().to_path_buf()));
+        let scan = scan_skills_hiding(
+            workspace.path(),
+            &[AUTO_SOURCE.into()],
+            "",
+            &["TOOLS:MORE".into()],
+        );
+        HOME_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+
+        let names = scan
+            .skills
+            .iter()
+            .map(|skill| skill.descriptor.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["review"], "{:?}", scan.skipped);
+        assert_eq!(scan.skipped.len(), 1, "{:?}", scan.skipped);
+        assert!(
+            scan.skipped[0].path.contains(".claude/plugins/cache"),
+            "{:?}",
+            scan.skipped
+        );
+        assert!(
+            scan.skipped[0].reason.starts_with("same content as"),
+            "{:?}",
+            scan.skipped
+        );
+    }
+
+    /// 市场条目也能点名 skill：条目的 source 是整个市场仓库时（anthropics/skills 那种，
+    /// 一个仓库拆成好几个插件），只认点名的那几个，不扫默认的 `skills/`——不然装了
+    /// document-skills 会把同仓库 example-skills 的十几个也带进来。
+    #[test]
+    fn a_marketplace_entry_that_names_skills_decides_which_ones_load() {
+        let home = tempfile::tempdir().expect("home");
+        let plugins = home.path().join(".claude/plugins");
+        let market = plugins.join("marketplaces/skills-repo");
+        let install = plugins.join("cache/skills-repo/docs/abc123");
+        write(
+            &plugins.join("known_marketplaces.json"),
+            &format!(r#"{{"skills-repo": {{"installLocation": {market:?}}}}}"#),
+        );
+        write(
+            &market.join(".claude-plugin/marketplace.json"),
+            r#"{"name": "skills-repo", "plugins": [
+                {"name": "docs", "source": "./", "strict": false, "skills": ["./skills/pdf"]}
+            ]}"#,
+        );
+        write(
+            &plugins.join("installed_plugins.json"),
+            &format!(
+                r#"{{"version": 2, "plugins": {{"docs@skills-repo": [{{"scope": "user", "installPath": {install:?}}}]}}}}"#
+            ),
+        );
+        write(
+            &home.path().join(".claude/settings.json"),
+            r#"{"enabledPlugins": {"docs@skills-repo": true}}"#,
+        );
+        write_skill(&install.join("skills/pdf"), "pdf");
+        write_skill(&install.join("skills/art"), "art");
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        assert_eq!(
+            names_in(home.path(), workspace.path(), &[AUTO_SOURCE.into()]),
+            vec!["docs:pdf"]
+        );
+    }
+
+    /// 只装给某个项目的（scope project / local）只在那个项目里算。
+    #[test]
+    fn a_plugin_installed_for_one_project_only_counts_there() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let other = tempfile::tempdir().expect("other project");
+        let plugins = home.path().join(".claude/plugins");
+        let install = plugins.join("cache/market/local-tool/1.0.0");
+        write(
+            &plugins.join("installed_plugins.json"),
+            &format!(
+                r#"{{"version": 2, "plugins": {{"local-tool@market": [{{"scope": "local", "projectPath": {:?}, "installPath": {install:?}}}]}}}}"#,
+                workspace.path()
+            ),
+        );
+        write(
+            &home.path().join(".claude/settings.json"),
+            r#"{"enabledPlugins": {"local-tool@market": true}}"#,
+        );
+        write_skill(&install.join("skills/fix"), "fix");
+
+        assert_eq!(
+            names_in(home.path(), workspace.path(), &[AUTO_SOURCE.into()]),
+            vec!["local-tool:fix"]
+        );
+        assert!(names_in(home.path(), other.path(), &[AUTO_SOURCE.into()]).is_empty());
+    }
+
+    /// `gld context --global` 列主目录里能用的来源，开着的插件里的 skill 也算 claude 的。
+    #[test]
+    fn the_global_scan_lists_skills_from_enabled_claude_code_plugins() {
+        let home = plugin_home();
+        let scan = scan_global_agent_context_at(home.path());
+        let claude = scan
+            .sources
+            .iter()
+            .find(|source| source.provider == "claude")
+            .expect("claude detection");
+        assert_eq!(
+            claude.skill_paths,
+            vec![
+                "~/.claude/plugins/cache/market/tools/1.0.0/skills/review/SKILL.md",
+                "~/.claude/plugins/cache/market/tools/1.0.0/extra/more/SKILL.md",
+            ]
         );
     }
 }
