@@ -2076,3 +2076,8 @@ concepts.md「compact 还会砍掉……」一节写了规则，troubleshooting 
 Claude Code 现在也列成 skill，但不是 SKILL.md；主目录的 `~/.claude/commands/` gld 也一直没扫）；claude.ai 同步来的插件（`plugins/synced/`）、
 `--plugin-dir`、`.claude/skills/` 下带 plugin.json 的插件；`CLAUDE_CONFIG_DIR`、`CLAUDE_CODE_PLUGIN_CACHE_DIR` 改过位置的；
 正文里的 `${CLAUDE_PLUGIN_ROOT}` 不替换（gld 不跑 skill 里的脚本，开着的这 3 个也都没用到）。没合并、没部署、没推送。
+
+**合并和文档（同日）：**三个提交已快进进 main（`bc5bda6`，没推送、没部署）。梳理文档时发现 concepts.md 从没写过 gld 扫哪些目录（任务说明以为写了），
+Skill 的通用规则也都挤在「compact 还会砍掉……」这个讲省 token 的小节里。拆成单独一节「本机和项目里的 Skill」：按来源列主目录和项目里的目录
+（照 `scan_skills_hiding` 核对过）、`--skill-sources` / `--custom-skill-paths` 怎么配、同一份 skill 为什么出现好几个 `✗`
+（开发机上收进来 97 个，另有 18 个 `✗` 全是这种），插件、链接、附件、隐藏各一小节；compact 小节只留字数上限，链过去。README 和 troubleshooting 的链接跟着改。
