@@ -2032,3 +2032,47 @@ diff 里没有家目录路径、个人域名、邮箱，作者都是 noreply 地
 推上去的审查文件只剩这一节的 23 行，§1–§35 的 2006 行没了；文档链接门禁当时已经报"断了的链接"，那条命令没看退出码就接着提交、推送。
 `42c6fdb` 的 CI 因此红（测试里的文档链接检查）。`25e28c4` 按 `d78461d` 的完整文件加上这一节恢复，和 `d78461d` 比只多这一节，
 CI（run 39105711877）8 个 job 全过。没改写历史。之后检查和提交分成两步、按退出码判断。
+
+## 37. Skill 自动发现认 Claude Code 开着的插件（2026-10-21）
+
+**起因：**用户问"能否自动识别本机 codex/claude 下的 skills"。实查：`~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`、
+`~/.cursor/skills` 这些标准目录都认，开发机上扫到 94 个；Claude Code 插件带的一个都没认，`agent_context.rs` 里没有任何插件相关代码。
+`~/.claude/plugins/` 下有 71 个 SKILL.md：`cache/claude-plugins-official` 14、`cache/local` 6、`marketplaces/anthropic-agent-skills` 20、
+`marketplaces/claude-plugins-official` 31。
+
+**Claude Code 自己怎么认：**
+
+| 问题 | 结论 | 依据 |
+| --- | --- | --- |
+| 哪些插件开着 | `enabledPlugins` 里 `"名字@市场": true`。来源按 id 逐个合并，用户级 < 项目 `.claude/settings.json` < `.claude/settings.local.json` < `--settings` < managed | 官方 plugins/loading「Find where a plugin is enabled」；2.1.304 二进制里 `enabledPlugins` 的说明写着同一个顺序，值的 schema 允许 `boolean` 和 `string[]`（带版本约束） |
+| 装了没写开关的算不算开 | 不算 | 文档说 `defaultEnabled` 默认 true；但 2.1.304 的 `claude plugin list --json` 把 skill-creator、openworld（装了，`enabledPlugins` 里没有）报成 `enabled: false`，照实际行为 |
+| 装在哪 | `~/.claude/plugins/installed_plugins.json`：每个 id 一串记录，`scope` 是 managed / user / project / local，后两种带 `projectPath`，`installPath` 是带版本的目录 | 官方 plugins/loading「Find plugins on disk」；二进制里这个文件的 schema |
+| `marketplaces/` 是什么 | 市场仓库的克隆，里面是市场上所有能装的插件，不是装了的 | 同上 |
+| 插件里哪些 SKILL.md 算 | 默认 `skills/<名字>/SKILL.md`；plugin.json 的 `skills` 是加上去的目录；市场条目 source 是整个市场仓库又列了 `skills` 时只认列的（anthropics/skills 拆成 document-skills、example-skills 等就是这么写的）；没有 `skills/`、没有 `skills` 键、根上放着 SKILL.md 的整个插件是一个 skill | 官方 plugins-reference「Standard layout」「How each key combines with its default location」「Marketplace entries and the manifest」 |
+| skill 叫什么 | `插件名:skill 名`，插件名用 plugin.json 的 `name` | plugins-reference「name」；开发机上 Claude Code 会话里列的就是 `exa:search`、`frontend-design:frontend-design` |
+
+开发机对照 `claude plugin list --json`：开着 6 个（code-review、commit-commands、context7、exa、frontend-design、playwright），
+带 SKILL.md 的只有 exa（`skills/agent`、`skills/search`；`node_modules/dotenv/skills/` 下另有两个，是依赖自带的）和 frontend-design（1 个）。
+71 个里 Claude Code 真正加载的是 3 个。
+
+**改了什么（`02e1afb`）：**来源里有 claude（auto 默认就有）时，扫完主目录各 skills 根再加上开着的插件里的 skill：开关按上表合并
+（没读 managed），安装记录里给这个项目装的优先、其次不分项目的，目录规则照上表，解析后跑出插件目录的不认。名字带插件前缀，
+`gld context` 里记 `claude/global`、路径在 `~/.claude/plugins/cache/…`；排在主目录 skill 后面，所以内容一字不差的留主目录那份；
+`--hidden-skills` 按全名藏；附件照主目录 skill 的规矩（auto 扫到的不给）。`gld context --global` 的 claude 一行也列上。
+concepts.md「compact 还会砍掉……」一节写了规则，troubleshooting 的"装了的 Skill 根本没有"一行补了这个原因。
+
+**验证：**
+
+- 新增 6 条单元测试（开着的进，关掉的、没写开关的、写了开关没装的、`marketplaces/` 里的、`node_modules` 里的不进；项目设置能开能关；
+  同内容去重和 `--hidden-skills` 全名；市场条目点名；只给某个项目装的；`--global`）。改动前跑：6 条红、`agent_context` 其余 20 条绿（退出码 101）；改后 26 条全绿。
+- 编出来的 gld 在隔离 `GLD_HOME`、临时项目上对开发机真实主目录跑：`gld context -w` 的 Skill 从 94 变 97，多的正是
+  `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`；`~/.claude/skills/frontend-design` 和插件那份内容不同，两个都在。
+  `gld tool call list_skills` count 97，名字里带 `:` 的只有这 3 个；关掉的 chrome-devtools-mcp、sourcegraph，没开的 skill-creator、openworld，
+  以及 `marketplaces/`、exa 的 `node_modules` 里的都没出现（列表里那个不带前缀的 `skill-creator` 是 Codex 自带的 `~/.codex/skills/.system/`）。
+  `get_skill name=exa:search` 回正文，带 `filesUnavailable`。测完停掉临时守护进程。
+- 全仓（隔离 `GLD_HOME`）：50 个测试二进制，990 passed / 0 failed（§36 的 984 加这次 6 条），clippy `-D warnings`、fmt 通过。
+
+**没做：**managed 策略文件（策略强关、自己设置里开着的插件，gld 照样给）；插件的 `commands/`（code-review、commit-commands 的斜杠命令，
+Claude Code 现在也列成 skill，但不是 SKILL.md；主目录的 `~/.claude/commands/` gld 也一直没扫）；claude.ai 同步来的插件（`plugins/synced/`）、
+`--plugin-dir`、`.claude/skills/` 下带 plugin.json 的插件；`CLAUDE_CONFIG_DIR`、`CLAUDE_CODE_PLUGIN_CACHE_DIR` 改过位置的；
+正文里的 `${CLAUDE_PLUGIN_ROOT}` 不替换（gld 不跑 skill 里的脚本，开着的这 3 个也都没用到）。没合并、没部署、没推送。
