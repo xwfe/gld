@@ -1124,6 +1124,10 @@ fn claude_plugin_skills(home: &Path, workspace_root: Option<&Path>) -> Vec<Plugi
     let plugins_root = claude.join("plugins");
     let installed = read_json(&plugins_root.join("installed_plugins.json"));
     let marketplaces = read_json(&plugins_root.join("known_marketplaces.json"));
+    // 一个市场的 marketplace.json 只读一次：开着的插件多半来自同一个市场，而官方市场那份有
+    // 170 多 KB。不缓存的话每个插件读一遍、解析一遍，本机 6 个开着的插件每次扫就是 1 MB 的 JSON，
+    // 而 workspace_context、list_skills、get_skill 每次调用都现扫一遍（审查 §38）。
+    let mut market_files = std::collections::HashMap::<String, Option<Value>>::new();
     let mut result = Vec::new();
     for id in enabled.into_iter().filter(|(_, on)| *on).map(|(id, _)| id) {
         let Some(install) = installed
@@ -1135,20 +1139,24 @@ fn claude_plugin_skills(home: &Path, workspace_root: Option<&Path>) -> Vec<Plugi
         };
         let (entry_name, marketplace) = id.split_once('@').unwrap_or((&id, ""));
         let manifest = read_json(&install.join(".claude-plugin/plugin.json"));
-        let entry = marketplaces
-            .as_ref()
-            .and_then(|known| known.get(marketplace)?.get("installLocation")?.as_str())
-            .and_then(|location| {
-                read_json(&Path::new(location).join(".claude-plugin/marketplace.json"))
-            })
-            .and_then(|market| {
-                market
-                    .get("plugins")?
-                    .as_array()?
-                    .iter()
-                    .find(|entry| entry.get("name").and_then(Value::as_str) == Some(entry_name))
-                    .cloned()
+        let market = market_files
+            .entry(marketplace.to_string())
+            .or_insert_with(|| {
+                marketplaces
+                    .as_ref()
+                    .and_then(|known| known.get(marketplace)?.get("installLocation")?.as_str())
+                    .and_then(|location| {
+                        read_json(&Path::new(location).join(".claude-plugin/marketplace.json"))
+                    })
             });
+        let entry = market.as_ref().and_then(|market| {
+            market
+                .get("plugins")?
+                .as_array()?
+                .iter()
+                .find(|entry| entry.get("name").and_then(Value::as_str) == Some(entry_name))
+                .cloned()
+        });
         let plugin = manifest
             .as_ref()
             .and_then(|manifest| manifest.get("name")?.as_str())
