@@ -11,14 +11,15 @@
 [发布说明](docs/releases/v0.8.3.md)）。main 上未发版的：`87eba6b` 补丁失败留下原因（审查 §22）；`98a4ef7`–`778fdd3`
 通知回 202、OAuth 动态注册写盘保护、`gld grant browser`（SuperAssistant 接 DeepSeek 网页）、升级文档（审查 §23–§25）；
 `e8f7f36`–`f9400f7` 点名说明在 compact 下也注入、收尾可重试、命令回显有界、§28 复核出的经 gld 开发的摩擦（审查 §26–§31），
-`gld --version` 带构建提交（§35）；`02e1afb` 认 Claude Code 开着的插件带的 skill（§37，2026-10-21 合并，没推送）。守护进程协议仍是 6。
-三台都是 `f9400f7`：`gld --version` 打 `gld 0.8.3 (f9400f7ade51)`（审查 §35）。
-- 本机：守护进程跑这一版（2026-10-18 15:30 换上），工具表 33 项（30 个加上本机 MCP 转发的 3 个，开着隔离的 `browser`）、指纹
+`gld --version` 带构建提交（§35）；`02e1afb`–`fba39d0` 认 Claude Code 开着的插件带的 skill、扫描时市场清单只读一次（§37、§38）。守护进程协议仍是 6。
+三台都是 `fba39d0`：`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）。
+- 本机：守护进程跑这一版（2026-10-22 00:17 换上），工具表 33 项（30 个加上本机 MCP 转发的 3 个，开着隔离的 `browser`）、指纹
   `59951e97a502352e`。ChatGPT 15:13:55 已经 Refresh 过这张工具表，`read_file ranges`、`list_skills query` 它看得到；
   守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`，`gld context -w gld` 两份说明都打 ✓。
-  回滚用的二进制在 `~/.local/opt/`：`gld-4a6d098-20261018-1528`（换之前那版）、`gld-0b4cb59-20261018-1419`、官方 0.8.3 包 `gld-0.8.3-20261009-2336`。
+  Skill 扫到 97 个（含开着的插件带的 3 个）。
+  回滚用的二进制在 `~/.local/opt/`：`gld-f9400f7-20261021-2352`（换之前那版）、`gld-4a6d098-20261018-1528`、官方 0.8.3 包 `gld-0.8.3-20261009-2336`。
 - 另一台 Mac、Linux 服务器的普通账号和 root：只装了命令行，没起守护进程（审查 §33）。
-- 全仓：本机 983 passed / 0 failed，Linux 服务器 982（差一条只在 macOS 编译的）。
+- 全仓：本机 990 passed / 0 failed，Linux 服务器 989（差一条只在 macOS 编译的）；线上 CI 8 个 job 全过。
 
 **已推送**：2026-10-18 用户看完三台换装和 §34 的实测后让推，main 推到 origin，没发版。CI 头一次跑这些提交红了三个 job（Windows 编译检查、两个平台各一条测试），`4b84a1c`、`d78461d` 修完全绿（审查 §36）。
 
@@ -50,7 +51,7 @@
 | 用户规则送到 ChatGPT | 已部署（2026-10-18，审查 §32） | `gld context -w gld` 里全局规则和仓库 `AGENTS.md` 都打 ✓。看 ChatGPT 下一轮经 gld 开发：提交说明有没有类型前缀和正文、文档有没有照规则写、撞到 gld 的毛病有没有写出来。没改善再考虑工具层提醒（比如回包里报未提交改动量）。见审查 §26 |
 | 零中断升级（RFC-0008） | 草案，未实现 | 让在跑的命令和请求跨版本都不断。要不要做、先做哪段由用户定；先确认真实痛点（比如长跑的开发服务器被重启停掉）再立项 |
 | 任务收尾与大输入回传 | 源码已修，未部署（2026-10-18） | `8fb5e31`、`63719bc`：收尾可只读重试、附加摘要失败不覆盖终态、命令回显有界；新增 8 条回归先失败后通过，全仓 test / clippy / fmt 通过，见审查 §27，复核见 §28。用户批准后按既有升级流程换二进制、重启守护进程，再从连接器验收；后台写入基线复核保持不变 |
-| Claude Code 插件带的 skill | 已合并进 main，没推送、没部署（2026-10-21） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。用户点头后照升级流程换二进制；换上后 `gld context -w gld` 应多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
+| Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
 
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
