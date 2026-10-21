@@ -2081,3 +2081,34 @@ Claude Code 现在也列成 skill，但不是 SKILL.md；主目录的 `~/.claude
 Skill 的通用规则也都挤在「compact 还会砍掉……」这个讲省 token 的小节里。拆成单独一节「本机和项目里的 Skill」：按来源列主目录和项目里的目录
 （照 `scan_skills_hiding` 核对过）、`--skill-sources` / `--custom-skill-paths` 怎么配、同一份 skill 为什么出现好几个 `✗`
 （开发机上收进来 97 个，另有 18 个 `✗` 全是这种），插件、链接、附件、隐藏各一小节；compact 小节只留字数上限，链过去。README 和 troubleshooting 的链接跟着改。
+
+## 38. 复核插件 skill 那一轮，三台换装（2026-10-22）
+
+**要求：**插件 skill 自动发现（§37，`02e1afb`–`df0a32b`）合并推送、CI 全绿之后，用户说"review 后，粒度 commit，文档完善。线上 CI 通过，然后三机安装"。
+
+### 复核了什么
+
+| 看的 | 结论 |
+| --- | --- |
+| 开没开、装在哪 | 读 `enabledPlugins`（用户级被项目的 `settings.json`、`settings.local.json` 依次盖掉）和 `installed_plugins.json`，不扫 `marketplaces/`。对 |
+| 项目能不能借 `settings.json` 开插件 | 能，但只能开**本机已经装了**的插件，gld 给的也只是 skill 正文；项目自己的 `.claude/skills` 本来就能往目录里放东西，没有多出能力 |
+| 跑到插件目录外面 | 点名目录是绝对路径或 `..`、链到外面的，都按真实路径过滤掉。对 |
+| 装的目录被删了 | 跳过。对 |
+| 名字、藏、附件 | 名字带插件前缀 `exa:search`，`--hidden-skills` 要写全名，附件照主目录 skill 的规矩默认不给；文档都写了 |
+| 效率 | **有问题**：每个开着的插件都重读、重解析一遍它所在市场的 `marketplace.json`，而扫描在每次 `workspace_context` / `list_skills` / `get_skill` 都现做 |
+| 文档 | 全；缺一条：Claude 桌面版里看得到、gld 不给的是怎么回事 |
+
+**本机核对：**新代码在这台机器上扫到 97 个（原来 94），多的 3 个是开着的 exa、frontend-design 带的。`~/.claude/settings.json` 里开着的 code-review、commit-commands
+没有 SKILL.md（带的是斜杠命令），context7、playwright 只带 MCP；`chrome-devtools-mcp`、`sourcegraph` 在 `settings.json` 里是 `false`，
+可 Claude 桌面版会话照样列出它们的 skill——桌面版在别处开的，gld 照 `settings.json` 算关。
+
+### 改了什么
+
+| 提交 | 内容 |
+| --- | --- |
+| `f282abe` | 一次扫描里一个市场的 `marketplace.json` 只读一次。本机 6 个开着的插件都来自官方市场（172 KB），改前每扫一次约 1 MB 的 JSON。同一项目连跑 7 次 `gld context`（调试版）取中位：367 ms → 232 ms，都是 97 个 |
+| `eea366a` | `concepts.md` 插件一节补上"Claude 桌面版里看得到、gld 不给的"是怎么回事、怎么让 gld 也给 |
+
+全仓 50 个测试二进制 990 passed / 0 failed，clippy、fmt 通过。
+
+**没改：**`installed_plugins.json`、`settings.json` 写坏了读不出来时，插件 skill 静默不给，`gld context` 里看不出原因（Claude Code 自己也会报错，这种情况少见）。
