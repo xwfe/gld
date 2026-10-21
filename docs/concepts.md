@@ -346,6 +346,8 @@ AI 那边：连上时拿到的说明里、`workspace_context` 的结果里都带
 
 不算的：关掉的、装了但从没开过的（`claude plugin list` 里 `enabled: false`）、`~/.claude/plugins/marketplaces/` 里的（那是市场上所有**能装**的插件，不是你装了的）。还没读的：企业 managed 策略里的开关（策略强关的插件，你自己设置里开着的话 gld 照样给）、插件的 `commands/`（老式斜杠命令，不是 SKILL.md）、从 claude.ai 同步来的插件。
 
+**Claude 桌面版里看得到、gld 不给的**，多半是桌面版在 `~/.claude/settings.json` 以外开的：这台开发机上 `chrome-devtools-mcp`、`sourcegraph` 在 `settings.json` 里是 `false`，桌面版会话照样列出它们的 skill；gld 照 `settings.json` 算关（2026-10-22 核对，审查 §38）。想让 gld 也给，在 `settings.json` 里把它设成 `true`。
+
 > 2026-10-21 之前 gld 一个插件 skill 都不认。这台开发机 `~/.claude/plugins/` 下有 71 个 SKILL.md，可绝大多数在 `marketplaces/`（没装）、关掉的插件、插件依赖里；Claude Code 真正加载的只有开着的 exa、frontend-design 带的 3 个，gld 看不见（审查 §37）。
 
 ### 写坏了的、只给用户点名用的
