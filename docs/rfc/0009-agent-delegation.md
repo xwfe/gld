@@ -1,6 +1,6 @@
 # RFC-0009：把任务交给本机的编码 Agent（Agent 委派）
 
-日期：2026-10-22。状态：**已定，未实现，可以从 D1 开工。**
+日期：2026-10-22。状态：**已定；D1 已实现（`0324602`–`267cdf9`，审查 §42），没部署、没真跑过 Agent。**
 
 - 第一稿只做 Codex，走 `codex app-server`。
 - 第二稿按用户的设想改写："能委派多种 Agent（Codex、Claude Code、Pi、Antigravity、Grok、DeepSeek……），先设计得简单，
@@ -168,6 +168,8 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
    路线 §5.6 已跟着改。
 2. **谁能发起**：按项目开关 `agent-delegation=off|ask|auto`，默认 off；只有服务主凭据和 `--write` grant 能发起，
    只读 grant、浏览器 grant 一律不能；ask 档 24 小时没人放行就作废。
+   **D1 实际做得更紧：所有 grant 都不能起、审、停**——调用方身份里分不出浏览器 grant（它往下传时不带标记），
+   要放开 `--write` grant 得先给 grant 加上这个标记，放到 D2。
 3. **在哪跑**：在项目目录里跑，同一个项目同时只许一个。跑着的时候 gld 对这个项目拦写文件和 `exec_command`，读的照常；
    跑完、进入 `awaiting_review` 就放开。不开 git worktree。
 

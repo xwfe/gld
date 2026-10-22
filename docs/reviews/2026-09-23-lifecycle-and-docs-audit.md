@@ -2260,3 +2260,42 @@ pid 19779 → 68019，20:02:34 换上，服务自己恢复。
 §39 的 Tunnel Token 改动和本机无关：本机公网入口是"固定地址（自建入口）"，cloudflared 不归 gld 起。
 
 **回滚：**`~/.local/opt/gld-fba39d0-20261022-2001` 写 `.new` 再改名放回去，`gld daemon restart`。没推送。
+
+## 42. Agent 委派 D1，和 `gld remote add` 精简（2026-10-22）
+
+**要求：**用户定了 RFC-0009 第 5 节三件事（照建议），并改了权限："不要限制在沙箱，解除限制，直接可写。完成后，交回给审核"。
+同一条消息里还说接 ccnm 的命令参数太多："ccnm 项目名就行了，还需要 workspace？默认就应该 coding"。
+
+### `gld remote add` 精简（`e265ca6`）
+
+原来是 `gld remote add <名字> --node <机器> --remote-workspace <项目名> [--mode coding]`，默认只读。现在 `gld remote add <项目名>`：
+名字默认跟它一样；`--node` 不填时起 bridge 不带它，由 ccnm 自己选（`ccnm mcp bridge --help` 写着只配了一台机器时可以不给）；
+默认 coding，只读写 `--mode read`。旧写法隐藏但照样认；缺 `max_mode` 字段的旧记录仍按只读读进来，不因为默认值改了被放开。
+集成测试覆盖新旧写法和冲突写法，旧代码上先红。
+
+### 委派 D1（`0324602`–`267cdf9`）
+
+| 提交 | 内容 |
+| --- | --- |
+| `0324602` | core：Agent 档案（内置 codex、claude，`agents.toml` 可改可加）、任务记录（`GLD_HOME/agents/<项目>/<任务>/`）、运行器（自己一个进程组、stdin 喂完就关、输出写文件、总时长和无输出两道超时、按档案信号停整组、比两次 git 快照算改动）、交接目录 `.gld/handoff/<任务>/` |
+| `c24e1b3` | 起跑前问 `--version` 改在任务目录里问：认不得它的程序会照常干活，第一次跑测试时假脚本在 `crates/core/` 下写出了 `--version`、`half.txt` 等四个文件（没进提交，已删） |
+| `85804aa` | `gld agent ls/show/approve/deny/stop`，守护进程 5 个请求，**协议 6 → 7**；`gld daemon restart` 的检查算上在跑的委派；守护进程退出时把委派记成 interrupted |
+| `29dd92d` | 项目开关 `agent-delegation`（off / ask / auto，默认 off） |
+| `267cdf9` | `agent_manage` 工具（compact 档工具数预算 30 → 31）；委派在跑时拦这个项目的 `apply_patch`、`exec_command`、`write_stdin` |
+
+**和 RFC 不一样的地方：**RFC 写"服务主凭据和 `--write` grant 能发起"，D1 只认服务主凭据——调用方身份里分不出浏览器 grant，
+放开 `--write` grant 要先给 grant 加标记，挪到 D2。Codex 不再加 `--ignore-user-config`：用户要全权跑，就用他自己的配置。
+
+**验证：**
+
+- core 单元测试 18 条，假 Agent 脚本覆盖：auto 跑完交回审核（recap、改动文件只算项目文件、`.gld/` 不算、提示尾巴）、三种结果来源、
+  非零退出和取不到结果、ask 放行 / 拒 / 作废、同项目互斥和叫停、无输出按卡住停、审核（跑完前审不了、意见写进 `review.md`）、
+  幂等键、版本记录和没验过的标记、问版本只写在任务目录、起它的进程不在了读成 unknown。
+- CLI 端到端 2 条，真起守护进程：开关没开被拒 → 开 ask → 起任务停在等放行 → `gld agent approve <前 8 位>` → 交回审核 →
+  `review accept`；auto 档在跑时 `exec_command` 和第二个委派被拦、`gld daemon restart` 列出"委派给 ticker"不重启、
+  `gld agent stop` 停掉后放开、能重启。
+- 全仓 1020 passed / 0 failed（第一遍挂的 4 条：schema 描述里又写了"gld appends"被当成子命令，边界表没登记新参数和没有对应的
+  `bounded` 调用，两条数工具个数的测试，都改了），clippy `-D warnings`、fmt、文档检查通过，`docs/cli.md` 重新生成。
+
+**没做：**真跑 Codex、Claude（花额度，要用户点头）；没部署（协议 7，工具表变了，换装后 ChatGPT 要 Refresh）；
+Pi、agy、Kimi 等档案（D2）；打回后接着同一会话（D3）；Windows。没推送。

@@ -1425,6 +1425,41 @@ notebook。
 工具结果是单块的，发不了图文交错。经服务连远端 ccnm 项目时那边会发图片——
 同一个模型在两种成员上看到的 notebook 因此略有不同，这是已知差异。
 
+## 把活委派给本机 Agent：`agent_manage`
+
+AI 可以把一段说得清楚的活交给你本机装的编码 Agent（Codex、Claude Code……）去做，自己等 recap、审改动。
+默认关着，要按项目打开：
+
+```bash
+gld set api agent-delegation=ask    # 每次要你在本机点头；auto 是直接起，off 是关（默认）
+gld agent ls                         # 发起了哪些、哪些在等你放行、哪些在等审核
+gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就行）；deny 拒掉，stop 停掉
+```
+
+一次委派是这样走的：
+
+1. AI 调 `agent_manage action=start agent=codex prompt=…`（可以带 `brief` 写背景和验收标准）。ask 档停在"等你放行"。
+2. gld 在项目目录里用命令行起这个 Agent 的无交互模式，**全权跑**：用的是它自己"全放开"的参数
+   （`codex exec --dangerously-bypass-approvals-and-sandbox`、`claude -p --dangerously-skip-permissions`），
+   能动你账号能动的一切，不只是项目目录。gld 在提示后面加一段：交接目录在哪、结尾写四段 recap、别 git commit。
+3. 跑的时候，gld 对这个项目的 `apply_patch`、`exec_command` 回 `AGENT_TASK_RUNNING`，同一个项目同时只许一个委派。
+   总时长默认 30 分钟（最长 2 小时），5 分钟没有任何输出按卡住停掉。
+4. 跑完进入"等审核"：AI 拿到 Agent 的 recap、交接报告（有的话）和改了哪些文件（跑前跑后两次 git 快照比出来的），
+   自己看 diff、跑测试，再 `action=review verdict=accept|reject`。**Agent 说"测试都过了"不算数**，验收照旧只认
+   gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。
+
+交接文件在项目里的 `.gld/handoff/<任务 id>/`：`brief.md`（AI 写的背景）、`report.md`（Agent 写的详细报告）、
+`review.md`（审核意见）。`.gld/` 里自带一个只写 `*` 的 `.gitignore`，这些文件不会出现在 git status 里。
+gld 自己的记录（提示全文、Agent 的原样输出）在数据目录的 `agents/` 下，`gld agent show` 看得到。
+
+**能用哪些 Agent**：内置 `codex`、`claude` 两份档案。别的（Pi、Antigravity、Kimi……）在数据目录的 `agents.toml` 里加，
+写法和每个字段的意思见 [RFC-0009 第 4.1 节](rfc/0009-agent-delegation.md#41-agent-档案一张配置表)；写坏了 `action=agents` 会报出哪一行。
+
+**谁能发起**：只有用服务自己的凭据连进来的才能起、审、停；`gld grant` 发的凭据不行（Agent 全权跑，等于把全权借出去）。
+Plan 模式下起不了。**风险**见 [security.md](security.md#委派出去的-agent-是全权跑的)。
+
+**还没有的**：打回之后接着同一个会话改（现在要重新起一个，把审核意见写进提示）、中途补充指令、Windows。
+
 ---
 
 ## 还有这些，在别的文档里

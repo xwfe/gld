@@ -170,6 +170,18 @@ SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 
 所以：**只把 gld 接到你自己信任的项目上。** 拉别人的 PR 分支、跑不认识的
 依赖、给公开仓库开公网入口，都要先想一遍上面那张表。
 
+### 委派出去的 Agent 是全权跑的
+
+项目开了 `agent-delegation`（[怎么用](concepts.md#把活委派给本机-agentagent_manage)），AI 就能在你电脑上起一个 Codex / Claude Code，
+用的是它们"全放开"的参数：不进沙箱、不停下来问，能读写你账号碰得到的一切，跑任何命令。gld 的命令白名单、
+`.git/` 保护、名字像密钥的环境变量会被去掉这些，**对它都不适用**——那些只管经 gld 工具做的事。
+
+网页、issue、依赖里的提示注入能借 ChatGPT 传给这个 Agent。所以：
+
+- 默认 off；对外接触多的项目用 `ask`，每次在本机看一眼 `gld agent show` 的提示再 `approve`，别用 `auto`。
+- 只有服务自己的凭据能发起，`gld grant` 发的凭据（哪怕 `--write`）不行。
+- 做完一律"等审核"，改动留在工作区不提交；审的时候看 diff，别只看 Agent 自己写的 recap。
+
 ## 怎么收紧
 
 按代价从小到大排：

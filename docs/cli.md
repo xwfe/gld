@@ -33,6 +33,12 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld grant browser](#gld-grant-browser)
 - [gld grant list](#gld-grant-list)
 - [gld grant remove](#gld-grant-remove)
+- [gld agent](#gld-agent)
+- [gld agent list](#gld-agent-list)
+- [gld agent show](#gld-agent-show)
+- [gld agent approve](#gld-agent-approve)
+- [gld agent deny](#gld-agent-deny)
+- [gld agent stop](#gld-agent-stop)
 - [gld logs](#gld-logs)
 - [gld health](#gld-health)
 - [gld doctor](#gld-doctor)
@@ -103,6 +109,7 @@ Commands:
   upgrade      改服务配置（端口 / 认证 / 工具集 / 公网入口），改完自动重启；也能改项目的目录和名称
   remote       远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
   grant        只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
+  agent        委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
   mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
   logs         查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
   health       逐项检查本地 / 公网端点与 OAuth 元数据是否可达
@@ -1088,6 +1095,161 @@ Usage: gld grant remove [OPTIONS] <NAME>
 
 Arguments:
   <NAME>  
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld agent
+
+```text
+委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
+
+  gld agent ls              所有项目的委派：跑到哪、哪些等你放行、哪些等审核
+  gld agent show 3f2a       一个任务的 recap、改了哪些文件、最后的输出
+  gld agent approve 3f2a    ask 档下放行（任务 id 给前 4 位以上就行）
+  gld agent deny 3f2a       拒掉
+  gld agent stop 3f2a       停掉在跑的
+
+项目要先开：gld set <项目> agent-delegation=ask（或 auto）。Agent 是全权跑的
+（能动你账号能动的一切），做完交回 AI 审核。见 docs/rfc/0009-agent-delegation.md。
+
+Usage: gld agent [OPTIONS] <COMMAND>
+
+Commands:
+  list     所有项目的委派任务，新的在前 [alias: ls]
+  show     一个任务的详情：recap、改了哪些文件、交接报告、最后的输出
+  approve  放行一个等你点头的任务（项目开的是 ask 档）
+  deny     拒掉一个等你点头的任务
+  stop     停掉在跑的（或作废还在等放行的）
+
+Options:
+  -w, --workspace <WS>
+          目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld agent list
+
+```text
+所有项目的委派任务，新的在前
+
+Usage: gld agent list [OPTIONS]
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld agent show
+
+```text
+一个任务的详情：recap、改了哪些文件、交接报告、最后的输出
+
+Usage: gld agent show [OPTIONS] <TASK>
+
+Arguments:
+  <TASK>  任务 id，给前 4 位以上就行
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld agent approve
+
+```text
+放行一个等你点头的任务（项目开的是 ask 档）
+
+Usage: gld agent approve [OPTIONS] <TASK>
+
+Arguments:
+  <TASK>  
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld agent deny
+
+```text
+拒掉一个等你点头的任务
+
+Usage: gld agent deny [OPTIONS] <TASK>
+
+Arguments:
+  <TASK>  
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld agent stop
+
+```text
+停掉在跑的（或作废还在等放行的）
+
+Usage: gld agent stop [OPTIONS] <TASK>
+
+Arguments:
+  <TASK>  
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
@@ -2112,6 +2274,7 @@ history-recording         true | false                           是否允许把
 history-context           逗号分隔的编号，或空                   新会话注入哪些历史档案（有界快照）
 allowed-commands          逗号分隔                               在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md
 confine-reads             true | false                           读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
+agent-delegation          off | ask | auto                       AI 能不能把活委派给本机 Agent（codex、claude……，全权跑，做完交回审核）：off 不能（默认）；ask 每次要你在本机 gld agent approve；auto 直接起
 executable-paths          路径列表（换行或分号分隔）             额外的可执行文件搜索路径
 ai-instructions           文本                                   注入 Agent 的工作区级说明
 actions.port              1-65535                                Actions 本地监听端口

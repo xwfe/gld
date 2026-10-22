@@ -35,6 +35,8 @@ server, all your projects behind it, one connection per client. Docs are in Chin
   就不放行，提醒 AI 先问你。
 - **给别人只开几个项目**：`gld grant` 发一份只能访问指定项目的凭据，默认只读，随时作废。
 - **任务与验收**：记下任务、计划和历史；任务收尾只认任务期间跑通过、之后没再改过文件的命令当证据。
+- **把活委派给本机 Agent**：项目打开后，AI 能把一段活交给你本机的 Codex、Claude Code 全权去做，做完交回它审核
+  （[怎么用、风险在哪](docs/concepts.md#把活委派给本机-agentagent_manage)）。默认关。
 
 ## 三步上手
 
