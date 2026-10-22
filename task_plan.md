@@ -12,7 +12,8 @@
 通知回 202、OAuth 动态注册写盘保护、`gld grant browser`（SuperAssistant 接 DeepSeek 网页）、升级文档（审查 §23–§25）；
 `e8f7f36`–`f9400f7` 点名说明在 compact 下也注入、收尾可重试、命令回显有界、§28 复核出的经 gld 开发的摩擦（审查 §26–§31），
 `gld --version` 带构建提交（§35）；`02e1afb`–`fba39d0` 认 Claude Code 开着的插件带的 skill、扫描时市场清单只读一次（§37、§38）；
-`0209cd3` Cloudflare Tunnel Token 不进任何命令行、`a034476` 初始化说明补四条看结果的规矩（对照 codex-bridge，§39，没部署）。守护进程协议仍是 6。
+`0209cd3` Cloudflare Tunnel Token 不进任何命令行、`a034476` 初始化说明补四条看结果的规矩（对照 codex-bridge，§39，没部署）；
+`825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40，没部署）。守护进程协议仍是 6。
 三台都是 `fba39d0`：`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）。
 - 本机：守护进程跑这一版（2026-10-22 00:17 换上），工具表 33 项（30 个加上本机 MCP 转发的 3 个，开着隔离的 `browser`）、指纹
   `59951e97a502352e`。ChatGPT 15:13:55 已经 Refresh 过这张工具表，`read_file ranges`、`list_skills query` 它看得到；
@@ -57,7 +58,7 @@
 
 | Agent 委派 | 2026-10-22 用户定排进计划，未开始 | 先写 RFC 草案、经用户认可再实现。要定的：ChatGPT 侧提交立即回任务 ID、等结果单次不超过 30 秒（经 OpenAI 隧道时官方上限 120 秒）；Codex 走 `codex app-server` 的 Thread/Turn；批准只在本机做，ChatGPT 只能回答 Agent 提的问题；同项目的写任务和 gld 自己的写操作互斥；Agent 的凭据不进回包。codex-bridge 的做法和该避开的坑见审查 §39 |
 | OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
-| 重启前等空闲 | 未开始 | 现在 `gld daemon restart` 直接停掉在跑的命令，靠人先查。改成有在跑的命令时拒绝并列出来，`--force` 照旧直接停；[安装 · 升级](docs/install.md#升级)里"先查有没有在跑"那步跟着改。完成标准：有在跑的命令时不带 `--force` 不重启，有测试 |
+| 重启前等空闲 | 源码已做，未部署（2026-10-22，审查 §40） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，新命令行查旧守护进程也行，所以下次换装用的就是新检查。用户批准后按[安装 · 升级](docs/install.md#升级)换装，换的时候正好实测一次（有命令在跑时先被拦下）。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查 |
 
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
 
