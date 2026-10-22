@@ -331,8 +331,9 @@ pub enum DaemonCmd {
         #[arg(long, default_value_t = 20, value_name = "SECS")]
         wait: u64,
     },
-    /// 停止后重新启动（换完二进制用它）；服务断开片刻，在跑的命令会被停掉
+    /// 停止后重新启动（换完二进制用它）；服务断开片刻。有在跑的命令时不重启，列出来
     Restart {
+        /// 有在跑的命令也重启（会停掉它们）；守护进程 20 秒内不退就强制结束进程树
         #[arg(long)]
         force: bool,
     },

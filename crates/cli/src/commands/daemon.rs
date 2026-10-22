@@ -1,5 +1,9 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gld_core::data::DataStore;
+use gld_core::tools::runs;
 use gld_daemon::lifecycle::{self, DaemonPaths, DaemonProbe, StopOutcome};
 use gld_daemon::server::{self, ServerOptions};
 use serde_json::json;
@@ -17,6 +21,9 @@ pub async fn run(command: &DaemonCmd, out: Output) -> CliResult {
             stop(&paths, out, *force, Duration::from_secs(*wait)).await
         }
         DaemonCmd::Restart { force } => {
+            if !force {
+                refuse_while_commands_run(&paths, out).await?;
+            }
             stop(&paths, out, *force, Duration::from_secs(20)).await?;
             start(&paths, out).await
         }
@@ -85,6 +92,91 @@ async fn start(paths: &DaemonPaths, out: Output) -> CliResult {
     Ok(())
 }
 
+/// 守护进程起的命令还在跑就不重启：重启会把它们（包括开着的 dev server）一起停掉。
+///
+/// 以前这一步靠人记着先查，忘了就把正跑着的测试、服务停了。看的是盘上的运行记录，不问
+/// 守护进程：换完二进制、重启之前，守护进程还是旧版，新命令行跟它的协议不一定对得上。
+/// 守护进程不在、不响应时不拦：前者没东西可停，后者本来就要靠重启救。
+async fn refuse_while_commands_run(paths: &DaemonPaths, out: Output) -> CliResult {
+    let DaemonProbe::Running(info) = lifecycle::probe(paths).await else {
+        return Ok(());
+    };
+    let running = runs::running_under(&paths.home.join("runs"), info.pid);
+    if running.is_empty() {
+        return Ok(());
+    }
+    let names = project_names();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let rows: Vec<_> = running
+        .iter()
+        .map(|(project, record)| {
+            let name = names
+                .get(project)
+                .cloned()
+                .unwrap_or_else(|| project.clone());
+            let secs = now.saturating_sub(record.started_at_ms) / 1000;
+            (name, record, secs)
+        })
+        .collect();
+    let json_rows: Vec<_> = rows
+        .iter()
+        .map(|(name, record, secs)| {
+            json!({
+                "project": name,
+                "session_id": record.session_id,
+                "command": record.command,
+                "pid": record.pid,
+                "service_port": record.service_port,
+                "running_secs": secs,
+            })
+        })
+        .collect();
+    let advice = "等命令跑完再重启；确定要停掉就加 --force：gld daemon restart --force";
+    if out.json_or(&json!({ "restarted": false, "running_commands": json_rows })) {
+        return Err(CliError::new(format!(
+            "有 {} 条命令在跑，没重启。{advice}",
+            rows.len()
+        )));
+    }
+    let mut message = format!(
+        "有 {} 条命令在跑，重启会连命令一起停掉，这次没重启：",
+        rows.len()
+    );
+    for (name, record, secs) in &rows {
+        let service = record
+            .service_port
+            .map(|port| format!("（服务，端口 {port}）"))
+            .unwrap_or_default();
+        let pid = record
+            .pid
+            .map(|pid| format!("，pid {pid}"))
+            .unwrap_or_default();
+        message.push_str(&format!(
+            "\n  {name}  {}{service}  已跑 {}{pid}",
+            record.command,
+            human_duration(*secs)
+        ));
+    }
+    message.push('\n');
+    message.push_str(advice);
+    Err(CliError::new(message))
+}
+
+/// 项目 id → 项目名。读不出来就空着，列表里退回显示 id，不因此拦不住重启。
+fn project_names() -> HashMap<String, String> {
+    DataStore::read_file(|data| Ok(data.profiles.clone()))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|profile| {
+            let root = Path::new(&profile.path);
+            let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            (runs::project_id(&root), profile.name)
+        })
+        .collect()
+}
+
 async fn stop(paths: &DaemonPaths, out: Output, force: bool, wait: Duration) -> CliResult {
     let outcome = lifecycle::request_stop(paths, wait, force).await?;
     let (message, pid) = match outcome {
@@ -131,7 +223,7 @@ async fn status(paths: &DaemonPaths, out: Output) -> CliResult {
                 ]);
                 if !version_ok {
                     out.line(out.yellow(&format!(
-                        "命令行版本 {} 与守护进程不一致，守护进程还在跑旧代码。换完二进制要 gld daemon restart：服务会断开片刻，在跑的命令会被停掉，见 docs/install.md 的「升级」。",
+                        "命令行版本 {} 与守护进程不一致，守护进程还在跑旧代码。换完二进制要 gld daemon restart：服务会断开片刻；有命令在跑时它先列出来、不重启，见 docs/install.md 的「升级」。",
                         gld_core::VERSION
                     )));
                 }

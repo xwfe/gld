@@ -1951,7 +1951,7 @@ Usage: gld daemon [OPTIONS] <COMMAND>
 Commands:
   start    在后台启动守护进程（已在运行则什么都不做）
   stop     请求守护进程退出，并等待它停掉所有服务
-  restart  停止后重新启动（换完二进制用它）；服务断开片刻，在跑的命令会被停掉
+  restart  停止后重新启动（换完二进制用它）；服务断开片刻。有在跑的命令时不重启，列出来
   status   显示守护进程是否在运行、pid、运行时长、日志位置
   run      在前台运行守护进程（给 systemd / launchd 或排障用；Ctrl-C 优雅退出）
   logs     查看守护进程自身日志
@@ -2008,12 +2008,12 @@ Options:
 ## gld daemon restart
 
 ```text
-停止后重新启动（换完二进制用它）；服务断开片刻，在跑的命令会被停掉
+停止后重新启动（换完二进制用它）；服务断开片刻。有在跑的命令时不重启，列出来
 
 Usage: gld daemon restart [OPTIONS]
 
 Options:
-      --force           
+      --force           有在跑的命令也重启（会停掉它们）；守护进程 20 秒内不退就强制结束进程树
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）

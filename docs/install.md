@@ -92,10 +92,10 @@ gld --version
 自己重拉。要不要点，比一下升级前后的工具表指纹就知道（下面第 2 步和"换完核对"）。
 除了升级，还有哪些操作会碰到连接器，见[装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。
 
-**会断一下，很短，但在跑的命令会被停掉。** `gld daemon restart` 是先停再起，新旧进程之间没有交接：
+**会断一下，很短；有命令在跑时先不重启。** `gld daemon restart` 是先停再起，新旧进程之间没有交接：
 本机实测停到起 0.2–0.3 秒，这期间来的请求会失败，客户端再调一次就好；没回完的请求最多再等 3 秒就强断。
-守护进程拉起的命令（AI 用 `exec_command` 跑着的测试、开发服务器）会被停掉，不会自己回来，
-**所以挑没有命令在跑的时候升级**，第 2 步最后一行就是查这个的。
+守护进程拉起的命令（AI 用 `exec_command` 跑着的测试、开发服务器）一停就不会自己回来，所以重启前
+它会先查一遍：还有这样的命令就不重启，把它们列出来，见下面第 4 步。
 命令和请求都不断的"零中断升级"现在做不到，设计在 [RFC-0008](rfc/0008-continuous-upgrades.md)，还没实现。
 
 本机从 0.6.0 起每次升级都逐项比对过口令、签名密钥、Client ID、ChatGPT 注册的客户端、公网地址、项目表的指纹，
@@ -121,21 +121,26 @@ mkdir -p ~/.local/opt
 cp -p "$(command -v gld)" ~/.local/opt/gld-$(date +%Y%m%d-%H%M)
 tar -czf ~/.local/opt/gld-config-$(date +%Y%m%d-%H%M).tgz -C ~/.config --exclude gld/daemon.sock gld
 chmod 600 ~/.local/opt/gld-config-*.tgz          # 里面有明文口令和签名密钥
-pgrep -lP "$(gld daemon status | awk '$1=="pid"{print $2}')"   # 守护进程拉起的子进程，见下面
 
 # 3. 换二进制：先写成新文件，再改名盖上去
 GLD="$(command -v gld)"
 install -m 755 target/release/gld "$GLD.new" && mv "$GLD.new" "$GLD"
 
-# 4. 重启守护进程。版本号没变也要做，见下面
+# 4. 重启守护进程。版本号没变也要做，见下面；有命令在跑时它不重启，见下面
 gld daemon restart
-#    配了 launchd 开机自启的换成下面这句，守护进程继续归 launchd 管（见守护进程 · 开机自启）：
+#    配了 launchd 开机自启的换成下面这句，守护进程继续归 launchd 管（见守护进程 · 开机自启）。
+#    这句不查在跑的命令，先 pgrep -lP <gld daemon status 里的 pid> 自己看一眼：
 #    gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon
 ```
 
-**第 2 步最后一行没有输出，就是没有命令在跑，可以放心换。** 有输出时看进程名：`cloudflared` / `frpc`
-是 gld 自己起的隧道，重启后跟着服务回来；`npx`、`node` 这类多半是本机 MCP 转发，下次调用会重新拉起；
-其余的基本是正在跑的项目命令，等它跑完，或者确认可以停，再往下做。
+**第 4 步报"有 N 条命令在跑……这次没重启"，就是没重启。** 它列出每条命令的项目、命令、跑了多久和 pid，
+开着的开发服务器会标"服务，端口 …"。二进制已经换好了，等这些命令跑完再敲一次 `gld daemon restart`；
+确认可以停，就 `gld daemon restart --force`，照旧连命令一起停掉。等的这段时间守护进程还跑着旧代码，
+ChatGPT 照常能用，命令行这边除了 `gld daemon status` / `stop` / `restart` 会提示版本不一致（下面"版本号"那段）。
+加 `--json` 时这份列表打在标准输出上，给脚本用，退出码照样非零。
+
+这个检查看的是数据目录里的运行记录，所以：旧守护进程是 0.8.1 之前的版本时没有记录，查不出来，换之前照
+上面 launchd 那行的办法自己看一眼；盘满等原因没留下记录的命令也看不到。
 
 `gld tool list --served` 是 0.7.0 加的；从更老的版本升上来时没有它，第 2 步那行跳过，换完直接按
 "不一样"处理（点一次 Refresh 没有坏处）。

@@ -365,6 +365,54 @@ pub fn instance_id() -> &'static str {
     INSTANCE.as_str()
 }
 
+/// pid 为 `owner_pid` 的那个 gld 进程起的、现在还在跑的命令，跨所有项目、所有主体，
+/// 按起跑时间从早到晚。返回 (项目 id, 记录)。
+///
+/// 给 `gld daemon restart` 动手前看一眼用：重启会把守护进程起的命令全停掉，所以谁起的都算，
+/// 不按主体过滤。只认 `owner_pid` 对得上的：同一个数据目录下别的 gld 进程（比如直连模式的
+/// `gld tool call`）起的命令，重启守护进程停不到它们。pid 被复用也不会认错：对上 pid 之后
+/// 还照 [`settle`] 看 owner 锁，起它的进程不在了就改成 `unknown`、不算在跑。
+///
+/// 只读盘、不经守护进程，所以新版命令行查旧版守护进程也能用——换完二进制、重启之前正是这种情况。
+/// 看不到的：没留下记录的命令（盘满之类，回包里 `kept_on_disk: false`）。
+pub fn running_under(runs_root: &Path, owner_pid: u32) -> Vec<(String, RunRecord)> {
+    let Ok(projects) = fs::read_dir(runs_root) else {
+        return Vec::new();
+    };
+    let mut running = Vec::new();
+    for project in projects.flatten() {
+        let Some(project_id) = project.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if project_id == OWNERS {
+            continue;
+        }
+        let Ok(sessions) = fs::read_dir(project.path()) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            if !session.file_name().to_str().is_some_and(valid_id) {
+                continue;
+            }
+            let dir = session.path();
+            let Some(record) = read_record(&dir) else {
+                continue;
+            };
+            if record.owner_pid != owner_pid || !record.is_running() {
+                continue;
+            }
+            let record = settle(runs_root, &dir, record);
+            if record.is_running() {
+                running.push((project_id.clone(), record));
+            }
+        }
+    }
+    running.sort_by(|a, b| {
+        (a.1.started_at_ms, &a.1.session_id).cmp(&(b.1.started_at_ms, &b.1.session_id))
+    });
+    running
+}
+
 /// 一条正在跑的命令往盘上写记录和日志。命令会话 [`crate::tools::session::ExecSession`] 拿着它。
 pub struct RunWriter {
     dir: PathBuf,
@@ -749,6 +797,60 @@ mod tests {
             assert!(mine.start(bad, "true", None, 0, None).is_none());
         }
         assert!(!root.join("etc").exists() && !root.join("p/a").exists());
+    }
+
+    /// 跨项目、跨主体列出某个进程起的、还在跑的命令；结束了的、别的进程起的、起它的进程
+    /// 已经不在的都不算。
+    #[test]
+    fn running_under_lists_live_commands_of_one_owner_across_projects() {
+        let home = tempdir().expect("home");
+        let root = home.path().join("runs");
+        let alpha = RunLog::new(root.clone(), "alpha", "local");
+        let beta = RunLog::new(root.clone(), "beta", "oauth:hub:someone");
+        let (first, second, done, orphan) = (id(), id(), id(), id());
+        let _first = alpha
+            .start(&first, "sleep 30", Some(1), 0, None)
+            .expect("建记录");
+        let _second = beta
+            .start(&second, "pnpm dev", Some(2), 0, Some(5173))
+            .expect("建记录");
+        alpha
+            .start(&done, "true", Some(3), 0, None)
+            .expect("建记录")
+            .finish("exited", Some(0), 0);
+        let _orphan = alpha
+            .start(&orphan, "sleep 40", Some(4), 0, None)
+            .expect("建记录");
+        orphan_record(&alpha, &orphan);
+
+        let me = std::process::id();
+        let listed = running_under(&root, me);
+        let mut seen: Vec<(String, String)> = listed
+            .iter()
+            .map(|(project, record)| (project.clone(), record.session_id.clone()))
+            .collect();
+        seen.sort();
+        let mut expected = vec![("alpha".to_string(), first), ("beta".to_string(), second)];
+        expected.sort();
+        assert_eq!(seen, expected);
+        assert!(
+            listed
+                .windows(2)
+                .all(|pair| pair[0].1.started_at_ms <= pair[1].1.started_at_ms),
+            "要按起跑时间从早到晚"
+        );
+        assert!(
+            running_under(&root, me.wrapping_add(1)).is_empty(),
+            "别的进程起的不该算"
+        );
+        assert_eq!(
+            read_record(&alpha.dir().join(&orphan))
+                .expect("记录")
+                .status,
+            "unknown",
+            "起它的进程不在了，读到时就该改成 unknown"
+        );
+        assert!(running_under(&home.path().join("nowhere"), me).is_empty());
     }
 
     /// 起它的进程还在（就是自己）：还是 running。起它的进程不在了：unknown，并写回盘上。

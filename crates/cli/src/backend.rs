@@ -163,7 +163,7 @@ pub fn current_executable() -> CliResult<PathBuf> {
 pub fn check_version(info: &gld_daemon::DaemonInfo) -> CliResult<()> {
     if info.protocol != PROTOCOL_VERSION || info.version != gld_core::VERSION {
         return Err(CliError::new(format!(
-            "守护进程版本 {}（协议 {}）与命令行版本 {}（协议 {}）不一致，这条命令没执行。换完二进制要 `gld daemon restart` 才用上新代码：服务会断开片刻，在跑的命令会被停掉，先看 docs/install.md 的「升级」。",
+            "守护进程版本 {}（协议 {}）与命令行版本 {}（协议 {}）不一致，这条命令没执行。换完二进制要 `gld daemon restart` 才用上新代码：服务会断开片刻；有命令在跑时它先列出来、不重启，见 docs/install.md 的「升级」。",
             info.version,
             info.protocol,
             gld_core::VERSION,

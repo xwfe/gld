@@ -25,7 +25,7 @@ socket        /Users/you/.config/gld/daemon.sock
 | --- | --- |
 | `gld daemon start` | 后台启动；已在跑就什么都不做 |
 | `gld daemon stop [--force] [--wait 20]` | 先停所有服务和隧道，再退出；20 秒没退可加 `--force` 杀进程树 |
-| `gld daemon restart` | stop + start，升级 `gld` 二进制后用 |
+| `gld daemon restart [--force]` | stop + start，升级 `gld` 二进制后用；有它起的命令在跑时不重启、列出来，`--force` 照旧停掉（[升级](install.md#升级)） |
 | `gld daemon run [--no-restore]` | 前台运行，Ctrl-C 优雅退出；给 launchd / systemd 或排障用 |
 | `gld daemon logs [-n 50] [-f]` | 它自己的日志（每个请求一行，含耗时） |
 
@@ -252,6 +252,7 @@ gld status                       # MCP 服务应该已经自己回来了
 
 配了 launchd [开机自启](#开机自启)的，把 `gld daemon restart` 换成
 `gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，守护进程继续归 launchd 管。
+这条不会像 `restart` 那样先查有没有命令在跑，换之前自己看一眼（[安装 · 升级](install.md#升级)第 4 步）。
 
 **MCP 服务会自己回来**：守护进程启动时把上次 `gld start` 过、没 `gld stop` 的服务连同
 隧道一起拉起（上面"启动时发生什么"第 5 条）。用的是 Cloudflare 临时地址的话，地址会换，

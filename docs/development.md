@@ -184,11 +184,14 @@ scripts/package.sh          构建 + 打包发布件（CI 也调它）
 - **工具表只加不改。** 删工具、改已有参数的含义，ChatGPT 缓存里的旧调用就会失败，Refresh 也救不回来；
   新加工具、可选参数没问题，只是要用户点一次 Refresh 才看得见。
 - **改了 IPC 就把 `PROTOCOL_VERSION` 加一**（上一节），新命令行连旧守护进程时才会拒绝并提示重启，而不是报看不懂的 `unknown variant`。
+- **运行记录 `runs/<项目>/<会话>/run.json` 和 owner 锁的格式别改不兼容。** `gld daemon restart` 是换完二进制的新命令行
+  直接读盘、查旧守护进程起的命令还在不在跑（`runs::running_under`），不经 IPC。改成旧版写的读不懂，检查就会悄悄查不出东西，
+  重启照样把在跑的命令停掉。
 
 怎么验：本机按[安装 · 升级](install.md#升级)走一遍，比工具表指纹、`gld ls`、`hub.json` 的摘要，
 再让 ChatGPT 调一次，`gld logs` 里应该是原来那个 `auth=oauth:hub:dcr-…`、没有 401。
 
-重启那零点几秒会断，在跑的命令会被停掉；让在跑的命令和请求都不断的交接方案在 [RFC-0008](rfc/0008-continuous-upgrades.md)，还没实现。
+重启那零点几秒会断；有命令在跑时 `gld daemon restart` 先拒绝，加 `--force` 才连命令一起停掉。让在跑的命令和请求都不断的交接方案在 [RFC-0008](rfc/0008-continuous-upgrades.md)，还没实现。
 
 ## 打包与发布
 

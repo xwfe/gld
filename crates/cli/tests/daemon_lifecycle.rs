@@ -478,6 +478,78 @@ fn stopping_the_daemon_stops_commands_started_through_tool_call() {
     assert!(!leaked, "守护进程退出后，它起的后台命令还在跑");
 }
 
+/// 守护进程起的命令还在跑时，`gld daemon restart` 不重启、把命令列出来；`--force` 照旧停掉重启。
+///
+/// 以前重启直接停掉在跑的命令，换二进制前"先查有没有在跑的"靠人记着，忘了就把正跑的
+/// 测试、dev server 停了。
+#[test]
+fn restart_refuses_while_a_command_runs_and_force_still_restarts() {
+    let env = Env::new();
+    let sleeper = Sleeper { ms: 61493 };
+    env.ok(&["add", ".", "--name", "it"]);
+    env.ok(&[
+        "set",
+        "it",
+        &format!("allowed-commands={}", sleeper.program()),
+    ]);
+    env.ok(&["daemon", "start"]);
+    let daemon_pid = |env: &Env| env.json(&["--json", "daemon", "status"])["info"]["pid"].clone();
+    let before = daemon_pid(&env);
+    let started = env.json(&[
+        "--json",
+        "tool",
+        "call",
+        "exec_command",
+        &format!("cmd={}", sleeper.command()),
+        "yield_time_ms:=0",
+        "timeout_ms:=120000",
+    ]);
+    assert_eq!(started["status"], "running", "{started}");
+
+    let refused = env.gld(&["daemon", "restart"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let held = !refused.status.success()
+        && stderr.contains(&format!("\n  it  {}", sleeper.command()))
+        && stderr.contains("--force")
+        && daemon_pid(&env) == before
+        && sleeper.is_running();
+    if !held {
+        sleeper.kill();
+    }
+    assert!(
+        held,
+        "有命令在跑时该拒绝重启、列出命令、守护进程和命令都不动：{stderr}"
+    );
+
+    // 给脚本用：--json 时 stdout 是这份列表，退出码照样非零。
+    let refused = env.gld(&["--json", "daemon", "restart"]);
+    assert!(!refused.status.success());
+    let listed: serde_json::Value =
+        serde_json::from_slice(&refused.stdout).expect("stdout 是 JSON");
+    assert_eq!(listed["restarted"], false, "{listed}");
+    assert_eq!(listed["running_commands"][0]["project"], "it", "{listed}");
+    assert_eq!(
+        listed["running_commands"][0]["session_id"], started["session_id"],
+        "{listed}"
+    );
+
+    env.ok(&["daemon", "restart", "--force"]);
+    assert_ne!(daemon_pid(&env), before, "--force 该照旧重启");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while sleeper.is_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let leaked = sleeper.is_running();
+    if leaked {
+        sleeper.kill();
+    }
+    assert!(!leaked, "--force 重启后命令还在跑");
+
+    // 没有在跑的了，不带 --force 也能重启。
+    env.ok(&["daemon", "restart"]);
+    env.ok(&["daemon", "stop"]);
+}
+
 /// 没有守护进程时，`gld tool call` 起的后台命令是命令行进程的子进程：命令行退出前要停掉它，
 /// 并说清楚为什么。不停的话它成了孤儿，下一条命令读不到也停不掉。
 #[test]
