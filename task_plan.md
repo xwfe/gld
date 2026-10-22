@@ -1,6 +1,6 @@
 # gld 当前任务与后续规划
 
-更新日期：2026-10-21。**本文件是当前排队与认领入口**；审查与验收过程保留在
+更新日期：2026-10-22。**本文件是当前排队与认领入口**；审查与验收过程保留在
 [生命周期审查](docs/reviews/2026-09-23-lifecycle-and-docs-audit.md)，用户用法见
 [项目开发生命周期](docs/project-lifecycle.md)。已完成项怎么做、怎么验的在审查和 git 历史里，这里不再留勾选清单。
 沿用 D / L 原有归属，不新增平行的 Goal、Task 或执行状态系统。
@@ -11,7 +11,8 @@
 [发布说明](docs/releases/v0.8.3.md)）。main 上未发版的：`87eba6b` 补丁失败留下原因（审查 §22）；`98a4ef7`–`778fdd3`
 通知回 202、OAuth 动态注册写盘保护、`gld grant browser`（SuperAssistant 接 DeepSeek 网页）、升级文档（审查 §23–§25）；
 `e8f7f36`–`f9400f7` 点名说明在 compact 下也注入、收尾可重试、命令回显有界、§28 复核出的经 gld 开发的摩擦（审查 §26–§31），
-`gld --version` 带构建提交（§35）；`02e1afb`–`fba39d0` 认 Claude Code 开着的插件带的 skill、扫描时市场清单只读一次（§37、§38）。守护进程协议仍是 6。
+`gld --version` 带构建提交（§35）；`02e1afb`–`fba39d0` 认 Claude Code 开着的插件带的 skill、扫描时市场清单只读一次（§37、§38）；
+`0209cd3` Cloudflare Tunnel Token 不进任何命令行、`a034476` 初始化说明补四条看结果的规矩（对照 codex-bridge，§39，没部署）。守护进程协议仍是 6。
 三台都是 `fba39d0`：`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）。
 - 本机：守护进程跑这一版（2026-10-22 00:17 换上），工具表 33 项（30 个加上本机 MCP 转发的 3 个，开着隔离的 `browser`）、指纹
   `59951e97a502352e`。ChatGPT 15:13:55 已经 Refresh 过这张工具表，`read_file ranges`、`list_skills query` 它看得到；
@@ -54,6 +55,10 @@
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
 
+| Agent 委派 | 2026-10-22 用户定排进计划，未开始 | 先写 RFC 草案、经用户认可再实现。要定的：ChatGPT 侧提交立即回任务 ID、等结果单次不超过 30 秒（经 OpenAI 隧道时官方上限 120 秒）；Codex 走 `codex app-server` 的 Thread/Turn；批准只在本机做，ChatGPT 只能回答 Agent 提的问题；同项目的写任务和 gld 自己的写操作互斥；Agent 的凭据不进回包。codex-bridge 的做法和该避开的坑见审查 §39 |
+| OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
+| 重启前等空闲 | 未开始 | 现在 `gld daemon restart` 直接停掉在跑的命令，靠人先查。改成有在跑的命令时拒绝并列出来，`--force` 照旧直接停；[安装 · 升级](docs/install.md#升级)里"先查有没有在跑"那步跟着改。完成标准：有在跑的命令时不带 `--force` 不重启，有测试 |
+
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
 
 ## 等遇到再做
@@ -74,7 +79,7 @@
 | 普通 grant 有效期、范围原地调整、服务端审批 | 浏览器专用短期凭据在本次直连需求中实现；普通 OAuth/Bearer grant 的扩展仍等真实共享/撤销场景需要时单独设计 |
 | Harness 锁等待上限、断电耐久性、记录清理/配额可配置 | 出现长时阻塞、恢复或磁盘需求时；当前缺口见审查 §7，不能宣称已有严格上限/强耐久保证 |
 | 文件版本号在 Linux 上分不清几毫秒内的等长改动 | 版本号是大小加修改时间，Linux 时间戳 4 毫秒一格（审查 §33）。真遇到漏检，或者要做脚本高频改文件的场景时，和 ccnm 一起把 inode 之类加进版本号（两边的 `version_of` 必须一字不差，不能只改 gld）。要不要做由用户定 |
-| 语义导航、managed worktree、CI/PR 写操作、Agent 委派 | 有真实用例和授权后分别接入；并行 worktree 要按"工作树文件"和"共享 Git 元数据"两级协调，不照搬 ccnm 把整个 common directory 串行的做法 |
+| 语义导航、managed worktree、CI/PR 写操作 | 有真实用例和授权后分别接入（Agent 委派已排进上面的队列）；并行 worktree 要按"工作树文件"和"共享 Git 元数据"两级协调，不照搬 ccnm 把整个 common directory 串行的做法 |
 
 **用户定了不做：**让调用方传环境变量（`exec_command` 不收 `env`，审查 §16；和"项目命令拿不到像密钥的变量"是两件事）、`migrate` 角色（§15）。
 真实 PTY、另起单项目 MCP 主服务、第二套 Goal/Plan/Task、完整 IDE/部署平台也不纳入；
