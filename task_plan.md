@@ -12,16 +12,17 @@
 通知回 202、OAuth 动态注册写盘保护、`gld grant browser`（SuperAssistant 接 DeepSeek 网页）、升级文档（审查 §23–§25）；
 `e8f7f36`–`f9400f7` 点名说明在 compact 下也注入、收尾可重试、命令回显有界、§28 复核出的经 gld 开发的摩擦（审查 §26–§31），
 `gld --version` 带构建提交（§35）；`02e1afb`–`fba39d0` 认 Claude Code 开着的插件带的 skill、扫描时市场清单只读一次（§37、§38）；
-`0209cd3` Cloudflare Tunnel Token 不进任何命令行、`a034476` 初始化说明补四条看结果的规矩（对照 codex-bridge，§39，没部署）；
-`825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40，没部署）。守护进程协议仍是 6。
-三台都是 `fba39d0`：`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）。
-- 本机：守护进程跑这一版（2026-10-22 00:17 换上），工具表 33 项（30 个加上本机 MCP 转发的 3 个，开着隔离的 `browser`）、指纹
-  `59951e97a502352e`。ChatGPT 15:13:55 已经 Refresh 过这张工具表，`read_file ranges`、`list_skills query` 它看得到；
-  守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`，`gld context -w gld` 两份说明都打 ✓。
-  Skill 扫到 97 个（含开着的插件带的 3 个）。
-  回滚用的二进制在 `~/.local/opt/`：`gld-f9400f7-20261021-2352`（换之前那版）、`gld-4a6d098-20261018-1528`、官方 0.8.3 包 `gld-0.8.3-20261009-2336`。
-- 另一台 Mac、Linux 服务器的普通账号和 root：只装了命令行，没起守护进程（审查 §33）。
-- 全仓：本机 990 passed / 0 failed，Linux 服务器 989（差一条只在 macOS 编译的）；线上 CI 8 个 job 全过。
+`0209cd3` Cloudflare Tunnel Token 不进任何命令行、`a034476` 初始化说明补四条看结果的规矩（对照 codex-bridge，§39）；
+`825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40）。守护进程协议仍是 6。
+- 本机：`6268bb0`，守护进程 2026-10-22 20:02 换上（审查 §41；换之前用新命令行对着旧守护进程实测，重启检查拦住了在跑的命令）。
+  工具表 33 项（30 个加上本机 MCP 转发的 3 个，开着隔离的 `browser`）、指纹 `59951e97a502352e`，这次没变、不用 Refresh；
+  §39 的初始化说明要 ChatGPT 新开对话才拿到。守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`，
+  `gld context -w gld` 两份说明都打 ✓，Skill 扫到 97 个（含开着的插件带的 3 个）。
+  回滚用的二进制在 `~/.local/opt/`：`gld-fba39d0-20261022-2001`（换之前那版）、`gld-f9400f7-20261021-2352`、官方 0.8.3 包 `gld-0.8.3-20261009-2336`。
+- 另一台 Mac、Linux 服务器的普通账号和 root：还是 `fba39d0`，`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）；
+  只装了命令行，没起守护进程（审查 §33）。
+- 全仓：本机 996 passed / 0 failed（`825b74a`，§40）；Linux 服务器 989 是 `fba39d0` 那次的（差一条只在 macOS 编译的）；
+  线上 CI 最近一次是 `fba39d0`，8 个 job 全过。`0209cd3` 起的提交只在本地 main，没推送。
 
 **已推送**：2026-10-18 用户看完三台换装和 §34 的实测后让推，main 推到 origin，没发版。CI 头一次跑这些提交红了三个 job（Windows 编译检查、两个平台各一条测试），`4b84a1c`、`d78461d` 修完全绿（审查 §36）。
 
@@ -58,7 +59,7 @@
 
 | Agent 委派 | 2026-10-22 用户定排进计划，未开始 | 先写 RFC 草案、经用户认可再实现。要定的：ChatGPT 侧提交立即回任务 ID、等结果单次不超过 30 秒（经 OpenAI 隧道时官方上限 120 秒）；Codex 走 `codex app-server` 的 Thread/Turn；批准只在本机做，ChatGPT 只能回答 Agent 提的问题；同项目的写任务和 gld 自己的写操作互斥；Agent 的凭据不进回包。codex-bridge 的做法和该避开的坑见审查 §39 |
 | OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
-| 重启前等空闲 | 源码已做，未部署（2026-10-22，审查 §40） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，新命令行查旧守护进程也行，所以下次换装用的就是新检查。用户批准后按[安装 · 升级](docs/install.md#升级)换装，换的时候正好实测一次（有命令在跑时先被拦下）。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查 |
+| 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
 
