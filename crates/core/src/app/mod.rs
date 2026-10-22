@@ -20,7 +20,9 @@
 //! | [`software`] | frpc / cloudflared 的安装与卸载 |
 //! | [`tools`] | 直接调用工具内核（命令行验证 AI 侧行为） |
 //! | [`doctor`] | 配置体检：把“哪里配错了”变成一条条可执行的修复建议 |
+//! | [`agents`] | 委派任务：本机看、放行、拒绝、停（RFC-0009） |
 
+mod agents;
 mod doctor;
 mod gateway;
 mod grant;

@@ -191,6 +191,12 @@ impl App {
             crate::tools::workspace_runtime::terminate_all_sessions_everywhere,
         )
         .await;
+        // 委派出去的 Agent 也一样，记成 interrupted。停的时候按档案先发信号、等它收尾，
+        // 每个最多十来秒，所以也放阻塞线程。
+        let _ = tokio::task::spawn_blocking(|| {
+            crate::agents::interrupt_all(std::time::Duration::from_secs(15))
+        })
+        .await;
         for service in self.running_services().unwrap_or_default() {
             if let Err(error) = self.stop_inner(&service.workspace_id, service.kind).await {
                 eprintln!(

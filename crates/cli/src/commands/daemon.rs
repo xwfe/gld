@@ -101,39 +101,55 @@ async fn refuse_while_commands_run(paths: &DaemonPaths, out: Output) -> CliResul
     let DaemonProbe::Running(info) = lifecycle::probe(paths).await else {
         return Ok(());
     };
-    let running = runs::running_under(&paths.home.join("runs"), info.pid);
-    if running.is_empty() {
+    let commands = runs::running_under(&paths.home.join("runs"), info.pid);
+    // 委派出去的 Agent 也是守护进程起的，重启一样会停掉（RFC-0009）。
+    let delegated = gld_core::agents::running_under(&paths.home, info.pid);
+    if commands.is_empty() && delegated.is_empty() {
         return Ok(());
     }
     let names = project_names();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as u64);
-    let rows: Vec<_> = running
-        .iter()
-        .map(|(project, record)| {
-            let name = names
-                .get(project)
-                .cloned()
-                .unwrap_or_else(|| project.clone());
-            let secs = now.saturating_sub(record.started_at_ms) / 1000;
-            (name, record, secs)
-        })
-        .collect();
-    let json_rows: Vec<_> = rows
-        .iter()
-        .map(|(name, record, secs)| {
-            json!({
-                "project": name,
-                "session_id": record.session_id,
-                "command": record.command,
-                "pid": record.pid,
-                "service_port": record.service_port,
-                "running_secs": secs,
-            })
-        })
-        .collect();
+    // 每一行：(项目, 在跑什么, 跑了几秒, pid, JSON)。
+    let mut rows: Vec<(String, String, u64, Option<u32>, serde_json::Value)> = Vec::new();
+    for (project, record) in &commands {
+        let name = names
+            .get(project)
+            .cloned()
+            .unwrap_or_else(|| project.clone());
+        let secs = now.saturating_sub(record.started_at_ms) / 1000;
+        let what = match record.service_port {
+            Some(port) => format!("{}（服务，端口 {port}）", record.command),
+            None => record.command.clone(),
+        };
+        let json = json!({
+            "kind": "command",
+            "project": name,
+            "session_id": record.session_id,
+            "command": record.command,
+            "pid": record.pid,
+            "service_port": record.service_port,
+            "running_secs": secs,
+        });
+        rows.push((name, what, secs, record.pid, json));
+    }
+    for task in &delegated {
+        let secs = now.saturating_sub(task.started_at_ms.unwrap_or(task.created_at_ms)) / 1000;
+        let preview: String = task.prompt_preview.chars().take(40).collect();
+        let what = format!("委派给 {}：{}", task.agent, preview.replace('\n', " "));
+        let json = json!({
+            "kind": "agent",
+            "project": task.workspace_name,
+            "task_id": task.task_id,
+            "agent": task.agent,
+            "pid": task.pid,
+            "running_secs": secs,
+        });
+        rows.push((task.workspace_name.clone(), what, secs, task.pid, json));
+    }
     let advice = "等命令跑完再重启；确定要停掉就加 --force：gld daemon restart --force";
+    let json_rows: Vec<_> = rows.iter().map(|row| row.4.clone()).collect();
     if out.json_or(&json!({ "restarted": false, "running_commands": json_rows })) {
         return Err(CliError::new(format!(
             "有 {} 条命令在跑，没重启。{advice}",
@@ -144,18 +160,10 @@ async fn refuse_while_commands_run(paths: &DaemonPaths, out: Output) -> CliResul
         "有 {} 条命令在跑，重启会连命令一起停掉，这次没重启：",
         rows.len()
     );
-    for (name, record, secs) in &rows {
-        let service = record
-            .service_port
-            .map(|port| format!("（服务，端口 {port}）"))
-            .unwrap_or_default();
-        let pid = record
-            .pid
-            .map(|pid| format!("，pid {pid}"))
-            .unwrap_or_default();
+    for (name, what, secs, pid, _) in &rows {
+        let pid = pid.map(|pid| format!("，pid {pid}")).unwrap_or_default();
         message.push_str(&format!(
-            "\n  {name}  {}{service}  已跑 {}{pid}",
-            record.command,
+            "\n  {name}  {what}  已跑 {}{pid}",
             human_duration(*secs)
         ));
     }

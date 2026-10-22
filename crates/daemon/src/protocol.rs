@@ -34,7 +34,9 @@ use serde_json::Value;
 ///    升级时新命令行连着旧守护进程，`--served` 报的是 `unknown variant`，不是"请重启"。
 /// 5：加了 `list_grants`、`add_grant`、`remove_grant`（`gld grant`，RFC-0007）。
 /// 6：加了 `add_browser_grant`，与普通永久 grant 分开，旧守护进程不能静默降级。
-pub const PROTOCOL_VERSION: u32 = 6;
+/// 7：加了 `list_agent_tasks`、`show_agent_task`、`approve_agent_task`、`deny_agent_task`、
+///    `stop_agent_task`（`gld agent`，RFC-0009）。
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +250,23 @@ pub enum Request {
     RemoveGrant {
         selector: String,
     },
+
+    // ---- 委派给本机 Agent（RFC-0009）----
+    ListAgentTasks,
+    ShowAgentTask {
+        task_id: String,
+    },
+    /// 起 Agent：进程和"在跑的表"都得在守护进程里，不然命令行一退就没人管了。
+    ApproveAgentTask {
+        task_id: String,
+    },
+    DenyAgentTask {
+        task_id: String,
+    },
+    /// 停在跑的：只有起它的守护进程能停。
+    StopAgentTask {
+        task_id: String,
+    },
     ListFrpProfiles,
     SaveFrpProfile {
         profile: FrpProfile,
@@ -384,6 +403,8 @@ impl Request {
                 // 要的是服务起 server 时的那个环境（PATH、环境变量），不是这个
                 // 终端的：两边不一样正是最常见的起不来的原因。
                 | Request::TestMcpServer { .. }
+                | Request::ApproveAgentTask { .. }
+                | Request::StopAgentTask { .. }
         )
     }
 

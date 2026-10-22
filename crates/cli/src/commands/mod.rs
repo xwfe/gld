@@ -2,6 +2,7 @@
 //! 组装 `Request`、调用后端、渲染结果。
 
 mod actions;
+mod agent;
 mod daemon;
 mod doctor;
 mod frp;
@@ -82,6 +83,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Upgrade(args) => upgrade::run(&mut ctx, args).await,
         Command::Remote(command) => hub::remote(&mut ctx, command).await,
         Command::Grant(command) => grant::run(&mut ctx, command).await,
+        Command::Agent(command) => agent::run(&mut ctx, command).await,
         Command::Mcp(command) => mcp::run(&mut ctx, command).await,
         Command::Logs(args) => logs::logs(&mut ctx, args).await,
         Command::Health(args) => inspect::health(&mut ctx, args).await,

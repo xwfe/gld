@@ -251,11 +251,12 @@ pub fn stop(data_home: &Path, task_id: &str) -> Result<AgentTask, AgentError> {
             save(&dir, &task)?;
             Ok(task)
         }
-        State::Running if run::request_stop(task_id) => Ok(task),
+        State::Running if run::request_stop(&task.task_id) => Ok(task),
         State::Running => Err(AgentError::new(
             "AGENT_NOT_HERE",
             format!(
-                "任务 {task_id} 是 pid {} 的 gld 进程起的，不在这个进程里，停不了；在起它的那个进程里停（一般是守护进程：gld agent stop）",
+                "任务 {} 是 pid {} 的 gld 进程起的，不在这个进程里，停不了；在起它的那个进程里停（一般是守护进程：gld agent stop）",
+                task.task_id,
                 task.owner_pid.map_or("?".into(), |pid| pid.to_string())
             ),
         )),
@@ -290,7 +291,7 @@ pub fn review(
         note: note.to_string(),
         at_ms: run::now_ms(),
     });
-    let handoff = handoff_dir(Path::new(&task.workspace_root), task_id);
+    let handoff = handoff_dir(Path::new(&task.workspace_root), &task.task_id);
     if handoff.is_dir() {
         let _ = fs::write(
             handoff.join("review.md"),
@@ -301,9 +302,11 @@ pub fn review(
     Ok(task)
 }
 
+/// 按任务 id 找。命令行敲完整的 uuid 太长：给前 4 位以上、只对得上一个就认。
 pub fn get(data_home: &Path, task_id: &str) -> Result<(PathBuf, AgentTask), AgentError> {
     let agents_root = store::root(data_home);
-    let dir = store::find(&agents_root, task_id)
+    let task_id = resolve_id(&agents_root, task_id)?;
+    let dir = store::find(&agents_root, &task_id)
         .ok_or_else(|| AgentError::new("AGENT_TASK_NOT_FOUND", format!("没有任务 {task_id}")))?;
     let task = store::read(&dir).ok_or_else(|| {
         AgentError::new(
@@ -313,6 +316,77 @@ pub fn get(data_home: &Path, task_id: &str) -> Result<(PathBuf, AgentTask), Agen
     })?;
     let task = settle(&agents_root, &dir, task);
     Ok((dir, task))
+}
+
+fn resolve_id(agents_root: &Path, given: &str) -> Result<String, AgentError> {
+    let given = given.trim();
+    if store::valid_id(given) {
+        return Ok(given.to_string());
+    }
+    let not_found = || AgentError::new("AGENT_TASK_NOT_FOUND", format!("没有任务 {given}"));
+    if given.len() < 4 || !given.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err(not_found());
+    }
+    let matches: Vec<String> = store::list(agents_root, None)
+        .into_iter()
+        .map(|(_, task)| task.task_id)
+        .filter(|id| id.starts_with(given))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(not_found()),
+        many => Err(AgentError::new(
+            "AGENT_TASK_AMBIGUOUS",
+            format!(
+                "{given} 对得上 {} 个任务，多给几位：{}",
+                many.len(),
+                many.join("、")
+            ),
+        )),
+    }
+}
+
+/// 给人看、给 ChatGPT 看的一份：任务本身，加交接目录、Agent 写的报告、在跑时最后一段输出。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaskDetail {
+    #[serde(flatten)]
+    pub task: AgentTask,
+    pub handoff_dir: String,
+    #[serde(default)]
+    pub report: Option<String>,
+    /// 没收尾（在跑、失败、超时）时才有：最后一段 stdout / stderr。
+    #[serde(default)]
+    pub output_tail: Option<OutputTail>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OutputTail {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// 最后一段输出最多回多少字节。
+pub const OUTPUT_TAIL_BYTES: usize = 4096;
+
+pub fn detail(dir: &Path, task: AgentTask) -> TaskDetail {
+    let output_tail = matches!(
+        task.state,
+        State::Running | State::Failed | State::Timeout | State::Stopped | State::Interrupted
+    )
+    .then(|| {
+        let (mut stdout, mut stderr) = output_tail(dir, OUTPUT_TAIL_BYTES);
+        crate::tools::history::redact_text(&mut stdout);
+        crate::tools::history::redact_text(&mut stderr);
+        OutputTail { stdout, stderr }
+    });
+    TaskDetail {
+        handoff_dir: handoff_dir(Path::new(&task.workspace_root), &task.task_id)
+            .display()
+            .to_string(),
+        report: report(&task),
+        output_tail,
+        task,
+    }
 }
 
 /// 全部任务（给了项目 id 就只看这个项目），新的在前。

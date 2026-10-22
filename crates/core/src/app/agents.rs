@@ -1,0 +1,36 @@
+//! `gld agent`：在本机看、放行、拒绝、停委派任务（RFC-0009）。
+//!
+//! 起委派只有 AI 经 `agent_manage` 能做；这里是操作员这一侧。放行和停止要在守护进程里做
+//! （进程和"在跑的表"在那儿），列和看直接读盘。
+
+use crate::agents::{self, store::AgentTask, AgentError, TaskDetail};
+use crate::error::{AppError, AppResult};
+
+use super::App;
+
+impl App {
+    pub fn list_agent_tasks(&self) -> AppResult<Vec<AgentTask>> {
+        Ok(agents::list(&crate::home::data_home()?, None))
+    }
+
+    pub fn agent_task(&self, task_id: &str) -> AppResult<TaskDetail> {
+        let (dir, task) = agents::get(&crate::home::data_home()?, task_id).map_err(convert)?;
+        Ok(agents::detail(&dir, task))
+    }
+
+    pub fn approve_agent_task(&self, task_id: &str) -> AppResult<AgentTask> {
+        agents::approve(&crate::home::data_home()?, task_id).map_err(convert)
+    }
+
+    pub fn deny_agent_task(&self, task_id: &str) -> AppResult<AgentTask> {
+        agents::deny(&crate::home::data_home()?, task_id).map_err(convert)
+    }
+
+    pub fn stop_agent_task(&self, task_id: &str) -> AppResult<AgentTask> {
+        agents::stop(&crate::home::data_home()?, task_id).map_err(convert)
+    }
+}
+
+fn convert(error: AgentError) -> AppError {
+    AppError::Message(format!("{}（{}）", error.message, error.code))
+}

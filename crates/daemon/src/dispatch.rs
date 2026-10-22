@@ -189,6 +189,19 @@ pub async fn dispatch(
                 .map_err(RpcError::from)?;
             ok(&removed)
         }
+        R::ListAgentTasks => ok(&app.list_agent_tasks()?),
+        R::ShowAgentTask { task_id } => ok(&app.agent_task(&task_id)?),
+        R::ApproveAgentTask { task_id } => {
+            // 起 Agent 前要问一次 `--version`（最多 5 秒）、拍 git 快照，不能占异步 worker。
+            let app = app.clone();
+            let started = tokio::task::spawn_blocking(move || app.approve_agent_task(&task_id))
+                .await
+                .map_err(|error| RpcError::internal(format!("放行委派的任务失败：{error}")))?
+                .map_err(RpcError::from)?;
+            ok(&started)
+        }
+        R::DenyAgentTask { task_id } => ok(&app.deny_agent_task(&task_id)?),
+        R::StopAgentTask { task_id } => ok(&app.stop_agent_task(&task_id)?),
         R::McpServers => ok(&app.mcp_servers()?),
         R::SwitchMcpServers { names, on, all } => ok(&app.switch_mcp_servers(names, on, all)?),
         R::TestMcpServer { name } => {

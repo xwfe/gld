@@ -229,6 +229,19 @@ pub enum Command {
     #[command(subcommand, verbatim_doc_comment)]
     Grant(GrantCmd),
 
+    /// 委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
+    ///
+    ///   gld agent ls              所有项目的委派：跑到哪、哪些等你放行、哪些等审核
+    ///   gld agent show 3f2a       一个任务的 recap、改了哪些文件、最后的输出
+    ///   gld agent approve 3f2a    ask 档下放行（任务 id 给前 4 位以上就行）
+    ///   gld agent deny 3f2a       拒掉
+    ///   gld agent stop 3f2a       停掉在跑的
+    ///
+    /// 项目要先开：gld set <项目> agent-delegation=ask（或 auto）。Agent 是全权跑的
+    /// （能动你账号能动的一切），做完交回 AI 审核。见 docs/rfc/0009-agent-delegation.md。
+    #[command(subcommand, verbatim_doc_comment)]
+    Agent(AgentCmd),
+
     /// 本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
     ///
     ///   gld mcp ls                     ~/.claude.json 和 ~/.codex/config.toml 里装了哪些、开了哪些
@@ -975,6 +988,36 @@ pub struct HubSetArgs {
     /// 经全局入口暴露为 <入口公网地址>/hub/mcp（全局入口要先启用）
     #[arg(long, value_name = "true|false")]
     pub global_gateway: Option<bool>,
+}
+
+// ----------------------------------------------------------------- agent
+
+#[derive(Debug, Subcommand)]
+pub enum AgentCmd {
+    /// 所有项目的委派任务，新的在前
+    #[command(visible_alias = "ls")]
+    List,
+    /// 一个任务的详情：recap、改了哪些文件、交接报告、最后的输出
+    Show {
+        /// 任务 id，给前 4 位以上就行
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+    /// 放行一个等你点头的任务（项目开的是 ask 档）
+    Approve {
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+    /// 拒掉一个等你点头的任务
+    Deny {
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+    /// 停掉在跑的（或作废还在等放行的）
+    Stop {
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
 }
 
 // ----------------------------------------------------------------- grant
