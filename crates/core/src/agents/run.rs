@@ -134,7 +134,7 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
     let result_file = task_dir.join(store::RESULT_FILE);
     let _ = fs::remove_file(&result_file);
     let (argv, prompt_on_stdin) = profile.argv(&root, &result_file, &prompt);
-    task.agent_version = agent_version(&argv[0]);
+    task.agent_version = agent_version(&argv[0], &task_dir);
     task.version_unverified = !profile.verified.is_empty()
         && !task
             .agent_version
@@ -235,9 +235,13 @@ fn spawn(
 }
 
 /// `<程序> --version` 的第一行，最多等 5 秒。拿不到就是 None，不挡着起跑。
-fn agent_version(program: &str) -> Option<String> {
+///
+/// 在任务目录里问：认不得 `--version` 的程序会把它当成普通参数照常干活，写出来的东西
+/// 落在任务目录，不落在项目里或者 gld 的当前目录（测试的假脚本就这么干过）。
+fn agent_version(program: &str, task_dir: &Path) -> Option<String> {
     let mut child = Command::new(program)
         .arg("--version")
+        .current_dir(task_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

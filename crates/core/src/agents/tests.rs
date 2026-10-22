@@ -45,7 +45,8 @@ impl Fixture {
     /// 放一个假 Agent 脚本，并在 agents.toml 里登记成 `name`。
     fn agent(&self, name: &str, script: &str, result: &str, extra: &str) -> PathBuf {
         let path = self.home.path().join(format!("{name}.sh"));
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("script");
+        let version = "if [ \"$1\" = \"--version\" ]; then echo 'fake-agent 1.0'; exit 0; fi";
+        std::fs::write(&path, format!("#!/bin/sh\n{version}\n{script}\n")).expect("script");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let toml = agents_toml(self.data_home());
         let mut text = std::fs::read_to_string(&toml).unwrap_or_default();
@@ -319,6 +320,58 @@ fn unknown_agents_and_empty_prompts_are_refused() {
     })
     .expect_err("空提示");
     assert_eq!(error.code, "INVALID_ARGUMENT");
+}
+
+/// 起跑前问一次版本，记进任务；不在档案 `verified` 里的标出来。
+#[test]
+fn the_agent_version_is_recorded_and_unverified_ones_are_flagged() {
+    let f = Fixture::new();
+    f.agent(
+        "fake",
+        "cat >/dev/null\necho ok",
+        STDOUT,
+        "verified = [\"fake-agent 2\"]",
+    );
+    let done = f.finished(&f.start("fake", Approval::Auto).expect("起"));
+    assert_eq!(done.agent_version.as_deref(), Some("fake-agent 1.0"));
+    assert!(done.version_unverified);
+}
+
+/// 认不得 `--version` 的程序会把它当普通参数照常干活：问版本那一次写出来的东西
+/// 只能落在任务目录，不能落进项目，也不能落进 gld 的当前目录（2026-10-22 撞过）。
+#[test]
+fn asking_the_version_runs_inside_the_task_directory() {
+    let f = Fixture::new();
+    let path = f.home.path().join("naive.sh");
+    std::fs::write(&path, "#!/bin/sh\necho stray > stray.txt\necho ok\n").expect("script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::fs::write(
+        agents_toml(f.data_home()),
+        format!(
+            "[agents.naive]\ncommand = [\"{}\"]\nresult = {STDOUT}\n",
+            path.display()
+        ),
+    )
+    .expect("agents.toml");
+    let task = f.start("naive", Approval::Auto).expect("起");
+    let done = f.finished(&task);
+    let (dir, _) = get(f.data_home(), &task.task_id).expect("任务");
+    assert!(
+        dir.join("stray.txt").exists(),
+        "问版本那一次应该写在任务目录"
+    );
+    assert!(
+        !std::env::current_dir()
+            .expect("cwd")
+            .join("stray.txt")
+            .exists(),
+        "不能写进 gld 的当前目录"
+    );
+    assert_eq!(
+        done.changed_files,
+        vec!["stray.txt".to_string()],
+        "真跑那一次在项目里"
+    );
 }
 
 /// 起它的进程已经不在了（这里假装一个死掉的实例）：读到时改成 unknown，不猜结局。
