@@ -58,7 +58,7 @@
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
 
-| Agent 委派 | 2026-10-22 用户定排进计划，未开始 | 先写 RFC 草案、经用户认可再实现。要定的：ChatGPT 侧提交立即回任务 ID、等结果单次不超过 30 秒（经 OpenAI 隧道时官方上限 120 秒）；Codex 走 `codex app-server` 的 Thread/Turn；批准只在本机做，ChatGPT 只能回答 Agent 提的问题；同项目的写任务和 gld 自己的写操作互斥；Agent 的凭据不进回包。codex-bridge 的做法和该避开的坑见审查 §39 |
+| Agent 委派 | [RFC-0009](docs/rfc/0009-agent-delegation.md) 草案（2026-10-22），等用户定 | 用户先定 RFC 第 3 节三件事：本机项目由 gld 直接驱动本机 Codex（和路线 §5.6"经 ccnm"不一致，ccnm 不收同账号同机），远端成员走 `ccnm.machine/1`；`agent-delegation=off/ask/auto` 谁能发起；委派写任务在跑时 gld 对该项目拦不拦写和执行。定了再按 D1（只读委派，假 app-server 测试 + 一次真跑）开工 |
 | OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
 | 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 
