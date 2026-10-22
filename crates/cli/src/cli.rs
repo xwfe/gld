@@ -439,7 +439,7 @@ pub struct StartArgs {
     #[arg(long, value_name = "TUNNEL")]
     pub tunnel: Option<TunnelSpec>,
 
-    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
     #[arg(
         long = "token",
         alias = "tunnel-token",
@@ -631,7 +631,7 @@ pub struct ShareArgs {
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 
-    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
     #[arg(
         long = "token",
         alias = "tunnel-token",
@@ -667,7 +667,7 @@ pub struct UpgradeArgs {
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 
-    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
     #[arg(
         long = "token",
         alias = "tunnel-token",

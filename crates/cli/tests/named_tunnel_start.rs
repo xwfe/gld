@@ -50,6 +50,43 @@ fn named_tunnel_accepts_a_reachable_endpoint_with_new_token_flag() {
     env.ok(&["start"]);
 }
 
+/// token 交给 cloudflared 走环境变量，不进 argv：argv 本机任何账号用 `ps` 都看得到。
+#[cfg(unix)]
+#[test]
+fn named_tunnel_token_reaches_cloudflared_outside_its_argv() {
+    let mut env = Env::new();
+    let seen = env.home.path().join("cloudflared-seen");
+    env.fake_binary(
+        "cloudflared",
+        &format!(
+            "#!/bin/sh\nprintf 'args=%s\\ntoken=%s\\n' \"$*\" \"$TUNNEL_TOKEN\" > '{}'\n\
+             echo 'INF Registered tunnel connection connIndex=0'\nwhile true; do sleep 1; done\n",
+            seen.display()
+        ),
+    );
+    let port = free_port();
+    let state = env.json(&[
+        "--json",
+        "start",
+        ".",
+        "--port",
+        &port.to_string(),
+        "--tunnel",
+        &format!("cf:http://127.0.0.1:{port}/mcp"),
+        "--token",
+        "fixture-token",
+    ]);
+    assert_eq!(state["service"]["state"], "running", "{state}");
+    let seen = std::fs::read_to_string(&seen).expect("假 cloudflared 没被调起来");
+    let args = seen.lines().next().unwrap_or_default();
+    assert!(args.contains("run"), "{seen}");
+    assert!(
+        !args.contains("fixture-token"),
+        "token 还在命令行里：{seen}"
+    );
+    assert!(seen.contains("token=fixture-token"), "{seen}");
+}
+
 #[test]
 fn token_flags_and_explicit_port_parse() {
     for command in ["start", "share", "upgrade"] {

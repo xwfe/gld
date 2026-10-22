@@ -224,14 +224,19 @@ gld share --tunnel cf:mcp.example.com
 ```
 
 token 没配过的话，这条命令会当场问你要（输入不显示）。不想交互——比如写在
-脚本里——就直接带上：
+脚本里——放环境变量 `TUNNEL_TOKEN`（和 cloudflared 自己认的同名），或者用 `--token` 带上：
 
 ```bash
+TUNNEL_TOKEN="$(cat ~/.config/cf-tunnel-token)" gld share --tunnel cf:mcp.example.com
 gld share --tunnel cf:mcp.example.com --token <隧道 token>
 ```
 
-写在命令行里的 token 会进 shell 历史，介意的话事先存起来：
-`gld secret set cloudflare_token <隧道 token>`。
+两个都给时用 `--token` 的。给过一次 gld 就存下来，以后不用再给；环境变量里的会覆盖已经存着的那份，
+所以 gld 用到它时会在终端提示一句。只有 `--tunnel cf:<域名>` 才读这个变量，临时地址、FRP、自建地址不受影响。
+
+`--token` 写在命令行里，命令跑着的时候本机别的账号用 `ps` 看得到，也会进 shell 历史；
+上面那样从文件或密码管理器读进环境变量就没有这两处。gld 起 cloudflared 时也是经环境变量把 token 交给它，
+不放在它的命令行里。
 
 **域名必须给。** 固定域名模式下 gld 不像 quick 那样能从 cloudflared 的输出里
 读回地址——这个地址要写进 OAuth 元数据，cloudflared 那边也拿它建 ingress。
@@ -258,8 +263,8 @@ gld upgrade --port 28767
 写出它预期的回源地址。已经起来的服务和隧道会留着，方便你改完云端配置直接复查。
 两点别误会：公网有响应不等于 OAuth 全流程能走通；要确认就跑 `gld health`。
 
-`start`、`share`、`upgrade` 三个命令给 token 都用 `--token`；旧写法 `--tunnel-token`
-仍然认。
+`start`、`share`、`upgrade` 三个命令给 token 都用 `--token` 或环境变量 `TUNNEL_TOKEN`；
+旧写法 `--tunnel-token` 仍然认。
 
 ### 办法三：FRP 固定域名（自己有公网机器）
 

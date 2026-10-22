@@ -510,7 +510,7 @@ gld share --off                        # 关掉
 **cloudflare quick 和 named 的区别：** quick 零配置但**服务每次重启地址都会变**，
 ChatGPT 的连接器改不了地址，只能删了重建（哪些操作会重启见 [connect-clients.md](connect-clients.md)），适合试用；named 要你在 Cloudflare 建一条隧道拿到 token，
 地址固定，用 `gld share --tunnel cf:<你的域名>` 一次把域名定下来——token
-没配过会当场问，脚本里用 `--token <token>` 直接给。
+没配过会当场问，脚本里放环境变量 `TUNNEL_TOKEN` 或用 `--token <token>` 给（[两种给法的区别](connect-clients.md#办法二cloudflare-固定域名)）。
 
 以前还有一个"全局入口"（多个单项目服务共用一个域名，服务经它挂在 `/hub/mcp`），
 老配置照旧能用，不再出现在帮助里，见

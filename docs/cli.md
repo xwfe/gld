@@ -209,7 +209,7 @@ Options:
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
       --token <TOKEN>
-          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
@@ -603,7 +603,7 @@ Options:
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
       --token <TOKEN>
-          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
@@ -675,7 +675,7 @@ Options:
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
       --token <TOKEN>
-          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给会当场问
+          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
 
       --subdomain <SUB>
           FRP 子域名（配合 --tunnel frp:<配置名>）

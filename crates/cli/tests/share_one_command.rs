@@ -226,6 +226,66 @@ fn the_tunnel_token_can_be_given_on_the_command_line() {
     assert_eq!(public_endpoint(&env), "https://mcp.example.com/mcp");
 }
 
+/// token 也能放环境变量 `TUNNEL_TOKEN`（和 cloudflared 一样），不用出现在命令行里；
+/// 两个都给时 `--token` 优先。
+#[test]
+fn the_tunnel_token_can_come_from_the_environment() {
+    let env = Env::new();
+    project(&env, "named-env");
+
+    let output = env.gld_with_env(
+        &["upgrade", "--tunnel", "cf:mcp.example.com"],
+        &[("TUNNEL_TOKEN", "tok-from-env")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("TUNNEL_TOKEN"),
+        "要说一声用的是环境变量：{stderr}"
+    );
+    assert_eq!(env.service_secret("cloudflare_token"), "tok-from-env");
+
+    let output = env.gld_with_env(
+        &[
+            "upgrade",
+            "--tunnel",
+            "cf:mcp.example.com",
+            "--token",
+            "tok-flag",
+        ],
+        &[("TUNNEL_TOKEN", "tok-from-env")],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        env.service_secret("cloudflare_token"),
+        "tok-flag",
+        "--token 要压过环境变量"
+    );
+}
+
+/// 只有固定域名才看 `TUNNEL_TOKEN`：shell 里常年 export 着它的人，用自己的公网地址照常。
+#[test]
+fn an_exported_tunnel_token_is_ignored_by_other_entries() {
+    let env = Env::new();
+    project(&env, "own-env");
+
+    let output = env.gld_with_env(
+        &["share", "--tunnel", "https://mcp.example.com/"],
+        &[("TUNNEL_TOKEN", "tok-from-env")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("TUNNEL_TOKEN"),
+        "不是固定域名就不该去读它：{stderr}"
+    );
+    assert_eq!(public_endpoint(&env), "https://mcp.example.com/mcp");
+}
+
 /// FRP 配置填了个不存在的名字，要在这一步就拦住并把已有的列出来。
 #[test]
 fn share_rejects_an_unknown_frp_profile_up_front() {

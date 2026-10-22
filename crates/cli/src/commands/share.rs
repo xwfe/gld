@@ -164,10 +164,33 @@ pub async fn configure_service(
     Ok(())
 }
 
-/// 服务的 Cloudflare Tunnel Token：命令行给了就存下来，没给也没配过就当场问。
+/// `--token` 没给时认的环境变量，名字和 cloudflared 自己的一样。token 写在命令行里，
+/// 本机别的账号用 `ps` 看得到，shell 历史里也留一份；放环境变量就没这两处。
+const TOKEN_ENV: &str = "TUNNEL_TOKEN";
+
+/// 用户这次给的 Tunnel Token：`--token` 优先，其次环境变量。
+///
+/// 只在固定域名这条路上调用：shell 里常年 export 着 `TUNNEL_TOKEN` 的人，
+/// 用临时地址或 FRP 时不该因此撞上"--token 是固定域名用的"。
+fn given_token(ctx: &Ctx, flag: Option<&str>) -> Option<String> {
+    if let Some(flag) = flag {
+        return Some(flag.trim().to_string());
+    }
+    let value = std::env::var(TOKEN_ENV).ok()?.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    // 说一声用的是哪份：环境变量里可能是别的隧道的旧 token，它会覆盖已保存的那份。
+    ctx.out.note(format!(
+        "Tunnel Token 取自环境变量 {TOKEN_ENV}，这次会把它存下来。"
+    ));
+    Some(value)
+}
+
+/// 服务的 Cloudflare Tunnel Token：命令行或环境变量给了就存下来，都没给也没配过就当场问。
 async fn ensure_service_token(ctx: &mut Ctx, token: Option<&str>) -> CliResult {
-    let value = match token {
-        Some(given) => given.trim().to_string(),
+    let value = match given_token(ctx, token) {
+        Some(given) => given,
         None => {
             let saved: String = ctx
                 .backend
@@ -182,7 +205,7 @@ async fn ensure_service_token(ctx: &mut Ctx, token: Option<&str>) -> CliResult {
                 "Cloudflare Tunnel Token（Zero Trust 后台复制，输入不显示）：",
                 "Cloudflare 固定域名要 Tunnel Token。非交互环境这样给：\n  \
                  gld secret set cloudflare_token <token>\n  \
-                 或者在命令里带上：--token <token>",
+                 或者设环境变量 TUNNEL_TOKEN=<token>，或者在命令里带上：--token <token>",
             )?
         }
     };
@@ -385,8 +408,8 @@ async fn ensure_cloudflare_token(
         TunnelService::Mcp => "cloudflare_token",
         TunnelService::Actions => "actions_cloudflare_token",
     };
-    let value = match token {
-        Some(given) => given.trim().to_string(),
+    let value = match given_token(ctx, token) {
+        Some(given) => given,
         None => {
             let saved: Option<String> = ctx
                 .backend
@@ -403,7 +426,7 @@ async fn ensure_cloudflare_token(
                 &format!(
                     "Cloudflare 固定域名要 Tunnel Token。非交互环境这样给：\n  \
                      gld secret set {key} <token>\n  \
-                     或者在命令里带上：--token <token>"
+                     或者设环境变量 TUNNEL_TOKEN=<token>，或者在命令里带上：--token <token>"
                 ),
             )?
         }

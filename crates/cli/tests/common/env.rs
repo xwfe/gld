@@ -74,6 +74,8 @@ impl Env {
             .env("NO_COLOR", "1")
             // 外面的环境变量会改变工作区推断，测试必须只认自己的临时目录。
             .env_remove("GLD_WORKSPACE")
+            // 开发机 shell 里 export 着的 Tunnel Token 会被当成用户给的，"没给 token"类测试就不成立了。
+            .env_remove("TUNNEL_TOKEN")
             .current_dir(self.project.path());
         if let Some(prefix) = &self.path_prefix {
             let existing = std::env::var("PATH").unwrap_or_default();

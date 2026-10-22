@@ -88,7 +88,8 @@ pub(crate) fn apply_proxy_env(cmd: &mut Command, proxy: &ProxyConfig) {
     }
 }
 
-/// Spawn `cloudflared tunnel --url http://127.0.0.1:{port}` (quick) or named `tunnel run --token`.
+/// Spawn `cloudflared tunnel --url http://127.0.0.1:{port}` (quick) or named `tunnel run`
+/// (token in `TUNNEL_TOKEN`).
 ///
 /// 先按 cloudflared 的默认协议（QUIC）连；如果发现连不上边缘，
 /// 自动杀掉重来一次并强制 http2，见 [`FALLBACK_PROTOCOL`]。
@@ -231,7 +232,10 @@ async fn try_spawn(
     if quick {
         cmd.args(["--url", &format!("http://127.0.0.1:{port}")]);
     } else {
-        cmd.args(["run", "--token", cloudflare_token.trim()]);
+        // token 走 cloudflared 认的环境变量，不放进 argv：argv 本机任何账号用 `ps` 都看得到，
+        // 拿到 token 就能顶替这条隧道接流量。
+        cmd.arg("run");
+        cmd.env("TUNNEL_TOKEN", cloudflare_token.trim());
     }
 
     let mut child = cmd.spawn().map_err(|err| {
