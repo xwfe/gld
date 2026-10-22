@@ -20,6 +20,7 @@ pub const BUILD_COMMIT: Option<&str> = option_env!("GLD_BUILD_COMMIT");
 
 pub mod actions;
 pub mod agent_context;
+pub mod agents;
 pub mod app;
 pub mod async_rt;
 pub mod auth;

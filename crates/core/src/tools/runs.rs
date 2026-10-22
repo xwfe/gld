@@ -609,7 +609,7 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn create_private_dir(path: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -620,7 +620,7 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     builder.create(path)
 }
 
-fn create_private_file(path: &Path) -> std::io::Result<File> {
+pub(crate) fn create_private_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -643,6 +643,14 @@ static OWNED: LazyLock<Mutex<HashMap<PathBuf, Option<File>>>> =
 
 /// 在 `root/owners/` 下拿着自己的锁，返回实例 id；拿不到返回 `None`。
 fn register_owner(root: &Path) -> Option<String> {
+    take_owner_lock(root, sweep_all)
+}
+
+/// 同 [`register_owner`]，但第一次拿到锁之后跑的是 `on_first`，不是运行记录的清理。
+///
+/// 委派任务（`crate::agents`）的目录也用这把锁判"起它的进程还在不在"，可它的目录结构
+/// 不是 `runs` 的：拿运行记录的规则去清，没有 `run.json` 的任务目录七天后会被当成残骸删掉。
+pub(crate) fn take_owner_lock(root: &Path, on_first: fn(&Path)) -> Option<String> {
     let mut owned = OWNED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -661,7 +669,7 @@ fn register_owner(root: &Path) -> Option<String> {
         match taken {
             Ok(file) => {
                 clear_dead_owners(&dir);
-                sweep_all(root);
+                on_first(root);
                 Some(file)
             }
             Err(error) => {
@@ -678,7 +686,7 @@ fn register_owner(root: &Path) -> Option<String> {
 
 /// 起它的那个 gld 进程还在不在。拿不准（锁文件打不开之类）时算"还在"：
 /// 宁可一条记录多挂一会儿 running，也不要把活着的命令说成 unknown。
-fn owner_alive(root: &Path, owner: &str) -> bool {
+pub(crate) fn owner_alive(root: &Path, owner: &str) -> bool {
     if owner == INSTANCE.as_str() {
         return true;
     }

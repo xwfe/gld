@@ -1,0 +1,558 @@
+//! 把一个委派跑起来、盯着、收尾（RFC-0009 4.2）。
+//!
+//! 不复用 `exec_command` 的会话表：那边一条命令最长 1 小时、会话按调用方分、输出放内存，
+//! 委派要 2 小时、要本机命令行也看得见、输出要整份留着给人查。这里直接起进程：
+//!
+//! - 自己一个进程组，停的时候停整组，Agent 起的子进程一个不留；
+//! - 提示从 stdin 喂，喂完就关（不关的话有的 Agent 一直等输入）；
+//! - stdout / stderr 直接写进任务目录的文件，"最后几行输出"从文件尾读；
+//! - 一个监视线程：进程退出、被叫停、总时长到了、太久没输出，四种收尾。
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+use sha2::{Digest, Sha256};
+
+use super::profile::{AgentProfile, ResultFrom, StopSignal};
+use super::store::{self, AgentTask, State};
+
+/// recap 最多回多少字节。
+pub const RECAP_MAX_BYTES: usize = 32 * 1024;
+/// 改动文件最多列多少个。
+pub const CHANGED_FILES_MAX: usize = 200;
+
+/// 为什么停。监视线程收尾时按它记状态。
+const REASON_NONE: u8 = 0;
+const REASON_STOPPED: u8 = 1;
+const REASON_INTERRUPTED: u8 = 2;
+
+/// 这个进程里正在跑的委派：任务 id → 它在哪个项目、怎么叫停。
+struct Live {
+    project_root: PathBuf,
+    reason: Arc<AtomicU8>,
+}
+
+static LIVE: LazyLock<Mutex<HashMap<String, Live>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn live() -> std::sync::MutexGuard<'static, HashMap<String, Live>> {
+    LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical(a) == canonical(b)
+}
+
+/// 这个项目有没有委派在跑，有就是它的任务 id。gld 对这个项目的写和执行据此拦下（RFC-0009 第 5 节第 3 条）。
+pub fn running_in(project_root: &Path) -> Option<String> {
+    live()
+        .iter()
+        .find(|(_, entry)| same_dir(&entry.project_root, project_root))
+        .map(|(id, _)| id.clone())
+}
+
+/// 这个进程里有没有在跑这个任务。
+pub fn is_live(task_id: &str) -> bool {
+    live().contains_key(task_id)
+}
+
+/// 先占住这个项目：同一个项目同时只许一个委派。占不住返回正在跑的那个任务 id。
+pub fn reserve(task_id: &str, project_root: &Path) -> Result<(), String> {
+    let mut live = live();
+    if let Some((id, _)) = live
+        .iter()
+        .find(|(_, entry)| same_dir(&entry.project_root, project_root))
+    {
+        return Err(id.clone());
+    }
+    live.insert(
+        task_id.to_string(),
+        Live {
+            project_root: project_root.to_path_buf(),
+            reason: Arc::new(AtomicU8::new(REASON_NONE)),
+        },
+    );
+    Ok(())
+}
+
+pub fn release(task_id: &str) {
+    live().remove(task_id);
+}
+
+/// 叫停一个在跑的委派。不在本进程里跑的返回 false。
+pub fn request_stop(task_id: &str) -> bool {
+    match live().get(task_id) {
+        Some(entry) => {
+            entry.reason.store(REASON_STOPPED, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
+
+/// gld 正常退出：停掉所有在跑的委派、记成 `interrupted`，最多等 `wait`。
+pub fn interrupt_all(wait: Duration) {
+    for entry in live().values() {
+        entry.reason.store(REASON_INTERRUPTED, Ordering::SeqCst);
+    }
+    let deadline = Instant::now() + wait;
+    while !live().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 起跑需要的东西。任务记录已经写好、项目已经 [`reserve`] 过。
+pub struct Launch {
+    pub task: AgentTask,
+    pub task_dir: PathBuf,
+    pub profile: AgentProfile,
+    pub prompt: String,
+    pub total_timeout: Duration,
+}
+
+/// 起进程、起监视线程。失败时任务记成 `failed`、放开项目，返回原因。
+pub fn launch(launch: Launch) -> Result<AgentTask, String> {
+    let Launch {
+        mut task,
+        task_dir,
+        profile,
+        prompt,
+        total_timeout,
+    } = launch;
+    let reason = match live().get(&task.task_id) {
+        Some(entry) => Arc::clone(&entry.reason),
+        None => return Err("内部错误：任务没有先占住项目".into()),
+    };
+    let root = PathBuf::from(&task.workspace_root);
+    let before = snapshot(&root);
+    let result_file = task_dir.join(store::RESULT_FILE);
+    let _ = fs::remove_file(&result_file);
+    let (argv, prompt_on_stdin) = profile.argv(&root, &result_file, &prompt);
+    task.agent_version = agent_version(&argv[0]);
+    task.version_unverified = !profile.verified.is_empty()
+        && !task
+            .agent_version
+            .as_deref()
+            .is_some_and(|version| profile.verified.iter().any(|ok| version.contains(ok)));
+
+    let spawned = spawn(
+        &argv,
+        &root,
+        &task_dir,
+        &profile,
+        prompt_on_stdin.then_some(prompt.as_str()),
+    );
+    let child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            task.state = State::Failed;
+            task.failure = Some(format!("起不来 {}：{error}", argv[0]));
+            task.finished_at_ms = Some(now_ms());
+            let _ = store::write(&task_dir, &task);
+            release(&task.task_id);
+            return Err(task.failure.clone().unwrap_or_default());
+        }
+    };
+    task.pid = Some(child.id());
+    task.state = State::Running;
+    task.started_at_ms = Some(now_ms());
+    task.owner_pid = Some(std::process::id());
+    if let Err(error) = store::write(&task_dir, &task) {
+        eprintln!("委派记录写不进 {}：{error}", task_dir.display());
+    }
+    let started = task.clone();
+    std::thread::Builder::new()
+        .name(format!("agent-{}", &task.task_id[..8]))
+        .spawn(move || {
+            watch(
+                child,
+                task,
+                task_dir,
+                profile,
+                total_timeout,
+                before,
+                reason,
+            )
+        })
+        .map_err(|error| format!("起不了监视线程：{error}"))?;
+    Ok(started)
+}
+
+fn spawn(
+    argv: &[String],
+    root: &Path,
+    task_dir: &Path,
+    profile: &AgentProfile,
+    stdin_text: Option<&str>,
+) -> Result<Child, String> {
+    #[cfg(not(unix))]
+    {
+        let _ = (argv, root, task_dir, profile, stdin_text);
+        Err("Windows 上还不支持委派（RFC-0009 没验过 Windows 的进程组和信号）".into())
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let open = |name: &str| {
+            crate::tools::runs::create_private_file(&task_dir.join(name))
+                .map_err(|error| format!("建不了 {name}：{error}"))
+        };
+        let mut command = Command::new(&argv[0]);
+        command
+            .args(&argv[1..])
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(open(store::STDOUT_FILE)?)
+            .stderr(open(store::STDERR_FILE)?)
+            .process_group(0);
+        // 和 exec_command 一个规矩：gld 的数据目录、名字像密钥的变量不给，档案点名要的除外
+        // （有的 Agent 靠环境变量里的 key 登录）。
+        command.env_remove(crate::home::HOME_ENV);
+        for name in crate::tools::exec::withheld_env_names() {
+            if !profile.env_pass.contains(&name) {
+                command.env_remove(name);
+            }
+        }
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let mut stdin = child.stdin.take();
+        let text = stdin_text.unwrap_or_default().to_string();
+        // 另起线程写：提示很长、Agent 又不急着读的话，写满管道会卡住这里。
+        std::thread::spawn(move || {
+            if let Some(stdin) = stdin.as_mut() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            drop(stdin);
+        });
+        Ok(child)
+    }
+}
+
+/// `<程序> --version` 的第一行，最多等 5 秒。拿不到就是 None，不挡着起跑。
+fn agent_version(program: &str) -> Option<String> {
+    let mut child = Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+enum Ending {
+    Exited(Option<i32>),
+    Stopped(u8),
+    TimedOut(String),
+}
+
+fn watch(
+    mut child: Child,
+    mut task: AgentTask,
+    task_dir: PathBuf,
+    profile: AgentProfile,
+    total_timeout: Duration,
+    before: Option<Snapshot>,
+    reason: Arc<AtomicU8>,
+) {
+    let started = Instant::now();
+    let idle_timeout = Duration::from_secs(profile.idle_timeout_secs.max(1));
+    let mut last_size = 0u64;
+    let mut last_output = Instant::now();
+    let pgid = child.id() as i32;
+    let ending = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ending::Exited(status.code()),
+            Ok(None) => {}
+            Err(error) => {
+                task.failure = Some(format!("等进程时出错：{error}"));
+                break Ending::Exited(None);
+            }
+        }
+        let why = reason.load(Ordering::SeqCst);
+        if why != REASON_NONE {
+            stop_group(&mut child, pgid, profile.stop_signal);
+            break Ending::Stopped(why);
+        }
+        if started.elapsed() >= total_timeout {
+            stop_group(&mut child, pgid, profile.stop_signal);
+            break Ending::TimedOut(format!(
+                "总时长到了（{} 分钟）",
+                total_timeout.as_secs() / 60
+            ));
+        }
+        let size = output_size(&task_dir);
+        if size != last_size {
+            last_size = size;
+            last_output = Instant::now();
+        } else if last_output.elapsed() >= idle_timeout {
+            stop_group(&mut child, pgid, profile.stop_signal);
+            break Ending::TimedOut(format!(
+                "{} 秒没有任何输出，按卡住处理",
+                idle_timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    // 正常退出也收一遍整组：全权跑的 Agent 留下的后台进程（dev server 之类）没人管就一直占着。
+    #[cfg(unix)]
+    signal(pgid, libc::SIGTERM);
+
+    let root = PathBuf::from(&task.workspace_root);
+    task.finished_at_ms = Some(now_ms());
+    match ending {
+        Ending::Exited(code) => {
+            task.exit_code = code;
+            match read_result(&profile, &task_dir) {
+                Ok(recap) if code == Some(0) => {
+                    task.recap = Some(recap);
+                    task.state = State::AwaitingReview;
+                }
+                Ok(recap) => {
+                    task.recap = Some(recap);
+                    task.state = State::Failed;
+                    task.failure
+                        .get_or_insert_with(|| format!("退出码 {code:?}"));
+                }
+                Err(error) => {
+                    task.state = State::Failed;
+                    task.failure.get_or_insert(error);
+                }
+            }
+        }
+        Ending::Stopped(why) => {
+            task.state = if why == REASON_INTERRUPTED {
+                State::Interrupted
+            } else {
+                State::Stopped
+            };
+            task.recap = read_result(&profile, &task_dir).ok();
+        }
+        Ending::TimedOut(why) => {
+            task.state = State::Timeout;
+            task.failure = Some(why);
+            task.recap = read_result(&profile, &task_dir).ok();
+        }
+    }
+    match (before, snapshot(&root)) {
+        (Some(before), Some(after)) => {
+            let mut changed = changed_files(&root, &before, &after);
+            task.changed_files_truncated = changed.len() > CHANGED_FILES_MAX;
+            changed.truncate(CHANGED_FILES_MAX);
+            task.changed_files = changed;
+        }
+        _ => task.changes_unknown = true,
+    }
+    if let Err(error) = store::write(&task_dir, &task) {
+        eprintln!("委派记录写不进 {}：{error}", task_dir.display());
+    }
+    release(&task.task_id);
+}
+
+fn output_size(task_dir: &Path) -> u64 {
+    [store::STDOUT_FILE, store::STDERR_FILE]
+        .iter()
+        .filter_map(|name| fs::metadata(task_dir.join(name)).ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+/// 先发档案的信号等 5 秒，再 TERM 等 3 秒，最后 KILL。停的是整个进程组。
+fn stop_group(child: &mut Child, pgid: i32, first: StopSignal) {
+    #[cfg(unix)]
+    {
+        let first = match first {
+            StopSignal::Int => libc::SIGINT,
+            StopSignal::Term => libc::SIGTERM,
+        };
+        for (sig, wait) in [
+            (first, Duration::from_secs(5)),
+            (libc::SIGTERM, Duration::from_secs(3)),
+        ] {
+            signal(pgid, sig);
+            let deadline = Instant::now() + wait;
+            while Instant::now() < deadline {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        signal(pgid, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pgid, first);
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn signal(pgid: i32, sig: i32) {
+    // SAFETY: kill 只是发信号；负的 pid 表示整个进程组，组已经没了会回 ESRCH，忽略。
+    unsafe {
+        libc::kill(-pgid, sig);
+    }
+}
+
+/// 按档案取 Agent 的最后一条消息，脱敏、截到 [`RECAP_MAX_BYTES`]。
+fn read_result(profile: &AgentProfile, task_dir: &Path) -> Result<String, String> {
+    let text = match profile.result.from {
+        ResultFrom::File => fs::read_to_string(task_dir.join(store::RESULT_FILE))
+            .map_err(|_| "Agent 没写出结果文件".to_string())?,
+        ResultFrom::Stdout => fs::read_to_string(task_dir.join(store::STDOUT_FILE))
+            .map_err(|error| format!("读不了输出：{error}"))?,
+        ResultFrom::Json => {
+            let stdout = fs::read_to_string(task_dir.join(store::STDOUT_FILE))
+                .map_err(|error| format!("读不了输出：{error}"))?;
+            json_field(&stdout, &profile.result.field).ok_or_else(|| {
+                format!(
+                    "输出里找不到 JSON 字段 {}（输出前 2 KB：{}）",
+                    profile.result.field,
+                    stdout.chars().take(2048).collect::<String>()
+                )
+            })?
+        }
+    };
+    let mut text = text.trim().to_string();
+    if text.len() > RECAP_MAX_BYTES {
+        let mut end = RECAP_MAX_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n…[截断，全文见任务目录]");
+    }
+    crate::tools::history::redact_text(&mut text);
+    Ok(text)
+}
+
+/// 整个输出是一个 JSON 对象就从它取；不是的话从最后一行往前找第一个能解析的。
+fn json_field(stdout: &str, field: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()
+        .or_else(|| {
+            stdout
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        })?;
+    match parsed.get(field)? {
+        serde_json::Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+/// 一个项目某一刻的样子：HEAD，加上 git 认为不干净的每个文件的内容摘要。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Snapshot {
+    head: Option<String>,
+    dirty: BTreeMap<String, String>,
+}
+
+fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+/// 不是 git 仓库（或者没装 git）就是 None，改动记成"不知道"，不瞎报。
+fn snapshot(root: &Path) -> Option<Snapshot> {
+    let status = git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    let head = git(root, &["rev-parse", "HEAD"])
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string());
+    let mut dirty = BTreeMap::new();
+    let mut entries = status
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let code = String::from_utf8_lossy(&entry[..2]).into_owned();
+        let path = String::from_utf8_lossy(&entry[3..]).into_owned();
+        // 改名的那一条后面还跟着原来的名字。
+        if code.starts_with('R') || code.starts_with('C') {
+            entries.next();
+        }
+        let digest = match fs::read(root.join(&path)) {
+            Ok(bytes) => format!("{code}:{:x}", Sha256::digest(&bytes)),
+            Err(_) => format!("{code}:missing"),
+        };
+        dirty.insert(path, digest);
+    }
+    Some(Snapshot { head, dirty })
+}
+
+/// 两次快照之间变了的文件：不干净的文件集合或内容变了的，加上 HEAD 动过时两次提交之间的。
+fn changed_files(root: &Path, before: &Snapshot, after: &Snapshot) -> Vec<String> {
+    let mut changed = BTreeSet::new();
+    for path in before.dirty.keys().chain(after.dirty.keys()) {
+        if before.dirty.get(path) != after.dirty.get(path) {
+            changed.insert(path.clone());
+        }
+    }
+    if let (Some(from), Some(to)) = (&before.head, &after.head) {
+        if from != to {
+            let range = format!("{from}..{to}");
+            if let Some(out) = git(root, &["diff", "--name-only", "-z", &range]) {
+                for path in out.split(|byte| *byte == 0).filter(|p| !p.is_empty()) {
+                    changed.insert(String::from_utf8_lossy(path).into_owned());
+                }
+            }
+        }
+    }
+    changed.into_iter().collect()
+}
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 测试里等监视线程收尾用。
+#[cfg(test)]
+pub fn wait_until_finished(task_dir: &Path, wait: Duration) -> AgentTask {
+    let deadline = Instant::now() + wait;
+    loop {
+        let task = store::read(task_dir).expect("任务记录");
+        if task.state != State::Running || Instant::now() >= deadline {
+            return task;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
