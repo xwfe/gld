@@ -128,11 +128,60 @@ fn an_auto_task_runs_edits_and_comes_back_for_review() {
         std::fs::read_to_string(handoff.join("brief.md")).expect("brief"),
         "背景：这是测试"
     );
+    assert!(
+        std::fs::read_to_string(f.root().join(".gld/.gitignore"))
+            .expect("gitignore")
+            .lines()
+            .any(|line| line == "*"),
+        ".gld/ 第一次由委派建出来时，和 Planning 一样放忽略全部的 .gitignore"
+    );
     assert_eq!(
-        std::fs::read_to_string(f.root().join(".gld/.gitignore")).expect("gitignore"),
+        std::fs::read_to_string(f.root().join(".gld/handoff/.gitignore")).expect("gitignore"),
         "*\n"
     );
     assert!(running_in(&f.root()).is_none(), "跑完要放开项目");
+}
+
+/// 用户删掉 `.gld/.gitignore` 是想让团队共享 Planning（concepts.md 写明"之后不会再补回来"），
+/// 委派不能把它补回来；交接文件照样不进 git，也不算进 Agent 的改动。
+#[test]
+fn a_shared_gld_directory_stays_shared_but_handoff_files_stay_out_of_git() {
+    let f = Fixture::new();
+    let planning = f.root().join(".gld/planning");
+    std::fs::create_dir_all(&planning).expect("planning");
+    std::fs::write(planning.join("state.json"), "{}").expect("state");
+    let committed = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(f.root())
+        .status()
+        .expect("git add")
+        .success()
+        && Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["commit", "-q", "-m", "share planning"])
+            .current_dir(f.root())
+            .status()
+            .expect("git commit")
+            .success();
+    assert!(committed, "共享 Planning 的提交没做成");
+
+    f.agent(
+        "fake",
+        "cat >/dev/null\necho x > touched.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    let done = f.finished(&f.start("fake", Approval::Auto).expect("起"));
+    assert!(
+        !f.root().join(".gld/.gitignore").exists(),
+        "用户共享着 .gld/，委派不该补回 .gitignore"
+    );
+    assert!(f.root().join(".gld/handoff/.gitignore").exists());
+    assert_eq!(
+        done.changed_files,
+        vec!["touched.txt".to_string()],
+        "{done:?}"
+    );
 }
 
 #[test]

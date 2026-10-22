@@ -131,7 +131,8 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 
 要交代的东西多时，用一个目录交接，两边都能读写：
 
-- **目录**：项目里的 `.gld/handoff/<task-id>/`。gld 第一次建 `.gld/` 时在里面放一个只写 `*` 的 `.gitignore`，整个目录不进 git status。
+- **目录**：项目里的 `.gld/handoff/<task-id>/`。`.gld/handoff/` 自带只写 `*` 的 `.gitignore`，交接文件不进 git status。
+  `.gld/` 是 Planning 也在用的目录，它的 `.gitignore` 照 Planning 的规矩只在第一次建出来时写，用户为共享 Planning 删掉了就不补回来。
 - **`brief.md`**：ChatGPT 起任务前用 gld 写进去（背景、约束、验收标准），提示里告诉 Agent 先读它。
 - **`report.md`**：Agent 写详细报告。有就回给 ChatGPT（最多 64 KB），没有就只回 recap。
 - **`review.md`**：ChatGPT `review` 时的意见，gld 写进去。打回重做时，下一次 `start` 的提示里告诉 Agent 先读它。

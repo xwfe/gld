@@ -517,10 +517,23 @@ fn settle(agents_root: &Path, dir: &Path, mut task: AgentTask) -> AgentTask {
 /// 整个目录不进 git status，也就不会被算成 Agent 的改动。
 fn prepare_handoff(root: &Path, task_id: &str, brief: Option<&str>) -> Result<String, String> {
     let gld_dir = root.join(".gld");
+    let handoff_root = gld_dir.join("handoff");
+    let first_gld = !gld_dir.exists();
+    let first_handoff = !handoff_root.exists();
     let dir = handoff_dir(root, task_id);
     fs::create_dir_all(&dir).map_err(|error| format!("建不了 {}：{error}", dir.display()))?;
-    let ignore = gld_dir.join(".gitignore");
-    if !ignore.exists() {
+    // `.gld/` 是 Planning 也在用的目录，规矩跟它（planning::store 的 ignore_self_in_git）：只在第一次建出来时
+    // 放只写 `*` 的 `.gitignore`。用户删掉它是想让团队共享 Goal / Plan，不补回来。
+    if first_gld {
+        let _ = fs::write(
+            gld_dir.join(".gitignore"),
+            "# gld 在这个项目里的本地状态，默认不进版本库\n*\n",
+        );
+    }
+    // 交接目录自己再放一个：哪怕用户共享了 `.gld/`，交接文件（Agent 写的报告、审核意见）也不进版本库，
+    // 跑前跑后的 git 快照也就不会把它们算成 Agent 的改动。
+    if first_handoff {
+        let ignore = handoff_root.join(".gitignore");
         fs::write(&ignore, "*\n")
             .map_err(|error| format!("写不了 {}：{error}", ignore.display()))?;
     }

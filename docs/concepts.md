@@ -1449,7 +1449,8 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。
 
 交接文件在项目里的 `.gld/handoff/<任务 id>/`：`brief.md`（AI 写的背景）、`report.md`（Agent 写的详细报告）、
-`review.md`（审核意见）。`.gld/` 里自带一个只写 `*` 的 `.gitignore`，这些文件不会出现在 git status 里。
+`review.md`（审核意见）。`.gld/handoff/` 自带一个只写 `*` 的 `.gitignore`，这些文件不会出现在 git status 里；
+你为了共享 Planning 删掉了 `.gld/.gitignore` 也一样（委派不会把它补回来）。
 gld 自己的记录（提示全文、Agent 的原样输出）在数据目录的 `agents/` 下，`gld agent show` 看得到。
 
 **能用哪些 Agent**：内置 `codex`、`claude` 两份档案。别的（Pi、Antigravity、Kimi……）在数据目录的 `agents.toml` 里加，
