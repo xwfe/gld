@@ -2328,3 +2328,36 @@ pid 68019 → 79902。换完：协议 7；工具表 33 → 34、指纹 `59951e97
 `action=review verdict=accept`，任务变成 `accepted`，意见写进 `.gld/handoff/910e5b3d…/review.md`。
 
 **没验：**Claude 真跑；ChatGPT 自己发起和审核（要用户先 Refresh）。临时项目留在服务上给用户试，不要了 `gld rm delegation-test`。没推送。
+
+## 44. ChatGPT 自己发起、审核一轮委派（2026-10-23 00:06–00:11）
+
+**做法：**用户在 ChatGPT 点了 Refresh、新开对话，贴了"让 codex 给 math_utils.py 加 median、补两条测试，停在等放行时告诉我，
+跑完自己看 diff、跑测试再 review"。结果从 `gld agent` 的任务记录和服务请求日志（UTC，下面换成本地时间）核对。
+
+| 本地时间 | ChatGPT 做了什么 |
+| --- | --- |
+| 00:06:27 | 重新 `initialize`、`tools/list`（46.7 KB，34 个工具）：Refresh 生效 |
+| 00:07:51 | `agent_manage action=agents` |
+| 00:08:07 | `action=start agent=codex`，提示写清了 median 的规则、"恰好两条测试"、不改无关文件、不提交，另带 brief 写验收标准；回 `waiting_local_approval` |
+| 00:09:51 | 用户 `gld agent approve ffb8a64f` |
+| 00:10:14–00:10:44 | `action=wait`，还在跑，等满 30 秒 |
+| 00:10:51 | `action=wait` → `awaiting_review`（Codex 跑了 61 秒，退出码 0，`codex-cli 0.163.0`；改了 `math_utils.py`、`test_math_utils.py`） |
+| 00:10:58 | `git_diff` |
+| 00:11:01 | `exec_command` 跑 `python3 -m unittest -v`，退出码 0 |
+| 00:11:20 | `action=review verdict=accept`，意见写了查了什么、5/5 通过 |
+
+**它审得对：**先看 diff、跑测试，再下结论，没有直接信 Agent 的 recap。我这边重跑也是 5/5，新增的两条测试是空列表和无序偶数长度列表。
+
+**它指出的问题是真的：**上一轮委派（§43 修 add / mean）的改动没提交，这次 `git_diff` 跟 HEAD 比，两轮的改动混在一起，
+它在意见里写"当前基于 HEAD 的 diff 无法确认来源"。回给审核者的只有"改了哪些文件"，没有"这次任务自己的那份 diff"。
+**下一步（还没做）：**跑之前、跑完各用临时 index `git add -A` + `write-tree` 记一棵树（不碰用户的 index 和工作区），
+两棵树一比就是这次任务自己的 diff（含新文件），有界地放进回包；`changed_files` 也改用它算。
+
+**另外两处：**
+
+- `.gld/.gitignore` 会被补回来（Planning 的规矩是用户删了就不补，删它是为了共享 Goal / Plan）：`7f0a87a` 已修，交接目录改用
+  自己的 `.gld/handoff/.gitignore`。临时项目里 `.gld/planning/` 本来就在用，是核对这一轮时看到的。
+- 在跑时的 `wait` 回包 14 KB（00:10:44 那次）：大头是 Codex `--json` 输出的事件流尾巴，JSON 里套 JSON 转义一层就翻倍。
+  可以把在跑时的输出尾巴收到 1 KB 左右，或者只给 stderr。还没改。
+
+`7f0a87a` 没部署。没推送。
