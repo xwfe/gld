@@ -1,0 +1,268 @@
+//! `agent_manage`：AI 把一段活委派给本机 Agent，做完交回审核（RFC-0009）。
+//!
+//! 把关都在这一层：
+//!
+//! - 项目开关 `agent-delegation` 是 off 就不让起（默认 off）；ask 档存下来等用户在本机 `gld agent approve`。
+//! - 起、审、停只有服务主凭据能做（D1）。grant 来的一律不行：现在分不出浏览器 grant，
+//!   而 Agent 是全权跑的，等于把全权借给了 grant 的持有人。
+//! - 只看得见、只动得了**这个项目**的任务。
+//! - Plan 模式下起不了（`manage::action_is_mutating` 把 start 算成写，分发层统一拦）。
+
+use std::path::Path;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::agents::{self, store::State, AgentError, Approval, StartRequest, TaskDetail};
+use crate::tools::caller::Caller;
+use crate::tools::workspace::WorkspaceError;
+use crate::tools::ToolContext;
+
+/// `wait` 单次最多等多久、起跑的总时长上限，都在 `tools::args::BOUNDED` 里：wait 和
+/// exec_command 一样最多 30 秒（经 OpenAI 隧道时官方上限 120 秒）。
+pub const ACTIONS: &[&str] = &[
+    "agents", "start", "status", "wait", "review", "stop", "list",
+];
+
+pub fn agent_manage(
+    ctx: &ToolContext,
+    caller: &Caller,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let data_home = crate::home::data_home().map_err(|error| {
+        tool_error(
+            "AGENT_STATE_UNAVAILABLE",
+            format!("找不到数据目录：{error}"),
+            "storage",
+        )
+    })?;
+    match action {
+        "agents" => agent_profiles(ctx, &data_home),
+        "list" => Ok(list(ctx, &data_home)),
+        "start" => {
+            only_operator(caller, "start")?;
+            start(ctx, caller, &data_home, args)
+        }
+        "status" => {
+            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            Ok(present(agents::detail(&dir, task)))
+        }
+        "wait" => {
+            let secs = crate::tools::args::bounded(args, "agent_manage", "wait_seconds");
+            let (_, task) = this_project_task(ctx, &data_home, args)?;
+            let (dir, task) = agents::wait(&data_home, &task.task_id, Duration::from_secs(secs))
+                .map_err(convert)?;
+            Ok(present(agents::detail(&dir, task)))
+        }
+        "review" => {
+            only_operator(caller, "review")?;
+            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            let verdict = string_arg(args, "verdict")?;
+            let note = args.get("note").and_then(Value::as_str).unwrap_or_default();
+            let task = agents::review(&data_home, &task.task_id, verdict, note).map_err(convert)?;
+            Ok(present(agents::detail(&dir, task)))
+        }
+        "stop" => {
+            only_operator(caller, "stop")?;
+            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            let task = agents::stop(&data_home, &task.task_id).map_err(convert)?;
+            Ok(present(agents::detail(&dir, task)))
+        }
+        other => Err(WorkspaceError::invalid_argument(format!(
+            "agent_manage action「{other}」不认识。可用：{}",
+            ACTIONS.join(", ")
+        ))),
+    }
+}
+
+fn start(
+    ctx: &ToolContext,
+    caller: &Caller,
+    data_home: &Path,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
+    let approval = match ctx.agent_delegation.as_str() {
+        "ask" => Approval::Ask,
+        "auto" => Approval::Auto,
+        _ => {
+            let name = if ctx.workspace_name.is_empty() {
+                "<项目>"
+            } else {
+                ctx.workspace_name.as_str()
+            };
+            return Err(WorkspaceError::ToolDetails {
+                code: "AGENT_DELEGATION_OFF",
+                message: format!(
+                    "这个项目没开委派。要开，请用户在本机运行 gld set {name} agent-delegation=ask（每次要他点头）或 =auto；Agent 会全权跑。"
+                ),
+                category: "permission",
+                retryable: false,
+                details: json!({ "setting": "agent-delegation", "current": ctx.agent_delegation }),
+            });
+        }
+    };
+    let task = agents::start(StartRequest {
+        data_home,
+        workspace_root: ctx.workspace.root(),
+        workspace_name: &ctx.workspace_name,
+        caller: caller.key(),
+        agent: string_arg(args, "agent")?,
+        prompt: string_arg(args, "prompt")?,
+        brief: args.get("brief").and_then(Value::as_str),
+        client_request_id: args.get("client_request_id").and_then(Value::as_str),
+        approval,
+        timeout_minutes: Some(crate::tools::args::bounded(
+            args,
+            "agent_manage",
+            "timeout_minutes",
+        )),
+    })
+    .map_err(convert)?;
+    let (dir, task) = agents::get(data_home, &task.task_id).map_err(convert)?;
+    Ok(present(agents::detail(&dir, task)))
+}
+
+fn agent_profiles(ctx: &ToolContext, data_home: &Path) -> Result<Value, WorkspaceError> {
+    let profiles = agents::profiles(data_home).map_err(convert)?;
+    let rows: Vec<Value> = profiles
+        .values()
+        .map(|profile| {
+            let program = profile.command.first().cloned().unwrap_or_default();
+            json!({
+                "name": profile.name,
+                "program": program,
+                "installed": on_path(&program),
+                "result_from": profile.result.from,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "delegation": ctx.agent_delegation,
+        "agents": rows,
+        "agents_toml": agents::agents_toml(data_home).display().to_string(),
+        "note": "Agents run non-interactively with full permissions in this project; the finished task comes back as awaiting_review."
+    }))
+}
+
+fn list(ctx: &ToolContext, data_home: &Path) -> Value {
+    let project_id = crate::tools::runs::project_id(&canonical(ctx.workspace.root()));
+    let tasks: Vec<Value> = agents::list(data_home, Some(&project_id))
+        .into_iter()
+        .take(50)
+        .map(|task| {
+            json!({
+                "task_id": task.task_id,
+                "agent": task.agent,
+                "state": task.state,
+                "created_at_ms": task.created_at_ms,
+                "prompt_preview": task.prompt_preview.chars().take(200).collect::<String>(),
+            })
+        })
+        .collect();
+    json!({ "tasks": tasks })
+}
+
+/// 按 task_id 找，而且必须是这个项目的：别的项目的任务当作不存在。
+fn this_project_task(
+    ctx: &ToolContext,
+    data_home: &Path,
+    args: &Value,
+) -> Result<(std::path::PathBuf, agents::store::AgentTask), WorkspaceError> {
+    let given = string_arg(args, "task_id")?;
+    let (dir, task) = agents::get(data_home, given).map_err(convert)?;
+    let here = crate::tools::runs::project_id(&canonical(ctx.workspace.root()));
+    if task.project_id != here {
+        return Err(convert(AgentError {
+            code: "AGENT_TASK_NOT_FOUND",
+            message: format!("这个项目没有任务 {given}"),
+        }));
+    }
+    Ok((dir, task))
+}
+
+/// 回包：任务详情加一句"下一步做什么"。
+fn present(detail: TaskDetail) -> Value {
+    let short = detail.task.task_id.chars().take(8).collect::<String>();
+    let id = detail.task.task_id.clone();
+    let next = match detail.task.state {
+        State::WaitingLocalApproval => format!(
+            "Ask the user to approve it on this machine with `gld agent approve {short}` (or deny it), then call agent_manage action=wait task_id={id}."
+        ),
+        State::Running => format!(
+            "Call agent_manage action=wait task_id={id} (up to 30 s per call) until the state changes. The project's apply_patch and exec_command are refused while it runs."
+        ),
+        State::AwaitingReview | State::Failed | State::Timeout | State::Stopped | State::Interrupted => format!(
+            "Review it yourself: git_diff and read_file the changed_files, run the relevant tests with exec_command, then agent_manage action=review task_id={id} verdict=accept|reject note=\"what you checked\". The agent's own claims are not evidence."
+        ),
+        State::Rejected => "Rejected. To continue, start a new task whose prompt or brief includes the review note.".to_string(),
+        _ => "Nothing to do for this task.".to_string(),
+    };
+    let mut value = serde_json::to_value(&detail).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("next_action".into(), Value::String(next));
+        // 原样输出、提示全文只在本机看：给 AI 的是 recap、报告和最后一段输出。
+        object.remove("caller");
+    }
+    value
+}
+
+fn only_operator(caller: &Caller, action: &str) -> Result<(), WorkspaceError> {
+    if caller.grant_id().is_none() {
+        return Ok(());
+    }
+    Err(WorkspaceError::ToolDetails {
+        code: "AGENT_DELEGATION_NOT_ALLOWED",
+        message: format!(
+            "grant 的凭据不能 {action} 委派：Agent 是全权跑的。用服务自己的凭据连进来才行。"
+        ),
+        category: "permission",
+        retryable: false,
+        details: json!({ "action": action }),
+    })
+}
+
+fn string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, WorkspaceError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| WorkspaceError::invalid_argument(format!("agent_manage 这个动作要 {key}")))
+}
+
+fn convert(error: AgentError) -> WorkspaceError {
+    let category = match error.code {
+        "INVALID_ARGUMENT" | "AGENT_UNKNOWN" => "argument",
+        "AGENT_TASK_RUNNING" | "AGENT_TASK_STATE" => "conflict",
+        "AGENT_TASK_NOT_FOUND" | "AGENT_TASK_AMBIGUOUS" => "not_found",
+        _ => "runtime",
+    };
+    tool_error(error.code, error.message, category)
+}
+
+fn tool_error(code: &'static str, message: String, category: &'static str) -> WorkspaceError {
+    WorkspaceError::ToolDetails {
+        code,
+        message,
+        category,
+        retryable: false,
+        details: json!({}),
+    }
+}
+
+fn canonical(path: &Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 程序在不在 PATH 上（或者给的就是一条存在的路径）。只是给 AI 看的提示，不挡着起。
+fn on_path(program: &str) -> bool {
+    let path = Path::new(program);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+        .unwrap_or(false)
+}

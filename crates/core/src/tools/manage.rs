@@ -189,6 +189,8 @@ pub fn action_is_mutating(name: &str, args: &Value) -> Option<bool> {
     match name {
         "history_manage" => Some(matches!(action, "bootstrap" | "checkpoint" | "validate")),
         "planning_manage" => Some(!matches!(action, "state")),
+        // 只有 start 会让项目里的文件被改（Agent 全权跑）；审、停、看都不动项目。
+        "agent_manage" => Some(action == "start"),
         "task_manage" => Some(
             matches!(action, "start" | "update" | "pause" | "resume" | "finish")
                 || (action == "refresh_baseline" && accepts_baseline()),

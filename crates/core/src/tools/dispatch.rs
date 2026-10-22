@@ -391,6 +391,29 @@ fn planning_gate(state: &PlanningState, name: &str, args: &Value) -> Option<Valu
     }
 }
 
+/// 委派的 Agent 在这个项目里跑着：gld 不改文件、不起命令（RFC-0009 第 5 节第 3 条）。
+///
+/// Agent 直接写盘、不经 gld，gld 的文件版本和写计数看不到它的中间状态；同时跑 `pnpm install`
+/// 这类命令会互相踩。读和 git 只读照常，`kill_session` 也照常（停的是 gld 自己起的命令）。
+fn delegation_gate(ctx: &ToolContext, name: &str) -> Option<Value> {
+    if !matches!(name, "apply_patch" | "exec_command" | "write_stdin") {
+        return None;
+    }
+    let task_id = crate::agents::running_in(ctx.workspace.root())?;
+    Some(tool_err(WorkspaceError::ToolDetails {
+        code: "AGENT_TASK_RUNNING",
+        message: format!(
+            "{name} is refused while a delegated agent is working in this project (task {task_id})"
+        ),
+        category: "conflict",
+        retryable: true,
+        details: json!({
+            "task_id": task_id,
+            "suggestion": format!("Call agent_manage action=wait task_id={task_id} until it finishes, or action=stop to stop it.")
+        }),
+    }))
+}
+
 fn goal_mode_gate(state: &PlanningState, name: &str) -> Option<Value> {
     let Some(goal_id) = state.focus_goal_id.as_deref() else {
         return Some(planning_permission_error(
@@ -547,6 +570,10 @@ fn dispatch_tool(
             return attach_planning_context(error, state);
         }
     }
+    if let Some(error) = delegation_gate(ctx, name) {
+        record_rejection(ctx, operation_id, name, &effective_args, &error);
+        return error;
+    }
     if let Err(e) = validate_tool_arguments_for_workspace(
         name,
         &effective_args,
@@ -645,6 +672,7 @@ fn dispatch_tool(
         "history_manage" => manage::history_manage(ctx, &effective_args),
         "planning_manage" => manage::planning_manage(ctx, &effective_args),
         "task_manage" => manage::task_manage(ctx, &effective_args),
+        "agent_manage" => crate::tools::agent::agent_manage(ctx, caller, &effective_args),
         "history_session_bootstrap" => history::bootstrap(ctx, &effective_args),
         "history_session_checkpoint" => history::checkpoint(ctx, &effective_args),
         "history_session_validate" => history::validate(ctx, &effective_args),

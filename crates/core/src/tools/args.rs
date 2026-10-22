@@ -43,6 +43,9 @@ const BOUNDED: &[(&str, &str, u64, u64, u64)] = &[
     ("git_blame", "max_lines", 200, 1, 1_000),
     ("view_image", "max_bytes", 5_242_880, 1_024, 10_485_760),
     ("view_image", "max_width", 2_000, 1, 10_000),
+    // 委派（RFC-0009）：总时长默认半小时、最长 2 小时；wait 单次最多 30 秒，和 exec_command 一致。
+    ("agent_manage", "timeout_minutes", 30, 1, 120),
+    ("agent_manage", "wait_seconds", 30, 0, 30),
     ("view_image", "max_height", 2_000, 1, 10_000),
     ("operation_log", "limit", 50, 1, 200),
     ("list_task_events", "limit", 50, 1, 200),
@@ -308,6 +311,7 @@ mod tests {
     #[test]
     fn every_call_site_names_an_entry() {
         let sources = [
+            include_str!("agent.rs"),
             include_str!("exec.rs"),
             include_str!("file.rs"),
             include_str!("git.rs"),

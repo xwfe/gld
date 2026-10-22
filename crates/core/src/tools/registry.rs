@@ -52,6 +52,14 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
         false,
     ),
     (
+        "agent_manage",
+        "Delegate to a local coding agent",
+        "Hand a piece of work to a coding agent installed on this machine (Codex, Claude Code, ...) and review what it did. The agent runs non-interactively with FULL permissions in this project and must not commit; when it finishes, the task comes back as awaiting_review with its recap, a report if it wrote one, and the changed files. Check them with git_diff / read_file and run the tests with exec_command before action=review verdict=accept|reject. The user must enable it per project (agent-delegation=ask|auto); with ask, they approve each task on this machine. One task per project at a time; while it runs, apply_patch and exec_command on this project are refused. Actions: agents (which agents are available), start, status, wait (up to 30 s per call), review, stop, list.",
+        false,
+        true,
+        false,
+    ),
+    (
         "history_session_bootstrap",
         "Initialize or restore development session",
         "At the start of every new ChatGPT conversation, call this exactly once before the first response and pass the user's verbatim initial_user_input. It creates or resumes a lossless archive, then returns bounded current state and search/read guidance rather than all history.",
@@ -554,6 +562,26 @@ static EVIDENCE_SESSION_IDS_SCHEMA: std::sync::LazyLock<Value> = std::sync::Lazy
 
 const ACCEPT_FINGERPRINT_DESCRIPTION: &str = "refresh_baseline: current.fingerprint from a previous refresh_baseline call you reviewed. Adopts the current workspace as the task baseline; refused if the workspace changed again since. Requires reason.";
 
+fn agent_manage_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": crate::tools::agent::ACTIONS },
+            "agent": { "type": "string", "minLength": 1, "description": "start: which local agent to use, a name from action=agents (e.g. codex, claude)." },
+            "prompt": { "type": "string", "minLength": 1, "maxLength": 65536, "description": "start: the task for the agent. The server adds a short note after it: where the handoff directory is, a request for a final recap, and not to commit." },
+            "brief": { "type": "string", "description": "start: optional background, constraints and acceptance criteria; written to .gld/handoff/<task>/brief.md and the agent is told to read it first." },
+            "client_request_id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "start: idempotency key; repeating it returns the same task instead of starting another." },
+            "timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 120, "default": 30, "description": "start: stop the agent after this long." },
+            "task_id": { "type": "string", "minLength": 4, "description": "status / wait / review / stop: the task id (a unique prefix of at least 4 characters also works)." },
+            "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 30, "default": 30, "description": "wait: return as soon as the task leaves running, or after this many seconds." },
+            "verdict": { "type": "string", "enum": ["accept", "reject"], "description": "review: your verdict after checking the diff and running the tests." },
+            "note": { "type": "string", "maxLength": 16384, "description": "review: what you checked and what is wrong; saved with the task and in .gld/handoff/<task>/review.md." }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
+}
+
 fn task_manage_schema() -> Value {
     json!({
         "type": "object",
@@ -586,6 +614,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "history_manage",
     "planning_manage",
     "task_manage",
+    "agent_manage",
     "history_session_bootstrap",
     "history_session_checkpoint",
     "history_session_validate",
@@ -635,6 +664,7 @@ pub const COMPACT_TOOLS: &[&str] = &[
     "history_manage",
     "planning_manage",
     "task_manage",
+    "agent_manage",
     "check_exec_environment",
     "check_command",
     "list_project_commands",
@@ -700,6 +730,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "history_manage",
     "planning_manage",
     "task_manage",
+    "agent_manage",
     "history_session_bootstrap",
     "history_session_checkpoint",
     "history_session_validate",
@@ -758,6 +789,8 @@ pub const MUTATING_TOOLS: &[&str] = &[
     "history_manage",
     "planning_manage",
     "task_manage",
+    // 起一个全权跑的 Agent；只看的那几个动作不算，dispatch 按参数区分（manage::action_is_mutating）。
+    "agent_manage",
     "history_session_bootstrap",
     "history_session_checkpoint",
     "history_session_validate",
@@ -1059,6 +1092,7 @@ pub fn input_schema(name: &str) -> Value {
         "history_manage" => history_manage_schema(),
         "planning_manage" => planning_manage_schema(),
         "task_manage" => task_manage_schema(),
+        "agent_manage" => agent_manage_schema(),
         "list_skills" => json!({
             "type": "object",
             "properties": {
@@ -1785,8 +1819,9 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 42);
+        assert_eq!(tools.len(), 43);
         assert_eq!(unique.len(), tools.len());
+        assert!(names.contains(&"agent_manage"));
         assert!(names.contains(&"history_manage"));
         assert!(names.contains(&"planning_manage"));
         assert!(names.contains(&"task_manage"));
@@ -1826,8 +1861,9 @@ mod tests {
             .collect();
 
         // 条数预算，不是哪个客户端的硬上限：工具表每次对话都要占 token。往默认档加工具
-        // 要有意识地改这个数（30 是加 list_project_commands 时定的）。
-        assert!(names.len() <= 30, "{}", names.len());
+        // 要有意识地改这个数（30 是加 list_project_commands 时定的，31 是加 agent_manage）。
+        assert!(names.len() <= 31, "{}", names.len());
+        assert!(names.contains(&"agent_manage"));
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"exec_command"));

@@ -1,3 +1,4 @@
+pub mod agent;
 pub(crate) mod args;
 pub mod caller;
 mod command_paths;
