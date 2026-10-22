@@ -2170,3 +2170,46 @@ Skill 的通用规则也都挤在「compact 还会砍掉……」这个讲省 to
 修正后再跑：994 passed / 0 failed（§38 的 990 加这次 4 条）。
 
 **没做：**OpenAI 隧道接入（要用户自己的 Platform 账号先手工走一遍）、重启前等空闲、Agent 委派，三项进了 `task_plan.md` 的队列。没部署、没推送。
+
+## 40. 有命令在跑时 `gld daemon restart` 先不重启（2026-10-22）
+
+**要求：**用户让接着做队列里的「重启前等空闲」：有在跑的命令时 `gld daemon restart` 拒绝并列出来，`--force` 照旧，带测试，同步升级文档。
+来由是 §39 对照 codex-bridge 时看到它升级前先等任务跑完；gld 以前在安装文档里给一句 `pgrep -lP <守护进程 pid>`，
+还得自己从隧道、本机 MCP 这些子进程里分出哪些是项目命令（§35、§38 换装时都是这么查的）。
+
+**关键约束：**升级时敲 `restart` 的是**换完二进制的新命令行**，对面是**旧守护进程**。新加一个 IPC 请求的话，旧守护进程不认，
+检查在最需要的那一次（下一次换装）就用不上。所以不问守护进程，读盘上的运行记录（D09 起就有，0.8.1 起每条 `exec_command`
+都留 `runs/<项目>/<会话>/run.json`）：`owner_pid` 等于守护进程的 pid、记录是 `running`、owner 锁还被拿着，就是守护进程起的、
+还在跑的命令。pid 被复用不会认错：对上 pid 之后还要过 owner 锁，起它的进程不在了，读到时就改成 `unknown`、不算。
+
+**改了什么（`825b74a`）：**
+
+- `runs::running_under(runs_root, owner_pid)`：跨项目、跨主体（重启谁起的都停），按起跑时间排。
+- `gld daemon restart` 不带 `--force` 时先查，有就报错退出（退出码 1），按项目列命令、跑了多久、pid，服务模式标端口；
+  项目名从 `data/profiles.json` 按项目 id 对回来，读不出来就显示 id。`--json` 时列表打在 stdout。守护进程不在、不响应时不拦。
+  `--force` 照旧停掉重启，原来"20 秒不退就强杀"的意思也还在。
+- 帮助和 `cli.md`、版本不一致时的两处提示（原来写着"在跑的命令会被停掉"）、`install.md` 升级步骤（去掉 pgrep 那行，第 4 步说明被拦下时怎么办）、
+  `daemon.md` 命令表和升级一节、`development.md` 升级连续性加一条：`run.json` 和 owner 锁的格式别改不兼容，否则检查会悄悄查不出东西。
+
+**手工看了一遍输出**（隔离 `GLD_HOME`，后台跑 `sleep 47.25`）：
+
+```text
+错误：有 1 条命令在跑，重启会连命令一起停掉，这次没重启：
+  demo  sleep 47.25  已跑 2s，pid 72611
+等命令跑完再重启；确定要停掉就加 --force：gld daemon restart --force
+```
+
+`--json` 打出 `restarted: false` 和带 `session_id`、`service_port` 的列表；`--force` 照旧重启，`sleep` 跟着停掉，没有残留。
+中间踩了一下：先红后绿时把旧版 `daemon.rs` 换回来跑过测试，`target/debug/gld` 是那次编的旧代码，紧接着手工跑就没拦——不是代码的问题，重新编译后正常。
+
+**验证：**
+
+- 集成测试 `restart_refuses_while_a_command_runs_and_force_still_restarts`：起守护进程、后台跑一条命令；不带 `--force` 时拒绝、
+  列出 `it  <命令>`、守护进程 pid 不变、命令还在跑；`--json` 的列表对得上 `session_id`；`--force` 后 pid 变了、命令停了；
+  空闲后不带 `--force` 也能重启。把 `daemon.rs` 换回改动前的版本跑，这条红。
+- 单元测试 `running_under_lists_live_commands_of_one_owner_across_projects`：两个项目两个主体的在跑命令都在、按时间排；
+  已结束的、owner 已死的（读到后变 `unknown`）、别的 pid 的不在；`runs/` 不存在时返回空。
+- 全仓 996 passed / 0 failed（§39 的 994 加这 2 条），clippy `-D warnings`、fmt 通过。
+
+**没做：**`gld daemon stop` 不查（`stop` 的意思就是停，现有测试也靠它停掉在跑的命令）；launchd 那条 `stop` + `kickstart` 因此也不查，文档里写了要自己看一眼；
+`gld restart`（只重启服务）没加检查；0.8.1 之前的守护进程和盘满没留记录的命令查不出来。没部署、没推送。
