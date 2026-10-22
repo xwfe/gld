@@ -2213,3 +2213,50 @@ Skill 的通用规则也都挤在「compact 还会砍掉……」这个讲省 to
 
 **没做：**`gld daemon stop` 不查（`stop` 的意思就是停，现有测试也靠它停掉在跑的命令）；launchd 那条 `stop` + `kickstart` 因此也不查，文档里写了要自己看一眼；
 `gld restart`（只重启服务）没加检查；0.8.1 之前的守护进程和盘满没留记录的命令查不出来。没部署、没推送。
+
+## 41. 本机换成 `6268bb0`，换之前对着旧守护进程实测重启检查（2026-10-22 20:02）
+
+**要求：**用户说"按 install.md 的升级步骤把本机换成当前 main，换之前先试一次 gld daemon restart 看检查有没有拦住在跑的命令，结果记审查；不推送"。只换本机，另一台 Mac 和 Linux 服务器还是 `fba39d0`。
+
+**换之前：**守护进程 pid 19779，跑 `fba39d0`，已运行 19 小时 40 分；没有子进程，没有在跑的命令。运行记录里最后一批是 ChatGPT
+（`oauth:hub:dcr-…`）19:47–19:49 在另一个项目里跑的检查和一次 `git commit`，都已结束，之后没再来请求。
+
+**照 install.md 做的：**`cargo build --release --locked -p gld`（2 分 23 秒；去符号那步照旧报 `rust-objcopy` 找不到 `libLLVM.dylib`，
+工具链老问题，二进制能用）。记下工具表 33 个、指纹 `59951e97a502352e`，`gld ls`，`data/profiles.json` 和 `data/oauth-clients/hub.json`
+排好键再哈希的指纹。备份 `~/.local/opt/gld-fba39d0-20261022-2001`（sha256 `c86e2d57…`，和 §38 装上的一致）、
+`gld-config-20261022-2001.tgz`（0600）。
+
+**换之前的实测：**
+
+1. 用装着的旧命令行经守护进程起一条命令：`gld tool call exec_command -w gld 'cmd=python3 -c "import time; time.sleep(300)"' yield_time_ms:=0`。
+   项目 gld 的策略不放 `sleep`，`check_command` 看过 Python 这条放行。盘上的 `run.json`：`running`、`owner_pid` 19779、`caller` local。
+2. 用新编的 `target/release/gld`（去掉本会话的 `CLAUDE*` 变量）敲 `gld daemon restart`：
+
+   ```text
+   错误：有 1 条命令在跑，重启会连命令一起停掉，这次没重启：
+     gld  python3 -c "import time; time.sleep(300)"  已跑 8s，pid 66815
+   等命令跑完再重启；确定要停掉就加 --force：gld daemon restart --force
+   ```
+
+   退出码 1；`--json` 打出 `restarted: false`，`project` 是 gld、`session_id` 对得上。之后守护进程还是 pid 19779，
+   Python 进程（66815）还在。**新命令行对着旧版守护进程查得出来**，读盘这条路在真实升级场景下成立。
+3. `gld tool call kill_session` 停掉这条命令，记录变成 `killed`，进程没了。
+
+**换装：**写 `.new` 再改名换上 `~/.local/bin/gld`（sha256 `e4653129…`），`gld daemon restart`（去掉 `CLAUDE*`）这回没有在跑的命令、直接重启：
+pid 19779 → 68019，20:02:34 换上，服务自己恢复。
+
+**换完核对：**
+
+| 看的 | 结果 |
+| --- | --- |
+| `gld --version`、服务的构建提交 | 都是 `6268bb088358`，等于 HEAD |
+| 工具表 | 33 个、指纹 `59951e97a502352e`，没变，**ChatGPT 不用 Refresh** |
+| `gld ls`、两份凭据指纹 | 和换之前逐字一样 |
+| 新守护进程环境里的 `CLAUDE*` 变量 | 0 个 |
+| `gld health` | 本地 /mcp、公网 /mcp、OAuth 授权元数据、受保护资源四项全 ✓ |
+| `gld context -w gld` | 全局规则和仓库 `AGENTS.md` 都打 ✓，Skill 扫到 97 |
+
+这一版带上了 §39 的初始化说明四条规矩：工具表没变，但说明是建对话时拿的，ChatGPT 要**新开对话**才看得到。
+§39 的 Tunnel Token 改动和本机无关：本机公网入口是"固定地址（自建入口）"，cloudflared 不归 gld 起。
+
+**回滚：**`~/.local/opt/gld-fba39d0-20261022-2001` 写 `.new` 再改名放回去，`gld daemon restart`。没推送。
