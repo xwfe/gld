@@ -195,9 +195,21 @@ fn present(detail: TaskDetail) -> Value {
         State::Running => format!(
             "Call agent_manage action=wait task_id={id} (up to 30 s per call) until the state changes. The project's apply_patch and exec_command are refused while it runs."
         ),
-        State::AwaitingReview | State::Failed | State::Timeout | State::Stopped | State::Interrupted => format!(
-            "Review it yourself: git_diff and read_file the changed_files, run the relevant tests with exec_command, then agent_manage action=review task_id={id} verdict=accept|reject note=\"what you checked\". The agent's own claims are not evidence."
-        ),
+        State::AwaitingReview | State::Failed | State::Timeout | State::Stopped | State::Interrupted => {
+            let truncated = if detail.diff_truncated {
+                " The diff was truncated; read_file the remaining changed_files."
+            } else {
+                ""
+            };
+            let committed = if detail.task.head_moved {
+                " HEAD moved while it ran: the agent committed although told not to; the diff still covers those changes."
+            } else {
+                ""
+            };
+            format!(
+                "Review it yourself. The diff field is this task's own change (working tree before vs after the agent ran); git_diff compares with HEAD and also shows any earlier uncommitted changes.{truncated}{committed} Run the relevant tests with exec_command, then agent_manage action=review task_id={id} verdict=accept|reject note=\"what you checked\". The agent's own claims are not evidence."
+            )
+        }
         State::Rejected => "Rejected. To continue, start a new task whose prompt or brief includes the review note.".to_string(),
         _ => "Nothing to do for this task.".to_string(),
     };

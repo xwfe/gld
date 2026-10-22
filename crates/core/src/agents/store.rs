@@ -20,6 +20,8 @@ pub const PROMPT_FILE: &str = "prompt.md";
 pub const STDOUT_FILE: &str = "stdout.log";
 pub const STDERR_FILE: &str = "stderr.log";
 pub const RESULT_FILE: &str = "result.txt";
+/// 这次任务自己的完整 diff：跑前跑后两棵工作区树之间的（见 `run::snapshot`）。
+pub const DIFF_FILE: &str = "task.diff";
 
 /// 一次委派走到哪了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +130,12 @@ pub struct AgentTask {
     pub changed_files_truncated: bool,
     #[serde(default)]
     pub changes_unknown: bool,
+    /// [`DIFF_FILE`] 多少字节。没算出来（不是 git 仓库）时为 None。
+    #[serde(default)]
+    pub diff_bytes: Option<u64>,
+    /// 跑的过程中 HEAD 动了：Agent 被叮嘱别提交，还是提交了。改动照样都在 diff 里。
+    #[serde(default)]
+    pub head_moved: bool,
     #[serde(default)]
     pub review: Option<Review>,
 }
@@ -252,6 +260,8 @@ mod tests {
             changed_files: Vec::new(),
             changed_files_truncated: false,
             changes_unknown: false,
+            diff_bytes: None,
+            head_moved: false,
             review: None,
         }
     }

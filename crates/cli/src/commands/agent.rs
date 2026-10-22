@@ -139,6 +139,18 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
             task.changed_files.len(),
             task.changed_files.join("\n")
         ));
+        if task.head_moved {
+            ctx.out.line("（跑的时候 HEAD 动了：Agent 被叮嘱别提交，还是提交了。改动照样都在下面的 diff 里。）");
+        }
+    }
+    if let Some(diff) = detail.diff.as_deref().filter(|diff| !diff.is_empty()) {
+        let more = if detail.diff_truncated {
+            "（只显示前 64 KB，全文在任务目录的 task.diff）"
+        } else {
+            ""
+        };
+        ctx.out
+            .line(format!("\n这次任务自己的 diff{more}：\n{diff}"));
     }
     if let Some(report) = &detail.report {
         ctx.out.line(format!("\n交接报告：\n{report}"));

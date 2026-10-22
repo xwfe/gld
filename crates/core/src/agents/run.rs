@@ -8,7 +8,7 @@
 //! - stdout / stderr 直接写进任务目录的文件，"最后几行输出"从文件尾读；
 //! - 一个监视线程：进程退出、被叫停、总时长到了、太久没输出，四种收尾。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,8 +16,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
-
-use sha2::{Digest, Sha256};
 
 use super::profile::{AgentProfile, ResultFrom, StopSignal};
 use super::store::{self, AgentTask, State};
@@ -130,7 +128,7 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
         None => return Err("内部错误：任务没有先占住项目".into()),
     };
     let root = PathBuf::from(&task.workspace_root);
-    let before = snapshot(&root);
+    let before = snapshot(&root, &task_dir, "before");
     let result_file = task_dir.join(store::RESULT_FILE);
     let _ = fs::remove_file(&result_file);
     let (argv, prompt_on_stdin) = profile.argv(&root, &result_file, &prompt);
@@ -361,13 +359,19 @@ fn watch(
             task.recap = read_result(&profile, &task_dir).ok();
         }
     }
-    match (before, snapshot(&root)) {
-        (Some(before), Some(after)) => {
-            let mut changed = changed_files(&root, &before, &after);
-            task.changed_files_truncated = changed.len() > CHANGED_FILES_MAX;
-            changed.truncate(CHANGED_FILES_MAX);
-            task.changed_files = changed;
-        }
+    let after = snapshot(&root, &task_dir, "after");
+    match (&before, &after) {
+        (Some(before), Some(after)) => match task_diff(&root, &task_dir, before, after) {
+            Some((mut changed, bytes)) => {
+                task.changed_files_truncated = changed.len() > CHANGED_FILES_MAX;
+                changed.truncate(CHANGED_FILES_MAX);
+                task.changed_files = changed;
+                task.diff_bytes = Some(bytes);
+                // Agent 被叮嘱了别提交；提交了也照样算进 diff（树比的是工作区），只是要让审核的人知道。
+                task.head_moved = before.head != after.head;
+            }
+            None => task.changes_unknown = true,
+        },
         _ => task.changes_unknown = true,
     }
     if let Err(error) = store::write(&task_dir, &task) {
@@ -471,74 +475,102 @@ fn json_field(stdout: &str, field: &str) -> Option<String> {
     }
 }
 
-/// 一个项目某一刻的样子：HEAD，加上 git 认为不干净的每个文件的内容摘要。
+/// 项目某一刻的样子：整个工作区写成的一棵 git 树，加上 HEAD。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Snapshot {
+pub(crate) struct Snapshot {
+    tree: String,
     head: Option<String>,
-    dirty: BTreeMap<String, String>,
 }
 
-fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("git")
+fn git_with(root: &Path, index: Option<&Path>, args: &[&str]) -> Option<Vec<u8>> {
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(root)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::null());
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let output = command.output().ok()?;
     output.status.success().then_some(output.stdout)
 }
 
-/// 不是 git 仓库（或者没装 git）就是 None，改动记成"不知道"，不瞎报。
-fn snapshot(root: &Path) -> Option<Snapshot> {
-    let status = git(
-        root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
-    let head = git(root, &["rev-parse", "HEAD"])
-        .map(|out| String::from_utf8_lossy(&out).trim().to_string());
-    let mut dirty = BTreeMap::new();
-    let mut entries = status
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty());
-    while let Some(entry) = entries.next() {
-        if entry.len() < 4 {
-            continue;
-        }
-        let code = String::from_utf8_lossy(&entry[..2]).into_owned();
-        let path = String::from_utf8_lossy(&entry[3..]).into_owned();
-        // 改名的那一条后面还跟着原来的名字。
-        if code.starts_with('R') || code.starts_with('C') {
-            entries.next();
-        }
-        let digest = match fs::read(root.join(&path)) {
-            Ok(bytes) => format!("{code}:{:x}", Sha256::digest(&bytes)),
-            Err(_) => format!("{code}:missing"),
-        };
-        dirty.insert(path, digest);
-    }
-    Some(Snapshot { head, dirty })
+fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    git_with(root, None, args)
 }
 
-/// 两次快照之间变了的文件：不干净的文件集合或内容变了的，加上 HEAD 动过时两次提交之间的。
-fn changed_files(root: &Path, before: &Snapshot, after: &Snapshot) -> Vec<String> {
-    let mut changed = BTreeSet::new();
-    for path in before.dirty.keys().chain(after.dirty.keys()) {
-        if before.dirty.get(path) != after.dirty.get(path) {
-            changed.insert(path.clone());
-        }
+/// 把工作区整个写成一棵树。不是 git 仓库（或者没装 git）就是 None，改动记成"不知道"，不瞎报。
+///
+/// 用任务目录里的临时 index（`GIT_INDEX_FILE`）`git add -A` 再 `write-tree`：**不碰用户自己的 index 和工作区**；
+/// 没提交的、新建的文件都在树里，`.gitignore` 忽略的不在。跑前跑后两棵树一比，就是这次任务自己改了什么——
+/// 以前跟 HEAD 比，上一轮委派没提交的改动会混进来，审核的人分不清（审查 §44）。
+///
+/// 临时 index 先从用户的 index 复制一份：`git add -A` 靠里面记的文件状态跳过没变的文件，大仓库也不用整个重读。
+/// 代价是往仓库的对象库里写了 blob 和树，没人引用，过期后 `git gc` 会清掉。
+pub(crate) fn snapshot(root: &Path, task_dir: &Path, label: &str) -> Option<Snapshot> {
+    let index = task_dir.join(format!("{label}.index"));
+    let _ = fs::remove_file(&index);
+    if let Some(path) = git(root, &["rev-parse", "--git-path", "index"]) {
+        let path = PathBuf::from(String::from_utf8_lossy(&path).trim());
+        let _ = fs::copy(root.join(path), &index);
     }
-    if let (Some(from), Some(to)) = (&before.head, &after.head) {
-        if from != to {
-            let range = format!("{from}..{to}");
-            if let Some(out) = git(root, &["diff", "--name-only", "-z", &range]) {
-                for path in out.split(|byte| *byte == 0).filter(|p| !p.is_empty()) {
-                    changed.insert(String::from_utf8_lossy(path).into_owned());
-                }
-            }
-        }
+    // --ignore-errors：有个文件读不了（权限之类）不该让整棵树都记不下来。
+    let tree = git_with(
+        root,
+        Some(&index),
+        &["add", "-A", "--ignore-errors", "--", "."],
+    )
+    .and_then(|_| git_with(root, Some(&index), &["write-tree"]));
+    let _ = fs::remove_file(&index);
+    let tree = String::from_utf8_lossy(&tree?).trim().to_string();
+    let head = git(root, &["rev-parse", "--verify", "-q", "HEAD"])
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string());
+    Some(Snapshot { tree, head })
+}
+
+/// 两棵树之间改了哪些文件，并把完整 diff 写进任务目录的 [`store::DIFF_FILE`]。返回文件列表和 diff 字节数。
+///
+/// 不跑仓库配置的外部 diff 和 textconv：那是项目里配的程序，审核时不该替它执行。
+fn task_diff(
+    root: &Path,
+    task_dir: &Path,
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Option<(Vec<String>, u64)> {
+    let names = git(
+        root,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            &before.tree,
+            &after.tree,
+        ],
+    )?;
+    let files = names
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    let patch = git(
+        root,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            &before.tree,
+            &after.tree,
+        ],
+    )?;
+    let written = crate::tools::runs::create_private_file(&task_dir.join(store::DIFF_FILE))
+        .and_then(|mut file| file.write_all(&patch));
+    if let Err(error) = written {
+        eprintln!("任务 diff 写不进 {}：{error}", task_dir.display());
     }
-    changed.into_iter().collect()
+    Some((files, patch.len() as u64))
 }
 
 pub fn now_ms() -> u64 {

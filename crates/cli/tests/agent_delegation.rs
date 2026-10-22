@@ -152,6 +152,18 @@ fn ask_mode_goes_from_approval_to_review() {
         serde_json::json!(["prompt-seen.txt", "touched.txt"])
     );
     assert!(done.get("caller").is_none(), "发起人标识不回给 AI：{done}");
+    let diff = done["diff"].as_str().unwrap_or("");
+    assert!(
+        diff.contains("+changed") && diff.contains("touched.txt"),
+        "回包里要有这次任务自己的 diff：{done}"
+    );
+    assert!(
+        done["next_action"]
+            .as_str()
+            .unwrap_or("")
+            .contains("diff field"),
+        "{done}"
+    );
     let seen = std::fs::read_to_string(env.project.path().join("prompt-seen.txt")).expect("提示");
     assert!(
         seen.contains("brief.md") && seen.contains("recap"),

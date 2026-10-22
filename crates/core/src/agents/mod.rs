@@ -169,6 +169,8 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         changed_files: Vec::new(),
         changed_files_truncated: false,
         changes_unknown: false,
+        diff_bytes: None,
+        head_moved: false,
         review: None,
     };
     let dir = store::task_dir(&agents_root, &project_id, &task_id);
@@ -346,7 +348,7 @@ fn resolve_id(agents_root: &Path, given: &str) -> Result<String, AgentError> {
     }
 }
 
-/// 给人看、给 ChatGPT 看的一份：任务本身，加交接目录、Agent 写的报告、在跑时最后一段输出。
+/// 给人看、给 ChatGPT 看的一份：任务本身，加交接目录、Agent 写的报告、这次任务自己的 diff、没收尾时最后一段输出。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskDetail {
     #[serde(flatten)]
@@ -354,6 +356,12 @@ pub struct TaskDetail {
     pub handoff_dir: String,
     #[serde(default)]
     pub report: Option<String>,
+    /// 这次任务自己改了什么（跑前跑后两棵工作区树之间），脱敏、最多 [`DIFF_MAX_BYTES`]。
+    /// 跟 HEAD 比会混进之前没提交的改动，审核看这个。
+    #[serde(default)]
+    pub diff: Option<String>,
+    #[serde(default)]
+    pub diff_truncated: bool,
     /// 没收尾（在跑、失败、超时）时才有：最后一段 stdout / stderr。
     #[serde(default)]
     pub output_tail: Option<OutputTail>,
@@ -365,28 +373,59 @@ pub struct OutputTail {
     pub stderr: String,
 }
 
-/// 最后一段输出最多回多少字节。
+/// 收尾之后（失败、超时、被停）最后一段输出最多回多少字节：要看它死在哪。
 pub const OUTPUT_TAIL_BYTES: usize = 4096;
+/// 在跑时每次 `wait` 都回一段，只要看得出还在动就行。Codex 的 `--json` 输出是事件 JSON，
+/// 套进回包再转义一层就翻倍：以前给 4 KB，一次 `wait` 回包 14 KB（审查 §44）。
+pub const RUNNING_TAIL_BYTES: usize = 768;
+/// 这次任务自己的 diff 最多回多少字节，全文在任务目录的 `task.diff`。
+pub const DIFF_MAX_BYTES: usize = 64 * 1024;
 
 pub fn detail(dir: &Path, task: AgentTask) -> TaskDetail {
+    let tail_bytes = if task.state == State::Running {
+        RUNNING_TAIL_BYTES
+    } else {
+        OUTPUT_TAIL_BYTES
+    };
     let output_tail = matches!(
         task.state,
         State::Running | State::Failed | State::Timeout | State::Stopped | State::Interrupted
     )
     .then(|| {
-        let (mut stdout, mut stderr) = output_tail(dir, OUTPUT_TAIL_BYTES);
+        let (mut stdout, mut stderr) = output_tail(dir, tail_bytes);
         crate::tools::history::redact_text(&mut stdout);
         crate::tools::history::redact_text(&mut stderr);
         OutputTail { stdout, stderr }
     });
+    let (diff, diff_truncated) = match task_diff_text(dir) {
+        Some((text, truncated)) => (Some(text), truncated),
+        None => (None, false),
+    };
     TaskDetail {
         handoff_dir: handoff_dir(Path::new(&task.workspace_root), &task.task_id)
             .display()
             .to_string(),
         report: report(&task),
+        diff,
+        diff_truncated,
         output_tail,
         task,
     }
+}
+
+/// `task.diff` 的前 [`DIFF_MAX_BYTES`]，按行截、脱敏。还没收尾或者没算出来就是 None。
+fn task_diff_text(dir: &Path) -> Option<(String, bool)> {
+    let bytes = fs::read(dir.join(store::DIFF_FILE)).ok()?;
+    let truncated = bytes.len() > DIFF_MAX_BYTES;
+    let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(DIFF_MAX_BYTES)]).into_owned();
+    if truncated {
+        // 截在半行上的那一行不要，免得看着像改了半行。
+        if let Some(newline) = text.rfind('\n') {
+            text.truncate(newline + 1);
+        }
+    }
+    crate::tools::history::redact_text(&mut text);
+    Some((text, truncated))
 }
 
 /// 全部任务（给了项目 id 就只看这个项目），新的在前。

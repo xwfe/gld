@@ -90,6 +90,31 @@ impl Fixture {
         let (dir, _) = get(self.data_home(), &task.task_id).expect("任务");
         run::wait_until_finished(&dir, Duration::from_secs(20))
     }
+
+    fn detail_of(&self, task: &AgentTask) -> TaskDetail {
+        let (dir, task) = get(self.data_home(), &task.task_id).expect("任务");
+        detail(&dir, task)
+    }
+
+    /// 在项目里跑 git，要求成功，返回 stdout。
+    fn git(&self, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(self.project.path())
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?}：{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn write(&self, name: &str, text: &str) {
+        std::fs::write(self.project.path().join(name), text).expect("write");
+    }
 }
 
 const STDOUT: &str = "{ from = \"stdout\" }";
@@ -439,5 +464,130 @@ fn a_running_record_without_a_live_owner_reads_as_unknown() {
         store::read(&dir).expect("盘上").state,
         State::Unknown,
         "要写回去"
+    );
+}
+
+/// 回给审核的 diff 只有这次任务自己的改动：之前没提交的改动、没跟踪的文件不算进来（审查 §44：
+/// 跟 HEAD 比时上一轮没提交的改动混在一起，ChatGPT 分不清）。用户的暂存区原样不动。
+#[test]
+fn the_diff_is_only_this_tasks_own_change_and_the_index_is_left_alone() {
+    let f = Fixture::new();
+    f.write("a.txt", "one\n");
+    f.write("s.txt", "staged before\n");
+    f.git(&["add", "-A"]);
+    f.git(&["commit", "-q", "-m", "base"]);
+    f.write("a.txt", "one\ntwo\n");
+    f.write("b.txt", "earlier, untracked\n");
+    f.write("s.txt", "staged before, changed\n");
+    f.git(&["add", "s.txt"]);
+    let staged_before = f.git(&["diff", "--cached"]);
+
+    f.agent(
+        "fake",
+        "cat >/dev/null\necho three >> a.txt\necho new > c.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    let task = f.start("fake", Approval::Auto).expect("起");
+    let done = f.finished(&task);
+    assert_eq!(done.state, State::AwaitingReview, "{done:?}");
+    assert_eq!(
+        done.changed_files,
+        vec!["a.txt".to_string(), "c.txt".to_string()],
+        "b.txt、s.txt 是跑之前就有的改动"
+    );
+    assert!(!done.head_moved);
+    let detail = f.detail_of(&done);
+    let diff = detail.diff.as_deref().expect("diff");
+    assert!(diff.contains("+three") && diff.contains("+new"), "{diff}");
+    assert!(
+        !diff.contains("+two") && !diff.contains("b.txt") && !diff.contains("s.txt"),
+        "之前的改动混进来了：{diff}"
+    );
+    assert!(!detail.diff_truncated);
+    assert_eq!(done.diff_bytes, Some(diff.len() as u64));
+    assert_eq!(
+        f.git(&["diff", "--cached"]),
+        staged_before,
+        "用户的暂存区被动了"
+    );
+    let (dir, _) = get(f.data_home(), &task.task_id).expect("任务");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .expect("任务目录")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".index") || name.ends_with(".lock"))
+        .collect();
+    assert!(leftovers.is_empty(), "临时 index 没收拾：{leftovers:?}");
+}
+
+/// Agent 被叮嘱别提交，还是提交了：标出来，改动照样在 diff 里（比的是工作区，不是 HEAD）。
+#[test]
+fn a_commit_by_the_agent_is_flagged_and_still_in_the_diff() {
+    let f = Fixture::new();
+    f.write("a.txt", "one\n");
+    f.git(&["add", "-A"]);
+    f.git(&["commit", "-q", "-m", "base"]);
+    f.agent(
+        "committer",
+        "cat >/dev/null\necho d > d.txt\ngit add d.txt\ngit -c user.name=a -c user.email=a@example.com commit -qm sneaky\necho ok",
+        STDOUT,
+        "",
+    );
+    let done = f.finished(&f.start("committer", Approval::Auto).expect("起"));
+    assert!(done.head_moved, "{done:?}");
+    assert_eq!(done.changed_files, vec!["d.txt".to_string()]);
+    assert!(f.detail_of(&done).diff.unwrap_or_default().contains("+d"));
+}
+
+/// diff 超过 64 KB 只回前面一段，截在整行上，标出来。
+#[test]
+fn a_huge_diff_is_cut_on_a_line_boundary() {
+    let f = Fixture::new();
+    f.agent(
+        "flood",
+        "cat >/dev/null\ni=0; while [ $i -lt 3000 ]; do echo \"line $i of a long generated file\"; i=$((i+1)); done > big.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    let done = f.finished(&f.start("flood", Approval::Auto).expect("起"));
+    let detail = f.detail_of(&done);
+    let diff = detail.diff.expect("diff");
+    assert!(detail.diff_truncated);
+    assert!(
+        diff.len() <= DIFF_MAX_BYTES && diff.ends_with('\n'),
+        "{}",
+        diff.len()
+    );
+    assert!(done.diff_bytes.unwrap_or(0) > DIFF_MAX_BYTES as u64);
+}
+
+/// 在跑时每次 wait 回的输出尾巴要小（审查 §44：Codex 的事件 JSON 让一次回包到了 14 KB）。
+#[test]
+fn a_running_task_reports_only_a_short_output_tail() {
+    let f = Fixture::new();
+    f.agent(
+        "chatty",
+        "cat >/dev/null\nwhile true; do echo '{\"type\":\"item.completed\",\"item\":{\"text\":\"a fairly long event line from the agent\"}}'; sleep 0.05; done",
+        STDOUT,
+        "",
+    );
+    let task = f.start("chatty", Approval::Auto).expect("起");
+    std::thread::sleep(Duration::from_millis(800));
+    let detail = f.detail_of(&task);
+    assert_eq!(detail.task.state, State::Running);
+    let tail = detail.output_tail.expect("在跑时有输出尾巴");
+    assert!(
+        !tail.stdout.is_empty() && tail.stdout.len() <= RUNNING_TAIL_BYTES,
+        "{}",
+        tail.stdout.len()
+    );
+    stop(f.data_home(), &task.task_id).expect("停");
+    let stopped = f.finished(&task);
+    let tail = f.detail_of(&stopped).output_tail.expect("停了也有");
+    assert!(
+        tail.stdout.len() > RUNNING_TAIL_BYTES,
+        "收尾后给长一点：{}",
+        tail.stdout.len()
     );
 }
