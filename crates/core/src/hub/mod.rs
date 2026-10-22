@@ -875,7 +875,7 @@ impl Hub {
             return plain_result(tool_err(WorkspaceError::ToolDetails {
                 code: "REMOTE_IS_READ_ONLY",
                 message: format!(
-                    "Remote workspace {} is configured read-only, so it has no writing session. The operator raises that with `gld remote add ... --mode coding`.",
+                    "Remote workspace {} is configured read-only, so it has no writing session. The operator raises that by removing it and running `gld remote add <project>` again without --mode read (coding is the default).",
                     member.name
                 ),
                 category: "permission",
@@ -2995,11 +2995,9 @@ mod tests {
             json!({ "workspace": "prod" }),
         );
         assert_eq!(out["error"]["code"], "REMOTE_IS_READ_ONLY", "{out}");
+        let summary = out["summary"].as_str().unwrap_or("");
         assert!(
-            out["summary"]
-                .as_str()
-                .unwrap_or("")
-                .contains("--mode coding"),
+            summary.contains("gld remote add") && summary.contains("--mode read"),
             "得说清楚操作员怎么放开：{out}"
         );
         assert_eq!(fixture.spy.opens(), 0, "连都不该连");

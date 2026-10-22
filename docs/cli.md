@@ -730,7 +730,7 @@ Options:
 Usage: gld remote [OPTIONS] <COMMAND>
 
 Commands:
-  add     登记一个远端 workspace 并加进服务（立即生效，不用重启）
+  add     把 ccnm 管着的一个项目加进服务（立即生效，不用重启）
   remove  删掉一个远端项目（按名字、id 或 id 前缀；gld rm 也能删） [alias: rm]
 
 Options:
@@ -747,25 +747,23 @@ Options:
 ## gld remote add
 
 ```text
-登记一个远端 workspace 并加进服务（立即生效，不用重启）
+把 ccnm 管着的一个项目加进服务（立即生效，不用重启）
 
-  gld remote add prod --node work --remote-workspace server
+  gld remote add server              gld 里也叫 server，能改能跑（coding）
+  gld remote add server --node work  本机 ccnm 配了不止一台机器时点名
 
-两个值填的都是 **ccnm 配置里的名字**，不是 host 也不是路径。在那台机器上
-跑 ccnm workspace list 能看到有哪些。
+server 是 **ccnm 里的项目名**（那台机器上 ccnm workspace list 看得到），
+不是 host 也不是路径。
 
-叫 --remote-workspace 是因为 --workspace / -w 已经被全局参数占了，
-那个说的是"本机哪个工作区"，两回事。
-
-Usage: gld remote add [OPTIONS] --node <NODE> --remote-workspace <WS> <NAME>
+Usage: gld remote add [OPTIONS] <PROJECT>
 
 Arguments:
-  <NAME>
-          给人看的名字，调用时 workspace 参数也能用它
+  <PROJECT>
+          ccnm 里的项目名
 
 Options:
-      --node <NODE>
-          ccnm 配置里的 node 别名（一台机器的名字）
+      --name <NAME>
+          gld 里叫什么（默认和 ccnm 里的项目名一样，重名时才要）
 
   -w, --workspace <WS>
           目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
@@ -775,18 +773,14 @@ Options:
       --json
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
-      --remote-workspace <WS>
-          ccnm 配置里的 workspace 名
-
-      --ccnm <PATH>
-          本机 ccnm 可执行程序（默认用 PATH 里的 ccnm）
+      --node <NODE>
+          ccnm 配置里的哪台机器；本机 ccnm 只配了一台时不用填
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
-      --mode <MODE>
-          访问上限：read（默认）| coding。coding 的成员多六个工具（改文件、跑命令、读输出、停后台命令、用那台机器上的 MCP server），用之前先
-          remote_coding_begin 拿句柄
+      --ccnm <PATH>
+          本机 ccnm 可执行程序（默认用 PATH 里的 ccnm）
 
       --timeout <SECS>
           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
@@ -795,6 +789,9 @@ Options:
           数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
           
           [env: GLD_HOME=]
+
+      --mode <MODE>
+          coding（默认）：能改文件、跑命令、用那台机器上的 MCP server；read：只看文件、搜索、看 git
 
       --no-color
           关闭彩色输出（也可设置环境变量 NO_COLOR）

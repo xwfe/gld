@@ -68,16 +68,22 @@ pub async fn run(ctx: &mut Ctx, command: HubCmd) -> CliResult {
 pub async fn remote(ctx: &mut Ctx, command: RemoteCmd) -> CliResult {
     match command {
         RemoteCmd::Add {
+            project,
             name,
             node,
             remote_workspace,
             ccnm,
             mode,
         } => {
+            // 旧写法里位置参数是 gld 里的名字，ccnm 项目名在 --remote-workspace。
+            let (name, workspace) = match remote_workspace {
+                Some(workspace) => (project, workspace),
+                None => (name.unwrap_or_default(), project),
+            };
             let spec = CcnmMemberSpec {
                 name,
-                node,
-                workspace: remote_workspace,
+                node: node.unwrap_or_default(),
+                workspace,
                 ccnm_bin: ccnm.unwrap_or_default(),
                 mode: mode.unwrap_or_default(),
             };
@@ -90,7 +96,7 @@ pub async fn remote(ctx: &mut Ctx, command: RemoteCmd) -> CliResult {
             // 通不通——先说清楚，免得以为"加成功了"就等于"连得上"。
             ctx.out.note(
                 "只写了配置，还没连过。验一下：gld start 之后让客户端调 remote_workspace_info，\
-                 或者先在本机跑 ccnm mcp bridge <workspace> --node <node> --mode read 看看通不通。",
+                 或者先在本机跑 ccnm mcp bridge <项目名> --mode read 看看通不通（配了多台机器要加 --node）。",
             );
             Ok(())
         }

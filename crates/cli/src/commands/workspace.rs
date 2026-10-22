@@ -189,8 +189,9 @@ pub async fn remove(ctx: &mut Ctx, args: RemoveArgs) -> CliResult {
         }
         for remote in &remote_victims {
             ctx.out.line(format!(
-                "  {}  远端 {}:{}",
-                remote.name, remote.node, remote.workspace
+                "  {}  远端 {}",
+                remote.name,
+                service::remote_location(&remote.node, &remote.workspace)
             ));
         }
         if !confirm("确认删除？项目在 gld 这边的配置和记账会被删掉，且无法恢复。")?

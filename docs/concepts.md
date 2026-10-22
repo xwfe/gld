@@ -105,12 +105,14 @@ ls -d ~/.config/gld/logs/<gld ls 里那 8 位>*                         # 确认
 可以把它也加进服务：
 
 ```bash
-gld remote add prod --node work --remote-workspace server
+gld remote add prod
 ```
 
-`--node` 和 `--remote-workspace` 填的都是 **ccnm 配置里的名字**，不是 host 也不是
-路径——在那台机器上跑 `ccnm workspace list` 能看到有哪些。（叫 `--remote-workspace`
-是因为 `-w/--workspace` 是全局参数，那个说的是"本机哪个项目"，两回事。）
+`prod` 是 **ccnm 里的项目名**，不是 host 也不是路径——在那台机器上跑 `ccnm workspace list`
+能看到有哪些。gld 里也叫这个名字，重名时用 `--name` 另起一个。默认能改能跑（`coding`），
+只想让 AI 看的加 `--mode read`；对面那个项目没开放 coding 的话，ccnm 会在 AI 第一次
+`remote_coding_begin` 时拒绝，不会悄悄降成只读。本机 ccnm 配了不止一台机器时加 `--node <机器名>`，
+只配了一台不用填，ccnm 自己认。以前的写法 `gld remote add <名字> --node … --remote-workspace <项目名>` 照样能用。
 
 前提：本机装了 `ccnm`，并且它能连到那台机器。gld 起的是公开命令
 `ccnm mcp bridge`，SSH 连接、凭据和对面的目录全由 ccnm 自己管，gld 不碰。
@@ -127,7 +129,7 @@ remote_view_image      workspace=prod  path=shots/a.png   看对面的图（PNG/
 remote_read_notebook   workspace=prod  path=a.ipynb       按 cell 读对面的 Jupyter notebook
 ```
 
-**能写的远端项目**（`--mode coding`）还多六个，都要先 `remote_coding_begin` 拿一个句柄：
+**能写的远端项目**（默认就是，`--mode read` 的除外）还多六个，都要先 `remote_coding_begin` 拿一个句柄：
 `remote_apply_patch`（改文件，含整文件覆盖和改 notebook 的 cell）、`remote_exec_command`
 （跑命令，`cmd` 是 argv、`shell` 是一行 bash）、`remote_read_output`（分页读输出）、
 `remote_stop_command`（停掉后台命令）、`remote_call_mcp_tool`（用那台机器上的 MCP server：项目 `.mcp.json` 里声明的、执行账号装的，对面的 ccnm 有可转的才有）、`remote_coding_end`（关会话、放写锁）。

@@ -922,30 +922,31 @@ pub enum HubCmd {
 /// `ccnm mcp bridge`，SSH 连接由 ccnm 自己管，gld 不碰凭据）。
 #[derive(Debug, Subcommand)]
 pub enum RemoteCmd {
-    /// 登记一个远端 workspace 并加进服务（立即生效，不用重启）
+    /// 把 ccnm 管着的一个项目加进服务（立即生效，不用重启）
     ///
-    ///   gld remote add prod --node work --remote-workspace server
+    ///   gld remote add server              gld 里也叫 server，能改能跑（coding）
+    ///   gld remote add server --node work  本机 ccnm 配了不止一台机器时点名
     ///
-    /// 两个值填的都是 **ccnm 配置里的名字**，不是 host 也不是路径。在那台机器上
-    /// 跑 ccnm workspace list 能看到有哪些。
-    ///
-    /// 叫 --remote-workspace 是因为 --workspace / -w 已经被全局参数占了，
-    /// 那个说的是"本机哪个工作区"，两回事。
+    /// server 是 **ccnm 里的项目名**（那台机器上 ccnm workspace list 看得到），
+    /// 不是 host 也不是路径。
     #[command(verbatim_doc_comment)]
     Add {
-        /// 给人看的名字，调用时 workspace 参数也能用它
-        #[arg(value_name = "NAME")]
-        name: String,
-        /// ccnm 配置里的 node 别名（一台机器的名字）
+        /// ccnm 里的项目名
+        #[arg(value_name = "PROJECT")]
+        project: String,
+        /// gld 里叫什么（默认和 ccnm 里的项目名一样，重名时才要）
+        #[arg(long, value_name = "NAME", conflicts_with = "remote_workspace")]
+        name: Option<String>,
+        /// ccnm 配置里的哪台机器；本机 ccnm 只配了一台时不用填
         #[arg(long, value_name = "NODE")]
-        node: String,
-        /// ccnm 配置里的 workspace 名
-        #[arg(long = "remote-workspace", value_name = "WS")]
-        remote_workspace: String,
+        node: Option<String>,
+        /// 旧写法：gld remote add <名字> --remote-workspace <项目名>，给了它，前面那个就当名字
+        #[arg(long = "remote-workspace", value_name = "WS", hide = true)]
+        remote_workspace: Option<String>,
         /// 本机 ccnm 可执行程序（默认用 PATH 里的 ccnm）
         #[arg(long, value_name = "PATH")]
         ccnm: Option<String>,
-        /// 访问上限：read（默认）| coding。coding 的成员多六个工具（改文件、跑命令、读输出、停后台命令、用那台机器上的 MCP server），用之前先 remote_coding_begin 拿句柄
+        /// coding（默认）：能改文件、跑命令、用那台机器上的 MCP server；read：只看文件、搜索、看 git
         #[arg(long, value_name = "MODE")]
         mode: Option<String>,
     },

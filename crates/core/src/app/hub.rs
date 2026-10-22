@@ -61,16 +61,16 @@ pub struct HubMemberDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CcnmMemberSpec {
-    /// 给人看的名字，也是调用时 `workspace` 参数可以用的值。
+    /// 给人看的名字，也是调用时 `workspace` 参数可以用的值；空串表示和 ccnm 里的项目名一样。
     pub name: String,
-    /// ccnm 配置里的 node 别名（一台机器的名字），不是 host 也不是 user。
+    /// ccnm 配置里的 node 别名（一台机器的名字），不是 host 也不是 user；空串表示交给 ccnm 选。
     pub node: String,
-    /// ccnm 配置里的 workspace 名，不是路径。
+    /// ccnm 里的项目（workspace）名，不是路径。
     pub workspace: String,
     /// 本机 `ccnm` 可执行程序；空串表示用 PATH 里的 `ccnm`。
     #[serde(default)]
     pub ccnm_bin: String,
-    /// 访问上限：`read`（默认）或 `coding`。
+    /// 访问上限：`coding`（默认）或 `read`。
     #[serde(default)]
     pub mode: String,
 }
@@ -748,19 +748,24 @@ fn remote_dto(member: &CcnmMember) -> HubMemberDto {
 
 /// 把命令行给的参数变成一条成员记录，顺手把能当场发现的错挡掉。
 ///
-/// 都是"填错了会在很久以后才炸"的那种：名字空着的话，调用时按名字找不到，
-/// 只能用 id；node 或 workspace 填成路径的话，要等真的去连 bridge 才报错，
-/// 而那时的报错来自 ccnm，看着像网络问题。
+/// 填成路径要当场挡：等真的去连 bridge 才报错的话，报错来自 ccnm，看着像网络问题。
+///
+/// 只有 ccnm 里的项目名是必填的，别的都有默认：名字和它一样（多数时候两边就叫同一个名字，
+/// 不该逼人填两遍）；node 交给 ccnm 选（本机 ccnm 只配了一台机器时它自己认，配了多台会当场
+/// 报错说要点名）。
 fn build_ccnm_member(spec: CcnmMemberSpec) -> AppResult<CcnmMember> {
-    let name = spec.name.trim();
-    let node = spec.node.trim();
     let workspace = spec.workspace.trim();
-    for (label, value) in [("名字", name), ("--node", node), ("--workspace", workspace)] {
-        if value.is_empty() {
-            return Err(AppError::Message(format!("{label} 不能是空的")));
-        }
+    if workspace.is_empty() {
+        return Err(AppError::Message(
+            "ccnm 里的项目名不能是空的：gld remote add <项目名>".into(),
+        ));
     }
-    for (label, value) in [("--node", node), ("--workspace", workspace)] {
+    let name = match spec.name.trim() {
+        "" => workspace,
+        name => name,
+    };
+    let node = spec.node.trim();
+    for (label, value) in [("--node", node), ("项目名", workspace)] {
         if value.contains('/') || value.contains('\\') {
             return Err(AppError::Message(format!(
                 "{label} 要填 ccnm 配置里的名字，不是路径（给的是「{value}」）。\
@@ -769,8 +774,10 @@ fn build_ccnm_member(spec: CcnmMemberSpec) -> AppResult<CcnmMember> {
         }
     }
     let max_mode = match spec.mode.trim() {
-        "" | "read" => Mode::Read,
-        "coding" => Mode::Coding,
+        // 默认 coding：远端项目加进来就是为了在那边改代码、跑命令，只想看的才写 read。
+        // 对面没开放 coding 时 ccnm 会拒绝、不会悄悄降级，报错出在第一次 remote_coding_begin。
+        "" | "coding" => Mode::Coding,
+        "read" => Mode::Read,
         other => {
             return Err(AppError::Message(format!(
                 "访问模式只能是 read 或 coding，给的是「{other}」"
@@ -820,9 +827,9 @@ mod tests {
     }
 
     #[test]
-    fn a_member_defaults_to_read_only_and_ccnm_on_path() {
+    fn a_member_defaults_to_coding_and_ccnm_on_path() {
         let member = build_ccnm_member(spec()).expect("建成员");
-        assert_eq!(member.max_mode, Mode::Read, "默认必须是只读");
+        assert_eq!(member.max_mode, Mode::Coding, "默认就是 coding");
         assert_eq!(member.ccnm_bin, "ccnm");
         assert_eq!(
             member.id.len(),
@@ -851,37 +858,29 @@ mod tests {
         }
     }
 
+    /// `gld remote add server`：只给 ccnm 里的项目名，名字跟着它，node 交给 ccnm 选。
     #[test]
-    fn empty_fields_are_named_one_by_one() {
-        for (label, mut spec) in [
-            (
-                "名字",
-                CcnmMemberSpec {
-                    name: "  ".into(),
-                    ..spec()
-                },
-            ),
-            (
-                "--node",
-                CcnmMemberSpec {
-                    node: String::new(),
-                    ..spec()
-                },
-            ),
-            (
-                "--remote-workspace",
-                CcnmMemberSpec {
-                    workspace: String::new(),
-                    ..spec()
-                },
-            ),
-        ] {
-            spec.mode = String::new();
-            let error = build_ccnm_member(spec).expect_err("该拒绝").to_string();
-            // --remote-workspace 在 app 层叫 --workspace，报错里认前缀就行。
-            let expected = label.trim_start_matches("--remote-");
-            assert!(error.contains(expected), "{label}: {error}");
-        }
+    fn only_the_ccnm_project_name_is_required() {
+        let member = build_ccnm_member(CcnmMemberSpec {
+            name: "  ".into(),
+            node: String::new(),
+            workspace: "server".into(),
+            ccnm_bin: String::new(),
+            mode: String::new(),
+        })
+        .expect("建成员");
+        assert_eq!(member.name, "server");
+        assert_eq!(member.workspace, "server");
+        assert_eq!(member.node, "");
+        assert_eq!(member.max_mode, Mode::Coding);
+
+        let error = build_ccnm_member(CcnmMemberSpec {
+            workspace: " ".into(),
+            ..spec()
+        })
+        .expect_err("项目名空着该拒绝")
+        .to_string();
+        assert!(error.contains("项目名"), "{error}");
     }
 
     #[test]
@@ -900,13 +899,13 @@ mod tests {
     }
 
     #[test]
-    fn coding_is_accepted_as_a_ceiling_even_though_it_is_not_implemented_yet() {
+    fn read_can_still_be_asked_for_explicitly() {
         let member = build_ccnm_member(CcnmMemberSpec {
-            mode: "coding".into(),
+            mode: "read".into(),
             ..spec()
         })
         .expect("建成员");
-        assert_eq!(member.max_mode, Mode::Coding);
+        assert_eq!(member.max_mode, Mode::Read);
     }
 
     /// 远端成员在名单里的样子：没有本机路径，有它在对面的位置。
@@ -919,6 +918,6 @@ mod tests {
         assert!(dto.tool_profile.is_empty());
         assert_eq!(dto.node, "work");
         assert_eq!(dto.workspace, "server");
-        assert_eq!(dto.mode, "read");
+        assert_eq!(dto.mode, "coding");
     }
 }

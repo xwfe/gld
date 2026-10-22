@@ -348,7 +348,7 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
 | --- | --- |
 | 升级 gld，升级前后指纹不一样 | 新版加了、删了工具或参数，或者改了说明 |
 | `gld mcp on` 开第一个 / `gld mcp off` 关掉最后一个 | 多出 / 少了 `list_mcp_tools` 这三个 |
-| `gld remote add` 加第一个远端项目 / 删掉最后一个；有了第一个 / 没了最后一个 `--mode coding` 的远端项目 | 多出 / 少了 `remote_*` 那几个 |
+| `gld remote add` 加第一个远端项目 / 删掉最后一个；有了第一个 / 没了最后一个能写的远端项目（默认就能写，`--mode read` 的不算） | 多出 / 少了 `remote_*` 那几个 |
 | `gld upgrade --tool-profile …` | 整张表换了 |
 
 不刷新的后果：新工具、新参数 AI 看不见；已经没有的工具 AI 还会去调，拿到 `Unknown tool`。怎么刷：
@@ -395,10 +395,10 @@ ChatGPT 的连接器（网页上叫"插件"）建好之后，大多数操作都�
 把它作为远端项目加进同一个服务，客户端那边什么都不用改：
 
 ```bash
-gld remote add prod --node work --remote-workspace server
+gld remote add prod          # prod 是 ccnm 里的项目名；默认能改能跑，只读加 --mode read
 ```
 
-远端项目的工具是另一套（`remote_*`），怎么用、有什么限制见
+远端项目的工具是另一套（`remote_*`），怎么用、多台机器时怎么点名、有什么限制见
 [concepts.md](concepts.md#成员还可以在别的机器上)。
 
 ## 自定义 GPT（GPT Actions）

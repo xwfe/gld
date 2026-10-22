@@ -60,10 +60,12 @@ pub struct CcnmMember {
     #[serde(default = "default_ccnm_bin")]
     pub ccnm_bin: String,
     /// ccnm 配置里的 node 别名（一台机器的名字），不是 host 也不是 user。
+    /// 空串表示不点名，起 bridge 时不带 `--node`，由 ccnm 自己选。
     pub node: String,
     /// ccnm 配置里的 workspace 名字，不是路径。
     pub workspace: String,
-    /// 这个成员最多允许到哪一级。默认只读。
+    /// 这个成员最多允许到哪一级。新加的默认 coding（`build_ccnm_member`）；
+    /// 缺这个字段的旧记录按只读读进来，不因为默认值改了就悄悄放开。
     #[serde(default = "default_mode")]
     pub max_mode: Mode,
 }
@@ -88,18 +90,12 @@ impl CcnmMember {
     /// payload，不碰 SSH 凭据，也不绕过官方 bridge（RFC-0002 5.1）。
     pub fn bridge_argv(&self, mode: Mode) -> (String, Vec<String>) {
         let mode = mode.min(self.max_mode);
-        (
-            self.ccnm_bin.clone(),
-            vec![
-                "mcp".into(),
-                "bridge".into(),
-                self.workspace.clone(),
-                "--node".into(),
-                self.node.clone(),
-                "--mode".into(),
-                mode.as_str().into(),
-            ],
-        )
+        let mut args = vec!["mcp".into(), "bridge".into(), self.workspace.clone()];
+        if !self.node.is_empty() {
+            args.extend(["--node".into(), self.node.clone()]);
+        }
+        args.extend(["--mode".into(), mode.as_str().into()]);
+        (self.ccnm_bin.clone(), args)
     }
 
     /// 这次调用实际能拿到的级别：要求的和配置上限取低。
@@ -139,6 +135,28 @@ mod tests {
                 "read"
             ]
         );
+    }
+
+    /// 没点名 node：不带 `--node`，让 ccnm 自己选（本机只配了一台机器时它认得出来）。
+    #[test]
+    fn an_unnamed_node_is_left_to_ccnm() {
+        let mut m = member();
+        m.node = String::new();
+        let (_, args) = m.bridge_argv(Mode::Coding);
+        assert_eq!(args, vec!["mcp", "bridge", "myproject", "--mode", "coding"]);
+    }
+
+    /// 旧记录没有 `max_mode` 字段：按只读读进来，不因为新加的成员默认 coding 就被放开。
+    #[test]
+    fn an_old_record_without_a_mode_stays_read_only() {
+        let member: CcnmMember = serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "name": "旧的",
+            "node": "work",
+            "workspace": "server"
+        }))
+        .expect("读得进来");
+        assert_eq!(member.max_mode, Mode::Read);
     }
 
     /// 成员配的是只读，要 coding 也只能拿到只读——不是报错，是降级到配置

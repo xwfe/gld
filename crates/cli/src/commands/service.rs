@@ -435,7 +435,7 @@ pub async fn show_service(ctx: &mut Ctx, reveal: bool) -> CliResult {
                 let (profile, location) = if member.kind == "remote" {
                     (
                         format!("{}（远端）", member.mode),
-                        format!("{}:{}", member.node, member.workspace),
+                        remote_location(&member.node, &member.workspace),
                     )
                 } else {
                     (member.tool_profile.clone(), member.path.clone())
@@ -571,6 +571,15 @@ pub fn print_endpoints(ctx: &Ctx, status: &HubStatusDto) {
         ("认证方式", status.config.auth_type.clone()),
         ("项目", status.members.len().to_string()),
     ]);
+}
+
+/// 远端项目在对面的位置：`机器:项目`；没点名机器（交给 ccnm 选）时只有项目名。
+pub fn remote_location(node: &str, workspace: &str) -> String {
+    if node.is_empty() {
+        workspace.to_string()
+    } else {
+        format!("{node}:{workspace}")
+    }
 }
 
 pub fn names(members: &[HubMemberDto]) -> String {
