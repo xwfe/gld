@@ -37,6 +37,13 @@ pub fn handle_request(state: &SharedState, caller: &Caller, body: &Value) -> Val
     }
 }
 
+/// 两档工具表都要的几条"怎么看结果"的规矩。
+///
+/// 每条都对着经 gld 开发时实测到的毛病（审查 §28）：一次读多段时改用 `python3 -c`，
+/// 读文件被记成命令；版本冲突被当成故障报给用户；被策略拒的命令换个解释器再跑；
+/// 没看到 command_ok / 提交号就说"已完成"。删掉哪句，对应的毛病就可能回来。
+const RESULT_RULES: &str = "Read project files with read_file (pass ranges for several parts of a file in one call), not with cat, sed or interpreter one-liners through exec_command. FILE_VERSION_CONFLICT, or a patch whose context no longer matches, means the file changed after you read it: re-read it and rebuild the change; it is not a gld or infrastructure failure, so do not report it as one. When a command is rejected by policy, do not run the same thing through another program, interpreter one-liner or wrapper; use check_command to see which rule blocked it and tell the user. Only say a command passed when its result has command_ok=true, and only say work was committed when git printed the new commit hash.";
+
 fn initialize_result(state: &SharedState) -> Value {
     let base_instructions = "Use these tools only for local coding operations inside the configured workspace. Planning mode is controlled exclusively by the gld CLI: every tool response may contain planning_context with the authoritative current mode, revision, focused Goal, and focused Plan. Never assume or attempt to change the mode from chat. Goal and Plan records are AI-driven conversation artifacts: when a user request benefits from durable tracking, create_goal and create_plan may be called directly from the conversation without asking the user to approve a proposal first. Keep their criteria and steps updated as work progresses. When the work is ready for acceptance, call request_goal_review and/or request_plan_review with a concise verification summary. Never archive or claim final acceptance yourself; only the human operator (gld planning ... accept) can accept and archive. If a review is rejected, continue from the reactivated Goal/Plan and incorporate the human feedback. In Plan mode, project writes and command execution are intentionally blocked by the server. In Goal mode, project mutations require an active focused Goal and must respect any focused Plan relationship/status. If the client reports missing tools while server authorization is still valid, treat it as a capability discovery mismatch rather than a permission loss: refresh the MCP session/tool list before requesting permissions. At the start of every new ChatGPT conversation, before answering the user's first request, call history_session_bootstrap exactly once and pass the user's verbatim first request as initial_user_input. Treat bootstrap as required conversation initialization: it creates or resumes a lossless Markdown archive and returns bounded current state, not all history. Use history_session_search followed by history_session_read only when exact earlier context is needed. history_session_read returns a bounded UTF-8-safe page; follow next_cursor with the returned content hash until the relevant archive is complete. Repeated successful bootstrap calls in the same conversation resume the same session and must not create duplicates. Preserve session_key and current_path returned by bootstrap, then pass them unchanged as session_key and expected_path to every history_session_checkpoint call. After completing each user-requested task in the conversation, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same session_key and path. The server cannot access ChatGPT transcript text that was not provided as a tool argument; persistence is not automatic background persistence. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, do not request a separate permission grant. Only retry the same tool with confirm=true when the user's request already clearly authorizes that dangerous operation; otherwise ask the user for confirmation.";
     let base_instructions = if state.tool_profile == "compact" {
@@ -44,6 +51,7 @@ fn initialize_result(state: &SharedState) -> Value {
     } else {
         base_instructions
     };
+    let base_instructions = format!("{base_instructions} {RESULT_RULES}");
     let current_ai_instructions = state.current_ai_instructions();
     let configured = if current_ai_instructions.trim().is_empty() {
         String::new()
@@ -79,7 +87,7 @@ fn initialize_result(state: &SharedState) -> Value {
         state.record_context_block("history_snapshot", &Value::String(history_context.clone()));
     }
     let instructions = [
-        base_instructions,
+        base_instructions.as_str(),
         configured.as_str(),
         skill_catalog.as_str(),
         history_context.as_str(),
@@ -216,6 +224,25 @@ mod tests {
         assert!(instructions.contains("confirm=true"));
         assert!(instructions.contains("planning_context"));
         assert!(instructions.contains("controlled exclusively by the gld CLI"));
+    }
+
+    #[test]
+    fn both_profiles_carry_the_result_rules() {
+        for state in [
+            Arc::new(test_context().with_tool_profile("compact")),
+            test_state(),
+        ] {
+            let initialized = initialize_result(&state);
+            let instructions = initialized["instructions"].as_str().expect("instructions");
+            assert!(instructions.contains("pass ranges"), "{instructions}");
+            assert!(
+                instructions.contains("FILE_VERSION_CONFLICT"),
+                "{instructions}"
+            );
+            assert!(instructions.contains("check_command"), "{instructions}");
+            assert!(instructions.contains("command_ok=true"), "{instructions}");
+            assert!(instructions.contains("commit hash"), "{instructions}");
+        }
     }
 
     #[test]
