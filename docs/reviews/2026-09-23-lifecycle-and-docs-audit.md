@@ -2129,3 +2129,44 @@ Skill 的通用规则也都挤在「compact 还会砍掉……」这个讲省 to
 
 `gld health` 第一次跑"公网 /mcp"报 `error sending request`，再跑两次都没有失败项。照惯例绕开本机代理直连三个公网地址各 3 次，9 次都是 200；
 经本机代理（127.0.0.1:7890）再访问 3 次也都是 200。是 gld 经本机代理那一下偶发没连上，公网入口本身没问题。
+
+## 39. 对照 codex-bridge：借了两处，三项排进队列（2026-10-22）
+
+**起因：**用户让参考 [Fanch-hui/codex-bridge](https://github.com/Fanch-hui/codex-bridge)（commit `f700ba6`，Swift 约 16 万行，Apache-2.0）
+看 gld 能吸取什么。三个子代理分头只读通读源码（没编译、没运行），回来的关键结论又对 gld 源码逐条核过。它的公开仓库是从私有代码树导出的，
+测试全被剔除，它文档里说的测试覆盖无法核实。
+
+**它是什么：**和 gld 同类，让 ChatGPT、Qwen、Gemini 经 MCP 操作本机登记过的项目（读写、补丁、命令、受控 Git 提交）；
+另外能把任务交给本机的 Codex、OpenCode 等 Agent 执行；带桌面 App，审批在 App 里点。
+
+| 方面 | codex-bridge | gld | 结论 |
+| --- | --- | --- | --- |
+| 接 ChatGPT | OpenAI 官方 Secure MCP Tunnel：本机 tunnel-client 只往外连 OpenAI，不要域名和公网端口；连接器选 Tunnel、填隧道 ID | Cloudflare 临时/固定域名、FRP、自建反代，都要公网 HTTPS | 值得加成可选接入，排进队列 |
+| 第三方程序拿密钥 | Runtime Key 和本机请求头经 fd 3/4 交给 helper，不进 argv | cloudflared 的 Tunnel Token 在 argv 里，本机任何账号 `ps` 看得到 | 已改（`0209cd3`） |
+| 升级 | 先拒收新任务，等任务和命令跑完再换；deb 安装时服务忙就拒绝 | `gld daemon restart` 直接停掉在跑的命令，靠人先查 | 排进队列 |
+| 给模型的规矩 | server instructions 写明状态冲突不是故障、被拒的命令不换法绕、没有回执不说完成 | 错误回包按错误码给下一步（`dispatch.rs` 的 `standalone_recovery_hint`），初始化说明里没这几条 | 已补（`a034476`） |
+| Agent 委派 | `submit_task` 立即回任务 ID，`wait_task` 最多等 300 秒、要审批或要回答问题时提前回；Codex 走 `codex app-server` 的 Thread/Turn；批准只能在本机 App 点，ChatGPT 只能回答 Agent 的提问；同项目写任务靠数据库部分唯一索引互斥 | 没有 | 用户定排进开发计划 |
+| `.git/` | 文件工具能写 `.git/config`，再调受控提交就会执行 `core.fsmonitor` 里的命令，只有审批挡着（推断，链条每一步有源码依据） | 文件工具一律不写 `.git/**`（`write_class.rs`） | gld 更严 |
+| 命令输出 | cursor 增量读 | `read_output` 已有 `offset` / `next_offset` | 已有 |
+| 大文件、疑似密钥 | 超过 200 KiB 整个不能读；写入含疑似密钥整个拒绝，读出时整行换成 `[REDACTED]` | 分页读；不拦 | 不学：误伤测试夹具，替换过的行补丁也对不上 |
+| 命令和写锁 | 命令一直占着项目写锁，一个 dev server 就挡住所有写入 | 写权在调用返回时就放 | 不学 |
+
+**Secure MCP Tunnel 的官方限制**（[官方文档](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)，2026-10-22 读）：
+单个请求从入队到回包最长 120 秒，进度通知不重置；请求或回包最大 10 MiB；每个隧道每分钟 600 次。要在 Platform 建隧道、勾上要用的 ChatGPT
+工作区，Runtime Key 要有 Tunnels Read + Use；只支持私有连接，不能拿去发公开插件。gld 单次调用最多等 30 秒（普通命令 `yield_time_ms`
+上限 30000，服务模式 `DEFAULT_WAIT_MS` 也是 30000），回包上限 1 MiB，都在范围内。**没弄清的**：ChatGPT 经隧道走 gld 的 OAuth 能不能通——
+官方只说 OAuth 发现能经隧道转发、授权服务器本身不会自动隧道化；codex-bridge 没走 OAuth，让 tunnel-client 给每个转发请求加一个静态请求头
+当本机凭据。另外它的 `wait_task` 默认等 300 秒，按官方 120 秒的上限经隧道会超时（推断，没实测）。
+
+**改了什么：**
+
+| 提交 | 内容 |
+| --- | --- |
+| `0209cd3` | 固定隧道的 token 经环境变量 `TUNNEL_TOKEN` 交给 cloudflared（本机 cloudflared 2026.10.0 的 `tunnel run --help` 写着 `--token` 也认 `$TUNNEL_TOKEN`），不再放 argv。start / share / upgrade 在 `--token` 没给时也认 `TUNNEL_TOKEN`，`--token` 优先；只在 `--tunnel cf:<域名>` 时读，用到时提示一句（它会覆盖已存的那份）。新测试：假 cloudflared 记下 argv 和环境，断言 token 不在 argv、在环境里；环境变量给 token、`--token` 压过环境变量、非固定域名不读它。前两条在改动前的代码上先红后绿 |
+| `a034476`、`30f8f46` | 两档初始化说明加四条：读文件用 `read_file`（多段用 `ranges`），不走 `exec_command` 跑 cat、sed、解释器单行；版本冲突、补丁对不上是文件变了，不是故障；被策略拒的命令不换程序绕，用 `check_command` 看规则、告诉用户；`command_ok=true` 才说通过，有新提交号才说已提交。对着 §28 实测的毛病。工具表和指纹不变，换装后 ChatGPT 要新开对话才拿到。`30f8f46` 是措辞修正：`a034476` 写了 "a gld or infrastructure failure"，`messages_name_real_commands` 把 `gld or` 当成子命令核对，全量挂了这一条 |
+
+**验证：**定向测试（`named_tunnel_start` 5 条、`share_one_command` 12 条、`mcp::server` 8 条、文档链接与命令三组）通过；clippy `-D warnings`、fmt 通过；
+`docs/cli.md` 用 `scripts/gen-cli-docs.sh` 重新生成。全仓头一遍 993 passed / 1 failed（就是上面 `gld or` 那条），
+修正后再跑：994 passed / 0 failed（§38 的 990 加这次 4 条）。
+
+**没做：**OpenAI 隧道接入（要用户自己的 Platform 账号先手工走一遍）、重启前等空闲、Agent 委派，三项进了 `task_plan.md` 的队列。没部署、没推送。
