@@ -50,6 +50,8 @@ pub struct ToolContext {
     pub ai_instructions: String,
     pub skills: Vec<SkillEntry>,
     pub agent_context: Option<AgentContextRuntimeConfig>,
+    /// 项目开关 `agent-delegation`：off | ask | auto（RFC-0009）。
+    pub agent_delegation: String,
     pub harness: Harness,
     default_cwd: Mutex<PathBuf>,
     /// 这个工作区目录的执行资源：写锁，和按调用方分的命令会话表。
@@ -131,6 +133,7 @@ impl ToolContext {
             ai_instructions: String::new(),
             skills: Vec::new(),
             agent_context: None,
+            agent_delegation: "off".into(),
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
             runtime,
             default_cwd: Mutex::new(root),
@@ -249,6 +252,11 @@ impl ToolContext {
 
     pub fn with_workspace_name(mut self, name: impl Into<String>) -> Self {
         self.workspace_name = name.into();
+        self
+    }
+
+    pub fn with_agent_delegation(mut self, mode: impl Into<String>) -> Self {
+        self.agent_delegation = mode.into();
         self
     }
 

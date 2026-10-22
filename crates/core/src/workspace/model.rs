@@ -97,6 +97,10 @@ pub struct RuntimeConfig {
     /// 默认能读整台机器风险太大。需要的人显式打开。
     #[serde(default = "default_confine_reads")]
     pub confine_reads: bool,
+    /// 能不能把活委派给本机 Agent（RFC-0009）：off（默认）| ask（每次要本机 `gld agent approve`）| auto。
+    /// Agent 是全权跑的，所以默认关。
+    #[serde(default = "default_agent_delegation")]
+    pub agent_delegation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +227,10 @@ fn default_confine_reads() -> bool {
     true
 }
 
+fn default_agent_delegation() -> String {
+    "off".to_string()
+}
+
 fn default_workspace_script_extensions() -> String {
     ".exe,.bat,.cmd,.ps1".to_string()
 }
@@ -276,6 +284,7 @@ impl Default for RuntimeConfig {
             workspace_local_entries: default_workspace_local_entries(),
             workspace_script_extensions: default_workspace_script_extensions(),
             confine_reads: default_confine_reads(),
+            agent_delegation: default_agent_delegation(),
         }
     }
 }

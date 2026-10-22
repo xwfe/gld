@@ -148,6 +148,15 @@ const FIELDS: &[Field] = &[
         }
     ),
     field!(
+        "mcp.agent-delegation",
+        "off | ask | auto",
+        "AI 能不能把活委派给本机 Agent（codex、claude……，全权跑，做完交回审核）：off 不能（默认）；ask 每次要你在本机 gld agent approve；auto 直接起",
+        |p, v| {
+            p.runtime.agent_delegation = parse_choice(v, &["off", "ask", "auto"])?;
+            Ok(())
+        }
+    ),
+    field!(
         "mcp.executable-paths",
         "路径列表（换行或分号分隔）",
         "额外的可执行文件搜索路径",

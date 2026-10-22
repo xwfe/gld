@@ -66,6 +66,7 @@ pub fn build_tool_context(
         runtime.history_context_sessions.clone(),
     )
     .with_workspace_name(workspace_name)
+    .with_agent_delegation(runtime.agent_delegation.clone())
     .with_usage(usage))
 }
 
