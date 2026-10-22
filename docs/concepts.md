@@ -1444,9 +1444,14 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    能动你账号能动的一切，不只是项目目录。gld 在提示后面加一段：交接目录在哪、结尾写四段 recap、别 git commit。
 3. 跑的时候，gld 对这个项目的 `apply_patch`、`exec_command` 回 `AGENT_TASK_RUNNING`，同一个项目同时只许一个委派。
    总时长默认 30 分钟（最长 2 小时），5 分钟没有任何输出按卡住停掉。
-4. 跑完进入"等审核"：AI 拿到 Agent 的 recap、交接报告（有的话）和改了哪些文件（跑前跑后两次 git 快照比出来的），
-   自己看 diff、跑测试，再 `action=review verdict=accept|reject`。**Agent 说"测试都过了"不算数**，验收照旧只认
-   gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。
+4. 跑完进入"等审核"：AI 拿到 Agent 的 recap、交接报告（有的话）、改了哪些文件，和**这次任务自己的 diff**（`diff` 字段，
+   最多 64 KB，全文在 gld 数据目录的任务记录里）。它是跑前跑后各把整个工作区写成一棵 git 树、两棵一比得出来的，
+   之前没提交的改动、没跟踪的文件不会混进来——`git_diff` 跟 HEAD 比就会混（上一轮委派没提交时撞过）。
+   AI 自己看 diff、跑测试，再 `action=review verdict=accept|reject`。**Agent 说"测试都过了"不算数**，验收照旧只认
+   gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。Agent 不听话提交了的，回包里 `head_moved` 为真，改动照样在 diff 里。
+
+   记树用的是任务目录里的临时 index，不碰你自己的暂存区和工作区；代价是往仓库的对象库里写了没人引用的对象，
+   过期后 `git gc` 会清掉。
 
 交接文件在项目里的 `.gld/handoff/<任务 id>/`：`brief.md`（AI 写的背景）、`report.md`（Agent 写的详细报告）、
 `review.md`（审核意见）。`.gld/handoff/` 自带一个只写 `*` 的 `.gitignore`，这些文件不会出现在 git status 里；

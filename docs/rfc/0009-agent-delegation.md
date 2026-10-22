@@ -117,7 +117,10 @@ result = { from = "stdout" }
 4. 两道超时：总时长（默认 30 分钟，最长 2 小时）和多久没输出（默认 5 分钟）。
    到点按档案的信号停：SIGINT，等一会儿，SIGTERM，再 SIGKILL，停的是整个进程组。"是 gld 主动停的"由 gld 自己记，不靠退出码猜。
 5. 取结果：按档案读结果文件、JSON 字段或 stdout。取不到、或者格式不认识，记 `failed`，带输出前 2 KB 和 Agent 的 `--version`。
-6. 算改动：跑之前、跑完各记一次 `git status`，两次一比就是改了哪些文件。
+6. 算改动：跑之前、跑完各用任务目录里的临时 index（`GIT_INDEX_FILE`，从用户的 index 复制一份当底）`git add -A` + `write-tree`，
+   把整个工作区记成一棵树；两棵树一比就是这次任务自己改了哪些文件和完整 diff（存成任务目录的 `task.diff`）。
+   第一版用两次 `git status` 比文件内容摘要，文件列表对，但回给审核的只有文件名，审核时跟 HEAD 比的 diff 会混进上一轮
+   没提交的改动（审查 §44）。不碰用户的 index 和工作区；会往对象库写没人引用的对象，`git gc` 过期后清掉。
 7. 状态变成 `awaiting_review`，放开项目写锁（ChatGPT 审的时候要跑测试）。
 
 ### 4.3 recap 和交接文档
@@ -159,7 +162,8 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
   和 compact 档里 `task_manage` 的写法一致。
 - 工具表多一项，指纹会变，**要在 ChatGPT 点一次 Refresh**。没开委派的项目照样看得到这个工具，调用时回"这个项目没开"和怎么开。
 - `wait` 单次最多 30 秒，经 OpenAI 隧道时官方上限 120 秒。
-- 回包有界、先脱敏：recap 最多 32 KB，report 最多 64 KB，改动文件最多 200 个。
+- 回包有界、先脱敏：recap 最多 32 KB，report 最多 64 KB，这次任务的 diff 最多 64 KB（截在整行上，标 `diff_truncated`），
+  改动文件最多 200 个；在跑时的输出尾巴每个流 768 字节，收尾后（失败、超时、被停）4 KB。
 - 本机命令行：`gld agent ls | show | approve | deny | stop`。
 
 ## 5. 已定的三件事（2026-10-22，照建议）
