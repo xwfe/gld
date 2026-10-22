@@ -2299,3 +2299,32 @@ pid 19779 → 68019，20:02:34 换上，服务自己恢复。
 
 **没做：**真跑 Codex、Claude（花额度，要用户点头）；没部署（协议 7，工具表变了，换装后 ChatGPT 要 Refresh）；
 Pi、agy、Kimi 等档案（D2）；打回后接着同一会话（D3）；Windows。没推送。
+
+## 43. 本机换成 `a8f9993`，Codex 真跑一次委派（2026-10-22 23:43–23:47）
+
+**要求：**用户同意"换装本机，在 `~/xdw` 下建临时项目，开 ask，让 Codex 真跑一次小改动"。放行这一步由我代按：用户同意的就是这一次运行，
+放行前先 `gld agent show` 和任务目录里的 `prompt.md` 核过提示全文。
+
+**换装：**换之前 ChatGPT 正在用 gld（23:36–23:43 每隔一两分钟一条 `ssh hpsrv …`），没有在跑的命令，趁两条之间的空档换。
+照 install.md 做：release 构建 2 分 21 秒，备份 `gld-6268bb0-20261022-2343` 和数据目录，写 `.new` 再改名，去掉 `CLAUDE*` 重启，
+pid 68019 → 79902。换完：协议 7；工具表 33 → 34、指纹 `59951e97…` → `e0d37cab…`（多了 `agent_manage`，**要用户 Refresh**）；
+`gld ls`、两份凭据指纹和换之前一样；新守护进程 `CLAUDE*` 变量 0 个；`gld health` 四项全 ✓。
+
+**临时项目：**`~/xdw/gld-delegation-test`，`math_utils.py` 埋两个 bug（`add` 写成减法、空列表求平均除零），三条 unittest 测试一失败一报错，
+初始提交 `bbc9079`。`gld add` 成 `delegation-test`，`agent-delegation=ask`；`action=agents` 报 codex、claude 都装着。
+
+**一次委派：**
+
+| 时刻 | 事 |
+| --- | --- |
+| 23:44 | `gld tool call agent_manage action=start agent=codex`（带 brief 写验收标准、`client_request_id`），回 `waiting_local_approval`，next_action 叫用户 `gld agent approve 910e5b3d`；`gld agent ls` 显示"等你放行" |
+| 23:44:32 | `gld agent approve 910e5b3d` |
+| 23:45:35 | `action=wait` 回 `awaiting_review`：Codex 跑了 62.9 秒，退出码 0，版本记成 `codex-cli 0.163.0` |
+
+回包：recap 照尾巴要求写成四段（做了什么、改了哪些文件、验证、没做完的）；`changed_files` 只有 `math_utils.py`；没写 report.md；
+回包里没有发起人标识。实际 diff：`add` 改成 `a + b`，`mean` 空列表返回 0，测试文件没动；Codex 没提交；`.gld/` 不在 git status 里。
+
+**审核：**gld 自己 `exec_command` 跑 `python3 -m unittest -v`，3 个全过、`command_ok=true`（也说明跑完后写锁放开了）；
+`action=review verdict=accept`，任务变成 `accepted`，意见写进 `.gld/handoff/910e5b3d…/review.md`。
+
+**没验：**Claude 真跑；ChatGPT 自己发起和审核（要用户先 Refresh）。临时项目留在服务上给用户试，不要了 `gld rm delegation-test`。没推送。

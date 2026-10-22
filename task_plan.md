@@ -14,14 +14,14 @@
 `gld --version` 带构建提交（§35）；`02e1afb`–`fba39d0` 认 Claude Code 开着的插件带的 skill、扫描时市场清单只读一次（§37、§38）；
 `0209cd3` Cloudflare Tunnel Token 不进任何命令行、`a034476` 初始化说明补四条看结果的规矩（对照 codex-bridge，§39）；
 `825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40）；`e265ca6` `gld remote add <项目名>` 精简、默认 coding；
-`0324602`–`267cdf9` Agent 委派 D1：`agent_manage`、`gld agent`、项目开关 `agent-delegation`（§42，没部署）。
-**守护进程协议从 7 起**（`85804aa`），工具表多了 `agent_manage`：换装后 ChatGPT 要 Refresh 一次。
-- 本机：`6268bb0`，守护进程 2026-10-22 20:02 换上（审查 §41；换之前用新命令行对着旧守护进程实测，重启检查拦住了在跑的命令）。
-  工具表 33 项（30 个加上本机 MCP 转发的 3 个，开着隔离的 `browser`）、指纹 `59951e97a502352e`，这次没变、不用 Refresh；
-  §39 的初始化说明要 ChatGPT 新开对话才拿到。守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`，
-  `gld context -w gld` 两份说明都打 ✓，Skill 扫到 97 个（含开着的插件带的 3 个）。
-  `~/.local/opt/` 只留三份（2026-10-22 清掉其余 26 个旧二进制和数据备份）：回滚用 `gld-fba39d0-20261022-2001`（换之前那版）、
-  官方 0.8.3 包 `gld-0.8.3-20261009-2336`，数据目录备份 `gld-config-20261022-2001.tgz`（0600，有明文凭据）。
+`0324602`–`267cdf9` Agent 委派 D1：`agent_manage`、`gld agent`、项目开关 `agent-delegation`（§42）。
+**守护进程协议从 7 起**（`85804aa`），工具表多了 `agent_manage`。
+- 本机：`a8f9993`，守护进程 2026-10-22 23:43 换上（审查 §43）。协议 7；工具表 34 项、指纹 `e0d37cabe9356c13`（原来 33 项
+  `59951e97a502352e`），**ChatGPT 还没 Refresh**，点之前看不到 `agent_manage`、原有工具照常。§39 的初始化说明要新开对话才拿到。
+  守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`。临时项目 `delegation-test`
+  （`~/xdw/gld-delegation-test`，`agent-delegation=ask`）还挂在服务上，留给用户从 ChatGPT 试委派，不要了就 `gld rm delegation-test`。
+  回滚用 `~/.local/opt/gld-6268bb0-20261022-2343`（换之前那版，协议 6）和 `gld-config-20261022-2343.tgz`（0600，有明文凭据）；
+  另留 `gld-fba39d0-20261022-2001`、官方 0.8.3 包、`gld-config-20261022-2001.tgz`。
 - 另一台 Mac、Linux 服务器的普通账号和 root：还是 `fba39d0`，`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）；
   只装了命令行，没起守护进程（审查 §33）。
 - 全仓：本机 1020 passed / 0 failed（`267cdf9`，§42）；Linux 服务器 989 是 `fba39d0` 那次的（差一条只在 macOS 编译的）；
@@ -59,7 +59,7 @@
 | 任务收尾与大输入回传 | 源码已修，未部署（2026-10-18） | `8fb5e31`、`63719bc`：收尾可只读重试、附加摘要失败不覆盖终态、命令回显有界；新增 8 条回归先失败后通过，全仓 test / clippy / fmt 通过，见审查 §27，复核见 §28。用户批准后按既有升级流程换二进制、重启守护进程，再从连接器验收；后台写入基线复核保持不变 |
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
-| Agent 委派 | D1 源码已做，没部署、没真跑过 Agent（2026-10-22，审查 §42） | [RFC-0009](docs/rfc/0009-agent-delegation.md)：`agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`，内置 codex、claude 两份档案，全权跑、做完交回审核。下一步：用户批准后换装（协议 7、工具表变了要 Refresh），在临时项目里 Codex、Claude 各真跑一次（花额度，先问），ChatGPT 审、gld 跑测试验收，结果记审查。D2 加 Pi、agy、Kimi 等档案，放开 `--write` grant（先给 grant 加浏览器标记） |
+| Agent 委派 | D1 本机已换上，Codex 真跑通过（2026-10-22，审查 §42、§43） | [RFC-0009](docs/rfc/0009-agent-delegation.md)：`agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`，内置 codex、claude 两份档案，全权跑、做完交回审核。没验的：Claude 真跑一次（花额度，先问）；ChatGPT 自己发起、审核一轮（用户先 Refresh，再在 `delegation-test` 上让它委派，结果记审查）。D2 加 Pi、agy、Kimi 等档案，放开 `--write` grant（先给 grant 加浏览器标记） |
 | OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
 | 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 
