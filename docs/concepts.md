@@ -1456,7 +1456,8 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    offset 超过总长（给了 `path` 就是不在那个文件那一段里）、`path` 不是这次改了的文件，回 `INVALID_ARGUMENT`；
    还没跑完回 `AGENT_TASK_STATE`；没跑过（被拒、过期）、没算出 diff（不是 git 仓库）、早于记文件位置的任务用了 `path`，
    回 `AGENT_DIFF_UNAVAILABLE`。
-   AI 自己看 diff、跑测试，再 `action=review verdict=accept|reject`。**Agent 说"测试都过了"不算数**，验收照旧只认
+   AI 自己看 diff、跑测试，再 `action=review verdict=accept|reject`（它的回包不再带一遍 diff，要再看用 `status` 或
+   `action=diff`）。**Agent 说"测试都过了"不算数**，验收照旧只认
    gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。Agent 不听话提交了的，回包里 `head_moved` 为真，改动照样在 diff 里。
 
    记树用的是任务目录里的临时 index，不碰你自己的暂存区和工作区；代价是往仓库的对象库里写了没人引用的对象，

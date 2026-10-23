@@ -237,6 +237,12 @@ fn ask_mode_goes_from_approval_to_review() {
         ],
     );
     assert_eq!(reviewed["state"], "accepted", "{reviewed}");
+    assert!(
+        reviewed.get("diff").is_none() && reviewed.get("diff_truncated").is_none(),
+        "审核的回包不再带一遍 diff：{reviewed}"
+    );
+    let status = manage(&env, &["action=status", &format!("task_id={task_id}")]);
+    assert_eq!(status["diff"], done["diff"], "要再看 diff，status 照样给");
     let shown = env.ok(&["agent", "show", &task_id[..8]]);
     assert!(
         shown.contains("已通过") && shown.contains("+1 -0\ttouched.txt"),

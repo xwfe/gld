@@ -74,7 +74,14 @@ pub fn agent_manage(
             let verdict = string_arg(args, "verdict")?;
             let note = args.get("note").and_then(Value::as_str).unwrap_or_default();
             let task = agents::review(&data_home, &task.task_id, verdict, note).map_err(convert)?;
-            Ok(present(agents::detail(&dir, task)))
+            let mut value = present(agents::detail(&dir, task));
+            // 审核的人刚看完 diff，回包不再带一遍：审查 §50 那一轮光这一项就 143 KB。要再看用 status 或 action=diff。
+            if let Some(object) = value.as_object_mut() {
+                for key in ["diff", "diff_truncated", "diff_next_offset"] {
+                    object.remove(key);
+                }
+            }
+            Ok(value)
         }
         "stop" => {
             only_operator(caller, "stop")?;
