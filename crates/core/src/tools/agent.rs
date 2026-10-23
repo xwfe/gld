@@ -21,7 +21,7 @@ use crate::tools::ToolContext;
 /// `wait` 单次最多等多久、起跑的总时长上限，都在 `tools::args::BOUNDED` 里：wait 和
 /// exec_command 一样最多 30 秒（经 OpenAI 隧道时官方上限 120 秒）。
 pub const ACTIONS: &[&str] = &[
-    "agents", "start", "status", "wait", "review", "stop", "list",
+    "agents", "start", "status", "wait", "diff", "review", "stop", "list",
 ];
 
 pub fn agent_manage(
@@ -57,6 +57,12 @@ pub fn agent_manage(
             let (dir, task) = agents::wait(&data_home, &task.task_id, Duration::from_secs(secs))
                 .map_err(convert)?;
             Ok(present(agents::detail(&dir, task)))
+        }
+        "diff" => {
+            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let page = agents::diff_page(&dir, &task, offset).map_err(convert)?;
+            Ok(present_page(page))
         }
         "review" => {
             only_operator(caller, "review")?;
@@ -196,10 +202,11 @@ fn present(detail: TaskDetail) -> Value {
             "Call agent_manage action=wait task_id={id} (up to 30 s per call) until the state changes. The project's apply_patch and exec_command are refused while it runs."
         ),
         State::AwaitingReview | State::Failed | State::Timeout | State::Stopped | State::Interrupted => {
-            let truncated = if detail.diff_truncated {
-                " The diff was truncated; read_file the remaining changed_files."
-            } else {
-                ""
+            let truncated = match detail.diff_next_offset {
+                Some(offset) => format!(
+                    " The diff field holds only the first part; read the rest with agent_manage action=diff task_id={id} offset={offset}."
+                ),
+                None => String::new(),
             };
             let committed = if detail.task.head_moved {
                 " HEAD moved while it ran: the agent committed although told not to; the diff still covers those changes."
@@ -218,6 +225,21 @@ fn present(detail: TaskDetail) -> Value {
         object.insert("next_action".into(), Value::String(next));
         // 原样输出、提示全文只在本机看：给 AI 的是 recap、报告和最后一段输出。
         object.remove("caller");
+    }
+    value
+}
+
+fn present_page(page: agents::DiffPage) -> Value {
+    let next = match page.next_offset {
+        Some(offset) => format!(
+            "More follows: call agent_manage action=diff task_id={} offset={offset}.",
+            page.task_id
+        ),
+        None => "That is the end of this task's diff.".to_string(),
+    };
+    let mut value = serde_json::to_value(&page).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("next_action".into(), Value::String(next));
     }
     value
 }
@@ -248,7 +270,7 @@ fn convert(error: AgentError) -> WorkspaceError {
     let category = match error.code {
         "INVALID_ARGUMENT" | "AGENT_UNKNOWN" => "argument",
         "AGENT_TASK_RUNNING" | "AGENT_TASK_STATE" => "conflict",
-        "AGENT_TASK_NOT_FOUND" | "AGENT_TASK_AMBIGUOUS" => "not_found",
+        "AGENT_TASK_NOT_FOUND" | "AGENT_TASK_AMBIGUOUS" | "AGENT_DIFF_UNAVAILABLE" => "not_found",
         _ => "runtime",
     };
     tool_error(error.code, error.message, category)
@@ -277,4 +299,47 @@ fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// diff 截断了，下一步要说清从哪个 offset 接着读：AI 自己算不出来（脱敏会改长度）。
+    #[test]
+    fn a_truncated_diff_says_where_the_next_page_starts() {
+        let detail: TaskDetail = serde_json::from_value(json!({
+            "task_id": "3f2a0000-0000-4000-8000-000000000000",
+            "project_id": "p",
+            "workspace_root": "/w",
+            "workspace_name": "w",
+            "agent": "codex",
+            "caller": "local",
+            "prompt_preview": "fix",
+            "state": "awaiting_review",
+            "created_at_ms": 1,
+            "handoff_dir": "/w/.gld/handoff/x",
+            "diff": "diff --git a/x b/x\n",
+            "diff_truncated": true,
+            "diff_next_offset": 65530
+        }))
+        .expect("detail");
+        let value = present(detail);
+        assert_eq!(value["diff_next_offset"], 65530);
+        let next = value["next_action"].as_str().unwrap_or("");
+        assert!(
+            next.contains("action=diff task_id=3f2a0000-0000-4000-8000-000000000000 offset=65530"),
+            "{next}"
+        );
+
+        let page = present_page(agents::DiffPage {
+            task_id: "t".into(),
+            offset: 65530,
+            next_offset: None,
+            total_bytes: 70000,
+            diff: String::new(),
+        });
+        assert!(page["next_offset"].is_null(), "{page}");
+        assert!(page["next_action"].as_str().unwrap_or("").contains("end"));
+    }
 }

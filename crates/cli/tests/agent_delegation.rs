@@ -174,6 +174,27 @@ fn ask_mode_goes_from_approval_to_review() {
             .contains("diff field"),
         "{done}"
     );
+    // 没截断时 action=diff 一页就读完，和回包里那份一样。
+    let page = manage(&env, &["action=diff", &format!("task_id={task_id}")]);
+    assert_eq!(page["diff"], done["diff"], "{page}");
+    assert!(page["next_offset"].is_null(), "{page}");
+    assert_eq!(page["total_bytes"], done["diff_bytes"], "{page}");
+    let past = manage(
+        &env,
+        &[
+            "action=diff",
+            &format!("task_id={task_id}"),
+            "offset:=99999999",
+        ],
+    );
+    assert_eq!(past["error"]["code"], "INVALID_ARGUMENT", "{past}");
+    assert!(
+        past["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("超过了 diff 的总长"),
+        "要是 offset 越界，不是参数名不认识：{past}"
+    );
     let seen = std::fs::read_to_string(env.project.path().join("prompt-seen.txt")).expect("提示");
     assert!(
         seen.contains("brief.md") && seen.contains("recap"),

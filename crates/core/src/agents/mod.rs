@@ -365,6 +365,9 @@ pub struct TaskDetail {
     pub diff: Option<String>,
     #[serde(default)]
     pub diff_truncated: bool,
+    /// 截断了才有：剩下的从这个字节位置起，用 `agent_manage action=diff offset=` 接着读。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_next_offset: Option<u64>,
     /// 没收尾（在跑、失败、超时）时才有：最后一段 stdout / stderr。
     #[serde(default)]
     pub output_tail: Option<OutputTail>,
@@ -381,7 +384,7 @@ pub const OUTPUT_TAIL_BYTES: usize = 4096;
 /// 在跑时每次 `wait` 都回一段，只要看得出还在动就行。Codex 的 `--json` 输出是事件 JSON，
 /// 套进回包再转义一层就翻倍：以前给 4 KB，一次 `wait` 回包 14 KB（审查 §44）。
 pub const RUNNING_TAIL_BYTES: usize = 768;
-/// 这次任务自己的 diff 最多回多少字节，全文在任务目录的 `task.diff`。
+/// 这次任务自己的 diff 一次最多回多少字节（`status` / `wait` 回包里的、`action=diff` 每一页），全文在任务目录的 `task.diff`。
 pub const DIFF_MAX_BYTES: usize = 64 * 1024;
 
 pub fn detail(dir: &Path, task: AgentTask) -> TaskDetail {
@@ -400,9 +403,10 @@ pub fn detail(dir: &Path, task: AgentTask) -> TaskDetail {
         crate::tools::history::redact_text(&mut stderr);
         OutputTail { stdout, stderr }
     });
-    let (diff, diff_truncated) = match task_diff_text(dir) {
-        Some((text, truncated)) => (Some(text), truncated),
-        None => (None, false),
+    // 还没收尾或者没算出来，就没有这个文件。
+    let (diff, diff_next_offset) = match read_diff(&dir.join(store::DIFF_FILE), 0, DIFF_MAX_BYTES) {
+        Ok((text, next)) => (Some(text), next),
+        Err(_) => (None, None),
     };
     TaskDetail {
         handoff_dir: handoff_dir(Path::new(&task.workspace_root), &task.task_id)
@@ -410,25 +414,94 @@ pub fn detail(dir: &Path, task: AgentTask) -> TaskDetail {
             .to_string(),
         report: report(&task),
         diff,
-        diff_truncated,
+        diff_truncated: diff_next_offset.is_some(),
+        diff_next_offset,
         output_tail,
         task,
     }
 }
 
-/// `task.diff` 的前 [`DIFF_MAX_BYTES`]，按行截、脱敏。还没收尾或者没算出来就是 None。
-fn task_diff_text(dir: &Path) -> Option<(String, bool)> {
-    let bytes = fs::read(dir.join(store::DIFF_FILE)).ok()?;
-    let truncated = bytes.len() > DIFF_MAX_BYTES;
-    let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(DIFF_MAX_BYTES)]).into_owned();
-    if truncated {
-        // 截在半行上的那一行不要，免得看着像改了半行。
-        if let Some(newline) = text.rfind('\n') {
-            text.truncate(newline + 1);
-        }
+/// `action=diff` 的一页。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiffPage {
+    pub task_id: String,
+    /// 这一页从 `task.diff` 的第几个字节起。
+    pub offset: u64,
+    /// 下一页从哪起；读完了是 None。
+    pub next_offset: Option<u64>,
+    /// `task.diff` 一共多少字节。
+    pub total_bytes: u64,
+    pub diff: String,
+}
+
+/// 跑完的任务的 diff，从 `offset` 字节起最多 [`DIFF_MAX_BYTES`]。回包里的 diff 截断了，剩下的靠它一页页读：
+/// AI 读不到 gld 数据目录里的 `task.diff`（审查 §47）。
+pub fn diff_page(dir: &Path, task: &AgentTask, offset: u64) -> Result<DiffPage, AgentError> {
+    if !task.state.is_finished() {
+        return Err(not_in_state(task, "已经跑完"));
     }
+    let path = dir.join(store::DIFF_FILE);
+    let Ok(meta) = fs::metadata(&path) else {
+        let why = match task.state {
+            State::Denied | State::Expired => "这个任务没跑过",
+            State::Unknown => "起它的 gld 进程没来得及收尾，没算 diff",
+            _ if task.changes_unknown => "项目不是 git 仓库（或者跑前跑后记不下工作区），没算 diff",
+            _ => "任务目录里没有 task.diff：这个任务早于 gld 存 diff 的版本，或者当时没写进去",
+        };
+        return Err(AgentError::new(
+            "AGENT_DIFF_UNAVAILABLE",
+            format!("任务 {} 没有 diff：{why}", task.task_id),
+        ));
+    };
+    let total_bytes = meta.len();
+    if offset > total_bytes {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            format!("offset {offset} 超过了 diff 的总长 {total_bytes} 字节"),
+        ));
+    }
+    let (diff, next_offset) = read_diff(&path, offset, DIFF_MAX_BYTES).map_err(|error| {
+        AgentError::new(
+            "AGENT_STATE_UNAVAILABLE",
+            format!("读不了 {}：{error}", path.display()),
+        )
+    })?;
+    Ok(DiffPage {
+        task_id: task.task_id.clone(),
+        offset,
+        next_offset,
+        total_bytes,
+        diff,
+    })
+}
+
+/// diff 文件从 `offset` 起最多 `max` 字节，脱敏。返回这一段和下一段从哪起（读完了是 None）。
+///
+/// 截在整行上：截在半行上看着像改了半行，切成两半的密钥也可能认不出来、漏过脱敏。一行本身就比 `max` 长（压缩过的文件）
+/// 才在行中间切，切在 UTF-8 字符边界上，下一页从同一个字符接着读。只读要用的这一段，diff 再大也不整个读进内存。
+fn read_diff(path: &Path, offset: u64, max: usize) -> std::io::Result<(String, Option<u64>)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::with_capacity(max + 1);
+    // 多读一个字节：读得到就说明后面还有，也用它判断切点是不是字符边界。
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    let mut next = None;
+    if bytes.len() > max {
+        let end = match bytes[..max].iter().rposition(|byte| *byte == b'\n') {
+            Some(newline) => newline + 1,
+            None => (1..=max)
+                .rev()
+                .find(|&end| bytes[end] & 0xC0 != 0x80)
+                .unwrap_or(max),
+        };
+        bytes.truncate(end);
+        next = Some(offset + end as u64);
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
     crate::tools::history::redact_text(&mut text);
-    Some((text, truncated))
+    Ok((text, next))
 }
 
 /// 全部任务（给了项目 id 就只看这个项目），新的在前。

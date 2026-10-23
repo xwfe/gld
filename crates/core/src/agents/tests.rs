@@ -595,11 +595,16 @@ fn outside_git_the_changes_are_unknown_and_there_are_no_trees() {
         STDOUT,
         "",
     );
-    let done = f.finished(&f.start("fake", Approval::Auto).expect("起"));
+    let task = f.start("fake", Approval::Auto).expect("起");
+    let done = f.finished(&task);
     assert_eq!(done.state, State::AwaitingReview, "{done:?}");
     assert!(done.changes_unknown && done.changed_files.is_empty());
-    assert_eq!((done.before_tree, done.after_tree), (None, None));
+    assert_eq!((&done.before_tree, &done.after_tree), (&None, &None));
     assert_eq!(done.diff_bytes, None);
+    let (dir, _) = get(f.data_home(), &task.task_id).expect("任务");
+    let error = diff_page(&dir, &done, 0).expect_err("没有 diff");
+    assert_eq!(error.code, "AGENT_DIFF_UNAVAILABLE");
+    assert!(error.message.contains("不是 git 仓库"), "{error}");
 }
 
 /// Agent 被叮嘱别提交，还是提交了：标出来，改动照样在 diff 里（比的是工作区，不是 HEAD）。
@@ -641,6 +646,84 @@ fn a_huge_diff_is_cut_on_a_line_boundary() {
         diff.len()
     );
     assert!(done.diff_bytes.unwrap_or(0) > DIFF_MAX_BYTES as u64);
+    assert_eq!(
+        detail.diff_next_offset,
+        Some(diff.len() as u64),
+        "没有要脱敏的内容时，下一页正好接在这一页后面"
+    );
+
+    // 剩下的一页页读（审查 §47：AI 读不到数据目录里的 task.diff），拼起来就是整份。
+    let (dir, task) = get(f.data_home(), &done.task_id).expect("任务");
+    let (mut whole, mut offset, mut pages) = (String::new(), 0, 0);
+    loop {
+        let page = diff_page(&dir, &task, offset).expect("一页");
+        assert!(page.diff.len() <= DIFF_MAX_BYTES, "{}", page.diff.len());
+        assert_eq!(Some(page.total_bytes), done.diff_bytes);
+        if pages == 0 {
+            assert_eq!(page.diff, diff, "第一页就是回包里那份");
+        }
+        whole.push_str(&page.diff);
+        pages += 1;
+        match page.next_offset {
+            Some(next) => {
+                assert!(page.diff.ends_with('\n'), "要截在整行上");
+                offset = next;
+            }
+            None => break,
+        }
+    }
+    assert!(pages >= 2, "{pages}");
+    assert_eq!(
+        whole.into_bytes(),
+        std::fs::read(dir.join(store::DIFF_FILE)).expect("task.diff")
+    );
+
+    let total = done.diff_bytes.expect("diff_bytes");
+    let end = diff_page(&dir, &task, total).expect("正好在末尾");
+    assert!(end.diff.is_empty() && end.next_offset.is_none());
+    assert_eq!(
+        diff_page(&dir, &task, total + 1)
+            .expect_err("超过总长")
+            .code,
+        "INVALID_ARGUMENT"
+    );
+}
+
+/// 一行比一页还长（压缩过的文件）就在行中间切，切在字符边界上；一页页接起来不丢不重。
+#[test]
+fn pages_cut_inside_an_overlong_line_on_a_char_boundary() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("task.diff");
+    for (text, max) in [("aéééb", 4), ("ab\ncdefgh\n", 5), ("", 4)] {
+        std::fs::write(&path, text).expect("write");
+        let (mut whole, mut offset) = (String::new(), 0);
+        loop {
+            let (page, next) = read_diff(&path, offset, max).expect("读");
+            assert!(page.len() <= max && !page.contains('\u{FFFD}'), "{page:?}");
+            whole.push_str(&page);
+            match next {
+                Some(next) => {
+                    assert!(next > offset, "要往前走");
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(whole, text);
+    }
+}
+
+/// 还没跑完的任务没有 diff 可读。
+#[test]
+fn the_diff_cannot_be_paged_before_the_task_has_run() {
+    let f = Fixture::new();
+    f.agent("fake", "cat >/dev/null\necho ok", STDOUT, "");
+    let waiting = f.start("fake", Approval::Ask).expect("存下");
+    let (dir, task) = get(f.data_home(), &waiting.task_id).expect("任务");
+    assert_eq!(
+        diff_page(&dir, &task, 0).expect_err("还没跑").code,
+        "AGENT_TASK_STATE"
+    );
 }
 
 /// 在跑时每次 wait 回的输出尾巴要小（审查 §44：Codex 的事件 JSON 让一次回包到了 14 KB）。

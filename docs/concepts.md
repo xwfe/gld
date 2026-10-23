@@ -1446,8 +1446,12 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    总时长默认 30 分钟（最长 2 小时），5 分钟没有任何输出按卡住停掉。
 4. 跑完进入"等审核"：AI 拿到 Agent 的 recap、交接报告（有的话）、改了哪些文件（`changed_files`）和每个文件增删几行
    （`file_stats`，同样的文件、同样的顺序，二进制文件的行数是 `null`），和**这次任务自己的 diff**（`diff` 字段，
-   最多 64 KB，全文在 gld 数据目录的任务记录里）。它是跑前跑后各把整个工作区写成一棵 git 树、两棵一比得出来的，
+   最多 64 KB）。它是跑前跑后各把整个工作区写成一棵 git 树、两棵一比得出来的，
    之前没提交的改动、没跟踪的文件不会混进来——`git_diff` 跟 HEAD 比就会混（上一轮委派没提交时撞过）。
+   超过 64 KB 的截在整行上，`diff_truncated` 为真、`diff_next_offset` 是剩下的从第几个字节起；AI 用
+   `action=diff task_id=… offset=<diff_next_offset>` 接着读，每页最多 64 KB，再按每页的 `next_offset` 往下读，
+   读到它是 `null` 为止。offset 超过总长回 `INVALID_ARGUMENT`；还没跑完回 `AGENT_TASK_STATE`；
+   没跑过（被拒、过期）或者没算出 diff（不是 git 仓库）回 `AGENT_DIFF_UNAVAILABLE`。
    AI 自己看 diff、跑测试，再 `action=review verdict=accept|reject`。**Agent 说"测试都过了"不算数**，验收照旧只认
    gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。Agent 不听话提交了的，回包里 `head_moved` 为真，改动照样在 diff 里。
 
