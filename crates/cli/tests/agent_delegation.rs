@@ -251,6 +251,36 @@ fn ask_mode_goes_from_approval_to_review() {
     env.ok(&["daemon", "stop"]);
 }
 
+/// diff 超过 64 KB 时 `gld agent show` 只打前一段，要说清全文在本机哪个文件，而且那个文件真在、就是全文。
+#[test]
+fn show_points_to_the_full_diff_when_it_is_cut() {
+    let env = Env::new();
+    agent(
+        &env,
+        "flood",
+        "cat >/dev/null\ni=0; while [ $i -lt 3000 ]; do echo \"line $i of a long generated file\"; i=$((i+1)); done > big.txt\necho ok",
+    );
+    project(&env);
+    env.ok(&["set", "it", "agent-delegation=auto"]);
+    let started = manage(
+        &env,
+        &["action=start", "agent=flood", "prompt=写一个大文件"],
+    );
+    let task_id = started["task_id"].as_str().expect("task_id").to_string();
+    let done = wait_done(&env, &task_id);
+    assert_eq!(done["diff_truncated"], true, "{done}");
+
+    let shown = env.ok(&["agent", "show", &task_id[..8]]);
+    let path = shown
+        .split("全文在 ")
+        .nth(1)
+        .and_then(|rest| rest.split('）').next())
+        .unwrap_or_else(|| panic!("没说全文在哪：{shown}"));
+    let full = std::fs::read(path).unwrap_or_else(|error| panic!("{path} 打不开：{error}"));
+    assert_eq!(Some(full.len() as u64), done["diff_bytes"].as_u64());
+    env.ok(&["daemon", "stop"]);
+}
+
 #[test]
 fn a_running_task_holds_writes_and_restart_until_stopped() {
     let env = Env::new();

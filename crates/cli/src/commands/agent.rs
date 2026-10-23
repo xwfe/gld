@@ -148,9 +148,9 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
     }
     if let Some(diff) = detail.diff.as_deref().filter(|diff| !diff.is_empty()) {
         let more = if detail.diff_truncated {
-            "（只显示前 64 KB，全文在任务目录的 task.diff）"
+            format!("（只显示前 64 KB，全文在 {}）", full_diff_path(task))
         } else {
-            ""
+            String::new()
         };
         ctx.out
             .line(format!("\n这次任务自己的 diff{more}：\n{diff}"));
@@ -172,6 +172,21 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
         ));
     }
     Ok(())
+}
+
+/// 完整 diff 在本机哪个文件。命令行和守护进程用同一个数据目录；算出来的文件不在（比如 GLD_HOME 不一样），
+/// 就只说在任务目录里，不给一条打不开的路径。
+fn full_diff_path(task: &AgentTask) -> String {
+    use gld_core::agents::store;
+    gld_core::home::data_home()
+        .ok()
+        .map(|home| {
+            store::task_dir(&store::root(&home), &task.project_id, &task.task_id)
+                .join(store::DIFF_FILE)
+        })
+        .filter(|path| path.is_file())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "任务目录的 task.diff".to_string())
 }
 
 /// 每个文件一行，前面是增删行数。早于记行数的任务只有文件名。

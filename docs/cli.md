@@ -1113,19 +1113,20 @@ Options:
 委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
 
   gld agent ls              所有项目的委派：跑到哪、哪些等你放行、哪些等审核
-  gld agent show 3f2a       一个任务的 recap、改了哪些文件、最后的输出
+  gld agent show 3f2a       一个任务的提示、recap、改了哪些文件、这次的 diff
   gld agent approve 3f2a    ask 档下放行（任务 id 给前 4 位以上就行）
   gld agent deny 3f2a       拒掉
   gld agent stop 3f2a       停掉在跑的
 
 项目要先开：gld set <项目> agent-delegation=ask（或 auto）。Agent 是全权跑的
-（能动你账号能动的一切），做完交回 AI 审核。见 docs/rfc/0009-agent-delegation.md。
+（能动你账号能动的一切），做完交回 AI 审核。怎么用、风险在哪见
+docs/concepts.md「把活委派给本机 Agent」和 docs/security.md。
 
 Usage: gld agent [OPTIONS] <COMMAND>
 
 Commands:
   list     所有项目的委派任务，新的在前 [alias: ls]
-  show     一个任务的详情：recap、改了哪些文件、交接报告、最后的输出
+  show     一个任务的详情：提示、recap、改了哪些文件（各增删几行）、这次的 diff、交接报告、最后的输出
   approve  放行一个等你点头的任务（项目开的是 ask 档）
   deny     拒掉一个等你点头的任务
   stop     停掉在跑的（或作废还在等放行的）
@@ -1181,7 +1182,7 @@ Options:
 ## gld agent show
 
 ```text
-一个任务的详情：recap、改了哪些文件、交接报告、最后的输出
+一个任务的详情：提示、recap、改了哪些文件（各增删几行）、这次的 diff、交接报告、最后的输出
 
 Usage: gld agent show [OPTIONS] <TASK>
 
