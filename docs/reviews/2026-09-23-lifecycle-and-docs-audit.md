@@ -2576,3 +2576,34 @@ MCP 2025-06-18 规范的工具一节原文是带 `structuredContent` 的工具 S
 fmt、文档检查通过。
 
 **没做：**换装（用户说先不换，本机还是 `c99c8cd`）；没用真的 ChatGPT 试 `path`。没推送。
+
+## 52. 委派收尾的小缺口、文档对账、README 精简（2026-10-23）
+
+**要求：**用户说"继续任务完善，同步更新文档；最后修正 README.md 的问题，保持简洁高效的，人话风格，站在用户角度，
+更多让用户去文档查看具体内容"。
+
+**委派这边补的（`ab28d2b`）：**`gld agent show` 在 diff 超过 64 KB 时只说"全文在任务目录的 task.diff"，任务目录在数据目录
+深处，用户找不到。现在打出完整路径（算出来的文件不在就退回原说法）；`gld agent` 的帮助跟上 show 现在打的内容，"见 RFC"改成指向
+concepts.md 和 security.md，重新生成 `docs/cli.md`。新增端到端一条，临时撤掉改动跑过，旧代码上失败。
+
+**文档对账（`11d9e4b`）：**
+
+- security.md 说"名字像密钥的环境变量会被去掉"对委派出去的 Agent 不适用——不对，起 Agent 时照样去掉（`run.rs` 的 `spawn`），
+  只是它能读 shell 配置和 `~/.config`，拦不住。改成实话。
+- RFC-0009 状态还是"没部署、一个 Agent 都没真跑过"，第 2 节流程还写着 `output_ref`、"用 `git_diff`、`read_file` 看改动"。改成现状；
+  第 8 节"要在 D1 实测的"写上四轮 Codex 的结果：从任务记录核，四轮退出码都是 0（60–163 秒）、都按四段写 recap；§50 那轮四个
+  MCP server 连不上，Codex 13 秒内报完错接着干；`.gld/handoff/` 会不会被格式化、lint 扫到还没测到。
+- concepts.md 委派一节第 4 步原来一大段，拆成"交回审核时拿到什么"（字段表）、"diff 太长怎么读"（offset / path、报错表）、
+  "这份 diff 是怎么算出来的"三小节，内容不变。
+
+**README（`b89ffe6`）：**
+
+- 发现的问题：README 让人去 Releases 下载，可委派、DeepSeek 网页（`gld grant browser`）、Claude Code 插件带的 skill 都不在
+  0.8.3 发布包里（`git grep v0.8.3` 核过，`list_project_commands`、`service_port`、Skill、本机 MCP、grant、ccnm 远端都在），
+  README 一句没提。现在第 1 步后面写明，development.md 发版第 1 步加了"这句要跟着改"（README 会打进发布包）。
+- "能做什么"每条压成一句、链到 concepts.md 对应小节；第 3 步的 DeepSeek 大段（构建日期、版本限制）并进"每种客户端怎么接"
+  的链接，connect-clients.md 里本来就有；文档表去掉重复的两行。102 → 94 行。
+
+**验证：**全仓 1033 passed / 0 failed，clippy、fmt、文档链接（含新锚点）、命令名、本机路径、命名门禁通过。
+
+**没做：**换装（`0b483f0` 起的提交都没部署，本机还是 `c99c8cd`）。没推送。
