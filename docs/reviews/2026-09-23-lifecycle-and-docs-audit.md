@@ -2626,3 +2626,48 @@ concepts.md 和 security.md，重新生成 `docs/cli.md`。新增端到端一条
 模拟估 CSV 那段约 167 KB，按路径排在最前，代码在后面三个文件里；`math_utils.py` 里留着前几轮没提交的改动，看 `path` 读出来的那段
 是不是只有这次的两个函数。审核要求先看 `file_stats`，代码文件用 `path` 各读一次，CSV 只读第一页，不按 offset 翻全份。结果等用户
 试完再核对、记下一节；请求日志从第 16428 行起是这一轮。没推送。
+
+## 54. ChatGPT 用 path 先读代码再审一个 172 KB 的委派 diff（2026-10-23 18:54–19:00）
+
+**结论：按文件读管用。**diff 171,539 字节，CSV 一段 167,748 字节排在最前，代码三段 1,846 / 558 / 1,387 字节。ChatGPT 看完
+`file_stats` 后用 `path` 把三个代码文件各读一页就完（`next_offset` 都是 `null`、页大小等于 `diff_bytes`），CSV 只读了第一页，
+一共读了 69,309 字节（总量的 40%）。`math_utils.py` 里留着前几轮没提交的改动，按 `path` 读出来那段只有这次的 `variance`、`stdev`
+（+11 行），审核意见里也写了没混进去。accept。
+
+| 本地时间 | ChatGPT 做了什么（项目自己的请求日志、运行记录） |
+| --- | --- |
+| 18:54:29 | 用户点 Refresh，`tools/list` 回 47,575 字节 |
+| 18:55:45–56:04 | `list_workspaces`、`agent_manage action=agents`、`start agent=codex`，回 `waiting_local_approval`；用户放行，Codex 跑了 134 秒 |
+| 18:57:08–58:43 | 四次 `wait`，在跑时回 6.6–7.4 KB，最后一次 `awaiting_review` 回 143,257 字节（带第一页，整页都是 CSV） |
+| 18:58:59–59:15 | 五次 `action=diff`：4,906、4,906、2,003、3,888、135,602 字节。审核意见里写的是四次（`gen_variance_cases.py`、`math_utils.py`、`test_variance_cases.py`、CSV 首页）；两次 4,906 正好是 `gen_variance_cases.py` 那段的大小，多半同一个文件读了两遍 |
+| 18:59:27–31 | `exec_command`：`git diff --numstat <before_tree> <after_tree>`、`python3 gen_variance_cases.py --check`、`python3 -m unittest -v`，退出码都是 0 |
+| 19:00:04 | `review verdict=accept`，回 11,251 字节（§50 那次带 diff 是 143,571），没有 diff 字段 |
+
+同一时间日志里的 `read_file` 是用户另一个对话在别的项目里读的（同一秒那个项目记了 `git_status`）。
+
+**我这边核对：**用 `gld tool call agent_manage action=diff path=…` 把四个文件各读一遍，都和 `task.diff` 里对应那段逐字节相同、各自从自己的
+`diff --git` 起；`math_utils.py` 那段只有 +11 行的两个函数，相对 HEAD 它是 +34 −1（前几轮的 +23 −1 加这 11 行），`test_math_utils.py`
+没动，没有新提交；`--check` 退出码 0，11 条测试 OK。
+
+**回包量：**这一轮 `agent_manage` 的大回包合计 305,813 字节，§50 是 790,539。CSV 首页那 135,602 字节是重复的：`wait` 回包里的第一页就是它
+（同样 offset 0–65,518），是我提示词要它"用 path 读 CSV 第一页"造成的。去掉这一项是 170 KB；`wait` 再不附第一页就只剩 39 KB。
+看 CSV 格式其实只要开头 247 字节（diff 头、表头、第一条），现在最少得读一页 64 KB。
+
+**ChatGPT 第 7 步的评价**（用户贴回来的）：按文件读够用，比从头翻更适合审代码，代码审核这一轮 3 次调用。别扭的地方和建议：
+
+1. （P1）`wait` / `status` 加 `diff_mode=metadata`，默认只给文件统计、不带 diff 正文——大 CSV 还是进了首个回包。
+2. （P1）`path` 加 `limit_bytes`，比如只读 CSV 前 4 KB。
+3. （P2）`path` 时省略 offset 是从这个文件在整份 diff 里的位置起，不是文件内的 0，容易误解；回 `file_offset` 和 `global_offset`。
+4. （P2）每页加 `page_bytes`、`file_done`。
+5. （P3）`path` 多选，一次读几个小代码文件。
+
+**我的看法**（还没定，等用户选）：
+
+- 第 2 条现在值得做：§50 时我说"真遇到一个文件就超过 64 KB 又只想看一部分再说"，这一轮就是（CSV 167 KB，看格式 247 字节够）。
+  名字跟 `read_file`、`git_diff` 一样叫 `max_bytes`，范围 1 KB–64 KB、默认 64 KB，照样截在整行上。
+- 第 1 条是 §51 用户定过"大 diff 时 `status` / `wait` 仍附第一页"的事，这一轮多了证据：两轮大 diff 的第一页都是生成的数据，对审代码没用，
+  每次 143 KB。要不要改由用户重新定；要改，按大小定（超过 64 KB 只给 `file_stats`）比加一个参数简单。
+- 第 3 条不加字段：它这一轮没用错；把 `offset` 的说明写明"给了 `path` 也是整份 diff 里的位置"就够。
+- 第 4、5 条不值：`page_bytes` 是 `next_offset - offset`，给了 `path` 时 `next_offset` 为 `null` 就是这个文件读完了；三个小文件三次调用一共 11 KB。
+
+没推送。
