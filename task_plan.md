@@ -16,12 +16,12 @@
 `825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40）；`e265ca6` `gld remote add <项目名>` 精简、默认 coding；
 `0324602`–`267cdf9` Agent 委派 D1：`agent_manage`、`gld agent`、项目开关 `agent-delegation`（§42）。
 **守护进程协议从 7 起**（`85804aa`），工具表多了 `agent_manage`。
-- 本机：`59f40ad`，守护进程 2026-10-23 10:55 换上（审查 §46），带上了 `7f0a87a`、`f9bc7f0`。协议 7；工具表 34 项、
-  指纹 `e0d37cabe9356c13`，这次没变、不用 Refresh（ChatGPT 10-23 00:06 已 Refresh 过这张表）。守护进程是去掉 `CLAUDE*`
+- 本机：`c99c8cd`，守护进程 2026-10-23 14:31 换上（审查 §49），带上了 `a5cf900`–`188f60c`。协议 7；工具表 34 项、
+  指纹 `e0d37cabe9356c13` → `a0c81b8f6d0580cd`（只有 `agent_manage` 变了），**ChatGPT 要点一次 Refresh**。守护进程是去掉 `CLAUDE*`
   变量后起的；已点名注入 `~/.codex/AGENTS.md`。临时项目 `delegation-test`（`~/xdw/gld-delegation-test`，`agent-delegation=ask`，
-  工作区里故意留着前两轮委派没提交的改动）还挂在服务上，不要了就 `gld rm delegation-test`。
-  回滚用 `~/.local/opt/gld-a8f9993-20261023-1054`（换之前那版）和 `gld-config-20261023-1054.tgz`（0600，有明文凭据）；
-  另有更早的 `gld-6268bb0-…`（协议 6）、`gld-fba39d0-…`、官方 0.8.3 包和两份旧数据备份，要清的话说一声。
+  工作区里故意留着前几轮委派没提交的改动）还挂在服务上，不要了就 `gld rm delegation-test`。
+  回滚用 `~/.local/opt/gld-59f40ad-20261023-1427`（换之前那版）和 `gld-config-20261023-1427.tgz`（0600，有明文凭据）；
+  另有更早的 `gld-a8f9993-…`、`gld-6268bb0-…`（协议 6）、`gld-fba39d0-…`、官方 0.8.3 包和几份旧数据备份，要清的话说一声。
 - 另一台 Mac、Linux 服务器的普通账号和 root：还是 `fba39d0`，`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）；
   只装了命令行，没起守护进程（审查 §33）。
 - 全仓：本机 1031 passed / 0 failed（`188f60c`，§48）；Linux 服务器 989 是 `fba39d0` 那次的（差一条只在 macOS 编译的）；
@@ -59,7 +59,7 @@
 | 任务收尾与大输入回传 | 源码已修，未部署（2026-10-18） | `8fb5e31`、`63719bc`：收尾可只读重试、附加摘要失败不覆盖终态、命令回显有界；新增 8 条回归先失败后通过，全仓 test / clippy / fmt 通过，见审查 §27，复核见 §28。用户批准后按既有升级流程换二进制、重启守护进程，再从连接器验收；后台写入基线复核保持不变 |
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
-| Agent 委派 | D1 本机已换上；Codex 真跑、ChatGPT 自己发起并审核一轮都通过（2026-10-23，审查 §42–§44） | [RFC-0009](docs/rfc/0009-agent-delegation.md)：`agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`，内置 codex、claude 两份档案，全权跑、做完交回审核。`7f0a87a`（不补回 `.gld/.gitignore`）、`f9bc7f0`（回包给这次任务自己的 diff、在跑时输出尾巴收到 768 字节，§45）10-23 已换上（§46），ChatGPT 再审一轮确认 diff 字段只含这次任务的改动、够它审（§47）。它提的三条 `a5cf900`（每文件增删行数 `file_stats`）、`ba6aaff`（`before_tree` / `after_tree`）、`188f60c`（`action=diff offset=` 分页读完整 diff）已提交、**没部署**（§48）；工具表变了，换装后要在 ChatGPT 点一次 Refresh 才看得见 `diff` 动作。下一步：换装（要用户点头）后让 ChatGPT 委派一个超过 64 KB 的改动，试分页读完再审；Claude 真跑一次（花额度，先问）；D2：Pi、agy、Kimi 等档案，放开 `--write` grant |
+| Agent 委派 | D1 本机已换上；Codex 真跑、ChatGPT 自己发起并审核一轮都通过（2026-10-23，审查 §42–§44） | [RFC-0009](docs/rfc/0009-agent-delegation.md)：`agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`，内置 codex、claude 两份档案，全权跑、做完交回审核。`7f0a87a`（不补回 `.gld/.gitignore`）、`f9bc7f0`（回包给这次任务自己的 diff、在跑时输出尾巴收到 768 字节，§45）10-23 已换上（§46），ChatGPT 再审一轮确认 diff 字段只含这次任务的改动、够它审（§47）。它提的三条 `a5cf900`（每文件增删行数 `file_stats`）、`ba6aaff`（`before_tree` / `after_tree`）、`188f60c`（`action=diff offset=` 分页读完整 diff）10-23 14:31 已换上（§49），要在 ChatGPT 点一次 Refresh 才看得见 `diff` 动作。下一步：ChatGPT 委派一个超过 64 KB 的改动、试分页读完再审（提示词已给用户，结果记 §50）；Claude 真跑一次（花额度，先问）；D2：Pi、agy、Kimi 等档案，放开 `--write` grant |
 | OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
 | 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 

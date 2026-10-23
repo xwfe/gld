@@ -2467,3 +2467,26 @@ debug 版（`--version` 打 `ba6aaff`：编译时还没提交 `188f60c`，代码
 
 **没做：**换装（用户说先不换，本机还是 `59f40ad`，这三个提交都没部署）；没用真的 Codex 跑超过 64 KB 的改动试分页，只有假 Agent
 脚本的测试。没推送。
+
+## 49. 本机换成 `c99c8cd`（2026-10-23 14:31）
+
+**要求：**用户说"按 install.md 换装本机（先查没有在跑的命令），然后给我一段提示词，让 ChatGPT 在 delegation-test 上委派一个
+超过 64 KB 的改动，试 action=diff 分页读完再审；不推送"。
+
+**换之前：**守护进程 pid 33026（`59f40ad`）没有子进程，`gld agent ls` 里没有在跑的委派。但 ChatGPT 14:25 还在调 `read_file`、
+`list_files`（请求日志看不出是哪个项目），所以没马上重启：二进制换好后等请求日志安静 20 秒再动手。14:31:25 重启时已经安静
+38 秒，最后一个请求在 14:30:47，没撞上调用。
+
+**换装：**release 构建 2 分 26 秒（`rust-objcopy` 去符号的警告是已知的工具链问题）；备份 `gld-59f40ad-20261023-1427` 和
+`gld-config-20261023-1427.tgz`（0600）；写 `.new` 再改名，去掉 `CLAUDE*` 变量重启，pid 33026 → 43580。
+
+**换完：**命令行和服务的构建提交都是 `c99c8cda835d`，协议 7；`gld ls` 前后一致，`profiles.json`、`oauth-clients/hub.json`
+排好键后的指纹前后一致；新进程 `CLAUDE*` 变量 0 个；`gld health` 四项全 ✓。工具表 34 项，指纹 `e0d37cabe9356c13` →
+`a0c81b8f6d0580cd`：旧、新二进制在隔离数据目录里逐个工具比，只有 `agent_manage` 的 `description` 和 `inputSchema` 变了
+（§48 的 `diff` 动作和 `offset` 参数），**要在 ChatGPT 点一次 Refresh**。
+
+**给 ChatGPT 的这一轮：**提示词让它先确认自己手上的 `agent_manage` 有 `diff` 动作和 `offset` 参数（没有就是还没 Refresh，停下），
+再委派 codex 写一个生成脚本、3000 条用例的 CSV 和读它的测试，期望值用标准库 `statistics` 算。估计 diff 一百多 KB；按路径排序
+CSV 在前，脚本和测试落在最后几页，不读完就审不了代码。审核只准用 `agent_manage` 读 diff，一页页读到 `next_offset` 是 `null`，
+再用 `exec_command` 跑两棵树之间的 `git diff --numstat` 对照 `file_stats`。结果等用户试完再核对、记下一节；请求日志从第
+15168 行起是这一轮。没推送。
