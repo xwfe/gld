@@ -365,8 +365,9 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
         .iter()
         .any(|key| key == "agent-delegation" || key == "agent-approval");
     if delegation_changed && runtime.agent_delegation != "off" {
+        // 劝"对外接触多的项目用 ask"只对 auto 说：已经是 ask 了还这么劝，读着像没改成功（2026-10-23 实测撞到）。
         let start = if runtime.agent_delegation == "auto" {
-            "AI 现在可以直接起本机 Agent，不用你在本机放行"
+            "AI 现在可以直接起本机 Agent，不用你在本机放行（对外接触多的项目用 ask）"
         } else {
             "AI 起本机 Agent 前要你在本机 gld agent approve"
         };
@@ -394,9 +395,7 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
         } else {
             format!("\n  收紧：{}", tighten.join("；"))
         };
-        ctx.out.line(format!(
-            "{mark} {start}；{power}。对外接触多的项目用 ask。{tighten}"
-        ));
+        ctx.out.line(format!("{mark} {start}；{power}。{tighten}"));
     }
 }
 

@@ -345,6 +345,13 @@ fn self_approval_is_listed_and_enforced() {
     assert!(!typo.status.success(), "写错的值要拒");
     let set = env.ok(&["set", "it", "agent-approval=self"]);
     assert!(set.contains("自行判断"), "{set}");
+    env.ok(&["set", "it", "agent-delegation=ask"]);
+    let asked = env.ok(&["set", "it", "agent-approval=self"]);
+    assert!(
+        !asked.contains("用 ask"),
+        "已经是 ask 了不该再劝用 ask：{asked}"
+    );
+    env.ok(&["set", "it", "agent-delegation=auto"]);
 
     let agents = manage(&env, &["action=agents"]);
     assert_eq!(agents["approval"], "self", "{agents}");
