@@ -2776,3 +2776,18 @@ gld 内部字段（`owner`、`owner_pid`、`pid`、`project_id` 等）一共约 
 show 里还有提示原文，这条临时撤掉改动跑过，旧代码上失败。全仓 1034 passed / 0 failed，clippy、fmt、文档门禁通过。
 
 **没做：**换装（本机还是 `2022624`）。没推送。
+
+## 59. 本机换成 `b052102`（2026-10-23 21:18）
+
+**要求：**用户说"按 install.md 换装本机（先查没有在跑的命令），换完核对，不推送。这次工具表没变，不用给 ChatGPT 提示词"。
+
+**换之前：**守护进程 pid 32869（`2022624`）没有子进程，没有在跑的委派。21:11 有一个客户端（请求 id 是随机数字）调了几次只读工具，
+之后安静；重启时已安静 415 秒。
+
+**换装：**release 构建 3 分 24 秒；备份 `gld-2022624-20261023-2118` 和 `gld-config-20261023-2118.tgz`（0600）；写 `.new` 再改名，
+去掉 `CLAUDE*` 变量重启，pid 32869 → 79050。带上 `13dabeb`（给 AI 的回包不带提示预览和本机记账字段）。
+
+**换完：**命令行和服务的构建提交都是 `b05210256c1b`，协议 7；工具表 34 项、指纹 `d857f66a1e45e9cc` **没变，不用 Refresh**；`gld ls`、
+两份凭据指纹前后一致；`CLAUDE*` 变量 0 个；`gld health` 四项全 ✓。用新版调一次 `agent_manage action=status`（§57 那个任务），
+`caller`、`prompt_preview`、`owner`、`owner_pid`、`pid`、`project_id` 都不在，`task_id`、`state`、`recap`、`file_stats`、`next_action` 都在；
+本机 `gld agent show` 照样有提示原文。没推送。
