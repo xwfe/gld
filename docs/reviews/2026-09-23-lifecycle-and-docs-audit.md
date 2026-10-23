@@ -2791,3 +2791,51 @@ show 里还有提示原文，这条临时撤掉改动跑过，旧代码上失败
 两份凭据指纹前后一致；`CLAUDE*` 变量 0 个；`gld health` 四项全 ✓。用新版调一次 `agent_manage action=status`（§57 那个任务），
 `caller`、`prompt_preview`、`owner`、`owner_pid`、`pid`、`project_id` 都不在，`task_id`、`state`、`recap`、`file_stats`、`next_action` 都在；
 本机 `gld agent show` 照样有提示原文。没推送。
+
+## 60. 一键放行全部命令、委派两档放权、更多 Agent 档案（2026-10-23）
+
+**要求：**用户说"可一键设置允许所有命令，但提示相关风险，chatgpt/grok/gemini 等页面也要提示下风险。关于连接 agent、智能体操作：
+agent 种类有很多，Codex、OpenCode、DeepSeek Harness、Antigravity、Pi 与 Qoder，未来对接其他智能体的可扩展性；同理，也可以一键批准
+agent 运行所有操作，或者由 agent 自行判断，自行批准，直接执行。梳理一下，然后继续任务"。
+
+**梳理时的现状：**命令有白名单、`gh` 只读、远端 shell 不放、危险命令和装东西要 `confirm=true`、不许经子进程写工作区外几道限制类关卡，
+`permission-mode=dangerous` 和 `trusted` 行为完全一样（摆设）。委派只有一档：全放开；内置档案只有 codex、claude；`agents.toml` 能加别的。
+ChatGPT、Grok、Gemini 这些网页自己不弹警告，风险只能写进 AI 读到的地方、要它转告。
+
+**各家 Agent 的参数**：开了一个子任务只读调研（只跑 `--help`、读安装包和官方文档，不装、不跑、不花额度），我再在本机逐条核：
+
+| Agent | 全放开 | 自行判断 | 本机 |
+| --- | --- | --- | --- |
+| Codex 0.163.0 | `--dangerously-bypass-approvals-and-sandbox` | `--approve-for-me`（审查模型自动批或拒，`--help` 核过） | 装了，真跑过 |
+| Claude Code 2.1.304 | `--dangerously-skip-permissions` | `--permission-mode auto`、`--permission-prompts none`（`--help` 核过） | 装了 |
+| Qwen Code 0.19.12 | `--yolo` | `--approval-mode auto`（顶层帮助不显示，安装包参数定义里核过） | 装了 |
+| Antigravity 1.1.28 | `--dangerously-skip-permissions` | 没有（`--mode` 只有 accept-edits、plan） | 装了 |
+| Pi 0.78.1 | 没有审批 | 没有 | 装了 |
+| Kimi 0.29.1 | `-p` 本身全放开 | `-p` 下没有 | 装了 |
+| OpenCode | `opencode run --auto` | 没有 | 没装 |
+| Qoder CLI | `qodercli -p --yolo` | `--permission-mode auto` | 没装（本机的 `qoder` 是 IDE 启动器） |
+| DeepSeek Harness | 没有命令行参数，要写 headless 预设 `danger-full-access` | 没有 | 没装（官方 `deepseek-ai/deepseek-harness`，`dsh`） |
+
+**改了什么：**
+
+- `6a840e2` 项目开关 `command-policy=guarded|all`。all 时放开上面那几道限制类关卡；照旧拦删 `.git` / `.github`、workdir 出工作区、
+  `cmd` 形式里的管道重定向、塞环境变量、超时超上限。AI 那边四处告知：hub 初始化说明里项目后面标 `command-policy=all`，
+  `list_workspaces`、`workspace_context` 回 `command_policy` 和 `risk`（要它进项目时跟用户说一声、动手前说清要跑什么），
+  单项目连接的初始化说明第一句就是它；某条命令按默认关卡会被拦时，回包加 `policy_bypassed`。本机：`gld set` 打开时打出风险和怎么改回，
+  `gld ls` 标「命令全放行」，`gld ls <项目>` 有"跑命令"一行。GPT Actions 不受影响。
+- `6f7280d` `gld set agent-delegation=auto` 时打出风险提示（后面 `fb9195d` 扩成两个委派开关一起说）。
+- `fb9195d` 项目开关 `agent-approval=all|self`，档案加 `self_command`（codex、claude 先有）。选了 self 而档案没有：起之前和 ask 档放行时
+  都回 `AGENT_APPROVAL_UNSUPPORTED`，**绝不退回全放开**（argv 只认要的那一档，空的当失败）。任务记录、`action=agents`、`gld agent show` 都写着按哪一档跑。
+- `dd60338` 内置档案加 qwen、agy、pi、kimi；OpenCode、Qoder CLI、DeepSeek Harness 在 concepts.md 给 `agents.toml` 写法，标明照文档写、没跑过。
+- `dd2d4a7` 读代码时发现内置 claude 档案用 `--output-format json`，跑完才吐结果，超过 5 分钟就会被"没输出就是卡住"误杀；改成
+  `stream-json --verbose`（`-p` 下不带 `--verbose` 会报错，本机二进制里有这句原文）。
+
+**验证：**新增测试 9 条（策略单元、hub、单项目初始化、命令行端到端各一条；委派单元两条、端到端一条；档案单元改写），全仓 1041 passed / 0 failed，
+clippy、fmt、文档门禁通过。每个中间提交都单独跑过委派单元、端到端和文档门禁。
+
+**工具表：**和已装的 `b052102` 比，只有 `agent_manage` 的说明变了（不再写死"FULL permissions"），换装后要再点 Refresh；
+`command-policy` 不改 schema，靠回包字段告诉 AI。
+
+**没做、要用户定的：**新加的 qwen、agy、pi、kimi 和 claude 都没真跑过（花额度）；OpenCode、Qoder CLI、DeepSeek Harness 没装（全局安装要先问）；
+换装；推送。核对 Codex 配置时 sed 的脱敏没生效（BSD sed 不认 `I` 标志），uTools 本机 MCP 的 key 明文出现在了会话的工具输出里，
+没写进任何文件，已告诉用户。
