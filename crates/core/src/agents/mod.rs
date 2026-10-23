@@ -171,6 +171,8 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         changed_files_truncated: false,
         changes_unknown: false,
         diff_bytes: None,
+        before_tree: None,
+        after_tree: None,
         head_moved: false,
         review: None,
     };

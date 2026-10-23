@@ -360,6 +360,8 @@ fn watch(
         }
     }
     let after = snapshot(&root, &task_dir, "after");
+    task.before_tree = before.as_ref().map(|snapshot| snapshot.tree.clone());
+    task.after_tree = after.as_ref().map(|snapshot| snapshot.tree.clone());
     match (&before, &after) {
         (Some(before), Some(after)) => match task_diff(&root, &task_dir, before, after) {
             Some((mut stats, bytes)) => {

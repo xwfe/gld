@@ -506,6 +506,14 @@ fn the_diff_is_only_this_tasks_own_change_and_the_index_is_left_alone() {
     );
     assert!(!detail.diff_truncated);
     assert_eq!(done.diff_bytes, Some(diff.len() as u64));
+    // 两棵树的 id 拿去 git diff，得到的就是回包里这份。
+    let (before, after) = (
+        done.before_tree.as_deref().expect("跑前的树"),
+        done.after_tree.as_deref().expect("跑后的树"),
+    );
+    assert_ne!(before, after);
+    assert_eq!(f.git(&["cat-file", "-t", before]), "tree\n");
+    assert_eq!(f.git(&["diff", "--no-color", before, after]), diff);
     assert_eq!(
         f.git(&["diff", "--cached"]),
         staged_before,
@@ -574,6 +582,24 @@ fn numstat_records_keep_tabs_in_paths_and_mark_binaries() {
             },
         ]
     );
+}
+
+/// 不是 git 仓库：改动记成"不知道"，没有树、没有 diff，不瞎报。
+#[test]
+fn outside_git_the_changes_are_unknown_and_there_are_no_trees() {
+    let f = Fixture::new();
+    std::fs::remove_dir_all(f.root().join(".git")).expect("去掉 .git");
+    f.agent(
+        "fake",
+        "cat >/dev/null\necho x > touched.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    let done = f.finished(&f.start("fake", Approval::Auto).expect("起"));
+    assert_eq!(done.state, State::AwaitingReview, "{done:?}");
+    assert!(done.changes_unknown && done.changed_files.is_empty());
+    assert_eq!((done.before_tree, done.after_tree), (None, None));
+    assert_eq!(done.diff_bytes, None);
 }
 
 /// Agent 被叮嘱别提交，还是提交了：标出来，改动照样在 diff 里（比的是工作区，不是 HEAD）。

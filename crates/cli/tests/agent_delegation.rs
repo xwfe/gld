@@ -157,6 +157,11 @@ fn ask_mode_goes_from_approval_to_review() {
         serde_json::json!({ "path": "touched.txt", "added": 1, "deleted": 0 }),
         "{done}"
     );
+    let tree = |key: &str| done[key].as_str().unwrap_or("").to_string();
+    assert!(
+        tree("before_tree").len() >= 40 && tree("before_tree") != tree("after_tree"),
+        "回包要附跑前跑后两棵树的 id：{done}"
+    );
     let diff = done["diff"].as_str().unwrap_or("");
     assert!(
         diff.contains("+changed") && diff.contains("touched.txt"),

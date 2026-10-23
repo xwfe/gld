@@ -121,6 +121,7 @@ result = { from = "stdout" }
    把整个工作区记成一棵树；两棵树一比就是这次任务自己改了哪些文件、各增删几行（`--numstat`）和完整 diff（存成任务目录的 `task.diff`）。
    第一版用两次 `git status` 比文件内容摘要，文件列表对，但回给审核的只有文件名，审核时跟 HEAD 比的 diff 会混进上一轮
    没提交的改动（审查 §44）。不碰用户的 index 和工作区；会往对象库写没人引用的对象，`git gc` 过期后清掉。
+   两棵树的 id 记进任务（`before_tree`、`after_tree`），审核的人能拿去自己 `git diff`。
 7. 状态变成 `awaiting_review`，放开项目写锁（ChatGPT 审的时候要跑测试）。
 
 ### 4.3 recap 和交接文档

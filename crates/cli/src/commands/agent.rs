@@ -115,6 +115,9 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
     if let Some(code) = task.exit_code {
         rows.push(("退出码", code.to_string()));
     }
+    if let (Some(before), Some(after)) = (&task.before_tree, &task.after_tree) {
+        rows.push(("跑前 → 跑后的树", format!("{before} → {after}")));
+    }
     if let Some(failure) = &task.failure {
         rows.push(("没成的原因", failure.clone()));
     }

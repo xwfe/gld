@@ -1452,7 +1452,9 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。Agent 不听话提交了的，回包里 `head_moved` 为真，改动照样在 diff 里。
 
    记树用的是任务目录里的临时 index，不碰你自己的暂存区和工作区；代价是往仓库的对象库里写了没人引用的对象，
-   过期后 `git gc` 会清掉。
+   过期后 `git gc` 会清掉。两棵树的 id 在回包的 `before_tree`、`after_tree` 里（`gld agent show` 也有），
+   在项目里 `git diff <before_tree> <after_tree>` 就是这份 diff；树被 gc 清掉后这条命令会报 `bad object`，
+   diff 全文另存在任务记录里，不靠它。
 
 交接文件在项目里的 `.gld/handoff/<任务 id>/`：`brief.md`（AI 写的背景）、`report.md`（Agent 写的详细报告）、
 `review.md`（审核意见）。`.gld/handoff/` 自带一个只写 `*` 的 `.gitignore`，这些文件不会出现在 git status 里；

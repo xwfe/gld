@@ -136,6 +136,12 @@ pub struct AgentTask {
     /// [`DIFF_FILE`] 多少字节。没算出来（不是 git 仓库）时为 None。
     #[serde(default)]
     pub diff_bytes: Option<u64>,
+    /// 跑前、跑后把整个工作区写成的两棵 git 树（见 `run::snapshot`），`git diff <前> <后>` 就是 [`DIFF_FILE`]。
+    /// 没人引用，过期后 `git gc` 会清掉，所以 diff 另存了一份。记不下来（不是 git 仓库）时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_tree: Option<String>,
     /// 跑的过程中 HEAD 动了：Agent 被叮嘱别提交，还是提交了。改动照样都在 diff 里。
     #[serde(default)]
     pub head_moved: bool,
@@ -273,6 +279,8 @@ mod tests {
             changed_files_truncated: false,
             changes_unknown: false,
             diff_bytes: None,
+            before_tree: None,
+            after_tree: None,
             head_moved: false,
             review: None,
         }
