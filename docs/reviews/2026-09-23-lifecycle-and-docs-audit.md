@@ -2839,3 +2839,32 @@ clippy、fmt、文档门禁通过。每个中间提交都单独跑过委派单�
 **没做、要用户定的：**新加的 qwen、agy、pi、kimi 和 claude 都没真跑过（花额度）；OpenCode、Qoder CLI、DeepSeek Harness 没装（全局安装要先问）；
 换装；推送。核对 Codex 配置时 sed 的脱敏没生效（BSD sed 不认 `I` 标志），uTools 本机 MCP 的 key 明文出现在了会话的工具输出里，
 没写进任何文件，已告诉用户。
+
+## 61. `gld add` 名字在前也认；本机换成 `b81b144` 并实测（2026-10-23 22:34）
+
+**要求：**用户说"很好，需要换装然后测试，但是目前 add 有问题"，贴了 `gld add devdocs-node ~/xdw/devdocs-node` 报
+"目录不存在或无法访问：…/keex/devdocs-node"。
+
+**原因：**`gld add` 的参数是 `[PATH]...`，两个词都当目录，第一个按当前目录 `~/xdw/keex` 去找。`gld remote add` 是名字在前，照着敲很自然。
+读代码时还发现：多个目录是一个个登记的，第二个不存在时第一个已经加进去了。
+
+**改了什么：**`f79409e` 先核对所有目录再登记，有一个不存在就一个都不加，不存在的是个单词时提示 `--name`；`b81b144` 没给 `--name`、
+正好两个参数、一个是当前目录下不存在的单词、另一个是存在的目录时，那个词当名称（名字在前在后都行），stderr 说一句怎么理解的。
+新增端到端两条，旧代码上都失败。全仓 1043 passed / 0 failed。
+
+**换装：**守护进程 pid 79050（`b052102`）没有子进程、没有在跑的委派；22:30 有客户端在调 `read_file`，二进制换好后重启时已安静 207 秒。
+release 构建 3 分 28 秒；备份 `gld-b052102-20261023-2234` 和 `gld-config-20261023-2234.tgz`（0600）；pid 79050 → 37079。
+构建提交 `b81b1442c91d`，协议 7；`gld ls`、两份凭据指纹前后一致（`profiles.json` 的指纹和 §59 时不同：用户这期间加了项目，按换装前那一刻比）；
+`CLAUDE*` 变量 0 个；`gld health` 全 ✓。工具表指纹 `d857f66a1e45e9cc` → `d7b4fcbe928d3203`（`agent_manage` 说明变了），**要点 Refresh**。
+
+**本机实测：**
+
+- 在 `~/xdw/keex` 下跑用户那条 `gld add devdocs-node ~/xdw/devdocs-node`：说明"当成项目名称"，退出码 0；这个项目用户已经另外加过，报"本来就在"。
+- `gld set delegation-test command-policy=all`：打出风险和改回的命令；`gld ls` 标「命令全放行」，`gld ls delegation-test` 的"跑命令"一行是 all。
+  经守护进程跑 `sh -c "echo hi from sh"`：跑了，回包 `policy_bypassed.rule = command_not_allowlisted`。
+- `gld set delegation-test agent-approval=self`：`action=agents` 回 `approval: self`，codex、claude、qwen 的 `self_approval` 为真，agy、pi、kimi 为假。
+  提示里项目本来就是 ask 还劝"用 ask"，读着像没改成功，`d0bef0e` 改成只对 auto 说（只改命令行文字，没换装）。
+
+**给 ChatGPT 的这一轮：**delegation-test 现在是 `command-policy=all`、`agent-approval=self`、`agent-delegation=ask`。提示词不提风险，看它进项目后会不会
+自己转告"这个项目允许所有命令"，跑白名单外 / 危险命令时会不会把 `policy_bypassed` 告诉用户；再委派 codex 一个小改动，看 `--approve-for-me`
+那一档能不能跑完、任务记录里 `agent_approval` 是不是 self。测完把 delegation-test 改回 `command-policy=guarded`。请求日志从第 16677 行起是这一轮。没推送。
