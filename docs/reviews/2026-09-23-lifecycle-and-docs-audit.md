@@ -2550,3 +2550,29 @@ MCP 2025-06-18 规范的工具一节原文是带 `structuredContent` 的工具 S
 - 加上我这边的：`review` 回包不带 diff（这一轮多回 143 KB）。
 
 没推送。
+
+## 51. 按文件读 diff，review 回包不带 diff（2026-10-23）
+
+**要求：**用户在 §50 的取舍里选了："做：file_stats 记每个文件在 task.diff 里的位置和大小、action=diff 加 path；review 回包不带 diff。
+大 diff 时 status/wait 仍附第一页。测试、文档、提交，先不换装"。
+
+**改了什么：**
+
+- `0b483f0` 按文件读：算 diff 时按行首的 `diff --git ` 把完整 diff 切成每个文件一段，段数和 numstat 对上就把每段的起点和长度记进
+  `file_stats`（`diff_offset`、`diff_bytes`），对不上就不记。`action=diff` 加 `path`：从这个文件那一段的开头读、读到它的结尾停，
+  超过一页照样分页，下一页的 next_action 带同一个 `path`。offset 还是整份 diff 里的位置。位置只靠 `task.diff`，不靠会被 gc 的两棵树。
+- `c8efb4d` `review` 回包去掉 `diff`、`diff_truncated`、`diff_next_offset`，要再看用 `status` 或 `action=diff`。
+
+**拿 §50 那份 diff 算：**按同样的切法，CSV 一段 172,495 字节，`gen_cases.py` 1,863 字节，`test_cases.py` 1,135 字节。那一轮
+要是能按文件读，代码两段一共 3 KB，各一次调用；当时它得先读完三页（加上重复的两次，`agent_manage` 大回包共 790 KB）。
+`review` 回包当时 143,571 字节，现在只剩任务本身（那一轮没有 report，Codex 写的结果文件 681 字节）。
+
+**工具表又变了：**已装的 `c99c8cd` 和新编的版本逐个工具比，只有 `agent_manage` 变了，多了 `path` 参数。换装后要再点一次 Refresh。
+
+**验证：**行数那条加上空文件、只改权限两种，核每段首尾相接、盖满整份、各自从自己的 `diff --git` 起（二进制、删文件也在里面）；
+新增一条大 diff 里只读一个文件——排最后的一页就完、夹在中间且超过一页的拼起来正好是它那一段、不读进下一个文件，offset 不在那段里、
+没改的文件、早于记位置的任务三种报错；回包单元测试加按文件读时下一页带 path；端到端加只读 `touched.txt` 正好是它那一段、`review`
+回包没有 diff 而之后 `status` 照样给。`review` 那条断言临时撤掉改动跑过，旧代码上失败。全仓 1032 passed / 0 failed，clippy、
+fmt、文档检查通过。
+
+**没做：**换装（用户说先不换，本机还是 `c99c8cd`）；没用真的 ChatGPT 试 `path`。没推送。
