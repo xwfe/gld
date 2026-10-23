@@ -2897,3 +2897,21 @@ ChatGPT 的自述（用户贴回来的）：从 `list_workspaces` 首次看到 `
 （之前 +13 −1 加这次 10 行），没有新提交。测完把 delegation-test 改回 `command-policy=guarded`、`agent-approval=all`。
 
 **还没装上的：**`d0bef0e`（ask 档时提示不再劝"用 ask"），改回时的提示里还能看到那句。没推送。
+
+## 63. 准备真跑 claude、qwen、agy、pi、kimi 五份档案（2026-10-23 23:16）
+
+**要求：**用户说"给我一段提示词，让 ChatGPT 在 delegation-test 上分别委派 claude、qwen、agy、pi、kimi 各做一个小改动，验证这些档案能跑通；不推送"。
+这就是花额度真跑，用户点了头。
+
+**预检（不花钱）：**只看凭据文件在不在、只读 Qwen 设置里选的登录方式，不读凭据内容。
+
+- Claude：这台机器的 Claude Code 账号。Pi：`~/.pi/agent/auth.json` 在。Kimi：`~/.kimi/credentials` 在。
+- Qwen：`security.auth.selectedType = qwen-oauth`，`~/.qwen/oauth_creds.json` 最后改于 2026-03-12，可能过期；0.19.12 的帮助里 `qwen auth` 标着 removed。
+- Antigravity：`~/.antigravity` 里只有 `argv.json`、`extensions`（像 IDE 的），没看到命令行登录信息，可能要先在交互模式登录一次。
+- 守护进程环境里名字像密钥的变量只有 `SSH_KEY_PATH`、`STARSHIP_SESSION_KEY`、`USE_LOCAL_OAUTH`、`USE_STAGING_OAUTH`，和这几家的登录无关，
+  gld 去掉它们不会挡住谁。
+
+**设计：**delegation-test 是 `agent-delegation=ask`、`agent-approval=all`。五家各加一个不同的函数和两三条测试（claude `harmonic_mean`、qwen `clamp`、
+agy `value_range`、pi `normalize`、kimi `cumulative_sum`），一家审完再起下一家；agy `timeout_minutes=10`（打印完不退出的已知 bug 最多拖 10 分钟），
+其余 15。失败的照样审：看 state、failure、recap、output_tail；被打回又留了改动的，先告诉用户再只撤这个任务自己的那段。结果等用户试完核对、
+记下一节；请求日志从第 16746 行起是这一轮。没推送。
