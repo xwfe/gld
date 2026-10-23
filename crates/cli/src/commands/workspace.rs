@@ -78,20 +78,37 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
 
 /// `gld add`：登记即加入服务。已经登记过的，确认它在服务里。
 pub async fn add(ctx: &mut Ctx, args: AddArgs) -> CliResult {
-    let paths = if args.paths.is_empty() {
+    let (paths, name) = (args.paths, args.name);
+    let paths = if paths.is_empty() {
         vec![std::path::PathBuf::from(".")]
     } else {
-        args.paths
+        paths
     };
-    if args.name.is_some() && paths.len() > 1 {
+    if name.is_some() && paths.len() > 1 {
         return Err(CliError::new(
             "--name 只能配一个目录：一次给了好几个的话，名字该给谁说不清。",
         ));
     }
+    // 先把目录都核一遍再登记：以前是一个个登记，第二个不存在时第一个已经加进去了，留下加了一半。
+    let mut absolutes = Vec::new();
+    for path in &paths {
+        let absolute = super::absolutize(path)?;
+        if !absolute.is_dir() {
+            let hint = if is_bare_word(path) {
+                format!("。要给项目起名字：gld add <目录> --name {}", path.display())
+            } else {
+                String::new()
+            };
+            return Err(CliError::new(format!(
+                "目录不存在或不是目录：{}，一个都没加{hint}",
+                absolute.display()
+            )));
+        }
+        absolutes.push(absolute);
+    }
     let mut added = Vec::new();
-    for path in paths {
-        let absolute = super::absolutize(&path)?;
-        let ensured = service::register(ctx, absolute, args.name.clone()).await?;
+    for absolute in absolutes {
+        let ensured = service::register(ctx, absolute, name.clone()).await?;
         let profile = ensured.profile;
         // 已经登记过、但不在服务里（RFC-0004 之前的老数据）：补加进去。
         let change: HubMembershipChange = ctx
@@ -127,6 +144,12 @@ pub async fn add(ctx: &mut Ctx, args: AddArgs) -> CliResult {
         ctx.out.note("服务没在跑：gld start");
     }
     Ok(())
+}
+
+/// 不带路径分隔符、也不是 `.` / `..` 的一个词：看着像名字，不像路径。
+fn is_bare_word(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy();
+    !text.is_empty() && text != "." && text != ".." && !text.contains(['/', '\\'])
 }
 
 /// `gld rm`：从服务里拿掉，并删掉它在 gld 这边的配置和记账。项目文件不动。
