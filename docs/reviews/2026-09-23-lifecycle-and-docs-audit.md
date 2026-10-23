@@ -2401,3 +2401,34 @@ pid 68019 → 79902。换完：协议 7；工具表 33 → 34、指纹 `59951e97
 **给 ChatGPT 的这一轮：**`delegation-test` 工作区里故意留着前两轮没提交的改动（add / mean 修复、median），`agent-delegation=ask`。
 提示词让它委派 codex 加 `mode(values)` 和两条测试，跑完先只看回包的 `diff` 字段审，再拿 `git_diff` 对照，说清 diff 字段有没有
 混进前两轮的改动，最后单独评价 diff 字段够不够用。结果等用户试完再核对、记下一节。没推送。
+
+## 47. ChatGPT 再审一轮，检验 diff 字段（2026-10-23 11:40–11:43）
+
+**结论：diff 字段管用。**工作区里有前两轮没提交的改动，这一轮回包的 `diff` 只有这次的 `mode` 函数和两条测试（1242 字节），
+跟 HEAD 比的 `git diff` 是 36 行新增、混着前两轮的 add / mean / median。ChatGPT 在审核意见里写了"委派 diff 未混入这些历史变更
+且无本次缺漏"——§44 它分不清来源的问题解决了。
+
+| 本地时间 | ChatGPT 做了什么（项目自己的请求日志） |
+| --- | --- |
+| 11:40:41–42 | `workspace_context`、`git_status`，先看工作区现状 |
+| 11:40:44 | `agent_manage action=agents` |
+| 11:40:54 | `start agent=codex`：提示写明只做 mode 和两条测试，前两轮的改动"严禁提交、还原、重写、整理"；回 `waiting_local_approval` |
+| 11:41:15 | 用户 `gld agent approve 93adca29`，Codex 跑了 63 秒 |
+| 11:42:01 | `wait` 时还在跑，回包 4958 字节（§44 同样情况是 14119 字节，输出尾巴收到 768 字节生效） |
+| 11:42:18 | `wait` → `awaiting_review`，回包 7783 字节，带 1242 字节的 diff，`diff_truncated=false`、`head_moved=false` |
+| 11:42:35 | `git_diff` 对照 |
+| 11:42:37 | `exec_command` 跑 `python3 -m unittest -v`，退出码 0 |
+| 11:42:54 | `review verdict=accept` |
+
+我这边重跑 7/7 通过；`task.diff` 的内容和它说的一致；Codex 没提交，暂存区没动（recap 里也自己核了）。
+
+**ChatGPT 提的改进建议**（写在审核意见里，原话的意思）：
+
+1. 回包附上跑前、跑后两个基线标识（两棵树的 id）。
+2. 给每个文件的增删行数，和 `changed_files` 一一对上。
+3. diff 截断时能分页接着读：现在超过 64 KB 只说了全文在 gld 数据目录里，而那个目录 AI 读不到。
+
+第 3 条对大改动是真缺口；第 1、2 条便宜。都还没做，排进 task_plan。另外它建议给 `mode` 补一条"只有一个众数"的测试，
+那是临时项目的事，不改。
+
+没推送。
