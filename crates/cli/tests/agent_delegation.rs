@@ -152,6 +152,20 @@ fn ask_mode_goes_from_approval_to_review() {
         serde_json::json!(["prompt-seen.txt", "touched.txt"])
     );
     assert!(done.get("caller").is_none(), "发起人标识不回给 AI：{done}");
+    for gone in ["prompt_preview", "owner", "owner_pid", "pid", "project_id"] {
+        assert!(
+            started.get(gone).is_none() && done.get(gone).is_none(),
+            "{gone} 是 AI 自己写的或本机记账用的，不回给它：{done}"
+        );
+    }
+    let tasks = manage(&env, &["action=list"]);
+    assert!(
+        tasks["tasks"][0]["prompt_preview"]
+            .as_str()
+            .unwrap_or("")
+            .contains("把 README 改好"),
+        "list 里还留着短预览，AI 认得出是哪个任务：{tasks}"
+    );
     let touched = &done["file_stats"][1];
     assert_eq!(
         (&touched["path"], &touched["added"], &touched["deleted"]),
@@ -245,8 +259,10 @@ fn ask_mode_goes_from_approval_to_review() {
     assert_eq!(status["diff"], done["diff"], "要再看 diff，status 照样给");
     let shown = env.ok(&["agent", "show", &task_id[..8]]);
     assert!(
-        shown.contains("已通过") && shown.contains("+1 -0\ttouched.txt"),
-        "{shown}"
+        shown.contains("已通过")
+            && shown.contains("+1 -0\ttouched.txt")
+            && shown.contains("把 README 改好"),
+        "本机 show 照样有提示：{shown}"
     );
     env.ok(&["daemon", "stop"]);
 }

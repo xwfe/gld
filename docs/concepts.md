@@ -1460,7 +1460,10 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
 diff 超过 64 KB 时不附，是因为文件按路径排序，生成的数据常排在代码前面：两轮实测（[审查 §50、§54](reviews/2026-09-23-lifecycle-and-docs-audit.md)）
 附上的第一页全是 CSV，一次回包 143 KB，对审代码没用。`review` 的回包也不带 diff；要再看用 `status`，或者下面的 `action=diff`。
 
-你在本机 `gld agent show` 看到的是同样这些字段，只是 diff 超过 64 KB 时照样打出前 64 KB，再告诉你全文在哪个文件。
+给 AI 的回包里没有提示原文，也没有发起人、进程号、项目哈希这些 gld 本机记账的字段：提示是 AI 自己写的，每次原样回去最多 2 KB、
+线上还要翻倍；`action=list` 里留着前 200 字，够它认出是哪个任务。
+
+你在本机 `gld agent show` 看到的比 AI 多：提示、这些记账字段都有；diff 超过 64 KB 时照样打出前 64 KB，再告诉你全文在哪个文件。
 
 ### diff 太长怎么读：`action=diff`
 

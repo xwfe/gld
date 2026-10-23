@@ -246,7 +246,18 @@ fn present(mut detail: TaskDetail) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("next_action".into(), Value::String(next));
         // 原样输出、提示全文只在本机看：给 AI 的是 recap、报告和最后一段输出。
-        object.remove("caller");
+        // 提示预览是 AI 自己写的，每次 status / wait / review 原样回去最多 2 KB、线上翻倍（审查 §57 量的：等审核那次回包里
+        // 它最大）；发起人、gld 进程和项目哈希是本机记账用的，AI 拿去也做不了什么。本机 `gld agent show` 照样都有。
+        for key in [
+            "caller",
+            "prompt_preview",
+            "owner",
+            "owner_pid",
+            "pid",
+            "project_id",
+        ] {
+            object.remove(key);
+        }
     }
     value
 }
@@ -332,6 +343,51 @@ fn on_path(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 给 AI 的回包不带它自己写的提示、也不带 gld 本机记账的字段；审核要的照样都在。
+    #[test]
+    fn the_reply_leaves_out_the_prompt_and_local_bookkeeping() {
+        let detail: TaskDetail = serde_json::from_value(json!({
+            "task_id": "3f2a0000-0000-4000-8000-000000000000",
+            "project_id": "e930f331b3792b0af10be1e667a89bae",
+            "workspace_root": "/w",
+            "workspace_name": "w",
+            "agent": "codex",
+            "caller": "local",
+            "prompt_preview": "在 math_utils.py 末尾新增 quartiles(values) 和 iqr(values)……",
+            "state": "awaiting_review",
+            "created_at_ms": 1,
+            "pid": 4242,
+            "owner": "0000000000000000000000000000beef",
+            "owner_pid": 32869,
+            "recap": "做了什么：……",
+            "file_stats": [{ "path": "a.py", "added": 1, "deleted": 0 }],
+            "handoff_dir": "/w/.gld/handoff/x",
+            "diff": "diff --git a/a.py b/a.py\n+x\n"
+        }))
+        .expect("detail");
+        let value = present(detail);
+        for gone in [
+            "caller",
+            "prompt_preview",
+            "owner",
+            "owner_pid",
+            "pid",
+            "project_id",
+        ] {
+            assert!(value.get(gone).is_none(), "{gone} 不该回给 AI：{value}");
+        }
+        for kept in [
+            "task_id",
+            "state",
+            "recap",
+            "file_stats",
+            "diff",
+            "next_action",
+        ] {
+            assert!(value.get(kept).is_some(), "{kept} 要在：{value}");
+        }
+    }
 
     /// diff 超过一页：给 AI 的回包不附第一页（审查 §54：两轮的第一页都是生成的数据，一次 143 KB），
     /// 下一步说清怎么按文件读、从哪接着读。不超过一页的照样整份附上。
