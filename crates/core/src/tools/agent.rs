@@ -123,12 +123,25 @@ fn start(
             });
         }
     };
+    let agent = string_arg(args, "agent")?;
+    if !allowed(ctx, agent) {
+        return Err(WorkspaceError::ToolDetails {
+            code: "AGENT_NOT_ALLOWED",
+            message: format!(
+                "这个项目只让委派给 {}（用户在本机用 agents=… 列的，填的是有订阅的几家）。换其中一个，或者请用户把 {agent} 加进名单",
+                ctx.agents_allowed.join("、")
+            ),
+            category: "permission",
+            retryable: false,
+            details: json!({ "setting": "agents", "allowed": ctx.agents_allowed }),
+        });
+    }
     let task = agents::start(StartRequest {
         data_home,
         workspace_root: ctx.workspace.root(),
         workspace_name: &ctx.workspace_name,
         caller: caller.key(),
-        agent: string_arg(args, "agent")?,
+        agent,
         prompt: string_arg(args, "prompt")?,
         brief: args.get("brief").and_then(Value::as_str),
         client_request_id: args.get("client_request_id").and_then(Value::as_str),
@@ -145,10 +158,22 @@ fn start(
     Ok(present(agents::detail(&dir, task)))
 }
 
+/// 项目的 `agents` 名单里有没有它；名单是空的就是不限。
+fn allowed(ctx: &ToolContext, agent: &str) -> bool {
+    ctx.agents_allowed.is_empty() || ctx.agents_allowed.iter().any(|name| name == agent)
+}
+
 fn agent_profiles(ctx: &ToolContext, data_home: &Path) -> Result<Value, WorkspaceError> {
     let profiles = agents::profiles(data_home).map_err(convert)?;
+    // 名单里写了却没有档案的：多半是名字写错，或者 agents.toml 里还没加，单独列出来。
+    let missing: Vec<&String> = ctx
+        .agents_allowed
+        .iter()
+        .filter(|name| !profiles.contains_key(name.as_str()))
+        .collect();
     let rows: Vec<Value> = profiles
         .values()
+        .filter(|profile| allowed(ctx, &profile.name))
         .map(|profile| {
             let program = profile.command.first().cloned().unwrap_or_default();
             json!({
@@ -163,6 +188,9 @@ fn agent_profiles(ctx: &ToolContext, data_home: &Path) -> Result<Value, Workspac
     Ok(json!({
         "delegation": ctx.agent_delegation,
         "approval": ctx.agent_approval,
+        // 用户在本机列的名单（填的是有订阅、登过录的）。null 表示没列、所有档案都在下面。
+        "allowed": (!ctx.agents_allowed.is_empty()).then_some(&ctx.agents_allowed),
+        "listed_without_profile": missing,
         "agents": rows,
         "agents_toml": agents::agents_toml(data_home).display().to_string(),
         "note": if ctx.agent_approval == "self" {

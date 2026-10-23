@@ -333,6 +333,51 @@ fn a_big_diff_can_be_peeked_and_show_points_to_the_full_one() {
     env.ok(&["daemon", "stop"]);
 }
 
+/// `agents=…`：用户列出有订阅的几家，AI 只看得到、只起得了这几家；名单里写了却没有档案的单独列出来。
+#[test]
+fn the_agent_list_limits_what_the_ai_sees_and_starts() {
+    let env = Env::new();
+    agent(&env, "fake", "cat >/dev/null\necho ran > ran.txt\necho ok");
+    project(&env);
+    env.ok(&["set", "it", "agent-delegation=ask"]);
+    let bad = env.gld(&["set", "it", "agents=codex,a b"]);
+    assert!(!bad.status.success(), "名字里有空格要拒");
+    env.ok(&["set", "it", "agents=fake, ghost,fake"]);
+    let detail = env.ok(&["ls", "it"]);
+    assert!(detail.contains("fake、ghost"), "去重、去空白：{detail}");
+
+    let agents = manage(&env, &["action=agents"]);
+    let names: Vec<&str> = agents["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .filter_map(|a| a["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["fake"], "{agents}");
+    assert_eq!(
+        agents["listed_without_profile"],
+        serde_json::json!(["ghost"])
+    );
+
+    let refused = manage(&env, &["action=start", "agent=codex", "prompt=改一下"]);
+    assert_eq!(refused["error"]["code"], "AGENT_NOT_ALLOWED", "{refused}");
+    assert!(
+        refused["summary"].as_str().unwrap_or("").contains("fake"),
+        "{refused}"
+    );
+    let started = manage(&env, &["action=start", "agent=fake", "prompt=改一下"]);
+    assert_eq!(started["state"], "waiting_local_approval", "{started}");
+
+    env.ok(&["set", "it", "agents="]);
+    let everyone = manage(&env, &["action=agents"]);
+    assert!(everyone["allowed"].is_null(), "{everyone}");
+    assert!(
+        everyone["agents"].as_array().expect("agents").len() > 1,
+        "清空名单就是全部档案：{everyone}"
+    );
+    env.ok(&["daemon", "stop"]);
+}
+
 /// `agent-approval=self`：AI 从 `action=agents` 看得到哪几家有"自行判断"那一档；拿没有的去起，
 /// 报错说清有哪几家、怎么改，不退回全放开。
 #[test]

@@ -68,6 +68,7 @@ pub fn build_tool_context(
     .with_workspace_name(workspace_name)
     .with_agent_delegation(runtime.agent_delegation.clone())
     .with_agent_approval(runtime.agent_approval.clone())
+    .with_agents_allowed(&runtime.agents)
     .with_usage(usage))
 }
 

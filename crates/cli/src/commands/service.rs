@@ -545,6 +545,14 @@ pub async fn show_project(ctx: &mut Ctx, target: WorkspaceTarget, reveal: bool) 
                 runtime.agent_delegation, runtime.agent_approval
             ),
         ),
+        (
+            "可委派的 Agent",
+            if runtime.agents.is_empty() {
+                "全部档案（gld set <项目> agents=codex,claude 只留有订阅的）".to_string()
+            } else {
+                runtime.agents.replace(',', "、")
+            },
+        ),
         ("只读工作区内", yes_no(runtime.confine_reads).to_string()),
         ("追加命令", or_dash(&runtime.allowed_commands)),
         ("历史记录", yes_no(runtime.history_recording).to_string()),

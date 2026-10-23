@@ -105,6 +105,10 @@ pub struct RuntimeConfig {
     /// 自行批准，用各家自己的自动审批模式；没有这一档的 Agent 起不来）。
     #[serde(default = "default_agent_approval")]
     pub agent_approval: String,
+    /// AI 能委派给哪几家 Agent：逗号分隔的档案名（填你有订阅、登过录的）。空的就是所有档案都给它看。
+    /// gld 查得出装没装，查不准订阅和登录，所以这份名单由用户来列。
+    #[serde(default)]
+    pub agents: String,
     /// `exec_command` 的关卡：guarded（默认：白名单、装东西和危险命令要 `confirm=true`……）| all（一律放行）。
     /// all 是用户自己选的一键放开，AI 那边每处都会被告知、要它转告用户（审查 §60）。
     #[serde(default = "default_command_policy")]
@@ -302,6 +306,7 @@ impl Default for RuntimeConfig {
             confine_reads: default_confine_reads(),
             agent_delegation: default_agent_delegation(),
             agent_approval: default_agent_approval(),
+            agents: String::new(),
             command_policy: default_command_policy(),
         }
     }

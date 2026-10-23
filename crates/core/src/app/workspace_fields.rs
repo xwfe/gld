@@ -175,6 +175,15 @@ const FIELDS: &[Field] = &[
         }
     ),
     field!(
+        "mcp.agents",
+        "逗号分隔的档案名，或空",
+        "AI 能委派给哪几家 Agent，填你有订阅、登过录的（如 codex,claude）；空表示所有档案都给它看",
+        |p, v| {
+            p.runtime.agents = parse_agent_names(v)?;
+            Ok(())
+        }
+    ),
+    field!(
         "mcp.executable-paths",
         "路径列表（换行或分号分隔）",
         "额外的可执行文件搜索路径",
@@ -639,6 +648,31 @@ fn listing<'a>(profiles: impl Iterator<Item = &'a FrpProfile>) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Agent 名单：逗号分隔、去空白去重，名字只能用档案名允许的字符（字母、数字、- 和 _）。
+/// 不在这里核对档案存不存在：档案在数据目录的 agents.toml 里，可以晚点再加；
+/// 名单里写了却没有档案的，`agent_manage action=agents` 会单独列出来。
+fn parse_agent_names(value: &str) -> AppResult<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(AppError::Message(format!(
+                "Agent 名「{name}」只能用字母、数字、- 和 _（写档案名，比如 codex,claude）"
+            )));
+        }
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names.join(","))
 }
 
 fn parse_u64_list(value: &str) -> AppResult<Vec<u64>> {

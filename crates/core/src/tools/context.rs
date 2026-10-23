@@ -54,6 +54,8 @@ pub struct ToolContext {
     pub agent_delegation: String,
     /// 项目开关 `agent-approval`：all | self，委派出去的 Agent 怎么放权。
     pub agent_approval: String,
+    /// 项目开关 `agents`：AI 能委派给哪几家。空的就是不限。
+    pub agents_allowed: Vec<String>,
     pub harness: Harness,
     default_cwd: Mutex<PathBuf>,
     /// 这个工作区目录的执行资源：写锁，和按调用方分的命令会话表。
@@ -137,6 +139,7 @@ impl ToolContext {
             agent_context: None,
             agent_delegation: "off".into(),
             agent_approval: "all".into(),
+            agents_allowed: Vec::new(),
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
             runtime,
             default_cwd: Mutex::new(root),
@@ -265,6 +268,16 @@ impl ToolContext {
 
     pub fn with_agent_approval(mut self, mode: impl Into<String>) -> Self {
         self.agent_approval = mode.into();
+        self
+    }
+
+    pub fn with_agents_allowed(mut self, configured: &str) -> Self {
+        self.agents_allowed = configured
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect();
         self
     }
 

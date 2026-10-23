@@ -1460,6 +1460,7 @@ AI 可以把一段说得清楚的活交给你本机装的编码 Agent（Codex、
 ```bash
 gld set api agent-delegation=ask    # 每次要你在本机点头；auto 是直接起，off 是关（默认）
 gld set api agent-approval=self      # Agent 自行判断、自行批准；all（默认）是一键批准它做任何操作
+gld set api agents=codex,claude       # AI 只能委派给这几家（填你有订阅、登过录的）；不设就是全部档案
 gld agent ls                         # 发起了哪些、哪些在等你放行、哪些在等审核
 gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就行）；deny 拒掉，stop 停掉
 ```
@@ -1534,6 +1535,10 @@ diff 超过 64 KB 时不附，是因为文件按路径排序，生成的数据�
 
 `self` 不是安全边界：分类器会看走眼，它判成"安全"的命令照样以你的账号跑。AI 用 `action=agents` 能看到当前是哪一档、
 每家有没有 `self`（`self_approval`）；任务记录和 `gld agent show` 里写着这次按哪一档跑的。
+
+**只给 AI 看你有订阅的几家：**`gld set <项目> agents=codex,claude`。gld 查得出装没装，查不准订阅和登录（装了却没登录的，委派出去才报错、
+还可能花掉时间），所以名单由你来列。列了以后 `action=agents` 只列这几家，起别的回 `AGENT_NOT_ALLOWED`；名单里写了却没有档案的，
+`action=agents` 的 `listed_without_profile` 里会列出来（多半是名字写错）。`agents=` 清空就是全部档案。`gld ls <项目>` 的"可委派的 Agent"一行写着现在的名单。
 
 内置档案的参数都在本机 `--help` 或安装包的参数定义里核过，但**真跑过的只有 Codex**，别的还没花额度跑过，第一次用先拿临时项目试：
 
