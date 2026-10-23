@@ -2432,3 +2432,38 @@ pid 68019 → 79902。换完：协议 7；工具表 33 → 34、指纹 `59951e97
 那是临时项目的事，不改。
 
 没推送。
+
+## 48. §47 的三条改进：每文件行数、两棵树的 id、diff 分页读（2026-10-23）
+
+**要求：**用户说"接着做 §47 的三条：agent_manage 加 action=diff 按 offset 分页读完整的 task.diff；回包给每个文件的增删行数；
+附跑前跑后两棵树的 id。测试、文档、提交，先不换装"。
+
+**改了什么**（三个行为三个提交，各自带测试和 concepts.md、RFC-0009 的改动）：
+
+- `a5cf900` 每文件增删行数：算改动从 `git diff --name-only` 换成 `--numstat -z --no-renames --no-ext-diff --no-textconv`，
+  任务记录加 `file_stats: [{path, added, deleted}]`，和 `changed_files` 同样的文件、同样的顺序，二进制文件两个数都是 `null`。
+  `gld agent show` 每个文件前打 `+增 -删`。
+- `ba6aaff` 两棵树的 id：任务记录加 `before_tree`、`after_tree`。测试里核过 `git diff <before_tree> <after_tree>` 和回包的 diff
+  一字不差。树没人引用，过期后 `git gc` 会清掉，那时这条命令报 `fatal: bad object <id>`（临时仓库里实测），diff 全文另存着不靠它。
+- `188f60c` 分页读：新动作 `action=diff task_id=… offset=…`，每页最多 64 KB、截在整行上，回 `diff`、`offset`、`next_offset`
+  （读完是 `null`）、`total_bytes`。`status` / `wait` 截断时多给 `diff_next_offset`：回包的 diff 脱敏过，AI 拿它的长度算不出下一页
+  从哪起。一行比一页还长时在 UTF-8 字符边界上切。读 diff 改成 seek 到 offset 只读一页，回包那份也走这个函数，
+  不再把整个 `task.diff` 读进内存。越界回 `INVALID_ARGUMENT`，还没跑完回 `AGENT_TASK_STATE`，没跑过、不是 git 仓库、
+  早于存 diff 的旧任务回 `AGENT_DIFF_UNAVAILABLE`。
+- 顺手：工具说明里过时的"用 git_diff / read_file 查改动"改成看 diff 字段、长的用 `action=diff` 读；截断时的 next_action 从
+  "read_file 剩下的 changed_files"改成直接给出 `action=diff … offset=N` 那条调用。
+
+**工具表变了：**`agent_manage` 的 `action` 多了 `diff`、参数多了 `offset`、说明改了。隔离数据目录里用已装的 `59f40ad` 和新编的
+debug 版（`--version` 打 `ba6aaff`：编译时还没提交 `188f60c`，代码已是改完的，输出里有 `diff`）各打一次 `gld --json tool list`，
+整份的 SHA-256 前 16 位 `9e284f4b19b64ffe` → `5d45b30633043ed0`。换装后**要在 ChatGPT 点一次 Refresh** 才看得见 `diff` 动作；
+不 Refresh 也不坏：`status` / `wait` 照常，新字段照样回，只是 ChatGPT 手里的旧表没有 `diff`、`offset`。守护进程的 `Request` / `Response`
+没改形状（只多了带默认值的字段，和 `f9bc7f0` 一样），协议还是 7。
+
+**验证：**新增 6 条——四种行数（改一行、删文件、二进制、新文件）和列表一一对上；numstat 路径里有制表符不切开；不是 git 仓库时没有树、
+没有 diff、分页报 `AGENT_DIFF_UNAVAILABLE`；超长行在字符边界上切、一定往前走；还没跑的任务读不了；截断时 next_action 带 offset。
+大 diff 那条接着一页页读完，拼起来和 `task.diff` 逐字节相同；diff 只含这次改动那条加上两棵树的核对；端到端加上 `file_stats`、
+两个树 id、一页读完和越界报错（核对报错原文，排除"参数名不认识"也回 `INVALID_ARGUMENT`）。新测试在旧代码上编译不过（没有这些
+字段和函数）。全仓 1031 passed / 0 failed，clippy、fmt、文档检查通过。
+
+**没做：**换装（用户说先不换，本机还是 `59f40ad`，这三个提交都没部署）；没用真的 Codex 跑超过 64 KB 的改动试分页，只有假 Agent
+脚本的测试。没推送。
