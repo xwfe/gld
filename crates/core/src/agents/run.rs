@@ -556,7 +556,7 @@ fn task_diff(
             &after.tree,
         ],
     )?;
-    let stats = parse_numstat(&numstat);
+    let mut stats = parse_numstat(&numstat);
     let patch = git(
         root,
         &[
@@ -568,6 +568,20 @@ fn task_diff(
             &after.tree,
         ],
     )?;
+    // 两次 git diff 比的是同样两棵树、同样不认改名，文件一样、顺序一样。对不上就不记位置，不能把一个文件的段标到另一个头上。
+    let sections = file_sections(&patch);
+    if sections.len() == stats.len() {
+        for (stat, (offset, bytes)) in stats.iter_mut().zip(sections) {
+            stat.diff_offset = Some(offset);
+            stat.diff_bytes = Some(bytes);
+        }
+    } else {
+        eprintln!(
+            "任务 diff 有 {} 段、numstat 有 {} 个文件，对不上，不记每个文件的位置",
+            sections.len(),
+            stats.len()
+        );
+    }
     let written = crate::tools::runs::create_private_file(&task_dir.join(store::DIFF_FILE))
         .and_then(|mut file| file.write_all(&patch));
     if let Err(error) = written {
@@ -591,7 +605,35 @@ pub(crate) fn parse_numstat(raw: &[u8]) -> Vec<store::FileStat> {
                 path: String::from_utf8_lossy(path).into_owned(),
                 added: count(added),
                 deleted: count(deleted),
+                diff_offset: None,
+                diff_bytes: None,
             })
+        })
+        .collect()
+}
+
+/// 完整 diff 里每个文件那一段从第几个字节起、多长，按出现的顺序。
+///
+/// 每段从行首的 `diff --git ` 起。diff 的内容行都带 ` `、`+`、`-`、`\` 前缀，路径里的换行 git 会转义，
+/// 所以行首出现这几个字就是下一个文件的开头。改模式、二进制、空文件也各有一段，和 numstat 一一对应。
+pub(crate) fn file_sections(patch: &[u8]) -> Vec<(u64, u64)> {
+    const HEADER: &[u8] = b"diff --git ";
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            patch
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'\n')
+                .map(|(at, _)| at + 1),
+        )
+        .filter(|&start| patch[start..].starts_with(HEADER))
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &start)| {
+            let end = starts.get(n + 1).copied().unwrap_or(patch.len());
+            (start as u64, (end - start) as u64)
         })
         .collect()
 }

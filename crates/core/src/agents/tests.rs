@@ -535,32 +535,136 @@ fn each_changed_file_comes_with_its_line_counts() {
     let f = Fixture::new();
     f.write("a.txt", "1\n2\n3\n");
     f.write("gone.txt", "x\ny\n");
+    f.write("run.sh", "echo hi\n");
     f.git(&["add", "-A"]);
     f.git(&["commit", "-q", "-m", "base"]);
     f.agent(
         "fake",
-        "cat >/dev/null\nprintf '1\\nTWO\\n3\\n' > a.txt\nrm gone.txt\nprintf '\\000\\001\\002' > blob.bin\necho new > new.txt\necho ok",
+        "cat >/dev/null\nprintf '1\\nTWO\\n3\\n' > a.txt\nrm gone.txt\nprintf '\\000\\001\\002' > blob.bin\necho new > new.txt\n: > empty.txt\nchmod +x run.sh\necho ok",
         STDOUT,
         "",
     );
     let done = f.finished(&f.start("fake", Approval::Auto).expect("起"));
     assert_eq!(done.state, State::AwaitingReview, "{done:?}");
-    let stat = |path: &str, added: Option<u64>, deleted: Option<u64>| store::FileStat {
-        path: path.into(),
-        added,
-        deleted,
-    };
+    let counts: Vec<(&str, Option<u64>, Option<u64>)> = done
+        .file_stats
+        .iter()
+        .map(|s| (s.path.as_str(), s.added, s.deleted))
+        .collect();
     assert_eq!(
-        done.file_stats,
+        counts,
         vec![
-            stat("a.txt", Some(1), Some(1)),
-            stat("blob.bin", None, None),
-            stat("gone.txt", Some(0), Some(2)),
-            stat("new.txt", Some(1), Some(0)),
+            ("a.txt", Some(1), Some(1)),
+            ("blob.bin", None, None),
+            ("empty.txt", Some(0), Some(0)),
+            ("gone.txt", Some(0), Some(2)),
+            ("new.txt", Some(1), Some(0)),
+            ("run.sh", Some(0), Some(0)),
         ]
     );
     let paths: Vec<String> = done.file_stats.iter().map(|s| s.path.clone()).collect();
     assert_eq!(done.changed_files, paths, "两份列表要一一对上");
+
+    // 每个文件在 task.diff 里那一段：首尾相接、盖满整份，每段从自己的 diff --git 起。
+    // 二进制、空文件、只改权限也各有一段（file_sections 的注释这么说，这里核）。
+    let (dir, _) = get(f.data_home(), &done.task_id).expect("任务");
+    let whole = std::fs::read(dir.join(store::DIFF_FILE)).expect("task.diff");
+    let mut at = 0;
+    for stat in &done.file_stats {
+        let (offset, bytes) = (
+            stat.diff_offset.expect("位置") as usize,
+            stat.diff_bytes.expect("大小") as usize,
+        );
+        assert_eq!(offset, at, "{} 没接上前一段", stat.path);
+        let header = format!("diff --git a/{0} b/{0}\n", stat.path);
+        assert!(
+            whole[offset..offset + bytes].starts_with(header.as_bytes()),
+            "{}：{}",
+            stat.path,
+            String::from_utf8_lossy(&whole[offset..offset + bytes])
+        );
+        at = offset + bytes;
+    }
+    assert_eq!(at, whole.len());
+}
+
+/// 大 diff 里只读一个文件：从它那一段的开头读到结尾，超过一页照样分页，不会读进下一个文件（审查 §50：
+/// 代码排在 170 KB 的生成数据后面，ChatGPT 得先读完数据才看得到）。
+#[test]
+fn one_file_can_be_read_alone_out_of_a_big_diff() {
+    let f = Fixture::new();
+    f.agent(
+        "flood",
+        "cat >/dev/null\necho 'print(1)' > a.py\ni=0; while [ $i -lt 6000 ]; do echo \"line $i of a long generated file\"; i=$((i+1)); done > big.txt\necho 'def f():\n    return 2' > z.py\necho ok",
+        STDOUT,
+        "",
+    );
+    let done = f.finished(&f.start("flood", Approval::Auto).expect("起"));
+    let (dir, task) = get(f.data_home(), &done.task_id).expect("任务");
+    let whole = std::fs::read(dir.join(store::DIFF_FILE)).expect("task.diff");
+    let section = |path: &str| {
+        let stat = task
+            .file_stats
+            .iter()
+            .find(|s| s.path == path)
+            .expect("文件");
+        let (offset, bytes) = (stat.diff_offset.unwrap(), stat.diff_bytes.unwrap());
+        (
+            offset,
+            whole[offset as usize..(offset + bytes) as usize].to_vec(),
+        )
+    };
+
+    // 排在最后的小文件：一页就完。
+    let (offset, z) = section("z.py");
+    let page = diff_page(&dir, &task, None, Some("z.py")).expect("z.py");
+    assert_eq!(page.offset, offset);
+    assert_eq!(page.next_offset, None);
+    assert_eq!(page.path.as_deref(), Some("z.py"));
+    assert_eq!(page.diff.as_bytes(), z.as_slice());
+
+    // 夹在中间、比一页大的：一页页读到它的结尾，拼起来正好是它那一段，没有读进 z.py。
+    let (offset, big) = section("big.txt");
+    assert!(big.len() > DIFF_MAX_BYTES, "{}", big.len());
+    let (mut read, mut next) = (Vec::new(), None);
+    loop {
+        let page = diff_page(&dir, &task, next, Some("big.txt")).expect("一页");
+        assert!(page.diff.len() <= DIFF_MAX_BYTES);
+        if next.is_none() {
+            assert_eq!(page.offset, offset, "不给 offset 就从这个文件开头读");
+        }
+        read.extend_from_slice(page.diff.as_bytes());
+        match page.next_offset {
+            Some(offset) => next = Some(offset),
+            None => break,
+        }
+    }
+    assert_eq!(read, big);
+
+    let error = |offset: Option<u64>, path: &str| {
+        diff_page(&dir, &task, offset, Some(path))
+            .expect_err("该报错")
+            .code
+    };
+    assert_eq!(
+        error(Some(0), "z.py"),
+        "INVALID_ARGUMENT",
+        "offset 不在这个文件里"
+    );
+    assert_eq!(error(None, "nobody.txt"), "INVALID_ARGUMENT", "没改的文件");
+
+    // 早于记位置的任务：文件在列表里，但没有位置。
+    let mut old = task.clone();
+    for stat in &mut old.file_stats {
+        stat.diff_offset = None;
+        stat.diff_bytes = None;
+    }
+    assert_eq!(
+        diff_page(&dir, &old, None, Some("z.py"))
+            .expect_err("没记位置")
+            .code,
+        "AGENT_DIFF_UNAVAILABLE"
+    );
 }
 
 /// `--numstat -z` 的路径原样带着，里面有制表符也不切开。
@@ -574,11 +678,15 @@ fn numstat_records_keep_tabs_in_paths_and_mark_binaries() {
                 path: "a\tb.txt".into(),
                 added: Some(3),
                 deleted: Some(1),
+                diff_offset: None,
+                diff_bytes: None,
             },
             store::FileStat {
                 path: "img.png".into(),
                 added: None,
                 deleted: None,
+                diff_offset: None,
+                diff_bytes: None,
             },
         ]
     );
@@ -602,7 +710,7 @@ fn outside_git_the_changes_are_unknown_and_there_are_no_trees() {
     assert_eq!((&done.before_tree, &done.after_tree), (&None, &None));
     assert_eq!(done.diff_bytes, None);
     let (dir, _) = get(f.data_home(), &task.task_id).expect("任务");
-    let error = diff_page(&dir, &done, 0).expect_err("没有 diff");
+    let error = diff_page(&dir, &done, Some(0), None).expect_err("没有 diff");
     assert_eq!(error.code, "AGENT_DIFF_UNAVAILABLE");
     assert!(error.message.contains("不是 git 仓库"), "{error}");
 }
@@ -656,7 +764,7 @@ fn a_huge_diff_is_cut_on_a_line_boundary() {
     let (dir, task) = get(f.data_home(), &done.task_id).expect("任务");
     let (mut whole, mut offset, mut pages) = (String::new(), 0, 0);
     loop {
-        let page = diff_page(&dir, &task, offset).expect("一页");
+        let page = diff_page(&dir, &task, Some(offset), None).expect("一页");
         assert!(page.diff.len() <= DIFF_MAX_BYTES, "{}", page.diff.len());
         assert_eq!(Some(page.total_bytes), done.diff_bytes);
         if pages == 0 {
@@ -679,10 +787,10 @@ fn a_huge_diff_is_cut_on_a_line_boundary() {
     );
 
     let total = done.diff_bytes.expect("diff_bytes");
-    let end = diff_page(&dir, &task, total).expect("正好在末尾");
+    let end = diff_page(&dir, &task, Some(total), None).expect("正好在末尾");
     assert!(end.diff.is_empty() && end.next_offset.is_none());
     assert_eq!(
-        diff_page(&dir, &task, total + 1)
+        diff_page(&dir, &task, Some(total + 1), None)
             .expect_err("超过总长")
             .code,
         "INVALID_ARGUMENT"
@@ -698,7 +806,7 @@ fn pages_cut_inside_an_overlong_line_on_a_char_boundary() {
         std::fs::write(&path, text).expect("write");
         let (mut whole, mut offset) = (String::new(), 0);
         loop {
-            let (page, next) = read_diff(&path, offset, max).expect("读");
+            let (page, next) = read_diff(&path, offset, u64::MAX, max).expect("读");
             assert!(page.len() <= max && !page.contains('\u{FFFD}'), "{page:?}");
             whole.push_str(&page);
             match next {
@@ -721,7 +829,9 @@ fn the_diff_cannot_be_paged_before_the_task_has_run() {
     let waiting = f.start("fake", Approval::Ask).expect("存下");
     let (dir, task) = get(f.data_home(), &waiting.task_id).expect("任务");
     assert_eq!(
-        diff_page(&dir, &task, 0).expect_err("还没跑").code,
+        diff_page(&dir, &task, Some(0), None)
+            .expect_err("还没跑")
+            .code,
         "AGENT_TASK_STATE"
     );
 }

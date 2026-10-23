@@ -160,7 +160,8 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 ### 4.5 工具面
 
 - ChatGPT 看到一个工具 `agent_manage`，`action` 有 `agents`、`start`、`status`、`wait`、`diff`、`review`、`stop`、`list`，
-  和 compact 档里 `task_manage` 的写法一致。`diff` 按字节 `offset` 分页读这次任务的完整 diff（审查 §47：截断后剩下的 AI 读不到）。
+  和 compact 档里 `task_manage` 的写法一致。`diff` 按字节 `offset` 分页读这次任务的完整 diff（审查 §47：截断后剩下的 AI 读不到），带 `path` 只读一个文件那一段
+  （审查 §50：代码排在一百多 KB 的生成数据后面）；每个文件的位置算 diff 时就记进 `file_stats`，不靠两棵树（会被 gc）。
 - 工具表多一项，指纹会变，**要在 ChatGPT 点一次 Refresh**。没开委派的项目照样看得到这个工具，调用时回"这个项目没开"和怎么开。
 - `wait` 单次最多 30 秒，经 OpenAI 隧道时官方上限 120 秒。
 - 回包有界、先脱敏：recap 最多 32 KB，report 最多 64 KB，这次任务的 diff 最多 64 KB（截在整行上，标 `diff_truncated`、

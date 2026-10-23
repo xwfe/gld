@@ -152,11 +152,37 @@ fn ask_mode_goes_from_approval_to_review() {
         serde_json::json!(["prompt-seen.txt", "touched.txt"])
     );
     assert!(done.get("caller").is_none(), "发起人标识不回给 AI：{done}");
+    let touched = &done["file_stats"][1];
     assert_eq!(
-        done["file_stats"][1],
-        serde_json::json!({ "path": "touched.txt", "added": 1, "deleted": 0 }),
+        (&touched["path"], &touched["added"], &touched["deleted"]),
+        (
+            &serde_json::json!("touched.txt"),
+            &serde_json::json!(1),
+            &serde_json::json!(0)
+        ),
         "{done}"
     );
+    // 只读这一个文件：正好是它那一段。
+    let one = manage(
+        &env,
+        &[
+            "action=diff",
+            &format!("task_id={task_id}"),
+            "path=touched.txt",
+        ],
+    );
+    let text = one["diff"].as_str().unwrap_or("");
+    assert!(
+        text.starts_with("diff --git a/touched.txt") && text.contains("+changed"),
+        "{one}"
+    );
+    assert_eq!(one["offset"], touched["diff_offset"], "{one}");
+    assert_eq!(
+        text.len() as u64,
+        touched["diff_bytes"].as_u64().unwrap_or(0),
+        "{one}"
+    );
+    assert!(one["next_offset"].is_null(), "{one}");
     let tree = |key: &str| done[key].as_str().unwrap_or("").to_string();
     assert!(
         tree("before_tree").len() >= 40 && tree("before_tree") != tree("after_tree"),

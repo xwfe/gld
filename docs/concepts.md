@@ -1450,8 +1450,12 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    之前没提交的改动、没跟踪的文件不会混进来——`git_diff` 跟 HEAD 比就会混（上一轮委派没提交时撞过）。
    超过 64 KB 的截在整行上，`diff_truncated` 为真、`diff_next_offset` 是剩下的从第几个字节起；AI 用
    `action=diff task_id=… offset=<diff_next_offset>` 接着读，每页最多 64 KB，再按每页的 `next_offset` 往下读，
-   读到它是 `null` 为止。offset 超过总长回 `INVALID_ARGUMENT`；还没跑完回 `AGENT_TASK_STATE`；
-   没跑过（被拒、过期）或者没算出 diff（不是 git 仓库）回 `AGENT_DIFF_UNAVAILABLE`。
+   读到它是 `null` 为止。只想看某个文件就加 `path=<file_stats 里的路径>`：`file_stats` 每一项带着这个文件那一段在
+   完整 diff 里从第几个字节起（`diff_offset`）、多长（`diff_bytes`），给了 `path` 就从它的开头读、读到它的结尾停，
+   比一页长照样分页（下一页要带同一个 `path`）。生成的数据排在代码前面时，先读代码不用先翻完数据。
+   offset 超过总长（给了 `path` 就是不在那个文件那一段里）、`path` 不是这次改了的文件，回 `INVALID_ARGUMENT`；
+   还没跑完回 `AGENT_TASK_STATE`；没跑过（被拒、过期）、没算出 diff（不是 git 仓库）、早于记文件位置的任务用了 `path`，
+   回 `AGENT_DIFF_UNAVAILABLE`。
    AI 自己看 diff、跑测试，再 `action=review verdict=accept|reject`。**Agent 说"测试都过了"不算数**，验收照旧只认
    gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。Agent 不听话提交了的，回包里 `head_moved` 为真，改动照样在 diff 里。
 

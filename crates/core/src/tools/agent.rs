@@ -60,8 +60,12 @@ pub fn agent_manage(
         }
         "diff" => {
             let (dir, task) = this_project_task(ctx, &data_home, args)?;
-            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
-            let page = agents::diff_page(&dir, &task, offset).map_err(convert)?;
+            let offset = args.get("offset").and_then(Value::as_u64);
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty());
+            let page = agents::diff_page(&dir, &task, offset, path).map_err(convert)?;
             Ok(present_page(page))
         }
         "review" => {
@@ -204,7 +208,7 @@ fn present(detail: TaskDetail) -> Value {
         State::AwaitingReview | State::Failed | State::Timeout | State::Stopped | State::Interrupted => {
             let truncated = match detail.diff_next_offset {
                 Some(offset) => format!(
-                    " The diff field holds only the first part; read the rest with agent_manage action=diff task_id={id} offset={offset}."
+                    " The diff field holds only the first part; read the rest with agent_manage action=diff task_id={id} offset={offset}, or one file at a time with action=diff task_id={id} path=<a path from file_stats>."
                 ),
                 None => String::new(),
             };
@@ -230,12 +234,18 @@ fn present(detail: TaskDetail) -> Value {
 }
 
 fn present_page(page: agents::DiffPage) -> Value {
-    let next = match page.next_offset {
-        Some(offset) => format!(
-            "More follows: call agent_manage action=diff task_id={} offset={offset}.",
+    let path_arg = page
+        .path
+        .as_deref()
+        .map(|path| format!(" path={path}"))
+        .unwrap_or_default();
+    let next = match (page.next_offset, page.path.as_deref()) {
+        (Some(offset), _) => format!(
+            "More follows: call agent_manage action=diff task_id={}{path_arg} offset={offset}.",
             page.task_id
         ),
-        None => "That is the end of this task's diff.".to_string(),
+        (None, Some(path)) => format!("That is the end of {path} in this task's diff."),
+        (None, None) => "That is the end of this task's diff.".to_string(),
     };
     let mut value = serde_json::to_value(&page).unwrap_or_else(|_| json!({}));
     if let Some(object) = value.as_object_mut() {
@@ -334,6 +344,7 @@ mod tests {
 
         let page = present_page(agents::DiffPage {
             task_id: "t".into(),
+            path: None,
             offset: 65530,
             next_offset: None,
             total_bytes: 70000,
@@ -341,5 +352,23 @@ mod tests {
         });
         assert!(page["next_offset"].is_null(), "{page}");
         assert!(page["next_action"].as_str().unwrap_or("").contains("end"));
+
+        // 按文件读时，下一页的调用要带上同一个 path，不然读出去就到了下一个文件。
+        let page = present_page(agents::DiffPage {
+            task_id: "t".into(),
+            path: Some("gen_cases.py".into()),
+            offset: 170000,
+            next_offset: Some(235530),
+            total_bytes: 300000,
+            diff: String::new(),
+        });
+        assert_eq!(page["path"], "gen_cases.py");
+        assert!(
+            page["next_action"]
+                .as_str()
+                .unwrap_or("")
+                .contains("action=diff task_id=t path=gen_cases.py offset=235530"),
+            "{page}"
+        );
     }
 }

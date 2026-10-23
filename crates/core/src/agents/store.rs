@@ -155,6 +155,12 @@ pub struct FileStat {
     pub path: String,
     pub added: Option<u64>,
     pub deleted: Option<u64>,
+    /// 这个文件那一段在 [`DIFF_FILE`] 里从第几个字节起、多长：`agent_manage action=diff path=` 按它只读这一段。
+    /// 早于记位置的任务没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_bytes: Option<u64>,
 }
 
 fn default_timeout_minutes() -> u64 {

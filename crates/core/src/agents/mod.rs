@@ -404,10 +404,11 @@ pub fn detail(dir: &Path, task: AgentTask) -> TaskDetail {
         OutputTail { stdout, stderr }
     });
     // 还没收尾或者没算出来，就没有这个文件。
-    let (diff, diff_next_offset) = match read_diff(&dir.join(store::DIFF_FILE), 0, DIFF_MAX_BYTES) {
-        Ok((text, next)) => (Some(text), next),
-        Err(_) => (None, None),
-    };
+    let (diff, diff_next_offset) =
+        match read_diff(&dir.join(store::DIFF_FILE), 0, u64::MAX, DIFF_MAX_BYTES) {
+            Ok((text, next)) => (Some(text), next),
+            Err(_) => (None, None),
+        };
     TaskDetail {
         handoff_dir: handoff_dir(Path::new(&task.workspace_root), &task.task_id)
             .display()
@@ -425,9 +426,12 @@ pub fn detail(dir: &Path, task: AgentTask) -> TaskDetail {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DiffPage {
     pub task_id: String,
-    /// 这一页从 `task.diff` 的第几个字节起。
+    /// 只读一个文件时是那个文件。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 这一页从 `task.diff` 的第几个字节起。给了 `path` 也是整份 diff 里的位置。
     pub offset: u64,
-    /// 下一页从哪起；读完了是 None。
+    /// 下一页从哪起；读完了（给了 `path` 就是读完那个文件）是 None。
     pub next_offset: Option<u64>,
     /// `task.diff` 一共多少字节。
     pub total_bytes: u64,
@@ -436,12 +440,20 @@ pub struct DiffPage {
 
 /// 跑完的任务的 diff，从 `offset` 字节起最多 [`DIFF_MAX_BYTES`]。回包里的 diff 截断了，剩下的靠它一页页读：
 /// AI 读不到 gld 数据目录里的 `task.diff`（审查 §47）。
-pub fn diff_page(dir: &Path, task: &AgentTask, offset: u64) -> Result<DiffPage, AgentError> {
+///
+/// 给了 `path` 只读那个文件的一段，`offset` 默认是它的开头、页到它的结尾为止：大 diff 里先看源代码，
+/// 不用先读完前面一百多 KB 的生成数据（审查 §50）。
+pub fn diff_page(
+    dir: &Path,
+    task: &AgentTask,
+    offset: Option<u64>,
+    path: Option<&str>,
+) -> Result<DiffPage, AgentError> {
     if !task.state.is_finished() {
         return Err(not_in_state(task, "已经跑完"));
     }
-    let path = dir.join(store::DIFF_FILE);
-    let Ok(meta) = fs::metadata(&path) else {
+    let diff_file = dir.join(store::DIFF_FILE);
+    let Ok(meta) = fs::metadata(&diff_file) else {
         let why = match task.state {
             State::Denied | State::Expired => "这个任务没跑过",
             State::Unknown => "起它的 gld 进程没来得及收尾，没算 diff",
@@ -454,20 +466,28 @@ pub fn diff_page(dir: &Path, task: &AgentTask, offset: u64) -> Result<DiffPage, 
         ));
     };
     let total_bytes = meta.len();
-    if offset > total_bytes {
-        return Err(AgentError::new(
-            "INVALID_ARGUMENT",
-            format!("offset {offset} 超过了 diff 的总长 {total_bytes} 字节"),
-        ));
+    let (start, end) = match path {
+        Some(path) => file_section(task, path)?,
+        None => (0, total_bytes),
+    };
+    let offset = offset.unwrap_or(start);
+    if offset < start || offset > end {
+        let message = match path {
+            Some(path) => format!("offset {offset} 不在 {path} 那一段（{start}–{end} 字节）里"),
+            None => format!("offset {offset} 超过了 diff 的总长 {total_bytes} 字节"),
+        };
+        return Err(AgentError::new("INVALID_ARGUMENT", message));
     }
-    let (diff, next_offset) = read_diff(&path, offset, DIFF_MAX_BYTES).map_err(|error| {
-        AgentError::new(
-            "AGENT_STATE_UNAVAILABLE",
-            format!("读不了 {}：{error}", path.display()),
-        )
-    })?;
+    let (diff, next_offset) =
+        read_diff(&diff_file, offset, end, DIFF_MAX_BYTES).map_err(|error| {
+            AgentError::new(
+                "AGENT_STATE_UNAVAILABLE",
+                format!("读不了 {}：{error}", diff_file.display()),
+            )
+        })?;
     Ok(DiffPage {
         task_id: task.task_id.clone(),
+        path: path.map(str::to_string),
         offset,
         next_offset,
         total_bytes,
@@ -475,18 +495,55 @@ pub fn diff_page(dir: &Path, task: &AgentTask, offset: u64) -> Result<DiffPage, 
     })
 }
 
-/// diff 文件从 `offset` 起最多 `max` 字节，脱敏。返回这一段和下一段从哪起（读完了是 None）。
+/// 一个文件那一段在 `task.diff` 里的起止字节。
+fn file_section(task: &AgentTask, path: &str) -> Result<(u64, u64), AgentError> {
+    let unrecorded = || {
+        AgentError::new(
+            "AGENT_DIFF_UNAVAILABLE",
+            format!(
+                "任务 {} 没记每个文件在 diff 里的位置（早于 gld 记位置的版本），只能按 offset 读",
+                task.task_id
+            ),
+        )
+    };
+    match task.file_stats.iter().find(|stat| stat.path == path) {
+        Some(stat) => match (stat.diff_offset, stat.diff_bytes) {
+            (Some(offset), Some(bytes)) => Ok((offset, offset + bytes)),
+            _ => Err(unrecorded()),
+        },
+        None if task.changed_files.iter().any(|changed| changed == path) => Err(unrecorded()),
+        None => {
+            let more = if task.changed_files_truncated {
+                "；文件列表只记了前 200 个，后面的只能按 offset 读"
+            } else {
+                ""
+            };
+            Err(AgentError::new(
+                "INVALID_ARGUMENT",
+                format!("这次任务没改 {path}，改了的文件见 file_stats{more}"),
+            ))
+        }
+    }
+}
+
+/// diff 文件从 `offset` 起、读到 `end` 为止最多 `max` 字节，脱敏。返回这一段和下一段从哪起（读到 `end` 了是 None）。
 ///
 /// 截在整行上：截在半行上看着像改了半行，切成两半的密钥也可能认不出来、漏过脱敏。一行本身就比 `max` 长（压缩过的文件）
 /// 才在行中间切，切在 UTF-8 字符边界上，下一页从同一个字符接着读。只读要用的这一段，diff 再大也不整个读进内存。
-fn read_diff(path: &Path, offset: u64, max: usize) -> std::io::Result<(String, Option<u64>)> {
+fn read_diff(
+    path: &Path,
+    offset: u64,
+    end: u64,
+    max: usize,
+) -> std::io::Result<(String, Option<u64>)> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = fs::File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
-    let mut bytes = Vec::with_capacity(max + 1);
-    // 多读一个字节：读得到就说明后面还有，也用它判断切点是不是字符边界。
-    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    // 剩下的不止一页时多读一个字节：读得到就说明后面还有，也用它判断切点是不是字符边界。
+    let want = end.saturating_sub(offset).min(max as u64 + 1);
+    let mut bytes = Vec::with_capacity(want as usize);
+    file.take(want).read_to_end(&mut bytes)?;
     let mut next = None;
     if bytes.len() > max {
         let end = match bytes[..max].iter().rposition(|byte| *byte == b'\n') {
