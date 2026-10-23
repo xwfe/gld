@@ -2671,3 +2671,29 @@ concepts.md 和 security.md，重新生成 `docs/cli.md`。新增端到端一条
 - 第 4、5 条不值：`page_bytes` 是 `next_offset - offset`，给了 `path` 时 `next_offset` 为 `null` 就是这个文件读完了；三个小文件三次调用一共 11 KB。
 
 没推送。
+
+## 55. `action=diff` 加 `max_bytes`，大 diff 时 `status` / `wait` 不附第一页（2026-10-23）
+
+**要求：**用户在 §54 的取舍里选了："做：action=diff 加 max_bytes（1 KB–64 KB，默认 64 KB，截在整行上）；diff 超过 64 KB 时
+status/wait 只给 file_stats、不附第一页；顺手把 offset 的说明写明白。测试、文档、提交，先不换装"。§51 定过的"仍附第一页"由此改掉。
+
+**改了什么：**
+
+- `b06730d` `max_bytes`：进 `tools::args` 的边界表（1,024–65,536，默认 65,536，给小了按 1 KB 算），照样截在整行上。schema 里
+  `offset` 的说明改成"一直是整份 diff 里的字节位置，带 `path` 也一样，不是从文件开头数"，不加 `file_offset` / `global_offset`。
+- `6ce3ba1` 给 AI 的回包（`tools::agent::present`）：diff 超过一页时 `diff` 为 null、`diff_truncated` 为真、`diff_next_offset` 为 0，
+  next_action 写明多少字节、照 `file_stats` 用 `path` 挑着读（大数据文件加 `max_bytes=4096`）或从 0 翻全份。不超过一页的照样整份附上。
+  本机 `gld agent show` 不走这里，照样打前 64 KB 和全文路径。
+
+**按 §54 那轮算：**`awaiting_review` 那次 `wait` 回包 143,257 字节里约 131 KB 是第一页（两份），现在不附；CSV 用 `max_bytes=4096` 瞄
+开头，回包约 9 KB 而不是 135,602 字节。那一轮的大回包合计会从 306 KB 降到约 47 KB（`wait` 剩约 12 KB、三个代码文件 14.7 KB、CSV 小页约 9 KB、review 11 KB；
+没真跑过，按回包构成估的）。
+
+**工具表又变了：**已装的 `2f50e09` 和新编的版本逐个工具比，只有 `agent_manage` 变了，多了 `max_bytes`（说明也改了）。换装后要再点 Refresh。
+
+**验证：**按文件读那条加 1 KB 小页（≤1 KB、截在整行上、从 `diff --git` 起、下一页紧接着、一页页拼回整段）；回包单元测试改成大 diff 不附、
+`diff_next_offset` 为 0、next_action 带字节数 / `path` / `max_bytes` / `offset=0`，小 diff 照样附；端到端大 diff 那条加 `max_bytes=4096`
+只回 4 KB 以内、`max_bytes=10` 按 1 KB 算、回包 `diff` 为 null 且 next_action 带 `path`。"不附第一页"的端到端断言临时撤掉改动跑过，
+旧代码上失败。全仓 1033 passed / 0 failed，clippy、fmt、文档门禁通过。
+
+**没做：**换装（本机还是 `2f50e09`）；没用真的 ChatGPT 试。没推送。
