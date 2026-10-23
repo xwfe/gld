@@ -203,7 +203,15 @@ fn this_project_task(
 }
 
 /// 回包：任务详情加一句"下一步做什么"。
-fn present(detail: TaskDetail) -> Value {
+///
+/// diff 超过一页（64 KB）时不附第一页，只给 `file_stats` 让 AI 挑着读：按路径排序，第一页常常全是生成的数据，
+/// 审查 §50、§54 两轮都是，一次回包 143 KB 对审代码没用。`diff` 为 null、`diff_next_offset` 为 0，从头读也接得上。
+/// 本机 `gld agent show` 不走这里，照样打第一页和全文在哪。
+fn present(mut detail: TaskDetail) -> Value {
+    if detail.diff_truncated {
+        detail.diff = None;
+        detail.diff_next_offset = Some(0);
+    }
     let short = detail.task.task_id.chars().take(8).collect::<String>();
     let id = detail.task.task_id.clone();
     let next = match detail.task.state {
@@ -214,11 +222,13 @@ fn present(detail: TaskDetail) -> Value {
             "Call agent_manage action=wait task_id={id} (up to 30 s per call) until the state changes. The project's apply_patch and exec_command are refused while it runs."
         ),
         State::AwaitingReview | State::Failed | State::Timeout | State::Stopped | State::Interrupted => {
-            let truncated = match detail.diff_next_offset {
-                Some(offset) => format!(
-                    " The diff field holds only the first part; read the rest with agent_manage action=diff task_id={id} offset={offset}, or one file at a time with action=diff task_id={id} path=<a path from file_stats>."
-                ),
-                None => String::new(),
+            let diff = if detail.diff_truncated {
+                format!(
+                    "This task's own diff (working tree before vs after the agent ran) is {} bytes, too big to include, so the diff field is null. file_stats lists every changed file with its added/deleted lines, diff_offset and diff_bytes: read the files you need with agent_manage action=diff task_id={id} path=<a path from file_stats> (add max_bytes=4096 to peek at a big data file), or page through all of it from offset=0.",
+                    detail.task.diff_bytes.unwrap_or(0)
+                )
+            } else {
+                "The diff field is this task's own change (working tree before vs after the agent ran).".to_string()
             };
             let committed = if detail.task.head_moved {
                 " HEAD moved while it ran: the agent committed although told not to; the diff still covers those changes."
@@ -226,7 +236,7 @@ fn present(detail: TaskDetail) -> Value {
                 ""
             };
             format!(
-                "Review it yourself. The diff field is this task's own change (working tree before vs after the agent ran); git_diff compares with HEAD and also shows any earlier uncommitted changes.{truncated}{committed} Run the relevant tests with exec_command, then agent_manage action=review task_id={id} verdict=accept|reject note=\"what you checked\". The agent's own claims are not evidence."
+                "Review it yourself. {diff} git_diff compares with HEAD and also shows any earlier uncommitted changes.{committed} Run the relevant tests with exec_command, then agent_manage action=review task_id={id} verdict=accept|reject note=\"what you checked\". The agent's own claims are not evidence."
             )
         }
         State::Rejected => "Rejected. To continue, start a new task whose prompt or brief includes the review note.".to_string(),
@@ -323,32 +333,48 @@ fn on_path(program: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// diff 截断了，下一步要说清从哪个 offset 接着读：AI 自己算不出来（脱敏会改长度）。
+    /// diff 超过一页：给 AI 的回包不附第一页（审查 §54：两轮的第一页都是生成的数据，一次 143 KB），
+    /// 下一步说清怎么按文件读、从哪接着读。不超过一页的照样整份附上。
     #[test]
-    fn a_truncated_diff_says_where_the_next_page_starts() {
-        let detail: TaskDetail = serde_json::from_value(json!({
-            "task_id": "3f2a0000-0000-4000-8000-000000000000",
-            "project_id": "p",
-            "workspace_root": "/w",
-            "workspace_name": "w",
-            "agent": "codex",
-            "caller": "local",
-            "prompt_preview": "fix",
-            "state": "awaiting_review",
-            "created_at_ms": 1,
-            "handoff_dir": "/w/.gld/handoff/x",
-            "diff": "diff --git a/x b/x\n",
-            "diff_truncated": true,
-            "diff_next_offset": 65530
-        }))
-        .expect("detail");
-        let value = present(detail);
-        assert_eq!(value["diff_next_offset"], 65530);
+    fn a_big_diff_is_left_out_and_the_reply_says_how_to_read_it() {
+        let detail = |diff: &str, truncated: bool, next: Option<u64>| -> TaskDetail {
+            serde_json::from_value(json!({
+                "task_id": "3f2a0000-0000-4000-8000-000000000000",
+                "project_id": "p",
+                "workspace_root": "/w",
+                "workspace_name": "w",
+                "agent": "codex",
+                "caller": "local",
+                "prompt_preview": "fix",
+                "state": "awaiting_review",
+                "created_at_ms": 1,
+                "diff_bytes": 171539,
+                "handoff_dir": "/w/.gld/handoff/x",
+                "diff": diff,
+                "diff_truncated": truncated,
+                "diff_next_offset": next
+            }))
+            .expect("detail")
+        };
+        let value = present(detail("diff --git a/x b/x\n", true, Some(65530)));
+        assert!(value["diff"].is_null(), "{value}");
+        assert_eq!(value["diff_truncated"], true);
+        assert_eq!(value["diff_next_offset"], 0, "不附第一页，从头读得从 0 起");
         let next = value["next_action"].as_str().unwrap_or("");
         assert!(
-            next.contains("action=diff task_id=3f2a0000-0000-4000-8000-000000000000 offset=65530"),
+            next.contains("171539 bytes")
+                && next.contains("action=diff task_id=3f2a0000-0000-4000-8000-000000000000 path=")
+                && next.contains("max_bytes=4096")
+                && next.contains("offset=0"),
             "{next}"
         );
+
+        let small = present(detail("diff --git a/x b/x\n+one\n", false, None));
+        assert_eq!(small["diff"], "diff --git a/x b/x\n+one\n");
+        assert!(small["next_action"]
+            .as_str()
+            .unwrap_or("")
+            .contains("The diff field is this task's own change"));
 
         let page = present_page(agents::DiffPage {
             task_id: "t".into(),

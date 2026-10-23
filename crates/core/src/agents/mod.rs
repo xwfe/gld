@@ -360,7 +360,8 @@ pub struct TaskDetail {
     #[serde(default)]
     pub report: Option<String>,
     /// 这次任务自己改了什么（跑前跑后两棵工作区树之间），脱敏、最多 [`DIFF_MAX_BYTES`]。
-    /// 跟 HEAD 比会混进之前没提交的改动，审核看这个。
+    /// 跟 HEAD 比会混进之前没提交的改动，审核看这个。给 AI 的回包里超过一页就不附（`tools::agent::present`），
+    /// 本机 `gld agent show` 照样打这一页。
     #[serde(default)]
     pub diff: Option<String>,
     #[serde(default)]

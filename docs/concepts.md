@@ -1453,15 +1453,18 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
 | --- | --- |
 | `recap`、`report` | Agent 最后一条消息（最多 32 KB）；它写在交接目录的详细报告（有的话，最多 64 KB） |
 | `changed_files`、`file_stats` | 改了哪些文件；`file_stats` 每个文件一项：增删几行（二进制是 `null`），和它在完整 diff 里从第几个字节起、多长（`diff_offset`、`diff_bytes`） |
-| `diff` | **这次任务自己的 diff**，最多 64 KB。超过的截在整行上，`diff_truncated` 为真，`diff_next_offset` 是剩下的从第几个字节起 |
+| `diff` | **这次任务自己的 diff**，不超过 64 KB 时整份附上。超过的不附（`null`），`diff_truncated` 为真、`diff_next_offset` 为 0：照 `file_stats` 挑文件读，见下面的 `action=diff` |
 | `before_tree`、`after_tree` | 跑前、跑后把整个工作区写成的两棵 git 树；在项目里 `git diff <before_tree> <after_tree>` 就是这份 diff |
 | `head_moved` | 为真说明 Agent 被叮嘱别提交，还是提交了。改动照样在 diff 里 |
 
-`review` 的回包不再带一遍 diff；要再看用 `status`，或者下面的 `action=diff`。`gld agent show` 在本机打的是同一份东西。
+diff 超过 64 KB 时不附，是因为文件按路径排序，生成的数据常排在代码前面：两轮实测（[审查 §50、§54](reviews/2026-09-23-lifecycle-and-docs-audit.md)）
+附上的第一页全是 CSV，一次回包 143 KB，对审代码没用。`review` 的回包也不带 diff；要再看用 `status`，或者下面的 `action=diff`。
+
+你在本机 `gld agent show` 看到的是同样这些字段，只是 diff 超过 64 KB 时照样打出前 64 KB，再告诉你全文在哪个文件。
 
 ### diff 太长怎么读：`action=diff`
 
-- **接着往下读**：`action=diff task_id=… offset=<diff_next_offset>`，每页最多 64 KB、截在整行上；再按每页回的 `next_offset`
+- **从头翻**：`action=diff task_id=…`（`offset` 不给就是 0），每页最多 64 KB、截在整行上；再按每页回的 `next_offset`
   往下读，读到它是 `null` 为止。
 - **只看一个文件**：`action=diff task_id=… path=<file_stats 里的路径>`，从这个文件那一段的开头读到结尾，比一页长照样分页
   （下一页带同一个 `path`）。生成的数据按路径排在代码前面时，先读代码不用先翻完数据。

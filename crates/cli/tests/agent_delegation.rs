@@ -270,6 +270,16 @@ fn a_big_diff_can_be_peeked_and_show_points_to_the_full_one() {
     let task_id = started["task_id"].as_str().expect("task_id").to_string();
     let done = wait_done(&env, &task_id);
     assert_eq!(done["diff_truncated"], true, "{done}");
+    // 超过一页的 diff 不附第一页，给 AI 的是 file_stats 和怎么读。
+    assert!(
+        done["diff"].is_null() && done["diff_next_offset"] == 0,
+        "{done}"
+    );
+    assert!(
+        done["next_action"].as_str().unwrap_or("").contains("path="),
+        "{done}"
+    );
+    assert_eq!(done["file_stats"][0]["path"], "big.txt", "{done}");
 
     let peek = |max: &str| {
         manage(
