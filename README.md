@@ -15,43 +15,41 @@ server, all your projects behind it, one connection per client. Docs are in Chin
 - 想让**网页版 ChatGPT** 改你本机的项目。它跑在 OpenAI 的服务器上，碰不到你的文件；gld 在本机起服务，
   再给它一个公网 HTTPS 地址。
 - 手上好几个项目，不想每个项目、每个客户端都配一遍。
-- 想让 ChatGPT 也用上本机装好的 MCP server（context7、deepwiki……），或者操作另一台机器上由
-  [ccnm](https://github.com/xwfe/ccnm) 管着的项目。
 
 **不适合：**
 
-- 需要沙箱隔离。AI 跑的命令以你的账号身份执行，gld 只做命令白名单这类静态检查，不是系统级隔离：
+- 需要沙箱隔离。AI 跑的命令就是用你的账号在跑，gld 只做命令白名单这类检查，不是系统级隔离：
   凭据给了谁，就等于让谁能在你电脑上跑代码。
-- 想要无人值守、从需求到上线全自动的开发平台。gld 管的是"AI 在你的项目里干活"这一段。
+- 想要从需求到上线全自动、没人看着的开发平台。
 
 ## 能做什么
 
-- **读、改、跑**：读写文件、改之前先预检补丁、跑命令（gld 重启后也读得到命令的结局和最后一段输出）、查 Git。
-- **先弄清项目怎么构建、怎么测**：列出项目里写好的命令和 CI 实际跑的步骤，AI 不用翻文档猜。
-- **起 dev server、用浏览器看页面**：起服务时告诉 gld 端口，端口连得上它才回话，最多开 1 小时；再配一个隔离的浏览器，
-  AI 就能打开页面、点按钮、看 console 报错、截图（[怎么配](docs/concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。
-- **用本机装好的 Skills 和 MCP server**：Claude Code、Codex 这些装在本机或项目里的 skill（含 Claude Code 开着的插件带的），AI 能按名字或关键词查、读正文（[扫哪些目录、怎么用](docs/concepts.md#本机和项目里的-skill)）；本机配好的 MCP server 点名开了才转给 AI（[本机 MCP](docs/concepts.md#本机装好的-mcp-server)）。skill 里的脚本 gld 不替你跑，只给 AI 读。
-- **要紧的操作停下来问你**：装依赖、装工具（`pnpm install`、`pip install`、`cargo install`……）、`rm -rf` 这类命令不带确认参数
-  就不放行，提醒 AI 先问你。
-- **给别人只开几个项目**：`gld grant` 发一份只能访问指定项目的凭据，默认只读，随时作废。
-- **任务与验收**：记下任务、计划和历史；任务收尾只认任务期间跑通过、之后没再改过文件的命令当证据。
-- **把活委派给本机 Agent**：项目打开后，AI 能把一段活交给你本机的 Codex、Claude Code 全权去做，做完交回它审核
-  （[怎么用、风险在哪](docs/concepts.md#把活委派给本机-agentagent_manage)）。默认关。
+- **读、改、跑、查 Git**：补丁先预检再写；命令跑完的结果，gld 重启后也查得到。
+- **先搞清项目怎么构建、怎么测**：列出项目里写好的命令和 CI 实际跑的步骤（[详情](docs/concepts.md#项目怎么构建怎么测list_project_commands)）。
+- **起 dev server、用浏览器看页面**（[怎么配](docs/concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。
+- **用本机装好的 Skills 和 MCP server**（[Skill](docs/concepts.md#本机和项目里的-skill)、[MCP server](docs/concepts.md#本机装好的-mcp-server)）。
+- **要紧的命令先问你**：装依赖、`rm -rf` 这类不带确认就不放行（[详情](docs/concepts.md#装东西的命令要你点头)）。
+- **只给别人开几个项目**：`gld grant` 发一份只能碰指定项目的凭据，默认只读，随时作废（[详情](docs/concepts.md#只开几个项目gld-grant)）。
+- **任务收尾要证据**：只认任务期间真跑通过的命令，AI 说"测过了"不算（[详情](docs/concepts.md#任务怎么收尾带证据才算-completed)）。
+- **把活委派给本机的 Codex、Claude Code**：它们全权去做，做完交回 AI 审核。默认关
+  （[怎么用](docs/concepts.md#把活委派给本机-agentagent_manage)、[风险](docs/security.md#委派出去的-agent-是全权跑的)）。
+- **接另一台机器上的项目**：由 [ccnm](https://github.com/xwfe/ccnm) 管着的项目也能挂进来（[详情](docs/concepts.md#成员还可以在别的机器上)）。
 
 ## 三步上手
 
-**1. 装。** 到 [Releases](../../releases) 下载对应平台的包（macOS、Linux、Windows），解压后放进 PATH：
+**1. 装。** 到 [Releases](../../releases) 下载对应平台的包，解压后放进 PATH（下面是 Apple 芯片的 Mac）：
 
 ```bash
-tar xzf gld-*-aarch64-apple-darwin.tar.gz        # Apple 芯片的 Mac；其他平台见安装文档
+tar xzf gld-*-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
 install -m 755 gld-*/gld "$HOME/.local/bin/gld"
 export PATH="$HOME/.local/bin:$PATH"
 gld --version
 ```
 
-macOS 上要是被拦（弹窗说无法验证开发者），核对校验和后执行 `xattr -d com.apple.quarantine ~/.local/bin/gld`；
-新开终端找不到 `gld`、Windows 怎么装、从源码装，见 [docs/install.md](docs/install.md)。
+别的平台、macOS 弹窗说"无法验证开发者"、新开终端找不到 `gld`，见 [install.md](docs/install.md)。
+
+发布包目前到 0.8.3。委派给本机 Agent、DeepSeek 网页、Claude Code 插件带的 skill 还没发版，要用得[从源码装](docs/install.md#从源码装)。
 
 **2. 加项目、起服务。**
 
@@ -61,23 +59,18 @@ gld add ~/code/another        # 再加一个，立即生效
 gld ls                        # 客户端要填的地址和凭据
 ```
 
-**3. 接客户端。** Claude Code、Cursor、Codex 填 `gld ls` 给的本地地址（认证怎么配见
-[connect-clients.md](docs/connect-clients.md#本机客户端claude-codecursorcodex-等)）。ChatGPT 只能连公网 HTTPS，要先拿一个公网地址：
+**3. 接客户端。** Claude Code、Cursor、Codex 填 `gld ls` 给的本地地址。ChatGPT 只能连公网 HTTPS，先拿一个公网地址：
 
 ```bash
 gld share                     # Cloudflare 临时地址，要先装 cloudflared
 ```
 
-临时地址在服务重启后会变，ChatGPT 里的连接器就得删了重建；长期用请换固定域名。每种客户端具体怎么填、
-固定域名怎么配，见 [docs/connect-clients.md](docs/connect-clients.md)。
+临时地址服务一重启就变，ChatGPT 里的连接器就得删了重建，长期用请换固定域名。每种客户端怎么填、
+固定域名怎么配、DeepSeek 网页怎么接，见 [connect-clients.md](docs/connect-clients.md)。
 
-**DeepSeek 网页**：装 Chrome 扩展 MCP SuperAssistant，`gld grant browser web-mcp my-project`（全部项目用 `--all`）生成一个
-短期地址填进去，直接连这个服务，不用另装代理，已有的 ChatGPT 连接器不受影响。要 2026-10-17 之后的构建
-（0.8.3 发布包里没有），接法见 [DeepSeek 网页与 SuperAssistant](docs/connect-clients.md#deepseek-网页与-superassistant)。
+> **开公网入口前先读 [security.md](docs/security.md)**：服务的主凭据能访问你加进来的全部项目。
 
-> **开公网入口前先读 [docs/security.md](docs/security.md)**：服务的主凭据能访问你加进来的全部项目。
-
-出问题先跑 `gld doctor`，每个问题下面都写着该执行的命令；再不行查 [docs/troubleshooting.md](docs/troubleshooting.md)。
+出问题先跑 `gld doctor`，每个问题下面都写着该执行的命令；还不行查 [troubleshooting.md](docs/troubleshooting.md)。
 
 ## 文档
 
@@ -87,8 +80,7 @@ gld share                     # Cloudflare 临时地址，要先装 cloudflared
 | 安装、升级、卸载 | [install.md](docs/install.md) |
 | AI 能碰什么、怎么收紧 | [security.md](docs/security.md) |
 | 报错怎么办 | [troubleshooting.md](docs/troubleshooting.md) |
-| 项目、工具集、Planning、grant 这些概念 | [concepts.md](docs/concepts.md) |
-| 让 AI 起 dev server、用浏览器验页面 | [concepts.md · dev server](docs/concepts.md#dev-server-这类要一直开着的service_port) |
+| 上面每个功能具体怎么用 | [concepts.md](docs/concepts.md) |
 | 拿它从需求做到上线，哪些靠得住、哪些还得人管 | [project-lifecycle.md](docs/project-lifecycle.md) |
 | 后台守护进程、开机自启 | [daemon.md](docs/daemon.md) |
 | 每个命令的全部参数 | [cli.md](docs/cli.md)，或 `gld <命令> --help` |

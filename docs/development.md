@@ -221,6 +221,7 @@ scripts/package.sh --checksums              # 给 dist/ 里已有的包生成 SH
    （签名密钥、公网地址、认证方式、数据目录布局），分档见
    [装好的连接器什么时候要动](connect-clients.md#装好的连接器什么时候要动)。拿不准就在本机升级一次，
    按[安装 · 换完核对](install.md#换完核对)比工具表指纹，以它为准。
+   README「三步上手」里"发布包目前到 x.y.z、哪些还没发版"那句跟着改：README 会打进发布包，不改的话新包里写着自己没有的功能。
 2. 本机打一次包：`scripts/package.sh`，再按安装文档的做法校验、解压、`--version`、起一次服务。
 3. 在 Actions 里手动跑一次 Release（workflow_dispatch）：走完测试、五个目标的构建打包、构建来源证明、
    上传构件，但不建 Release（`publish` 只在 tag 上跑，空跑时它显示 skipped 是对的）。全绿再打 tag。
