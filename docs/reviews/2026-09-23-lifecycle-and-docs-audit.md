@@ -2697,3 +2697,22 @@ status/wait 只给 file_stats、不附第一页；顺手把 offset 的说明写�
 旧代码上失败。全仓 1033 passed / 0 failed，clippy、fmt、文档门禁通过。
 
 **没做：**换装（本机还是 `2f50e09`）；没用真的 ChatGPT 试。没推送。
+
+## 56. 本机换成 `2022624`（2026-10-23 19:26）
+
+**要求：**用户说"继续"，接 §55 列的下一步：换装后让 ChatGPT 再审一次大 diff，看回包是不是降到几十 KB。换装照 install.md，
+和 §49、§53 同一范围。
+
+**换之前：**守护进程 pid 25532（`2f50e09`）没有子进程，没有在跑的委派；19:22 有一次 `tools/list`、没有工具调用，重启时已安静 285 秒。
+
+**换装：**release 构建 3 分 02 秒；备份 `gld-2f50e09-20261023-1926` 和 `gld-config-20261023-1926.tgz`（0600）；写 `.new` 再改名，去掉
+`CLAUDE*` 变量重启，pid 25532 → 32869。带上 `b06730d`（`max_bytes`）、`6ce3ba1`（大 diff 不附第一页）。
+
+**换完：**命令行和服务的构建提交都是 `20226247f332`，协议 7；`gld ls`、两份凭据指纹前后一致；`CLAUDE*` 变量 0 个；`gld health` 四项全 ✓。
+工具表指纹 `2ceba8697b67815e` → `d857f66a1e45e9cc`，逐个工具比只有 `agent_manage` 的说明和 schema 变了（多了 `max_bytes`），
+**要在 ChatGPT 点一次 Refresh**。
+
+**给 ChatGPT 的这一轮：**委派 codex 在 `math_utils.py` 手写 `quartiles` / `iqr`（不许 import `statistics`），生成脚本用标准库
+`statistics.quantiles(method="inclusive")` 算期望值，3000 条用例的 CSV 和读它的测试。模拟估 CSV 那段约 193 KB。这次不规定怎么读，
+只要求按回包的 next_action 和 `file_stats` 自己定、数据文件只用小的 `max_bytes` 瞄开头、不用 `read_file` / `git_diff` 读这次的改动；
+看回包总量是不是到了 §55 估的几十 KB。结果等用户试完再核对、记下一节；请求日志从第 16553 行起是这一轮。没推送。
