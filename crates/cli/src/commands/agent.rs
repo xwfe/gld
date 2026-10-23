@@ -215,7 +215,12 @@ fn agent_text(task: &AgentTask) -> String {
     } else {
         ""
     };
-    format!("{}（{version}{flag}）", task.agent)
+    let approval = if task.agent_approval == "self" {
+        "自行判断、自行批准"
+    } else {
+        "一键批准所有操作"
+    };
+    format!("{}（{version}{flag}；放权：{approval}）", task.agent)
 }
 
 fn state_text(state: State) -> &'static str {

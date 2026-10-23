@@ -72,6 +72,8 @@ pub struct StartRequest<'a> {
     pub brief: Option<&'a str>,
     pub client_request_id: Option<&'a str>,
     pub approval: Approval,
+    /// 项目的 `agent-approval`：all | self。
+    pub agent_approval: &'a str,
     pub timeout_minutes: Option<u64>,
 }
 
@@ -117,6 +119,12 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         .unwrap_or(DEFAULT_TIMEOUT_MINUTES)
         .clamp(1, MAX_TIMEOUT_MINUTES);
     let profile = find_profile(request.data_home, request.agent)?;
+    let agent_approval = if request.agent_approval == "self" {
+        "self"
+    } else {
+        "all"
+    };
+    check_approval(request.data_home, &profile, agent_approval)?;
     let root = request
         .workspace_root
         .canonicalize()
@@ -153,6 +161,7 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         caller: request.caller.to_string(),
         client_request_id: request.client_request_id.map(str::to_string),
         prompt_preview: preview,
+        agent_approval: agent_approval.to_string(),
         state: State::WaitingLocalApproval,
         created_at_ms: run::now_ms(),
         timeout_minutes,
@@ -207,6 +216,33 @@ pub fn approve(data_home: &Path, task_id: &str) -> Result<AgentTask, AgentError>
     launch(data_home, dir, task, profile, prompt)
 }
 
+/// 要"自行判断"那一档，档案里就得有 `self_command`。没有就拒，**不退回全放开**：那等于背着用户把权放大。
+/// 起之前查一次；ask 档放行时再查一次（这期间 `agents.toml` 可能改过）。
+fn check_approval(
+    data_home: &Path,
+    profile: &AgentProfile,
+    agent_approval: &str,
+) -> Result<(), AgentError> {
+    if agent_approval != "self" || profile.supports_self_approval() {
+        return Ok(());
+    }
+    let supported: Vec<String> = profiles(data_home)?
+        .into_values()
+        .filter(AgentProfile::supports_self_approval)
+        .map(|profile| profile.name)
+        .collect();
+    Err(AgentError::new(
+        "AGENT_APPROVAL_UNSUPPORTED",
+        format!(
+            "{} 没有\"自行判断、自行批准\"那一档，而这个项目设的是 agent-approval=self。有这一档的：{}。\
+             要用 {} 就换一个 Agent，或者请用户改成 agent-approval=all（一键批准所有操作）",
+            profile.name,
+            supported.join("、"),
+            profile.name
+        ),
+    ))
+}
+
 fn launch(
     data_home: &Path,
     dir: PathBuf,
@@ -214,6 +250,7 @@ fn launch(
     profile: AgentProfile,
     prompt: String,
 ) -> Result<AgentTask, AgentError> {
+    check_approval(data_home, &profile, &task.agent_approval)?;
     let agents_root = store::root(data_home);
     let owner = crate::tools::runs::take_owner_lock(&agents_root, |_| {}).ok_or_else(|| {
         AgentError::new(

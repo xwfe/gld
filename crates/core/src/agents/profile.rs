@@ -11,6 +11,10 @@
 //!
 //! 命令里的占位符：`{workdir}` 是项目根，`{result_file}` 是任务目录里给 Agent 写最后一条消息的文件，
 //! `{prompt}` 是提示全文。没有 `{prompt}` 的档案，提示从 stdin 喂进去。
+//!
+//! 两档放权（项目的 `agent-approval`）：`command` 是"一键批准所有操作"，用这家全放开的参数；`self_command`
+//! 是"Agent 自行判断、自行批准"，用这家自己的自动审批模式（分类器或审查模型把关，拦下的它换办法接着干）。
+//! 没写 `self_command` 的就是这家没有那一档。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -52,7 +56,11 @@ pub enum StopSignal {
 pub struct AgentProfile {
     #[serde(skip_deserializing, default)]
     pub name: String,
+    /// `agent-approval=all`：一键批准所有操作。
     pub command: Vec<String>,
+    /// `agent-approval=self`：Agent 自行判断、自行批准。空的就是这家没有这一档，选了会起不来。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub self_command: Vec<String>,
     pub result: ResultSpec,
     /// 名字像密钥、本来会被 gld 去掉的环境变量里，这个 Agent 要哪几个（比如它靠 API key 登录）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -76,11 +84,27 @@ fn default_stop_signal() -> StopSignal {
 }
 
 impl AgentProfile {
-    /// 起这个 Agent 的 argv。`prompt_on_stdin` 为真时提示要从 stdin 喂。
-    pub fn argv(&self, workdir: &Path, result_file: &Path, prompt: &str) -> (Vec<String>, bool) {
+    /// 有没有"自行判断"那一档。
+    pub fn supports_self_approval(&self) -> bool {
+        !self.self_command.is_empty()
+    }
+
+    /// 起这个 Agent 的 argv。`self_approval` 选 `self_command`：没有就是空的，不退回 `command`（那是全放开）。
+    /// `prompt_on_stdin` 为真时提示要从 stdin 喂。
+    pub fn argv(
+        &self,
+        self_approval: bool,
+        workdir: &Path,
+        result_file: &Path,
+        prompt: &str,
+    ) -> (Vec<String>, bool) {
+        let command = if self_approval {
+            &self.self_command
+        } else {
+            &self.command
+        };
         let mut prompt_on_stdin = true;
-        let argv = self
-            .command
+        let argv = command
             .iter()
             .map(|part| {
                 if part.contains("{prompt}") {
@@ -102,81 +126,113 @@ impl AgentProfile {
         {
             return Err(format!("档案 {} 的 command 是空的", self.name));
         }
+        if self.supports_self_approval()
+            && self
+                .self_command
+                .first()
+                .is_none_or(|program| program.trim().is_empty())
+        {
+            return Err(format!(
+                "档案 {} 的 self_command 第一项得是程序名",
+                self.name
+            ));
+        }
         if self.result.from == ResultFrom::Json && self.result.field.is_empty() {
             return Err(format!(
                 "档案 {} 的结果从 JSON 取，要写 field（比如 result = {{ from = \"json\", field = \"result\" }}）",
                 self.name
             ));
         }
-        if self.result.from == ResultFrom::File
-            && !self
-                .command
-                .iter()
-                .any(|part| part.contains("{result_file}"))
-        {
-            return Err(format!(
-                "档案 {} 的结果从文件取，command 里得有 {{result_file}}，不然 Agent 不知道往哪写",
-                self.name
-            ));
+        for (key, command) in [
+            ("command", &self.command),
+            ("self_command", &self.self_command),
+        ] {
+            if self.result.from == ResultFrom::File
+                && !command.is_empty()
+                && !command.iter().any(|part| part.contains("{result_file}"))
+            {
+                return Err(format!(
+                    "档案 {} 的结果从文件取，{key} 里得有 {{result_file}}，不然 Agent 不知道往哪写",
+                    self.name
+                ));
+            }
         }
         Ok(())
     }
 }
 
-/// 内置档案。全都用这个 Agent 自己"全放开"的参数：用户定的是不限制在沙箱、直接全权可写，
-/// 做完交回审核（RFC-0009 4.4）。参数名在本机 codex 0.163.0、claude 2.1.304 的 `--help` 里核过。
+fn builtin_profile(
+    command: &[&str],
+    self_command: &[&str],
+    result: ResultSpec,
+    idle_timeout_secs: u64,
+    stop_signal: StopSignal,
+) -> AgentProfile {
+    AgentProfile {
+        name: String::new(),
+        command: command.iter().map(|part| part.to_string()).collect(),
+        self_command: self_command.iter().map(|part| part.to_string()).collect(),
+        result,
+        env_pass: Vec::new(),
+        idle_timeout_secs,
+        stop_signal,
+        verified: Vec::new(),
+    }
+}
+
+fn from(from: ResultFrom, field: &str) -> ResultSpec {
+    ResultSpec {
+        from,
+        field: field.into(),
+    }
+}
+
+/// 内置档案。`command` 一律用这家"全放开"的参数（用户 2026-10-22 定的：不限制在沙箱、全权可写，做完交回审核，
+/// RFC-0009 4.4）；有自动审批模式的另给 `self_command`（2026-10-23 用户要的"由 Agent 自行判断、自行批准"）。
+///
+/// 参数都在本机 `--help` 或安装包的参数定义里核过：codex 0.163.0（`--approve-for-me`：审查模型自动批或拒，工作区可写沙箱）、
+/// claude 2.1.304（`--permission-mode auto` 分类器把关，`--permission-prompts none` 让 `-p` 下没人答的提示直接拒而不是等）。
+/// **真跑过的只有 codex**（审查 §43–§57）。
 fn builtin() -> BTreeMap<String, AgentProfile> {
+    let codex_head = [
+        "codex",
+        "exec",
+        "--json",
+        "-o",
+        "{result_file}",
+        "-C",
+        "{workdir}",
+        "--skip-git-repo-check",
+    ];
+    let claude_head = ["claude", "-p", "--output-format", "json"];
     let profiles = [
         (
             "codex",
-            AgentProfile {
-                name: String::new(),
-                command: [
-                    "codex",
-                    "exec",
-                    "--json",
-                    "-o",
-                    "{result_file}",
-                    "-C",
-                    "{workdir}",
-                    "--skip-git-repo-check",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "-",
+            builtin_profile(
+                &[
+                    &codex_head[..],
+                    &["--dangerously-bypass-approvals-and-sandbox", "-"],
                 ]
-                .map(String::from)
-                .to_vec(),
-                result: ResultSpec {
-                    from: ResultFrom::File,
-                    field: String::new(),
-                },
-                env_pass: Vec::new(),
-                idle_timeout_secs: default_idle_timeout_secs(),
-                stop_signal: StopSignal::Term,
-                verified: Vec::new(),
-            },
+                .concat(),
+                &[&codex_head[..], &["--approve-for-me", "-"]].concat(),
+                from(ResultFrom::File, ""),
+                default_idle_timeout_secs(),
+                StopSignal::Term,
+            ),
         ),
         (
             "claude",
-            AgentProfile {
-                name: String::new(),
-                command: [
-                    "claude",
-                    "-p",
-                    "--output-format",
-                    "json",
-                    "--dangerously-skip-permissions",
+            builtin_profile(
+                &[&claude_head[..], &["--dangerously-skip-permissions"]].concat(),
+                &[
+                    &claude_head[..],
+                    &["--permission-mode", "auto", "--permission-prompts", "none"],
                 ]
-                .map(String::from)
-                .to_vec(),
-                result: ResultSpec {
-                    from: ResultFrom::Json,
-                    field: "result".into(),
-                },
-                env_pass: Vec::new(),
-                idle_timeout_secs: default_idle_timeout_secs(),
-                stop_signal: StopSignal::Int,
-                verified: Vec::new(),
-            },
+                .concat(),
+                from(ResultFrom::Json, "result"),
+                default_idle_timeout_secs(),
+                StopSignal::Int,
+            ),
         ),
     ];
     profiles
@@ -229,48 +285,90 @@ pub fn load(agents_toml: &Path) -> Result<BTreeMap<String, AgentProfile>, String
 mod tests {
     use super::*;
 
+    /// 每份内置档案的 `command` 是这家全放开的参数；有自动审批模式的给 `self_command`，
+    /// 里面不能混进全放开的参数（那就不是"自行判断"了）。
     #[test]
-    fn the_builtin_profiles_are_valid_and_run_with_full_access() {
+    fn the_builtin_profiles_give_full_access_and_self_approval_where_the_agent_has_it() {
         let profiles = builtin();
         for profile in profiles.values() {
             profile.check().expect("内置档案自己得过检查");
         }
-        let codex = &profiles["codex"];
-        assert!(codex
-            .command
-            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
-        assert!(profiles["claude"]
-            .command
-            .contains(&"--dangerously-skip-permissions".to_string()));
+        let full = |name: &str, flag: &str| {
+            assert!(
+                profiles[name].command.contains(&flag.to_string()),
+                "{name} 的 command 要带 {flag}"
+            );
+        };
+        full("codex", "--dangerously-bypass-approvals-and-sandbox");
+        full("claude", "--dangerously-skip-permissions");
+
+        let own = |name: &str, flags: &[&str]| {
+            let command = &profiles[name].self_command;
+            for flag in flags {
+                assert!(
+                    command.contains(&flag.to_string()),
+                    "{name} 的 self_command 要带 {flag}"
+                );
+            }
+            for loud in [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-skip-permissions",
+                "--yolo",
+            ] {
+                assert!(
+                    !command.contains(&loud.to_string()),
+                    "{name} 的 self_command 混进了 {loud}"
+                );
+            }
+        };
+        own("codex", &["--approve-for-me"]);
+        own(
+            "claude",
+            &["--permission-mode", "auto", "--permission-prompts", "none"],
+        );
         assert_eq!(profiles["claude"].stop_signal, StopSignal::Int);
     }
 
     #[test]
     fn placeholders_are_filled_and_the_prompt_goes_to_stdin_unless_named() {
         let codex = &builtin()["codex"];
-        let (argv, on_stdin) = codex.argv(Path::new("/w"), Path::new("/t/result.txt"), "hi");
+        let (argv, on_stdin) = codex.argv(false, Path::new("/w"), Path::new("/t/result.txt"), "hi");
         assert!(on_stdin);
         assert!(argv.contains(&"/w".to_string()) && argv.contains(&"/t/result.txt".to_string()));
+        assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        let (argv, _) = codex.argv(true, Path::new("/w"), Path::new("/t/result.txt"), "hi");
+        assert!(argv.contains(&"--approve-for-me".to_string()), "{argv:?}");
 
         let inline = AgentProfile {
             command: vec!["kimi".into(), "-p".into(), "{prompt}".into()],
+            self_command: Vec::new(),
             ..codex.clone()
         };
-        let (argv, on_stdin) = inline.argv(Path::new("/w"), Path::new("/r"), "fix it");
+        let (argv, on_stdin) = inline.argv(false, Path::new("/w"), Path::new("/r"), "fix it");
         assert!(!on_stdin);
         assert_eq!(argv, vec!["kimi", "-p", "fix it"]);
+        // 没有自行判断那一档：给空的，绝不退回全放开的 command。
+        assert!(inline
+            .argv(true, Path::new("/w"), Path::new("/r"), "fix it")
+            .0
+            .is_empty());
     }
 
     #[test]
     fn agents_toml_adds_and_replaces_profiles() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agents.toml");
-        assert_eq!(load(&path).expect("没有文件").len(), 2);
+        assert_eq!(load(&path).expect("没有文件").len(), builtin().len());
         std::fs::write(
             &path,
             r#"
-[agents.pi]
-command = ["pi", "-p", "--no-session"]
+[agents.opencode]
+command = ["opencode", "run", "--auto"]
+result = { from = "stdout" }
+
+[agents.qoder]
+command = ["qodercli", "-p", "{prompt}", "--yolo"]
+self_command = ["qodercli", "-p", "{prompt}", "--permission-mode", "auto"]
 result = { from = "stdout" }
 
 [agents.claude]
@@ -281,11 +379,17 @@ idle_timeout_secs = 60
         )
         .expect("write");
         let profiles = load(&path).expect("读得进来");
-        assert_eq!(profiles["pi"].result.from, ResultFrom::Stdout);
+        assert_eq!(profiles["opencode"].result.from, ResultFrom::Stdout);
+        assert!(!profiles["opencode"].supports_self_approval());
+        assert!(profiles["qoder"].supports_self_approval());
         assert_eq!(profiles["claude"].idle_timeout_secs, 60);
         assert!(!profiles["claude"]
             .command
             .contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(
+            !profiles["claude"].supports_self_approval(),
+            "同名整条换掉，内置的 self_command 不留"
+        );
         assert!(profiles.contains_key("codex"));
     }
 
@@ -299,6 +403,8 @@ idle_timeout_secs = 60
             "[agents.x]\ncommand = [\"x\"]\nresult = { from = \"file\" }\n",
             "[agents.x]\ncommand = [\"x\"]\nresult = { from = \"stdout\" }\nbogus = 1\n",
             "[agents.\"a b\"]\ncommand = [\"x\"]\nresult = { from = \"stdout\" }\n",
+            "[agents.x]\ncommand = [\"x\"]\nself_command = [\"\"]\nresult = { from = \"stdout\" }\n",
+            "[agents.x]\ncommand = [\"x\", \"{result_file}\"]\nself_command = [\"x\"]\nresult = { from = \"file\" }\n",
         ] {
             std::fs::write(&path, text).expect("write");
             let error = load(&path).expect_err(text);

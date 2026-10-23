@@ -1459,6 +1459,7 @@ AI 可以把一段说得清楚的活交给你本机装的编码 Agent（Codex、
 
 ```bash
 gld set api agent-delegation=ask    # 每次要你在本机点头；auto 是直接起，off 是关（默认）
+gld set api agent-approval=self      # Agent 自行判断、自行批准；all（默认）是一键批准它做任何操作
 gld agent ls                         # 发起了哪些、哪些在等你放行、哪些在等审核
 gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就行）；deny 拒掉，stop 停掉
 ```
@@ -1466,9 +1467,9 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
 一次委派是这样走的：
 
 1. AI 调 `agent_manage action=start agent=codex prompt=…`（可以带 `brief` 写背景和验收标准）。ask 档停在"等你放行"。
-2. gld 在项目目录里用命令行起这个 Agent 的无交互模式，**全权跑**：用的是它自己"全放开"的参数
-   （`codex exec --dangerously-bypass-approvals-and-sandbox`、`claude -p --dangerously-skip-permissions`），
-   能动你账号能动的一切，不只是项目目录。gld 在提示后面加一段：交接目录在哪、结尾写四段 recap、别 git commit。
+2. gld 在项目目录里用命令行起这个 Agent 的无交互模式，按项目的 `agent-approval` 放权（见下面
+   [能用哪些 Agent、怎么放权](#能用哪些-agent怎么放权)）：默认 `all` 用它"全放开"的参数，**能动你账号能动的一切**，
+   不只是项目目录；`self` 用它自己的自动审批模式。gld 在提示后面加一段：交接目录在哪、结尾写四段 recap、别 git commit。
 3. 跑的时候，gld 对这个项目的 `apply_patch`、`exec_command` 回 `AGENT_TASK_RUNNING`，同一个项目同时只许一个委派。
    总时长默认 30 分钟（最长 2 小时），5 分钟没有任何输出按卡住停掉。
 4. 跑完进入"等审核"：AI 自己看这次的 diff、跑测试，再 `action=review verdict=accept|reject`。
@@ -1521,17 +1522,37 @@ diff 超过 64 KB 时不附，是因为文件按路径排序，生成的数据�
 会清掉。树被清掉后 `git diff <before_tree> <after_tree>` 会报 `bad object`，不要紧：diff 全文另存在任务记录里
 （`gld agent show` 截断时会打出它在哪）。
 
-### 交接文件、能用哪些 Agent、谁能发起
+### 能用哪些 Agent、怎么放权
+
+两个开关分开管：`agent-delegation` 管**谁来放行**（`ask` 每次你在本机点头，`auto` AI 直接起），`agent-approval` 管
+**放行以后 Agent 能做多少**：
+
+| `agent-approval` | 意思 |
+| --- | --- |
+| `all`（默认） | 一键批准 Agent 做任何操作：用这家"全放开"的参数，不进沙箱、不停下来问 |
+| `self` | Agent 自行判断、自行批准：用这家自己的自动审批模式，它的分类器或审查模型放行安全的、拦下有风险的，拦下的它换办法接着干，不会卡住等人。没有这一档的 Agent 起不来（`AGENT_APPROVAL_UNSUPPORTED`），**不会退回全放开** |
+
+`self` 不是安全边界：分类器会看走眼，它判成"安全"的命令照样以你的账号跑。AI 用 `action=agents` 能看到当前是哪一档、
+每家有没有 `self`（`self_approval`）；任务记录和 `gld agent show` 里写着这次按哪一档跑的。
+
+内置档案的参数都在本机 `--help` 或安装包的参数定义里核过，但**真跑过的只有 Codex**，别的还没花额度跑过，第一次用先拿临时项目试：
+
+| Agent | 档案名 | `all` 用的参数 | `self` 用的参数 | 要知道的 |
+| --- | --- | --- | --- | --- |
+| Codex | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--approve-for-me`（审查模型自动批或拒，工作区可写的沙箱） | 真跑过 |
+| Claude Code | `claude` | `--dangerously-skip-permissions` | `--permission-mode auto --permission-prompts none` | 按官方文档，auto 模式要较新的模型（Opus / Sonnet 4.6 以上），Team / Enterprise 管理员能关掉 |
+
+**别的 Agent 在数据目录的 `agents.toml` 里加**（同名的会整条换掉内置的）。写坏了 `action=agents` 会报出哪一行；字段的意思见
+[RFC-0009 第 4.1 节](rfc/0009-agent-delegation.md#41-agent-档案一张配置表)。
+
+### 交接文件、谁能发起
 
 交接文件在项目里的 `.gld/handoff/<任务 id>/`：`brief.md`（AI 写的背景）、`report.md`（Agent 写的详细报告）、
 `review.md`（审核意见）。`.gld/handoff/` 自带一个只写 `*` 的 `.gitignore`，这些文件不会出现在 git status 里；
 你为了共享 Planning 删掉了 `.gld/.gitignore` 也一样（委派不会把它补回来）。
 gld 自己的记录（提示全文、Agent 的原样输出）在数据目录的 `agents/` 下，`gld agent show` 看得到。
 
-**能用哪些 Agent**：内置 `codex`、`claude` 两份档案。别的（Pi、Antigravity、Kimi……）在数据目录的 `agents.toml` 里加，
-写法和每个字段的意思见 [RFC-0009 第 4.1 节](rfc/0009-agent-delegation.md#41-agent-档案一张配置表)；写坏了 `action=agents` 会报出哪一行。
-
-**谁能发起**：只有用服务自己的凭据连进来的才能起、审、停；`gld grant` 发的凭据不行（Agent 全权跑，等于把全权借出去）。
+**谁能发起**：只有用服务自己的凭据连进来的才能起、审、停；`gld grant` 发的凭据不行（Agent 能动你的账号，等于把权借出去）。
 Plan 模式下起不了。**风险**见 [security.md](security.md#委派出去的-agent-是全权跑的)。
 
 **还没有的**：打回之后接着同一个会话改（现在要重新起一个，把审核意见写进提示）、中途补充指令、Windows。

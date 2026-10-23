@@ -72,6 +72,16 @@ impl Fixture {
         approval: Approval,
         client_request_id: Option<&str>,
     ) -> Result<AgentTask, AgentError> {
+        self.start_as(agent, approval, client_request_id, "all")
+    }
+
+    fn start_as(
+        &self,
+        agent: &str,
+        approval: Approval,
+        client_request_id: Option<&str>,
+        agent_approval: &str,
+    ) -> Result<AgentTask, AgentError> {
         start(StartRequest {
             data_home: self.data_home(),
             workspace_root: self.project.path(),
@@ -82,8 +92,21 @@ impl Fixture {
             brief: Some("背景：这是测试"),
             client_request_id,
             approval,
+            agent_approval,
             timeout_minutes: None,
         })
+    }
+
+    /// 给刚登记的档案补一条 `self_command`（同一个脚本，多带一个参数 `self`）。
+    /// 档案是追加在 agents.toml 末尾的，紧跟着写的键就归它。
+    fn add_self_command(&self, script: &Path) {
+        let toml = agents_toml(self.data_home());
+        let mut text = std::fs::read_to_string(&toml).expect("agents.toml");
+        text.push_str(&format!(
+            "self_command = [\"{}\", \"self\"]\n",
+            script.display()
+        ));
+        std::fs::write(toml, text).expect("agents.toml");
     }
 
     fn finished(&self, task: &AgentTask) -> AgentTask {
@@ -390,6 +413,7 @@ fn unknown_agents_and_empty_prompts_are_refused() {
         brief: None,
         client_request_id: None,
         approval: Approval::Auto,
+        agent_approval: "all",
         timeout_minutes: None,
     })
     .expect_err("空提示");
@@ -446,6 +470,79 @@ fn asking_the_version_runs_inside_the_task_directory() {
         vec!["stray.txt".to_string()],
         "真跑那一次在项目里"
     );
+}
+
+/// 两档放权：all 用 `command`，self 用 `self_command`，任务里记下是哪一档（用户要的"一键批准所有操作"
+/// 和"由 Agent 自行判断、自行批准"）。
+#[test]
+fn each_approval_level_runs_its_own_command_and_is_recorded() {
+    let f = Fixture::new();
+    let script = f.agent(
+        "fake",
+        "cat >/dev/null\necho \"mode=$1\" > mode.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    f.add_self_command(&script);
+    let mode = || std::fs::read_to_string(f.root().join("mode.txt")).expect("mode.txt");
+
+    let own = f.finished(
+        &f.start_as("fake", Approval::Auto, None, "self")
+            .expect("起"),
+    );
+    assert_eq!(own.state, State::AwaitingReview, "{own:?}");
+    assert_eq!(own.agent_approval, "self");
+    assert_eq!(mode(), "mode=self\n");
+
+    let all = f.finished(&f.start_as("fake", Approval::Auto, None, "all").expect("起"));
+    assert_eq!(all.agent_approval, "all");
+    assert_eq!(mode(), "mode=\n");
+}
+
+/// 没有"自行判断"那一档的 Agent，项目设了 self 就起不来，报出哪几家有；绝不退回全放开。
+/// ask 档等放行期间档案被改掉了这一档，放行时照样拒，Agent 一下都没跑。
+#[test]
+fn self_approval_never_falls_back_to_full_access() {
+    let f = Fixture::new();
+    f.agent(
+        "plain",
+        "cat >/dev/null\necho ran > ran.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    let error = f
+        .start_as("plain", Approval::Auto, None, "self")
+        .expect_err("plain 没有 self_command");
+    assert_eq!(error.code, "AGENT_APPROVAL_UNSUPPORTED");
+    assert!(
+        error.message.contains("codex") && error.message.contains("agent-approval=all"),
+        "{error}"
+    );
+    assert!(list(f.data_home(), None).is_empty(), "拒了就不该留任务");
+
+    let script = f.agent(
+        "flip",
+        "cat >/dev/null\necho ran > ran.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    f.add_self_command(&script);
+    let waiting = f
+        .start_as("flip", Approval::Ask, None, "self")
+        .expect("存下");
+    // 用户在等放行的时候把 flip 的 self_command 删了。
+    let toml = agents_toml(f.data_home());
+    let text = std::fs::read_to_string(&toml).expect("agents.toml");
+    let kept: String = text
+        .lines()
+        .filter(|line| !line.starts_with("self_command"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&toml, kept).expect("agents.toml");
+    let error = approve(f.data_home(), &waiting.task_id).expect_err("放行时再查一次");
+    assert_eq!(error.code, "AGENT_APPROVAL_UNSUPPORTED");
+    assert!(!f.root().join("ran.txt").exists(), "不能换成全放开的命令跑");
+    assert!(running_in(&f.root()).is_none());
 }
 
 /// 起它的进程已经不在了（这里假装一个死掉的实例）：读到时改成 unknown，不猜结局。

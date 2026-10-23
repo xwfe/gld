@@ -312,11 +312,42 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
             ctx.out.yellow("⚠")
         ));
     }
-    if keys.iter().any(|key| key == "agent-delegation") && runtime.agent_delegation == "auto" {
-        ctx.out.line(format!(
-            "{} AI 现在可以直接起本机 Agent，不用你在本机放行；Agent 是全权跑的，能动你账号能动的一切。\
-             对外接触多的项目用 ask。\n  改回来：gld set {name} agent-delegation=ask",
+    // 委派的两个开关一起说：谁来放行（agent-delegation）、放行后 Agent 能做多少（agent-approval）。
+    let delegation_changed = keys
+        .iter()
+        .any(|key| key == "agent-delegation" || key == "agent-approval");
+    if delegation_changed && runtime.agent_delegation != "off" {
+        let start = if runtime.agent_delegation == "auto" {
+            "AI 现在可以直接起本机 Agent，不用你在本机放行"
+        } else {
+            "AI 起本机 Agent 前要你在本机 gld agent approve"
+        };
+        let power = if runtime.agent_approval == "self" {
+            "Agent 用它自己的自动审批模式，自行判断哪些操作能做（codex、claude 有这一档，别的起不来）。\
+             那是 Agent 自己的分类器，会看走眼，不是安全边界"
+        } else {
+            "Agent 一键批准所有操作，能动你账号能动的一切，不只是项目目录"
+        };
+        let risky = runtime.agent_delegation == "auto" || runtime.agent_approval == "all";
+        let mark = if risky {
             ctx.out.yellow("⚠")
+        } else {
+            ctx.out.dim("·")
+        };
+        let mut tighten = Vec::new();
+        if runtime.agent_delegation == "auto" {
+            tighten.push(format!("gld set {name} agent-delegation=ask"));
+        }
+        if runtime.agent_approval == "all" {
+            tighten.push(format!("gld set {name} agent-approval=self"));
+        }
+        let tighten = if tighten.is_empty() {
+            String::new()
+        } else {
+            format!("\n  收紧：{}", tighten.join("；"))
+        };
+        ctx.out.line(format!(
+            "{mark} {start}；{power}。对外接触多的项目用 ask。{tighten}"
         ));
     }
 }

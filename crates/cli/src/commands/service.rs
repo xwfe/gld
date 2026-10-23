@@ -538,7 +538,13 @@ pub async fn show_project(ctx: &mut Ctx, target: WorkspaceTarget, reveal: bool) 
         ("工具集", runtime.tool_profile.clone()),
         ("权限模式", runtime.permission_mode.clone()),
         ("跑命令", command_policy_text(ctx, &runtime.command_policy)),
-        ("委派给本机 Agent", runtime.agent_delegation.clone()),
+        (
+            "委派给本机 Agent",
+            format!(
+                "{}（放权：{}）",
+                runtime.agent_delegation, runtime.agent_approval
+            ),
+        ),
         ("只读工作区内", yes_no(runtime.confine_reads).to_string()),
         ("追加命令", or_dash(&runtime.allowed_commands)),
         ("历史记录", yes_no(runtime.history_recording).to_string()),

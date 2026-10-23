@@ -172,14 +172,17 @@ SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 
 
 ### 委派出去的 Agent 是全权跑的
 
-项目开了 `agent-delegation`（[怎么用](concepts.md#把活委派给本机-agentagent_manage)），AI 就能在你电脑上起一个 Codex / Claude Code，
-用的是它们"全放开"的参数：不进沙箱、不停下来问，能读写你账号碰得到的一切，跑任何命令。gld 的命令白名单、
+项目开了 `agent-delegation`（[怎么用](concepts.md#把活委派给本机-agentagent_manage)），AI 就能在你电脑上起一个 Codex / Claude Code 这类 Agent。
+默认（`agent-approval=all`）用的是它们"全放开"的参数：不进沙箱、不停下来问，能读写你账号碰得到的一切，跑任何命令。
+改成 `agent-approval=self` 是让 Agent 用它自己的自动审批模式（分类器或审查模型放行它判断安全的）：比全放开收一些，
+但那是 Agent 自己的判断，会看走眼，**不是安全边界**。gld 的命令白名单、
 `.git/` 保护**对它都不适用**——那些只管经 gld 工具做的事。起它时 gld 照样去掉名字像密钥的环境变量
 （档案的 `env_pass` 点名放行的除外），但这拦不住它：它能读你的 shell 配置、`~/.config` 这些文件。
 
 网页、issue、依赖里的提示注入能借 ChatGPT 传给这个 Agent。所以：
 
-- 默认 off；对外接触多的项目用 `ask`，每次在本机看一眼 `gld agent show` 的提示再 `approve`，别用 `auto`。
+- 默认 off；对外接触多的项目用 `ask`，每次在本机看一眼 `gld agent show` 的提示再 `approve`，别用 `auto`；
+  能用 `self` 的 Agent（Codex、Claude Code）就别用 `all`。打开或改这两个开关时 `gld set` 会说清现在是哪种组合、怎么收紧。
 - 只有服务自己的凭据能发起，`gld grant` 发的凭据（哪怕 `--write`）不行。
 - 做完一律"等审核"，改动留在工作区不提交；审的时候看 diff，别只看 Agent 自己写的 recap。
 

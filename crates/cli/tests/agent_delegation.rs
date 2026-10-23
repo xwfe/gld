@@ -333,6 +333,46 @@ fn a_big_diff_can_be_peeked_and_show_points_to_the_full_one() {
     env.ok(&["daemon", "stop"]);
 }
 
+/// `agent-approval=self`：AI 从 `action=agents` 看得到哪几家有"自行判断"那一档；拿没有的去起，
+/// 报错说清有哪几家、怎么改，不退回全放开。
+#[test]
+fn self_approval_is_listed_and_enforced() {
+    let env = Env::new();
+    agent(&env, "fake", "cat >/dev/null\necho ran > ran.txt\necho ok");
+    project(&env);
+    env.ok(&["set", "it", "agent-delegation=auto"]);
+    let typo = env.gld(&["set", "it", "agent-approval=maybe"]);
+    assert!(!typo.status.success(), "写错的值要拒");
+    let set = env.ok(&["set", "it", "agent-approval=self"]);
+    assert!(set.contains("自行判断"), "{set}");
+
+    let agents = manage(&env, &["action=agents"]);
+    assert_eq!(agents["approval"], "self", "{agents}");
+    let supports = |name: &str| {
+        agents["agents"]
+            .as_array()
+            .expect("agents")
+            .iter()
+            .find(|a| a["name"] == name)
+            .map(|a| a["self_approval"].clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(supports("codex"), true, "{agents}");
+    assert_eq!(supports("fake"), false, "{agents}");
+
+    let refused = manage(&env, &["action=start", "agent=fake", "prompt=改一下"]);
+    assert_eq!(
+        refused["error"]["code"], "AGENT_APPROVAL_UNSUPPORTED",
+        "{refused}"
+    );
+    assert!(
+        refused["summary"].as_str().unwrap_or("").contains("codex"),
+        "{refused}"
+    );
+    assert!(!env.project.path().join("ran.txt").exists());
+    env.ok(&["daemon", "stop"]);
+}
+
 #[test]
 fn a_running_task_holds_writes_and_restart_until_stopped() {
     let env = Env::new();

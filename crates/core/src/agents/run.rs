@@ -131,7 +131,20 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
     let before = snapshot(&root, &task_dir, "before");
     let result_file = task_dir.join(store::RESULT_FILE);
     let _ = fs::remove_file(&result_file);
-    let (argv, prompt_on_stdin) = profile.argv(&root, &result_file, &prompt);
+    let (argv, prompt_on_stdin) =
+        profile.argv(task.agent_approval == "self", &root, &result_file, &prompt);
+    if argv.is_empty() {
+        // 调用方（agents::launch）已经查过；万一漏了也是起不来，不换成全放开的那条命令。
+        task.state = State::Failed;
+        task.failure = Some(format!(
+            "档案 {} 没有 agent-approval={} 要用的命令",
+            profile.name, task.agent_approval
+        ));
+        task.finished_at_ms = Some(now_ms());
+        let _ = store::write(&task_dir, &task);
+        release(&task.task_id);
+        return Err(task.failure.clone().unwrap_or_default());
+    }
     task.agent_version = agent_version(&argv[0], &task_dir);
     task.version_unverified = !profile.verified.is_empty()
         && !task

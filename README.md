@@ -32,8 +32,9 @@ server, all your projects behind it, one connection per client. Docs are in Chin
   风险自担，AI 会被告知并要它转告你（[怎么开、风险在哪](docs/concepts.md#一键放行全部命令command-policyall)）。
 - **只给别人开几个项目**：`gld grant` 发一份只能碰指定项目的凭据，默认只读，随时作废（[详情](docs/concepts.md#只开几个项目gld-grant)）。
 - **任务收尾要证据**：只认任务期间真跑通过的命令，AI 说"测过了"不算（[详情](docs/concepts.md#任务怎么收尾带证据才算-completed)）。
-- **把活委派给本机的 Codex、Claude Code**：它们全权去做，做完交回 AI 审核。默认关
-  （[怎么用](docs/concepts.md#把活委派给本机-agentagent_manage)、[风险](docs/security.md#委派出去的-agent-是全权跑的)）。
+- **把活委派给本机的 Codex、Claude Code**：做完交回 AI 审核；可以一键批准它做任何操作，
+  也可以让它自行判断，别的 Agent 加一条配置就能接。默认关
+  （[怎么用](docs/concepts.md#能用哪些-agent怎么放权)、[风险](docs/security.md#委派出去的-agent-是全权跑的)）。
 - **接另一台机器上的项目**：由 [ccnm](https://github.com/xwfe/ccnm) 管着的项目也能挂进来（[详情](docs/concepts.md#成员还可以在别的机器上)）。
 
 ## 三步上手

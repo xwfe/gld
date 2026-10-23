@@ -80,34 +80,27 @@ ChatGPT 那边：
 [agents.codex]
 command = ["codex", "exec", "--json", "-o", "{result_file}", "-C", "{workdir}",
            "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-"]   # "-" = 提示从 stdin 读
+self_command = ["codex", "exec", "--json", "-o", "{result_file}", "-C", "{workdir}",
+                "--skip-git-repo-check", "--approve-for-me", "-"]
 result = { from = "file" }                 # 最后一条消息在 {result_file}
-session = { jsonl_field = "thread_id" }    # 接着同一个会话用（D3）
 
 [agents.claude]
 command = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions"]
 result = { from = "json", field = "result" }
-session = { json_field = "session_id" }
 stop_signal = "INT"                        # SIGTERM 会直接退出 143、这一轮什么都不记
-
-[agents.pi]
-command = ["pi", "-p", "--no-session"]     # Pi 没有权限系统，本来就是全权
-result = { from = "stdout" }
-
-[agents.agy]
-command = ["agy", "-p", "--output-format", "json", "--dangerously-skip-permissions"]
-result = { from = "json", field = "response" }
-
-[agents.kimi]
-command = ["kimi", "-p", "{prompt}", "-y", "--output-format", "text"]
-result = { from = "stdout" }
 ```
 
-- 用的是**用户自己的配置**（模型、MCP server、全局规则），和平时在终端里用它一样；档案里想加什么参数自己加。
-- **`env_pass`**：放行哪些环境变量。gld 现在一律去掉名字像密钥的变量，有的 Agent 靠环境变量里的 key 登录（比如 DeepSeek Harness），要点名放行。
-- **`verified`**：验过的版本。
-- **`idle_timeout`**：多久没输出算卡住。
-- **`stop_signal`**：停的时候先发什么信号。
-- Qwen 这一版的帮助里没找到"全放开"的参数，Grok、Gemini、dsh、OpenCode 没装，它们的档案到 D2 核过帮助再写。
+- **`command`**：项目 `agent-approval=all`（默认）时用，这家"全放开"的参数。占位符：`{workdir}` 项目根、`{result_file}`
+  任务目录里给它写最后一条消息的文件、`{prompt}` 提示全文（没有它就从 stdin 喂）。
+- **`self_command`**：`agent-approval=self` 时用，这家自己的自动审批模式。不写就是没有这一档，选了起不来，不退回 `command`。
+- **`result`**：最后一条消息从哪取：`file`、`json`（带 `field`；整份 stdout 不是一个 JSON 就从最后一行往前找）、`stdout`。
+- **`env_pass`**：放行哪些环境变量。gld 一律去掉名字像密钥的变量，有的 Agent 靠环境变量里的 key 登录（比如 DeepSeek Harness），要点名放行。
+- **`idle_timeout_secs`**：多久没输出算卡住，默认 300。
+- **`stop_signal`**：停的时候先发什么信号；**`verified`**：验过的 `--version`（不在里面照样跑，回包标出来）。
+- 用的是**用户自己的配置**（模型、MCP server、全局规则），和平时在终端里用它一样。
+- 内置哪几份、各用什么参数、哪些真跑过，以 concepts.md 的
+  [能用哪些 Agent、怎么放权](../concepts.md#能用哪些-agent怎么放权) 为准。
+- 接着同一个会话（`session`）是 D3 的事，现在没有这个字段。
 
 ### 4.2 一次委派怎么跑
 
@@ -150,6 +143,12 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 用户定的：**不限制在沙箱，直接全权可写，做完交回审核。** 每个档案都用这个 Agent 自己"全放开"的参数（4.1），
 跑起来和你在终端里给它开了全部权限一样，碰得到的不止项目目录，是你账号能碰的一切。
 
+2026-10-23 用户加了第二档（审查 §60）："一键批准 Agent 运行所有操作，或者由 Agent 自行判断、自行批准，直接执行"。
+项目开关 `agent-approval`：`all`（默认，就是上面这种）| `self`（档案的 `self_command`，用这家自己的自动审批模式：
+Codex `--approve-for-me`、Claude `--permission-mode auto`）。两家在无人值守时拦下的操作都是
+拒掉、让 Agent 换办法，不会卡住等人。没有这一档的 Agent 选了 `self` 就起不来，不退回全放开。`self` 靠的是 Agent 自己的分类器，
+不是安全边界，下面这些把关照旧。
+
 所以把关放在**起之前**和**做完之后**：
 
 - **起之前**：项目开关默认 off；`ask` 档每次要你在本机点头；只有服务主凭据和 `--write` grant 能发起（D1 更紧，grant 都不行，见第 5 节）。
@@ -187,7 +186,7 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 | 阶段 | 做什么 | 怎么算做完 | 花不花额度 |
 | --- | --- | --- | --- |
 | D1 | 档案表、执行和收尾、`agent_manage`（含 `review`）、`gld agent`、三档开关、项目写锁、`.gld/handoff/`；内置 Codex 和 Claude 两份档案 | 用假 Agent 脚本（按档案吐结果、卡住、不关 stdin、被停、改文件）测全部状态、超时和互斥；Codex、Claude 各在临时项目里真跑一次改一处，ChatGPT 审、gld 跑测试 | 真跑那两次要用户点头 |
-| D2 | 更多档案：Pi、agy、Kimi、Qwen；Gemini、Grok、dsh、OpenCode 装了再加 | 每个档案先核帮助，再在临时项目里真跑一次 | 同上 |
+| D2 | 更多档案：Pi、agy、Kimi、Qwen；Gemini、Grok、dsh、OpenCode、Qoder CLI 装了再加 | 每个档案先核帮助，再在临时项目里真跑一次 | 同上 |
 | D3 | 打回后接着同一个会话：只用明确的 session id，不用 `--continue` / `--last`（并发时会接错） | 假脚本覆盖；真跑一次打回、接着改 | 同上 |
 | D4 | 要中途补充指令时换 ACP；远端成员经 `ccnm.machine/1` | 另起小节 | 同上 |
 

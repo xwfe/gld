@@ -95,6 +95,10 @@ pub struct AgentTask {
     pub client_request_id: Option<String>,
     /// 用户给的提示，脱敏后最多 2 KB，给人看。全文在 `prompt.md`。
     pub prompt_preview: String,
+    /// 按哪一档放权跑：all（一键批准所有操作）| self（Agent 自行判断）。发起时按项目的 `agent-approval` 定下来，
+    /// ask 档放行时照这个跑，不看放行那一刻的设置：用户在本机点头的就是这一档。
+    #[serde(default = "default_agent_approval")]
+    pub agent_approval: String,
     pub state: State,
     pub created_at_ms: u64,
     /// 总时长上限。ask 档等放行之后才起，所以要记下来。
@@ -165,6 +169,10 @@ pub struct FileStat {
 
 fn default_timeout_minutes() -> u64 {
     super::DEFAULT_TIMEOUT_MINUTES
+}
+
+fn default_agent_approval() -> String {
+    "all".into()
 }
 
 /// `GLD_HOME/agents`
@@ -267,6 +275,7 @@ mod tests {
             caller: "local".into(),
             client_request_id: None,
             prompt_preview: "fix".into(),
+            agent_approval: "all".into(),
             state: State::Running,
             created_at_ms: created,
             timeout_minutes: 30,

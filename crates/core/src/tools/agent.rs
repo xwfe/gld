@@ -133,6 +133,7 @@ fn start(
         brief: args.get("brief").and_then(Value::as_str),
         client_request_id: args.get("client_request_id").and_then(Value::as_str),
         approval,
+        agent_approval: &ctx.agent_approval,
         timeout_minutes: Some(crate::tools::args::bounded(
             args,
             "agent_manage",
@@ -155,14 +156,20 @@ fn agent_profiles(ctx: &ToolContext, data_home: &Path) -> Result<Value, Workspac
                 "program": program,
                 "installed": on_path(&program),
                 "result_from": profile.result.from,
+                "self_approval": profile.supports_self_approval(),
             })
         })
         .collect();
     Ok(json!({
         "delegation": ctx.agent_delegation,
+        "approval": ctx.agent_approval,
         "agents": rows,
         "agents_toml": agents::agents_toml(data_home).display().to_string(),
-        "note": "Agents run non-interactively with full permissions in this project; the finished task comes back as awaiting_review."
+        "note": if ctx.agent_approval == "self" {
+            "approval=self: agents run non-interactively in their own auto-approval mode and decide for themselves what is safe; only agents with self_approval=true can start. The finished task comes back as awaiting_review."
+        } else {
+            "approval=all: agents run non-interactively with full permissions (every operation approved); the finished task comes back as awaiting_review."
+        }
     }))
 }
 
@@ -307,7 +314,7 @@ fn string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, WorkspaceError>
 
 fn convert(error: AgentError) -> WorkspaceError {
     let category = match error.code {
-        "INVALID_ARGUMENT" | "AGENT_UNKNOWN" => "argument",
+        "INVALID_ARGUMENT" | "AGENT_UNKNOWN" | "AGENT_APPROVAL_UNSUPPORTED" => "argument",
         "AGENT_TASK_RUNNING" | "AGENT_TASK_STATE" => "conflict",
         "AGENT_TASK_NOT_FOUND" | "AGENT_TASK_AMBIGUOUS" | "AGENT_DIFF_UNAVAILABLE" => "not_found",
         _ => "runtime",
