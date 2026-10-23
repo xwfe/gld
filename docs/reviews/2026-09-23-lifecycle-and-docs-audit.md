@@ -2915,3 +2915,29 @@ ChatGPT 的自述（用户贴回来的）：从 `list_workspaces` 首次看到 `
 agy `value_range`、pi `normalize`、kimi `cumulative_sum`），一家审完再起下一家；agy `timeout_minutes=10`（打印完不退出的已知 bug 最多拖 10 分钟），
 其余 15。失败的照样审：看 state、failure、recap、output_tail；被打回又留了改动的，先告诉用户再只撤这个任务自己的那段。结果等用户试完核对、
 记下一节；请求日志从第 16746 行起是这一轮。没推送。
+
+## 64. Agent 名单、默认模型和推理强度、放行时能改（2026-10-24）
+
+**要求：**用户说不是每家 Agent 都有订阅，五份新档案的真跑先通过、遇到再调；问 model 和 effort 怎么设、Agent 是自动还是手动选。
+我答：现在 gld 不管模型和强度（用各家自己的配置，比如这台机器 Codex 是 `~/.codex/config.toml` 的 `gpt-6-astra` / `xhigh`），
+AI 按名字自己挑、ask 档只能批或拒，`installed` 查不出订阅和登录；建议名单 + 档案默认 + AI 提议 + 放行时能改。用户说"按你的建议做"。
+
+**各家参数**（本机 `--help` 核过）：Codex `-m`、`-c model_reasoning_effort=`（取值帮助里没列；二进制里能看到一串枚举名，分不清哪几个属于
+推理强度，所以 gld 不核对、交给 Codex 报错）；Claude `--model`、`--effort low|medium|high|xhigh|max`；Antigravity `--model`、`--effort low|medium|high`；
+Pi `--model`、`--thinking off|minimal|low|medium|high|xhigh`；Qwen、Kimi 只有 `-m`。
+
+**改了什么（三个提交）：**
+
+- `4559682` 项目字段 `agents`（逗号分隔，去重去空白；空的是全部）。`action=agents` 只列名单里的，回 `allowed`、`listed_without_profile`；
+  起名单外的回 `AGENT_NOT_ALLOWED`。`gld ls <项目>` 加"可委派的 Agent"一行。
+- `5234bba` 档案加 `model`、`effort`、`model_args`、`effort_args`、`efforts`，内置六家填好；参数加在命令末尾，最后一项是 `-` 的加在它前面。
+  `agents.toml` 里不写 `command` 的条目在同名内置上改字段（只改默认模型和强度不用抄整条）。`agent_manage start` 收 `model`、`effort`，
+  先核对再起，实际用的记进任务；`action=agents` 回每家默认值和能不能选。
+- `9e7dd10` `gld agent approve <任务> --agent / --model / --effort`。换 Agent 时模型和强度改用新那家的默认；核对都在改任务记录之前，
+  不对就报错、任务留着；改了什么记进 `approval_changes`，AI 看得到。守护进程协议 7 → 8（旧守护进程会悄悄丢掉用户的修改）。
+
+**验证：**新增测试 7 条（档案单元三条、委派单元两条、端到端三条，含名单那条），全仓 1051 passed / 0 failed，clippy、fmt、文档门禁通过。
+跑委派单元时"在跑时输出尾巴"那条在后台搜 Codex 二进制、CPU 吃满时偶发失败一次，单独重跑通过，和这次改动无关。
+
+**换装要知道的：**工具表变了（`agent_manage` 多了 `model`、`effort`，说明也改了），要点 Refresh；协议号变了，换二进制后必须重启守护进程
+（换装流程本来就有这步），命令行和守护进程版本对不上时命令行会先报"请重启"。没换装、没推送。
