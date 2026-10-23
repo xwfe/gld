@@ -2607,3 +2607,22 @@ concepts.md 和 security.md，重新生成 `docs/cli.md`。新增端到端一条
 **验证：**全仓 1033 passed / 0 failed，clippy、fmt、文档链接（含新锚点）、命令名、本机路径、命名门禁通过。
 
 **没做：**换装（`0b483f0` 起的提交都没部署，本机还是 `c99c8cd`）。没推送。
+
+## 53. 本机换成 `2f50e09`（2026-10-23 18:50）
+
+**要求：**用户说"按 install.md 换装本机（先查没有在跑的命令），然后给我一段提示词，让 ChatGPT 在 delegation-test 上委派一个大 diff，
+用 path 先读代码再审；不推送"。
+
+**换之前：**守护进程 pid 43580（`c99c8cd`）没有子进程，没有在跑的委派，请求日志 100 多分钟没动。
+
+**换装：**release 构建 3 分 02 秒；备份 `gld-c99c8cd-20261023-1850` 和 `gld-config-20261023-1850.tgz`（0600）；写 `.new` 再改名，
+去掉 `CLAUDE*` 变量重启，pid 43580 → 25532。带上 `0b483f0`（按文件读）、`c8efb4d`（review 回包不带 diff）、`ab28d2b`（show 给全文路径）。
+
+**换完：**命令行和服务的构建提交都是 `2f50e09b7c17`，协议 7；`gld ls` 前后一致，`profiles.json`、`oauth-clients/hub.json` 指纹一致；
+`CLAUDE*` 变量 0 个；`gld health` 四项全 ✓。工具表指纹 `a0c81b8f6d0580cd` → `2ceba8697b67815e`，旧、新二进制逐个工具比，只有
+`agent_manage` 的说明和 schema 变了（多了 `path`），**要在 ChatGPT 点一次 Refresh**。
+
+**给 ChatGPT 的这一轮：**委派 codex 往 `math_utils.py` 加 `variance` / `stdev`，再写生成脚本、3000 条用例的 CSV 和读它的测试。
+模拟估 CSV 那段约 167 KB，按路径排在最前，代码在后面三个文件里；`math_utils.py` 里留着前几轮没提交的改动，看 `path` 读出来的那段
+是不是只有这次的两个函数。审核要求先看 `file_stats`，代码文件用 `path` 各读一次，CSV 只读第一页，不按 offset 翻全份。结果等用户
+试完再核对、记下一节；请求日志从第 16428 行起是这一轮。没推送。
