@@ -2523,4 +2523,30 @@ MCP 2025-06-18 规范的工具一节原文是带 `structuredContent` 的工具 S
 又 `status` 一次，`review` 的回包又带了一遍第一页的 diff（143 KB）。`review` 回包不带 diff 是能直接省的；双份回包是 MCP 层
 的事，没证据说明 ChatGPT 两份都算进上下文，先不动。
 
-ChatGPT 第 7 步的评价写在对话里，gld 记录里没有，没核对。没推送。
+**ChatGPT 第 7 步的评价**（用户贴回来的）：分页够用，正确性、文件统计、任务隔离都过，175 KB 三页合理；大 CSV 占上下文、
+接口还能更直观。按优先级提了五条：
+
+1. 回包里的 `diff_next_offset` 和分页里的 `next_offset` 统一成一个名字。
+2. 按文件读：`path=gen_cases.py` 直接看源代码，不用先读完约 170 KB 的 CSV。
+3. 摘要模式：`view=summary` 先给文件列表、增删行数、diff 大小，再按需读内容。
+4. 每页带 `page_index`、`page_bytes`、`line_start`、`line_end`，方便检查连续性。
+5. 每页大小可调（`limit_bytes`，16 / 32 / 64 KB）。
+
+它还说 Codex 日志里有 HTTP 403、502 和协作线程报错。核对 `stderr.log`：16:00:22–33 四条是 Codex 自己的 MCP 客户端连它配置里的服务
+（`~/.codex/config.toml`）失败，403 `Invalid x-mcp-key` 对应配置里唯一带这个请求头的 uTools 本机服务，三条 502 没写是哪个服务
+（同一时间本机 ardot 也是 502）；16:01:34 `collab spawn failed: no thread with id` 是 Codex 起子代理失败。都不经过 gld，
+没影响结果（退出码 0，改动完整）。
+
+**我的看法**（还没定，等用户选）：
+
+- 第 2 条最值。可以在算 diff 时顺手记下每个文件在 `task.diff` 里从第几个字节起、多长，放进 `file_stats`，`action=diff` 加 `path`
+  只读那一段（超过 64 KB 照样分页）。只靠 `task.diff`，不靠两棵树（树会被 gc）。
+- 第 3 条大半已有：`status` / `wait` 的 `file_stats`、`diff_bytes` 就是摘要，缺的是每个文件的 diff 多大，跟第 2 条一起补上。
+  真正的浪费是 diff 超过 64 KB 时 `status` / `wait` 每次都附第一页（线上 135–142 KB），这一轮第一页几乎全是 CSV；按文件读做好后，
+  大 diff 可以只给摘要、不附第一页，这是行为变化，要用户定。
+- 第 1 条不值：`status` / `wait` 回包是整个任务的详情，裸 `next_offset` 说不清是谁的下一页；这一轮它也没用错。改名还得再 Refresh。
+- 第 4 条不值：`page_bytes` 就是 `next_offset - offset`；能任意给 offset 的接口里页码没有固定含义；连续性 gld 的测试已经按逐字节拼回全文核过。
+- 第 5 条暂缓：页越小调用越多，双份回包的固定开销占比越大；按文件读之后真遇到"一个文件就超过 64 KB 又只想看一部分"再说。
+- 加上我这边的：`review` 回包不带 diff（这一轮多回 143 KB）。
+
+没推送。
