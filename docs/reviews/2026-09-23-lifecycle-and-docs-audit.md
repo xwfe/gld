@@ -2490,3 +2490,37 @@ debug 版（`--version` 打 `ba6aaff`：编译时还没提交 `188f60c`，代码
 CSV 在前，脚本和测试落在最后几页，不读完就审不了代码。审核只准用 `agent_manage` 读 diff，一页页读到 `next_offset` 是 `null`，
 再用 `exec_command` 跑两棵树之间的 `git diff --numstat` 对照 `file_stats`。结果等用户试完再核对、记下一节；请求日志从第
 15168 行起是这一轮。没推送。
+
+## 50. ChatGPT 委派一个 175 KB 的改动，分页读完再审（2026-10-23 15:58–16:04）
+
+**结论：分页管用。**diff 175,493 字节，回包给第一页和 `diff_next_offset=65530`，ChatGPT 接着用 `action=diff` 读到
+`next_offset=null`，三页 65,530 + 65,499 + 44,464 字节，每页截在整行上（页与页接缝处 CSV 编号 1146/1147、2277/2278 连续），
+加起来正好是总长。脚本和测试按路径排序落在第 3 页，它是读完才审到的。审核意见里的页数、offset、`file_stats` 和 numstat 的对照
+都和我这边的记录一致，accept。
+
+| 本地时间 | ChatGPT 做了什么（项目自己的请求日志、运行记录） |
+| --- | --- |
+| 15:58:38 | 用户点 Refresh，`tools/list` 回 47,322 字节，`auth=` 还是原来那个 `oauth:hub:dcr-…` |
+| 15:59:22–34 | `list_workspaces`、`git_status`、`workspace_context`、`agent_manage action=agents` |
+| 15:59:57 | `start agent=codex`，回 `waiting_local_approval`；用户在本机放行，Codex（codex-cli 0.163.0）跑了 163 秒 |
+| 16:00:54–16:03:03 | 四次 `wait`：在跑时每次回 5.9–6.6 KB，最后一次 `awaiting_review` 回 141,939 字节（带第一页） |
+| 16:03:18–45 | 四次 `agent_manage`：135,389、141,939、135,273、92,428 字节。按大小看是 `diff offset=0`（又读了一遍第一页）、`status`、第二页、第三页 |
+| 16:04:15–23 | `exec_command`：`git diff --numstat <before_tree> <after_tree>`、`python3 gen_cases.py --check`、`python3 -m unittest -v`、`git status --short`，退出码都是 0 |
+| 16:04:53 | `review verdict=accept`，回 143,571 字节 |
+
+这一轮在 delegation-test 里没用 `read_file`、`git_diff` 读新文件。同一时间日志里那几次 `read_file` 是用户另一个对话在别的项目里
+读的（同一秒那个项目记了一次 `git_status`）。
+
+**我这边核对：**`git diff <before_tree> <after_tree>` 和 `task.diff` 逐字节相同；用 `gld tool call agent_manage action=diff`
+自己读三页，拼起来也和 `task.diff` 逐字节相同；`file_stats` 是 CSV +3001、`gen_cases.py` +55、`test_cases.py` +28，和 numstat 一致；
+`--check` 退出码 0，8 条测试 OK；前几轮没提交的改动还是 36 行新增，没动，没有新提交。脚本的期望值确实用的 `statistics`，
+众数并列取最小，`--check` 只比对不写文件。
+
+**发现：回包比 diff 本身大一倍多。**一页 64 KB 的 diff，回包 135 KB：gld 的 MCP 回包把同一份结果放两次，`content[0].text`
+（JSON 再转义一层）和 `structuredContent`（`crates/core/src/tools/workspace.rs` 的 `wrap_mcp_tool_result`，所有工具都这样，
+MCP 2025-06-18 规范的工具一节原文是带 `structuredContent` 的工具 SHOULD 同时在文本块里给一份序列化的 JSON）。这一轮 `agent_manage` 的六个大回包加起来 790 KB，diff 本身 175 KB。
+其中三个是重复的：`awaiting_review` 之后又读一次第一页（可能是我提示词要它报"每页的 offset"，回包里的第一页没有 `offset` 字段），
+又 `status` 一次，`review` 的回包又带了一遍第一页的 diff（143 KB）。`review` 回包不带 diff 是能直接省的；双份回包是 MCP 层
+的事，没证据说明 ChatGPT 两份都算进上下文，先不动。
+
+ChatGPT 第 7 步的评价写在对话里，gld 记录里没有，没核对。没推送。
