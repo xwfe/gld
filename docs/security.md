@@ -174,7 +174,8 @@ SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 
 
 项目开了 `agent-delegation`（[怎么用](concepts.md#把活委派给本机-agentagent_manage)），AI 就能在你电脑上起一个 Codex / Claude Code，
 用的是它们"全放开"的参数：不进沙箱、不停下来问，能读写你账号碰得到的一切，跑任何命令。gld 的命令白名单、
-`.git/` 保护、名字像密钥的环境变量会被去掉这些，**对它都不适用**——那些只管经 gld 工具做的事。
+`.git/` 保护**对它都不适用**——那些只管经 gld 工具做的事。起它时 gld 照样去掉名字像密钥的环境变量
+（档案的 `env_pass` 点名放行的除外），但这拦不住它：它能读你的 shell 配置、`~/.config` 这些文件。
 
 网页、issue、依赖里的提示注入能借 ChatGPT 传给这个 Agent。所以：
 

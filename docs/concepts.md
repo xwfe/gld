@@ -1444,26 +1444,46 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    能动你账号能动的一切，不只是项目目录。gld 在提示后面加一段：交接目录在哪、结尾写四段 recap、别 git commit。
 3. 跑的时候，gld 对这个项目的 `apply_patch`、`exec_command` 回 `AGENT_TASK_RUNNING`，同一个项目同时只许一个委派。
    总时长默认 30 分钟（最长 2 小时），5 分钟没有任何输出按卡住停掉。
-4. 跑完进入"等审核"：AI 拿到 Agent 的 recap、交接报告（有的话）、改了哪些文件（`changed_files`）和每个文件增删几行
-   （`file_stats`，同样的文件、同样的顺序，二进制文件的行数是 `null`），和**这次任务自己的 diff**（`diff` 字段，
-   最多 64 KB）。它是跑前跑后各把整个工作区写成一棵 git 树、两棵一比得出来的，
-   之前没提交的改动、没跟踪的文件不会混进来——`git_diff` 跟 HEAD 比就会混（上一轮委派没提交时撞过）。
-   超过 64 KB 的截在整行上，`diff_truncated` 为真、`diff_next_offset` 是剩下的从第几个字节起；AI 用
-   `action=diff task_id=… offset=<diff_next_offset>` 接着读，每页最多 64 KB，再按每页的 `next_offset` 往下读，
-   读到它是 `null` 为止。只想看某个文件就加 `path=<file_stats 里的路径>`：`file_stats` 每一项带着这个文件那一段在
-   完整 diff 里从第几个字节起（`diff_offset`）、多长（`diff_bytes`），给了 `path` 就从它的开头读、读到它的结尾停，
-   比一页长照样分页（下一页要带同一个 `path`）。生成的数据排在代码前面时，先读代码不用先翻完数据。
-   offset 超过总长（给了 `path` 就是不在那个文件那一段里）、`path` 不是这次改了的文件，回 `INVALID_ARGUMENT`；
-   还没跑完回 `AGENT_TASK_STATE`；没跑过（被拒、过期）、没算出 diff（不是 git 仓库）、早于记文件位置的任务用了 `path`，
-   回 `AGENT_DIFF_UNAVAILABLE`。
-   AI 自己看 diff、跑测试，再 `action=review verdict=accept|reject`（它的回包不再带一遍 diff，要再看用 `status` 或
-   `action=diff`）。**Agent 说"测试都过了"不算数**，验收照旧只认
-   gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。Agent 不听话提交了的，回包里 `head_moved` 为真，改动照样在 diff 里。
+4. 跑完进入"等审核"：AI 自己看这次的 diff、跑测试，再 `action=review verdict=accept|reject`。
+   **Agent 说"测试都过了"不算数**，验收照旧只认 gld 跑的命令（[任务怎么收尾](#任务怎么收尾带证据才算-completed)）。
 
-   记树用的是任务目录里的临时 index，不碰你自己的暂存区和工作区；代价是往仓库的对象库里写了没人引用的对象，
-   过期后 `git gc` 会清掉。两棵树的 id 在回包的 `before_tree`、`after_tree` 里（`gld agent show` 也有），
-   在项目里 `git diff <before_tree> <after_tree>` 就是这份 diff；树被 gc 清掉后这条命令会报 `bad object`，
-   diff 全文另存在任务记录里，不靠它。
+### 交回审核时，AI 拿到什么
+
+| 字段 | 是什么 |
+| --- | --- |
+| `recap`、`report` | Agent 最后一条消息（最多 32 KB）；它写在交接目录的详细报告（有的话，最多 64 KB） |
+| `changed_files`、`file_stats` | 改了哪些文件；`file_stats` 每个文件一项：增删几行（二进制是 `null`），和它在完整 diff 里从第几个字节起、多长（`diff_offset`、`diff_bytes`） |
+| `diff` | **这次任务自己的 diff**，最多 64 KB。超过的截在整行上，`diff_truncated` 为真，`diff_next_offset` 是剩下的从第几个字节起 |
+| `before_tree`、`after_tree` | 跑前、跑后把整个工作区写成的两棵 git 树；在项目里 `git diff <before_tree> <after_tree>` 就是这份 diff |
+| `head_moved` | 为真说明 Agent 被叮嘱别提交，还是提交了。改动照样在 diff 里 |
+
+`review` 的回包不再带一遍 diff；要再看用 `status`，或者下面的 `action=diff`。`gld agent show` 在本机打的是同一份东西。
+
+### diff 太长怎么读：`action=diff`
+
+- **接着往下读**：`action=diff task_id=… offset=<diff_next_offset>`，每页最多 64 KB、截在整行上；再按每页回的 `next_offset`
+  往下读，读到它是 `null` 为止。
+- **只看一个文件**：`action=diff task_id=… path=<file_stats 里的路径>`，从这个文件那一段的开头读到结尾，比一页长照样分页
+  （下一页带同一个 `path`）。生成的数据按路径排在代码前面时，先读代码不用先翻完数据。
+
+读不了时的报错：
+
+| 报错 | 什么时候 |
+| --- | --- |
+| `INVALID_ARGUMENT` | offset 超过总长，或者不在 `path` 那个文件那一段里；`path` 不是这次改了的文件 |
+| `AGENT_TASK_STATE` | 任务还没跑完 |
+| `AGENT_DIFF_UNAVAILABLE` | 任务没跑过（被拒、过期）；项目不是 git 仓库，没算出 diff；早于记文件位置的旧任务用了 `path`（改用 offset 读） |
+
+### 这份 diff 是怎么算出来的
+
+跑之前、跑完各把整个工作区写成一棵 git 树，两棵一比。所以之前没提交的改动、没跟踪的文件不会混进来——`git_diff` 跟 HEAD 比
+就会混（上一轮委派没提交时撞过）。
+
+记树用的是任务目录里的临时 index，不碰你自己的暂存区和工作区；代价是往仓库的对象库里写了没人引用的对象，过期后 `git gc`
+会清掉。树被清掉后 `git diff <before_tree> <after_tree>` 会报 `bad object`，不要紧：diff 全文另存在任务记录里
+（`gld agent show` 截断时会打出它在哪）。
+
+### 交接文件、能用哪些 Agent、谁能发起
 
 交接文件在项目里的 `.gld/handoff/<任务 id>/`：`brief.md`（AI 写的背景）、`report.md`（Agent 写的详细报告）、
 `review.md`（审核意见）。`.gld/handoff/` 自带一个只写 `*` 的 `.gitignore`，这些文件不会出现在 git status 里；

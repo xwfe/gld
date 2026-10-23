@@ -1,6 +1,7 @@
 # RFC-0009：把任务交给本机的编码 Agent（Agent 委派）
 
-日期：2026-10-22。状态：**已定；D1 已实现（`0324602`–`267cdf9`，审查 §42），没部署、没真跑过 Agent。**
+日期：2026-10-22。状态：**已定；D1 已实现（`0324602`–`267cdf9`，审查 §42），本机在用，Codex 经 ChatGPT 真跑、审核过多轮
+（审查 §43–§50）；Claude 还没真跑过。**之后的进展只在 task_plan 里记。
 
 - 第一稿只做 Codex，走 `codex app-server`。
 - 第二稿按用户的设想改写："能委派多种 Agent（Codex、Claude Code、Pi、Antigravity、Grok、DeepSeek……），先设计得简单，
@@ -18,7 +19,7 @@
 - 本机 `~/.codex/config.toml` 的 MCP server 名单。
 - 各家官方文档（第 3、4 节标了链接）。
 
-**一个 Agent 都还没真跑过。**
+写这一稿时一个 Agent 都还没真跑过；上面这些是当时核的。
 
 ## 1. 要解决什么
 
@@ -51,9 +52,9 @@ ChatGPT 那边：
    - 结局和退出码；
    - Agent 的 recap（最后一条消息，最多 32 KB）；
    - 交接报告（有的话）；
-   - gld 自己算的改动文件；
-   - 原始输出的 `output_ref`。
-5. ChatGPT 审：`git_diff`、`read_file` 看改动，`exec_command` 跑测试，然后
+   - gld 自己算的改动：改了哪些文件、各增删几行，和这次任务自己的 diff（最多 64 KB，长的用 `action=diff` 分页或按文件读）。
+   回包字段的完整说明在 [concepts.md](../concepts.md#把活委派给本机-agentagent_manage)。
+5. ChatGPT 审：看回包里的 diff，`exec_command` 跑测试，然后
    `action=review task_id=… verdict=accept|reject note="…"`。
    - `accept`：任务记 `accepted`，审核意见存进任务记录。
    - `reject`：任务记 `rejected`。要接着改，就带上审核意见再 `start` 一次（D3 起可以接着同一个会话）。
@@ -151,7 +152,7 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 
 所以把关放在**起之前**和**做完之后**：
 
-- **起之前**：项目开关默认 off；`ask` 档每次要你在本机点头；只有服务主凭据和 `--write` grant 能发起（第 5 节）。
+- **起之前**：项目开关默认 off；`ask` 档每次要你在本机点头；只有服务主凭据和 `--write` grant 能发起（D1 更紧，grant 都不行，见第 5 节）。
   ChatGPT 读的网页、issue 里要是夹着提示注入，能借 ChatGPT 传给 Agent，而 Agent 是全权的——**对外接触多的项目用 `ask`，别用 `auto`**。
 - **做完之后**：状态停在 `awaiting_review`，审核结论记进任务；验收只认 gld 自己跑的命令。
 - **不递归**：委派出去的 Agent 不能再经 gld 发起委派（它的主体没有 `agent_manage`）。
@@ -201,7 +202,10 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 
 ## 8. 要在 D1 实测的
 
-- 各档案"全放开"的参数在 `-p` 下是不是真的一次都不停下来问。
-- 四段 recap 各 Agent 实际守得怎么样，守不住就退回"最后一条消息原样回"。
-- `.gld/handoff/` 放在项目里，会不会被项目自己的工具（格式化、lint）扫到。
-- 用户自己的 Codex 配置带着 24 个 MCP server，起动慢不慢、会不会因为某个 server 起不来而卡住。
+到 2026-10-23 Codex（codex-cli 0.163.0）在临时项目里真跑了四轮（审查 §43–§50），Claude 还没跑过：
+
+- 各档案"全放开"的参数在 `-p` 下是不是真的一次都不停下来问：**Codex 四轮都没停**，退出码都是 0（60–163 秒）。Claude 待测。
+- 四段 recap 各 Agent 实际守得怎么样，守不住就退回"最后一条消息原样回"：**Codex 四轮都按四段写了**。
+- `.gld/handoff/` 放在项目里，会不会被项目自己的工具（格式化、lint）扫到：临时项目里没有这类工具，**还没测到**。
+- 用户自己的 Codex 配置带着 24 个 MCP server，起动慢不慢、会不会因为某个 server 起不来而卡住：§50 那轮有四个连不上
+  （403、502），Codex 起来后 13 秒内报完错接着干，**没卡住**。
