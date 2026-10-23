@@ -1006,10 +1006,24 @@ pub enum AgentCmd {
         #[arg(value_name = "TASK")]
         task: String,
     },
-    /// 放行一个等你点头的任务（项目开的是 ask 档）
+    /// 放行一个等你点头的任务（项目开的是 ask 档）；可以顺手换 Agent、模型、推理强度
+    ///
+    ///   gld agent approve 3f2a                          照 AI 的提议跑
+    ///   gld agent approve 3f2a --agent claude           换一家（模型、强度用它的默认）
+    ///   gld agent approve 3f2a --model gpt-5.4 --effort high
+    #[command(verbatim_doc_comment)]
     Approve {
         #[arg(value_name = "TASK")]
         task: String,
+        /// 换成这家 Agent（档案名；不受项目 agents 名单限制，那份名单只管 AI 能选谁）
+        #[arg(long)]
+        agent: Option<String>,
+        /// 用这个模型（这家得支持指定模型）
+        #[arg(long)]
+        model: Option<String>,
+        /// 用这个推理强度（这家得有推理强度参数，取值见 gld agent show 或 docs/concepts.md）
+        #[arg(long)]
+        effort: Option<String>,
     },
     /// 拒掉一个等你点头的任务
     Deny {

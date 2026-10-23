@@ -40,6 +40,7 @@ ChatGPT 网页端经 gld 干活，每一步都是一次工具调用来回，长�
 gld set api agent-delegation=ask   # 默认 off；ask = 每次要本机点头，auto = ChatGPT 直接起
 gld agent ls                        # 发起了哪些、在等谁、哪些等审核
 gld agent approve <task-id>         # ask 档下放行；deny 拒掉，stop 停掉在跑的
+gld agent approve <task-id> --agent claude --model … --effort …   # 放行时换（2026-10-24，审查 §64）
 ```
 
 ChatGPT 那边：

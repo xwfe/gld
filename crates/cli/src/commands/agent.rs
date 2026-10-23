@@ -13,12 +13,27 @@ pub async fn run(ctx: &mut Ctx, command: AgentCmd) -> CliResult {
     match command {
         AgentCmd::List => list(ctx).await,
         AgentCmd::Show { task } => show(ctx, task).await,
-        AgentCmd::Approve { task } => {
+        AgentCmd::Approve {
+            task,
+            agent,
+            model,
+            effort,
+        } => {
             let task: AgentTask = ctx
                 .backend
-                .call_typed(Request::ApproveAgentTask { task_id: task })
+                .call_typed(Request::ApproveAgentTask {
+                    task_id: task,
+                    agent,
+                    model,
+                    effort,
+                })
                 .await?;
-            done(ctx, &task, "已放行，Agent 起来了")
+            done(ctx, &task, "已放行，Agent 起来了")?;
+            if !task.approval_changes.is_empty() && !ctx.out.json {
+                ctx.out
+                    .line(format!("改了：{}", task.approval_changes.join("；")));
+            }
+            Ok(())
         }
         AgentCmd::Deny { task } => {
             let task: AgentTask = ctx
@@ -166,7 +181,7 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
     }
     if task.state == State::WaitingLocalApproval {
         ctx.out.note(format!(
-            "在等你放行：gld agent approve {}；不要就 gld agent deny {}。Agent 会全权跑。",
+            "在等你放行：gld agent approve {}（--agent / --model / --effort 可以换）；不要就 gld agent deny {}。",
             short(&task.task_id),
             short(&task.task_id)
         ));

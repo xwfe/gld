@@ -18,8 +18,24 @@ impl App {
         Ok(agents::detail(&dir, task))
     }
 
-    pub fn approve_agent_task(&self, task_id: &str) -> AppResult<AgentTask> {
-        agents::approve(&crate::home::data_home()?, task_id).map_err(convert)
+    /// 放行，可以顺手换 Agent、模型、推理强度（都不给就照 AI 的提议）。
+    pub fn approve_agent_task(
+        &self,
+        task_id: &str,
+        agent: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> AppResult<AgentTask> {
+        agents::approve_with(
+            &crate::home::data_home()?,
+            task_id,
+            agents::ApprovalChange {
+                agent,
+                model,
+                effort,
+            },
+        )
+        .map_err(convert)
     }
 
     pub fn deny_agent_task(&self, task_id: &str) -> AppResult<AgentTask> {

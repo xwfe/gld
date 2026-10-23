@@ -36,7 +36,9 @@ use serde_json::Value;
 /// 6：加了 `add_browser_grant`，与普通永久 grant 分开，旧守护进程不能静默降级。
 /// 7：加了 `list_agent_tasks`、`show_agent_task`、`approve_agent_task`、`deny_agent_task`、
 ///    `stop_agent_task`（`gld agent`，RFC-0009）。
-pub const PROTOCOL_VERSION: u32 = 7;
+/// 8：`approve_agent_task` 多了 `agent`、`model`、`effort`（放行时换 Agent、模型、推理强度）。旧守护进程不认这几个字段，
+///    会照 AI 的提议跑、悄悄丢掉用户的修改，所以递增，让命令行先报"请重启"。
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +261,13 @@ pub enum Request {
     /// 起 Agent：进程和"在跑的表"都得在守护进程里，不然命令行一退就没人管了。
     ApproveAgentTask {
         task_id: String,
+        /// 放行时换成别的 Agent、模型、推理强度；不给就照 AI 的提议。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
     },
     DenyAgentTask {
         task_id: String,

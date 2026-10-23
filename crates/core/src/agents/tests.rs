@@ -615,6 +615,112 @@ fn proposed_model_and_effort_reach_the_agent_and_are_recorded() {
     assert_eq!(list(f.data_home(), None).len(), 2, "拒了就不留任务");
 }
 
+/// ask 档放行时用户能改：换 Agent（模型、强度改用新那家的默认）、只改模型、改强度；改了什么记进任务。
+/// 改得不对就报错，任务原样留着等放行，Agent 一下都没跑。
+#[test]
+fn approval_can_change_the_agent_model_and_effort() {
+    let f = Fixture::new();
+    let choices = |model: &str| {
+        format!(
+            "model_args = [\"--model\", \"{{model}}\"]\neffort_args = [\"--effort\", \"{{effort}}\"]\nefforts = [\"low\", \"high\"]\nmodel = \"{model}\""
+        )
+    };
+    f.agent(
+        "one",
+        "cat >/dev/null\necho \"one $@\" > ran.txt\necho ok",
+        STDOUT,
+        &choices("one-default"),
+    );
+    f.agent(
+        "two",
+        "cat >/dev/null\necho \"two $@\" > ran.txt\necho ok",
+        STDOUT,
+        &choices("two-default"),
+    );
+    let ran = || std::fs::read_to_string(f.root().join("ran.txt")).expect("ran.txt");
+    let ask = |model: Option<&str>, effort: Option<&str>| {
+        start(StartRequest {
+            data_home: f.data_home(),
+            workspace_root: f.project.path(),
+            workspace_name: "demo",
+            caller: "local",
+            agent: "one",
+            prompt: "改一下",
+            brief: None,
+            client_request_id: None,
+            approval: Approval::Ask,
+            agent_approval: "all",
+            model,
+            effort,
+            timeout_minutes: None,
+        })
+        .expect("存下")
+    };
+
+    // 换一家：AI 给 one 提议的模型和强度不沿用，改用 two 的默认。
+    let waiting = ask(Some("m1"), Some("high"));
+    let change = ApprovalChange {
+        agent: Some("two"),
+        ..ApprovalChange::default()
+    };
+    let done = f.finished(&approve_with(f.data_home(), &waiting.task_id, change).expect("放行"));
+    assert_eq!(done.agent, "two");
+    assert_eq!(
+        (done.model.as_str(), done.effort.as_str()),
+        ("two-default", "")
+    );
+    assert_eq!(
+        done.approval_changes,
+        vec![
+            "agent one → two",
+            "model m1 → two-default",
+            "effort high → 默认"
+        ]
+    );
+    assert_eq!(ran(), "two --model two-default\n");
+
+    // 只改模型：强度照 AI 的提议。
+    let waiting = ask(Some("m1"), Some("low"));
+    let change = ApprovalChange {
+        model: Some("m2"),
+        ..ApprovalChange::default()
+    };
+    let done = f.finished(&approve_with(f.data_home(), &waiting.task_id, change).expect("放行"));
+    assert_eq!(done.approval_changes, vec!["model m1 → m2"]);
+    assert_eq!(ran(), "one --model m2 --effort low\n");
+
+    // 改得不对：报错，任务还在等放行，没跑。
+    std::fs::remove_file(f.root().join("ran.txt")).expect("清掉");
+    let waiting = ask(None, None);
+    for (change, code) in [
+        (
+            ApprovalChange {
+                effort: Some("turbo"),
+                ..ApprovalChange::default()
+            },
+            "INVALID_ARGUMENT",
+        ),
+        (
+            ApprovalChange {
+                agent: Some("nobody"),
+                ..ApprovalChange::default()
+            },
+            "AGENT_UNKNOWN",
+        ),
+    ] {
+        let error = approve_with(f.data_home(), &waiting.task_id, change).expect_err("该拒");
+        assert_eq!(error.code, code, "{error}");
+        let (_, still) = get(f.data_home(), &waiting.task_id).expect("任务");
+        assert_eq!(still.state, State::WaitingLocalApproval);
+        assert!(still.approval_changes.is_empty());
+    }
+    assert!(!f.root().join("ran.txt").exists());
+    // 照原样放行：没改就不记。
+    let done = f.finished(&approve(f.data_home(), &waiting.task_id).expect("放行"));
+    assert!(done.approval_changes.is_empty());
+    assert_eq!(ran(), "one --model one-default\n");
+}
+
 /// 起它的进程已经不在了（这里假装一个死掉的实例）：读到时改成 unknown，不猜结局。
 #[test]
 fn a_running_record_without_a_live_owner_reads_as_unknown() {

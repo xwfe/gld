@@ -1463,11 +1463,15 @@ gld set api agent-approval=self      # Agent 自行判断、自行批准；all�
 gld set api agents=codex,claude       # AI 只能委派给这几家（填你有订阅、登过录的）；不设就是全部档案
 gld agent ls                         # 发起了哪些、哪些在等你放行、哪些在等审核
 gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就行）；deny 拒掉，stop 停掉
+gld agent approve 3f2a --agent claude --effort high   # 放行时换 Agent、模型（--model）、推理强度
 ```
 
 一次委派是这样走的：
 
-1. AI 调 `agent_manage action=start agent=codex prompt=…`（可以带 `brief` 写背景和验收标准）。ask 档停在"等你放行"。
+1. AI 调 `agent_manage action=start agent=codex prompt=…`（可以带 `brief` 写背景和验收标准，`model`、`effort` 提议模型和推理强度）。
+   ask 档停在"等你放行"：`gld agent show` 看它提议了哪家、什么模型和强度、做什么，照着放行，或者用 `--agent`、`--model`、`--effort`
+   当场改。换了 Agent 就用新那家的默认模型和强度，除非一起改；改了什么记进任务的 `approval_changes`，AI 等结果时看得到。
+   你换谁都行，不受 `agents` 名单限制（那份名单管的是 AI 能选谁）。
 2. gld 在项目目录里用命令行起这个 Agent 的无交互模式，按项目的 `agent-approval` 放权（见下面
    [能用哪些 Agent、怎么放权](#能用哪些-agent怎么放权)）：默认 `all` 用它"全放开"的参数，**能动你账号能动的一切**，
    不只是项目目录；`self` 用它自己的自动审批模式。gld 在提示后面加一段：交接目录在哪、结尾写四段 recap、别 git commit。

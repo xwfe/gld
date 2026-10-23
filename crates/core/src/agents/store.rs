@@ -104,6 +104,9 @@ pub struct AgentTask {
     pub model: String,
     #[serde(default)]
     pub effort: String,
+    /// 用户在本机放行时改了什么（换 Agent、模型、推理强度），比如 `agent codex → claude`。AI 等结果时看得到。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_changes: Vec<String>,
     pub state: State,
     pub created_at_ms: u64,
     /// 总时长上限。ask 档等放行之后才起，所以要记下来。
@@ -283,6 +286,7 @@ mod tests {
             agent_approval: "all".into(),
             model: String::new(),
             effort: String::new(),
+            approval_changes: Vec::new(),
             state: State::Running,
             created_at_ms: created,
             timeout_minutes: 30,

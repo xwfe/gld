@@ -170,6 +170,7 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         agent_approval: agent_approval.to_string(),
         model,
         effort,
+        approval_changes: Vec::new(),
         state: State::WaitingLocalApproval,
         created_at_ms: run::now_ms(),
         timeout_minutes,
@@ -208,13 +209,78 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
     }
 }
 
-/// ask 档放行：起它。
+/// 放行时用户在本机改的：换 Agent、模型、推理强度。都不给就照 AI 的提议跑。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ApprovalChange<'a> {
+    pub agent: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+}
+
+/// ask 档放行：照 AI 的提议起它。
 pub fn approve(data_home: &Path, task_id: &str) -> Result<AgentTask, AgentError> {
-    let (dir, task) = get(data_home, task_id)?;
+    approve_with(data_home, task_id, ApprovalChange::default())
+}
+
+/// ask 档放行，顺手改 Agent、模型、推理强度（用户要的"AI 提议，你拍板"，2026-10-24）。
+///
+/// 换了 Agent 就不沿用 AI 给原来那家提议的模型和强度，各取新那家的默认，除非这次一起改了。项目的 `agents` 名单管的是
+/// AI 能选哪几家，用户在本机换谁都行。所有核对都在改任务记录之前：核对不过任务原样留着等放行。
+pub fn approve_with(
+    data_home: &Path,
+    task_id: &str,
+    change: ApprovalChange<'_>,
+) -> Result<AgentTask, AgentError> {
+    let (dir, mut task) = get(data_home, task_id)?;
     if task.state != State::WaitingLocalApproval {
         return Err(not_in_state(&task, "等本机放行"));
     }
-    let profile = find_profile(data_home, &task.agent)?;
+    let agent = change
+        .agent
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        .unwrap_or(&task.agent)
+        .to_string();
+    let switched = agent != task.agent;
+    let profile = find_profile(data_home, &agent)?;
+    let keep = |value: &str| (!switched && !value.is_empty()).then(|| value.to_string());
+    let model = change
+        .model
+        .map(str::to_string)
+        .or_else(|| keep(&task.model));
+    let effort = change
+        .effort
+        .map(str::to_string)
+        .or_else(|| keep(&task.effort));
+    let (model, effort) = profile
+        .resolve(model.as_deref(), effort.as_deref())
+        .map_err(|message| AgentError::new("INVALID_ARGUMENT", message))?;
+    check_approval(data_home, &profile, &task.agent_approval)?;
+    let shown = |value: &str| {
+        if value.is_empty() {
+            "默认".to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    let mut changes = Vec::new();
+    if switched {
+        changes.push(format!("agent {} → {agent}", task.agent));
+    }
+    if model != task.model {
+        changes.push(format!("model {} → {}", shown(&task.model), shown(&model)));
+    }
+    if effort != task.effort {
+        changes.push(format!(
+            "effort {} → {}",
+            shown(&task.effort),
+            shown(&effort)
+        ));
+    }
+    task.agent = agent;
+    task.model = model;
+    task.effort = effort;
+    task.approval_changes = changes;
     let prompt = fs::read_to_string(dir.join(store::PROMPT_FILE)).map_err(|error| {
         AgentError::new(
             "AGENT_STATE_UNAVAILABLE",

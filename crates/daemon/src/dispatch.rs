@@ -191,13 +191,25 @@ pub async fn dispatch(
         }
         R::ListAgentTasks => ok(&app.list_agent_tasks()?),
         R::ShowAgentTask { task_id } => ok(&app.agent_task(&task_id)?),
-        R::ApproveAgentTask { task_id } => {
+        R::ApproveAgentTask {
+            task_id,
+            agent,
+            model,
+            effort,
+        } => {
             // 起 Agent 前要问一次 `--version`（最多 5 秒）、拍 git 快照，不能占异步 worker。
             let app = app.clone();
-            let started = tokio::task::spawn_blocking(move || app.approve_agent_task(&task_id))
-                .await
-                .map_err(|error| RpcError::internal(format!("放行委派的任务失败：{error}")))?
-                .map_err(RpcError::from)?;
+            let started = tokio::task::spawn_blocking(move || {
+                app.approve_agent_task(
+                    &task_id,
+                    agent.as_deref(),
+                    model.as_deref(),
+                    effort.as_deref(),
+                )
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("放行委派的任务失败：{error}")))?
+            .map_err(RpcError::from)?;
             ok(&started)
         }
         R::DenyAgentTask { task_id } => ok(&app.deny_agent_task(&task_id)?),

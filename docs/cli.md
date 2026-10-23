@@ -1129,7 +1129,7 @@ Usage: gld agent [OPTIONS] <COMMAND>
 Commands:
   list     所有项目的委派任务，新的在前 [alias: ls]
   show     一个任务的详情：提示、recap、改了哪些文件（各增删几行）、这次的 diff、交接报告、最后的输出
-  approve  放行一个等你点头的任务（项目开的是 ask 档）
+  approve  放行一个等你点头的任务（项目开的是 ask 档）；可以顺手换 Agent、模型、推理强度
   deny     拒掉一个等你点头的任务
   stop     停掉在跑的（或作废还在等放行的）
 
@@ -1205,22 +1205,55 @@ Options:
 ## gld agent approve
 
 ```text
-放行一个等你点头的任务（项目开的是 ask 档）
+放行一个等你点头的任务（项目开的是 ask 档）；可以顺手换 Agent、模型、推理强度
+
+  gld agent approve 3f2a                          照 AI 的提议跑
+  gld agent approve 3f2a --agent claude           换一家（模型、强度用它的默认）
+  gld agent approve 3f2a --model gpt-5.4 --effort high
 
 Usage: gld agent approve [OPTIONS] <TASK>
 
 Arguments:
-  <TASK>  
+  <TASK>
+          
 
 Options:
-  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
-      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
-      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
-      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
-  -h, --help            Print help
-  -V, --version         Print version
+      --agent <AGENT>
+          换成这家 Agent（档案名；不受项目 agents 名单限制，那份名单只管 AI 能选谁）
+
+  -w, --workspace <WS>
+          目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+      --model <MODEL>
+          用这个模型（这家得支持指定模型）
+
+      --effort <EFFORT>
+          用这个推理强度（这家得有推理强度参数，取值见 gld agent show 或 docs/concepts.md）
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
 
 ## gld agent deny

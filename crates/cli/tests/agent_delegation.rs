@@ -446,6 +446,68 @@ fn start_can_propose_model_and_effort() {
     env.ok(&["daemon", "stop"]);
 }
 
+/// ask 档：AI 提议的模型和强度，用户在本机放行时改掉；AI 等到的回包里有 approval_changes。
+#[test]
+fn the_user_can_change_the_proposal_when_approving() {
+    let env = Env::new();
+    agent(
+        &env,
+        "fake",
+        "cat >/dev/null\necho \"$@\" > args.txt\necho ok",
+    );
+    let toml = env.home.path().join("agents.toml");
+    let mut text = std::fs::read_to_string(&toml).expect("agents.toml");
+    text.push_str("model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{effort}\"]\nefforts = [\"low\", \"high\"]\n");
+    std::fs::write(&toml, text).expect("agents.toml");
+    project(&env);
+    env.ok(&["set", "it", "agent-delegation=ask"]);
+
+    let started = manage(
+        &env,
+        &[
+            "action=start",
+            "agent=fake",
+            "prompt=改一下",
+            "model=m1",
+            "effort=high",
+        ],
+    );
+    let task_id = started["task_id"].as_str().expect("task_id").to_string();
+    let shown = env.gld(&["agent", "show", &task_id[..8]]);
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&shown.stdout),
+        String::from_utf8_lossy(&shown.stderr),
+    );
+    assert!(stdout.contains("模型 m1，推理强度 high"), "{stdout}");
+    assert!(stderr.contains("--effort"), "放行前要提示能改：{stderr}");
+
+    let bad = env.gld(&["agent", "approve", &task_id[..8], "--effort", "turbo"]);
+    assert!(!bad.status.success(), "取值不对要拒");
+    let approved = env.ok(&[
+        "agent",
+        "approve",
+        &task_id[..8],
+        "--model",
+        "m9",
+        "--effort",
+        "low",
+    ]);
+    assert!(
+        approved.contains("改了：model m1 → m9；effort high → low"),
+        "{approved}"
+    );
+    let done = wait_done(&env, &task_id);
+    assert_eq!(done["model"], "m9", "{done}");
+    assert_eq!(
+        done["approval_changes"],
+        serde_json::json!(["model m1 → m9", "effort high → low"]),
+        "{done}"
+    );
+    let args = std::fs::read_to_string(env.project.path().join("args.txt")).expect("args.txt");
+    assert_eq!(args, "--model m9 --effort low\n");
+    env.ok(&["daemon", "stop"]);
+}
+
 /// `agent-approval=self`：AI 从 `action=agents` 看得到哪几家有"自行判断"那一档；拿没有的去起，
 /// 报错说清有哪几家、怎么改，不退回全放开。
 #[test]
