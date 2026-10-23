@@ -208,7 +208,15 @@ fn builtin() -> BTreeMap<String, AgentProfile> {
         "{workdir}",
         "--skip-git-repo-check",
     ];
-    let claude_head = ["claude", "-p", "--output-format", "json"];
+    // stream-json：一边跑一边出事件，不会因为长时间没输出被当成卡住（json 要跑完才一次性吐）；最后一行是
+    // `type: result`，`result` 字段就是最后一条消息。`-p` 下 stream-json 要带 `--verbose`。
+    let claude_head = [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+    ];
     let profiles = [
         (
             "codex",
@@ -394,6 +402,20 @@ mod tests {
             );
         }
         assert_eq!(profiles["claude"].stop_signal, StopSignal::Int);
+        // json 要跑完才一次性吐，长任务会被"5 分钟没输出"当成卡住停掉；stream-json 边跑边出。
+        // `-p` 下 stream-json 不带 --verbose 会直接报错（claude 2.1.304 的二进制里有这句报错）。
+        for command in [
+            &profiles["claude"].command,
+            &profiles["claude"].self_command,
+        ] {
+            assert!(
+                command
+                    .windows(2)
+                    .any(|w| w == ["--output-format", "stream-json"])
+                    && command.contains(&"--verbose".to_string()),
+                "{command:?}"
+            );
+        }
         // 跑完才吐结果的，不能按"5 分钟没输出就是卡住"停掉。
         assert!(profiles["pi"].idle_timeout_secs >= 3600);
         assert!(profiles["agy"].idle_timeout_secs >= 3600);

@@ -85,8 +85,8 @@ self_command = ["codex", "exec", "--json", "-o", "{result_file}", "-C", "{workdi
 result = { from = "file" }                 # 最后一条消息在 {result_file}
 
 [agents.claude]
-command = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions"]
-result = { from = "json", field = "result" }
+command = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
+result = { from = "json", field = "result" }   # stream-json 最后一行 type=result 里的 result
 stop_signal = "INT"                        # SIGTERM 会直接退出 143、这一轮什么都不记
 ```
 
