@@ -277,6 +277,11 @@ async fn set_fields(
     target: WorkspaceTarget,
     pairs: Vec<(String, String)>,
 ) -> CliResult {
+    // 这次改到的字段名（去掉 `mcp.` 前缀），发请求前取：pairs 要交出去。
+    let keys: Vec<String> = pairs
+        .iter()
+        .map(|(key, _)| key.trim().trim_start_matches("mcp.").to_string())
+        .collect();
     let update: WorkspaceUpdate = ctx
         .backend
         .call_typed(Request::SetWorkspaceFields {
@@ -289,7 +294,24 @@ async fn set_fields(
     }
     ctx.out
         .line(format!("已更新项目「{}」。", update.profile.name));
+    report_risks(ctx, &keys, &update);
     report_restarts(ctx, &update)
+}
+
+/// 一键放开的开关，打开的那一刻把风险说清楚、说怎么改回来（审查 §60）。只看存下来的值，
+/// 写错被拒的不会走到这里。
+fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
+    let name = &update.profile.name;
+    let runtime = &update.profile.runtime;
+    if keys.iter().any(|key| key == "command-policy") && runtime.command_policy == "all" {
+        ctx.out.line(format!(
+            "{} 这个项目现在允许 AI 跑任何命令：不看白名单，装依赖、rm -rf 这类也不再先问你。命令用你的账号跑，\
+             能读写你账号碰得到的一切，不只是项目目录；网页、issue 里夹着的提示注入也能借 AI 让它跑。\
+             接到公网（ChatGPT、DeepSeek 网页这些）的服务尤其要想清楚。\n  连着的 AI 每次进这个项目都会被告知这个设置，并被要求先跟你说一声。\
+             \n  改回来：gld set {name} command-policy=guarded",
+            ctx.out.yellow("⚠")
+        ));
+    }
 }
 
 /// 把"为了让新配置生效做了什么"讲清楚。

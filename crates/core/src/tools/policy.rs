@@ -57,6 +57,13 @@ const DEFAULT_ALLOWED_COMMANDS: &[&str] = &[
     "pwsh",
 ];
 
+/// `command-policy=all` 的项目，AI 每次连上、每次进这个项目都会读到这一句。ChatGPT、Grok、Gemini 这些网页
+/// 自己不会弹警告，风险只能靠 AI 转告用户（审查 §60）。
+pub const ALLOW_ALL_NOTICE: &str = "The user set this workspace to allow all commands (command-policy=all): exec_command skips the command allowlist and the confirm=true checks for installs and dangerous commands, and runs with the user's own account and permissions. When you start working here, tell the user this is on; before anything destructive, irreversible, installing or reaching outside the workspace, say what you will run.";
+
+/// 放行模式下，一条命令要是按默认关卡会被拦，回包里附这一句。
+pub const ALLOW_ALL_BYPASS_NOTE: &str = "This ran only because the user set this workspace to allow all commands (command-policy=all); the default policy would have stopped it (see code and message). Tell the user what you ran, especially if it installed or deleted something or touched files outside the workspace.";
+
 #[derive(Debug, Clone)]
 pub struct PolicySettings {
     pub allowed_commands: HashSet<String>,
@@ -74,6 +81,9 @@ pub struct PolicySettings {
     pub allowlist_mode: &'static str,
     /// 这份策略是从哪儿来的。
     pub config_source: &'static str,
+    /// 项目的 `command-policy`：`guarded`（默认）或 `all`。all 时 [`validate_command_for_workspace`] 只留技术上的约束
+    /// 和删 `.git` 的保护，白名单、`confirm=true` 这些限制类关卡都不拦。
+    pub command_policy: &'static str,
 }
 
 impl Default for PolicySettings {
@@ -87,6 +97,7 @@ impl Default for PolicySettings {
             confine_reads: true,
             allowlist_mode: "defaults",
             config_source: "built-in defaults",
+            command_policy: "guarded",
         }
     }
 }
@@ -116,6 +127,11 @@ impl PolicySettings {
             confine_reads: runtime.confine_reads,
             allowlist_mode: allowlist_mode(&runtime.allowed_commands),
             config_source: "workspace config (mcp.allowed-commands)",
+            command_policy: if runtime.command_policy == "all" {
+                "all"
+            } else {
+                "guarded"
+            },
         }
     }
 
@@ -129,11 +145,26 @@ impl PolicySettings {
             confine_reads: actions.confine_reads,
             allowlist_mode: allowlist_mode(&actions.allowed_commands),
             config_source: "actions config (allowed_commands)",
+            // GPT Actions 是另一条线路，没有这个开关。
+            command_policy: "guarded",
         }
     }
 
     pub fn network_allowed(&self) -> bool {
         self.permission_mode == "trusted" || self.permission_mode == "dangerous"
+    }
+
+    /// 用户把这个项目设成了"命令一律放行"。
+    pub fn allows_all_commands(&self) -> bool {
+        self.command_policy == "all"
+    }
+
+    /// 同一份策略按默认关卡判：放行模式下拿它看"要是没放开，这条会不会被拦"，好告诉 AI 它绕过了什么。
+    pub fn guarded(&self) -> Self {
+        Self {
+            command_policy: "guarded",
+            ..self.clone()
+        }
     }
 }
 
@@ -436,7 +467,12 @@ pub fn validate_command_for_workspace(
             "禁止删除或递归清空 .git/.github",
         ));
     }
-    if interpreter_mutation_pattern().is_match(command)
+    // 用户把项目设成了 command-policy=all：下面的限制类关卡（经子进程写工作区外、危险命令和装东西要 confirm、
+    // 白名单、gh 只读、远端 shell）都不拦。上面几条照旧：workdir 在工作区里、cmd 形式不当 shell 解释是工具本身的约定，
+    // 删 .git 几乎从来不是想要的；后面的环境变量、超时也照旧。放行了什么由 dispatch 按默认策略再判一次、告诉 AI。
+    let allow_all = policy.allows_all_commands();
+    if !allow_all
+        && interpreter_mutation_pattern().is_match(command)
         && crate::tools::command_paths::command_contains_external_path(
             command,
             workspace.map(Workspace::root),
@@ -447,13 +483,13 @@ pub fn validate_command_for_workspace(
             "workspace scope 禁止通过子进程写入 Workspace 外部路径",
         ));
     }
-    if dangerous_command_pattern().is_match(command) && !confirmed(arguments) {
+    if !allow_all && dangerous_command_pattern().is_match(command) && !confirmed(arguments) {
         return Err(PolicyError::new(
             PolicyReason::ConfirmationRequired,
             "dangerous command requires confirm=true",
         ));
     }
-    if network_command_pattern().is_match(command) && !policy.network_allowed() {
+    if !allow_all && network_command_pattern().is_match(command) && !policy.network_allowed() {
         return Err(PolicyError::new(
             PolicyReason::NetworkBlocked,
             "Network-looking commands are blocked in safe permission mode",
@@ -476,8 +512,9 @@ pub fn validate_command_for_workspace(
             .workspace_script_extensions
             .iter()
             .any(|extension| base_name.to_ascii_lowercase().ends_with(extension));
-    if !(policy.allowed_commands.contains(stem)
-        || (policy.workspace_local_entries && workspace_entry_candidate))
+    if !allow_all
+        && !(policy.allowed_commands.contains(stem)
+            || (policy.workspace_local_entries && workspace_entry_candidate))
     {
         // 远端 shell 单独说一句。笼统的"不在白名单"会让模型去试 scp、试
         // `python -c paramiko`，而正确答案是根本不从这里出去：远端机器上的事
@@ -498,7 +535,7 @@ pub fn validate_command_for_workspace(
     // 就能把 `gh run view` 变成 `gh run rerun`，而"首个单词是 gh"看不出区别
     // （方案 B 的 GitHub 两行、审查 A05）。名单是允许制——没列进去的子命令
     // 一律拒，gh 以后加了什么新命令也默认不放行。
-    if stem == "gh" {
+    if stem == "gh" && !allow_all {
         check_github_cli(&parts)?;
     }
 
@@ -531,7 +568,7 @@ pub fn validate_command_for_workspace(
     // 装依赖、装工具要联网下载、跑包自己的安装脚本。回包里写"先问用户"拦不住：ChatGPT 把"按 CI 全跑一遍"
     // 当成了同意，没问就跑了 pnpm install（审查 §17）。所以和 rm -rf 一样，用户点头后带 confirm=true。
     // 哪些算装，见 project_commands/installs.rs。放在最后：被别的规则拒的命令，问了用户也跑不了，先报那个。
-    if !confirmed(arguments) {
+    if !allow_all && !confirmed(arguments) {
         let workdir = arguments
             .get("workdir")
             .or_else(|| arguments.get("cwd"))
@@ -988,5 +1025,55 @@ mod tests {
         )
         .is_err());
         assert!(validate_command(&json!({"cmd": "echo hello > output.txt"}), &policy).is_err());
+    }
+
+    /// `command-policy=all` 放开的是限制类关卡；工具本身的约定和删 `.git` 的保护照旧。
+    /// 同一条命令拿 `guarded()` 判，就是默认关卡下的结论（dispatch 用它告诉 AI 绕过了什么）。
+    #[test]
+    fn allowing_all_commands_lifts_the_restrictions_but_keeps_the_rails() {
+        let runtime = crate::workspace::RuntimeConfig {
+            command_policy: "all".into(),
+            ..crate::workspace::RuntimeConfig::default()
+        };
+        let all = PolicySettings::from_runtime(&runtime);
+        assert!(all.allows_all_commands());
+        let guarded = all.guarded();
+        assert!(!guarded.allows_all_commands());
+
+        let lifted = [
+            json!({"argv": ["sh", "-c", "echo hi"]}),
+            json!({"cmd": "rm -rf build"}),
+            json!({"cmd": "pnpm install"}),
+            json!({"cmd": "pip install requests"}),
+            json!({"cmd": "gh pr merge 3"}),
+            json!({"cmd": "ssh devbox uptime"}),
+            json!({"cmd": "my-own-tool --flag"}),
+        ];
+        for args in &lifted {
+            assert!(validate_command(args, &all).is_ok(), "放开后该能跑：{args}");
+            assert!(
+                validate_command(args, &guarded).is_err(),
+                "默认关卡该拦：{args}"
+            );
+        }
+
+        let kept = [
+            json!({"argv": ["rm", "-rf", ".git"]}),
+            json!({"cmd": "echo hello > output.txt"}),
+            json!({"cmd": "pwd", "env": {"A": "1"}}),
+            json!({"cmd": "pwd", "timeout_ms": 3_600_000}),
+            json!({"cmd": "pwd", "workdir": "/etc"}),
+        ];
+        for args in &kept {
+            assert!(
+                validate_command(args, &all).is_err(),
+                "放开了也该拦：{args}"
+            );
+        }
+
+        // GPT Actions 那条线路没有这个开关。
+        assert!(
+            !PolicySettings::from_actions_config(&ActionsConfig::default()).allows_all_commands()
+        );
     }
 }

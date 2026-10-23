@@ -101,6 +101,10 @@ pub struct RuntimeConfig {
     /// Agent 是全权跑的，所以默认关。
     #[serde(default = "default_agent_delegation")]
     pub agent_delegation: String,
+    /// `exec_command` 的关卡：guarded（默认：白名单、装东西和危险命令要 `confirm=true`……）| all（一律放行）。
+    /// all 是用户自己选的一键放开，AI 那边每处都会被告知、要它转告用户（审查 §60）。
+    #[serde(default = "default_command_policy")]
+    pub command_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +235,10 @@ fn default_agent_delegation() -> String {
     "off".to_string()
 }
 
+fn default_command_policy() -> String {
+    "guarded".to_string()
+}
+
 fn default_workspace_script_extensions() -> String {
     ".exe,.bat,.cmd,.ps1".to_string()
 }
@@ -285,6 +293,7 @@ impl Default for RuntimeConfig {
             workspace_script_extensions: default_workspace_script_extensions(),
             confine_reads: default_confine_reads(),
             agent_delegation: default_agent_delegation(),
+            command_policy: default_command_policy(),
         }
     }
 }

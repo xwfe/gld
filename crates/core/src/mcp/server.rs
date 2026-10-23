@@ -52,6 +52,15 @@ fn initialize_result(state: &SharedState) -> Value {
         base_instructions
     };
     let base_instructions = format!("{base_instructions} {RESULT_RULES}");
+    // 一键放行的项目：连上就告诉 AI，让它转告用户（审查 §60）。放在最前，别被后面一长串规矩淹没。
+    let base_instructions = if state.policy.allows_all_commands() {
+        format!(
+            "{} {base_instructions}",
+            crate::tools::policy::ALLOW_ALL_NOTICE
+        )
+    } else {
+        base_instructions
+    };
     let current_ai_instructions = state.current_ai_instructions();
     let configured = if current_ai_instructions.trim().is_empty() {
         String::new()
@@ -251,6 +260,23 @@ mod tests {
         let initialized = initialize_result(&state);
 
         assert_eq!(initialized["capabilities"]["tools"]["listChanged"], false);
+    }
+
+    /// 单项目连接也一样：一键放行的项目，连上的第一句就是风险提示，要 AI 转告用户（审查 §60）。
+    #[test]
+    fn initialize_leads_with_the_risk_when_all_commands_are_allowed() {
+        let mut context = test_context();
+        context.policy.command_policy = "all";
+        let initialized = initialize_result(&Arc::new(context));
+        let instructions = initialized["instructions"].as_str().expect("instructions");
+        assert!(
+            instructions.starts_with(crate::tools::policy::ALLOW_ALL_NOTICE),
+            "{instructions}"
+        );
+
+        let guarded = initialize_result(&test_state());
+        let instructions = guarded["instructions"].as_str().expect("instructions");
+        assert!(!instructions.contains("command-policy=all"));
     }
 
     #[test]

@@ -640,7 +640,8 @@ Skill 那几行里另外两种标记（`◦` 用户点名才用、`✗` 没收�
 > 并且有测试把"报告的能力"和"实际行为"绑在一起，两边同时改才可能过。
 
 真要收紧能力，用 [security.md](security.md) 里那四条（关隧道 / 换只读工具集 /
-`only:` 收窄白名单 / 别用 noauth），不是靠这个字段。
+`only:` 收窄白名单 / 别用 noauth），不是靠这个字段。反过来想全部放开，用
+[`command-policy=all`](#一键放行全部命令command-policyall)，也不是这个字段。
 
 ---
 
@@ -922,6 +923,32 @@ AI 跑下表里的命令时，gld 先拦下，报 `DANGEROUS_OPERATION_REQUIRES_
 **为什么要拦，而不是在回包里提醒：**2026-10-07 实测过两次，只提醒拦不住。一次 AI 照提醒没跑 `pnpm install`，可 `pnpm run test`
 自己把依赖装上了；另一次它把"按 CI 全跑一遍"当成你同意了，没问就跑了 `pnpm install`。`confirm=true` 仍是 AI 自己填的，
 服务端看不到你点没点头（见[安全](security.md)），它管的是让 AI 在动手前停下来问你。
+
+---
+
+## 一键放行全部命令：`command-policy=all`
+
+嫌一条条加白名单、一次次点头太烦，可以把一个项目整个放开：
+
+```bash
+gld set api command-policy=all       # 打开，会打出风险提示
+gld set api command-policy=guarded   # 改回默认
+```
+
+打开后 AI 跑命令不再看白名单，装依赖、`rm -rf` 这类也不再停下来问你，`gh` 写操作、`ssh` 都放行。命令照旧以**你的账号**跑，
+能读写你账号碰得到的一切，不只是项目目录。
+
+还拦的只剩这几条：删 `.git` / `.github`（几乎从来不是想要的）、`workdir` 写到工作区外、`cmd` 形式里写管道和重定向
+（那不是 shell，要用就 `argv: ["sh", "-c", "…"]`）、调用方自己塞环境变量、超时超过上限。
+
+**AI 那边会被告知，要它转告你。**ChatGPT、Grok、Gemini、DeepSeek 这些网页自己不弹警告，所以 gld 在这几处写给 AI 看：
+
+- 连上时的说明里，这个项目后面标着 `command-policy=all`；
+- `list_workspaces`、`workspace_context` 回 `command_policy: "all"` 和一段 `risk`，要它进项目时先跟你说一声、动手前说清要跑什么；
+- 某条命令要是按默认关卡会被拦，回包里多一个 `policy_bypassed`（哪条规则、为什么），要它把跑了什么告诉你。
+
+本机这边：打开时 `gld set` 打出风险和怎么改回来；`gld ls` 在项目后面标「命令全放行」，`gld ls <项目>` 的"跑命令"一行写着 `all`。
+只管 MCP 这条线路，项目的 GPT Actions 不受影响。风险见 [security.md](security.md#一键放行全部命令等于把账号交给-ai)。
 
 ---
 

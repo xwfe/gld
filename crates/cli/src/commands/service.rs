@@ -437,6 +437,11 @@ pub async fn show_service(ctx: &mut Ctx, reveal: bool) -> CliResult {
                         format!("{}（远端）", member.mode),
                         remote_location(&member.node, &member.workspace),
                     )
+                } else if allows_all_commands(&profiles, &member.id) {
+                    (
+                        format!("{}，{}", member.tool_profile, out.yellow("命令全放行")),
+                        member.path.clone(),
+                    )
                 } else {
                     (member.tool_profile.clone(), member.path.clone())
                 };
@@ -457,6 +462,15 @@ pub async fn show_service(ctx: &mut Ctx, reveal: bool) -> CliResult {
             }))
             .collect();
         out.table(&["名称", "ID", "工具集 / 模式", "路径 / 位置"], &rows);
+        if status
+            .members
+            .iter()
+            .any(|member| allows_all_commands(&profiles, &member.id))
+        {
+            out.line(out.yellow(
+                "标了「命令全放行」的项目，AI 能用你的账号跑任何命令、不先问你。改回来：gld set <项目> command-policy=guarded",
+            ));
+        }
         if !outside.is_empty() {
             out.line(out.yellow(
                 "标了「不在服务里」的 AI 看不见（以前的版本登记的）。gld start 会把它们加进来。",
@@ -523,6 +537,8 @@ pub async fn show_project(ctx: &mut Ctx, target: WorkspaceTarget, reveal: bool) 
         ),
         ("工具集", runtime.tool_profile.clone()),
         ("权限模式", runtime.permission_mode.clone()),
+        ("跑命令", command_policy_text(ctx, &runtime.command_policy)),
+        ("委派给本机 Agent", runtime.agent_delegation.clone()),
         ("只读工作区内", yes_no(runtime.confine_reads).to_string()),
         ("追加命令", or_dash(&runtime.allowed_commands)),
         ("历史记录", yes_no(runtime.history_recording).to_string()),
@@ -571,6 +587,26 @@ pub fn print_endpoints(ctx: &Ctx, status: &HubStatusDto) {
         ("认证方式", status.config.auth_type.clone()),
         ("项目", status.members.len().to_string()),
     ]);
+}
+
+/// 这个项目设成了 `command-policy=all`。
+fn allows_all_commands(profiles: &[WorkspaceProfile], id: &str) -> bool {
+    profiles
+        .iter()
+        .any(|profile| profile.id == id && profile.runtime.command_policy == "all")
+}
+
+/// 项目详情里"跑命令"那一行。
+fn command_policy_text(ctx: &Ctx, policy: &str) -> String {
+    if policy == "all" {
+        format!(
+            "all：{}",
+            ctx.out
+                .yellow("一律放行，AI 能用你的账号跑任何命令、不先问你")
+        )
+    } else {
+        "guarded：照白名单，装东西、危险命令先问你".to_string()
+    }
 }
 
 /// 远端项目在对面的位置：`机器:项目`；没点名机器（交给 ccnm 选）时只有项目名。

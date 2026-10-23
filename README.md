@@ -28,7 +28,8 @@ server, all your projects behind it, one connection per client. Docs are in Chin
 - **先搞清项目怎么构建、怎么测**：列出项目里写好的命令和 CI 实际跑的步骤（[详情](docs/concepts.md#项目怎么构建怎么测list_project_commands)）。
 - **起 dev server、用浏览器看页面**（[怎么配](docs/concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。
 - **用本机装好的 Skills 和 MCP server**（[Skill](docs/concepts.md#本机和项目里的-skill)、[MCP server](docs/concepts.md#本机装好的-mcp-server)）。
-- **要紧的命令先问你**：装依赖、`rm -rf` 这类不带确认就不放行（[详情](docs/concepts.md#装东西的命令要你点头)）。
+- **要紧的命令先问你**：装依赖、`rm -rf` 这类不带确认就不放行（[详情](docs/concepts.md#装东西的命令要你点头)）。嫌烦可以按项目一键全放行，
+  风险自担，AI 会被告知并要它转告你（[怎么开、风险在哪](docs/concepts.md#一键放行全部命令command-policyall)）。
 - **只给别人开几个项目**：`gld grant` 发一份只能碰指定项目的凭据，默认只读，随时作废（[详情](docs/concepts.md#只开几个项目gld-grant)）。
 - **任务收尾要证据**：只认任务期间真跑通过的命令，AI 说"测过了"不算（[详情](docs/concepts.md#任务怎么收尾带证据才算-completed)）。
 - **把活委派给本机的 Codex、Claude Code**：它们全权去做，做完交回 AI 审核。默认关

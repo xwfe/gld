@@ -557,9 +557,11 @@ pub(crate) fn policy_snapshot(ctx: &ToolContext) -> Value {
         ctx.policy.max_patch_bytes.hash(&mut hasher);
         ctx.policy.confine_reads.hash(&mut hasher);
         ctx.policy.allowlist_mode.hash(&mut hasher);
+        ctx.policy.command_policy.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     };
     json!({
+        "command_policy": ctx.policy.command_policy,
         "permission_mode": ctx.policy.permission_mode,
         "network_allowed": ctx.policy.network_allowed(),
         "allowlist_mode": ctx.policy.allowlist_mode,

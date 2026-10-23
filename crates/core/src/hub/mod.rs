@@ -411,6 +411,12 @@ impl Hub {
                 let lines = members
                     .iter()
                     .map(|member| match member {
+                        // 一键放行的项目在连上的第一眼就标出来，workspace_context 里再给全文。
+                        Member::Local(local) if local.runtime.command_policy == "all" => format!(
+                            "- {} (id {}, command-policy=all: every command is allowed there; tell the user it is on and what you will run before anything risky)",
+                            member.name(),
+                            member.id()
+                        ),
                         Member::Local(_) => format!("- {} (id {})", member.name(), member.id()),
                         Member::Remote(_) => format!(
                             "- {} (id {}, remote: use the remote_* tools)",
@@ -1049,10 +1055,11 @@ impl Hub {
         // 两边口径不会漂。
         let skills =
             render_skill_catalog_for_profile(&context.current_skills(), &context.tool_profile).text;
-        tool_ok(json!({
+        let mut out = json!({
             "name": member.name,
             "path": member.path,
             "tool_profile": context.tool_profile,
+            "command_policy": context.policy.command_policy,
             "tools": tools,
             "planning_mode": PlanningService::new(context.workspace.root())
                 .state()
@@ -1062,7 +1069,11 @@ impl Hub {
             "skills": skills,
             "history_context": crate::tools::history::context_snapshot(context).ok().flatten(),
             "scope": "These instructions and skills apply to this workspace only."
-        }))
+        });
+        if context.policy.allows_all_commands() {
+            out["risk"] = json!(crate::tools::policy::ALLOW_ALL_NOTICE);
+        }
+        tool_ok(out)
     }
 }
 
@@ -1180,13 +1191,20 @@ fn list_workspaces(members: &[Member]) -> Value {
         "workspaces": members
             .iter()
             .map(|member| match member {
-                Member::Local(local) => json!({
-                    "id": local.id,
-                    "name": local.name,
-                    "kind": "local",
-                    "path": local.path,
-                    "tool_profile": normalize_tool_profile(&local.runtime.tool_profile),
-                }),
+                Member::Local(local) => {
+                    let mut entry = json!({
+                        "id": local.id,
+                        "name": local.name,
+                        "kind": "local",
+                        "path": local.path,
+                        "tool_profile": normalize_tool_profile(&local.runtime.tool_profile),
+                    });
+                    if local.runtime.command_policy == "all" {
+                        entry["command_policy"] = json!("all");
+                        entry["risk"] = json!(crate::tools::policy::ALLOW_ALL_NOTICE);
+                    }
+                    entry
+                }
                 // 远端不报 path：那是对面机器上的目录，gld 这边根本不知道，
                 // 报一个假的比不报更糟。也不报 node —— 模型路由只需要 id。
                 Member::Remote(remote) => json!({
@@ -1919,6 +1937,97 @@ mod tests {
             json!({ "workspace": "api", "session_id": session_id }),
         );
         assert_eq!(killed["ok"], true, "{killed}");
+    }
+
+    /// `command-policy=all`：不在白名单的命令照跑，回包注明绕过了哪道关；删 `.git` 照样拦；
+    /// AI 从连上、列项目、进项目三处都能读到风险提示，好转告用户（审查 §60）。别的项目不受影响。
+    #[cfg(unix)]
+    #[test]
+    fn allowing_all_commands_runs_them_and_tells_the_ai_everywhere() {
+        let fixture = fixture();
+        let run = |argv: Value| {
+            call(
+                &fixture.hub,
+                "exec_command",
+                json!({ "workspace": "api", "argv": argv, "yield_time_ms": 30_000 }),
+            )
+        };
+        let refused = run(json!(["sh", "-c", "echo ran"]));
+        assert_eq!(refused["ok"], false, "默认关卡下 sh 不在白名单：{refused}");
+
+        let api_id = fixture.api.id.clone();
+        update_fixed(&fixture.hub, |profiles, _| {
+            for profile in profiles.iter_mut().filter(|p| p.id == api_id) {
+                profile.runtime.command_policy = "all".into();
+            }
+        });
+        let ran = run(json!(["sh", "-c", "echo ran"]));
+        assert_eq!(ran["ok"], true, "{ran}");
+        assert_eq!(
+            ran["policy_bypassed"]["rule"], "command_not_allowlisted",
+            "{ran}"
+        );
+        assert!(ran["policy_bypassed"]["note"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Tell the user"));
+        let plain = run(json!(["python3", "-c", "print(1)"]));
+        assert_eq!(plain["ok"], true, "{plain}");
+        assert!(
+            plain.get("policy_bypassed").is_none(),
+            "默认也放行的不用提：{plain}"
+        );
+        let git = run(json!(["rm", "-rf", ".git"]));
+        assert_eq!(git["ok"], false, "删 .git 照样拦：{git}");
+
+        let listed = call(&fixture.hub, LIST_WORKSPACES, json!({}));
+        let workspaces = listed["workspaces"].as_array().expect("workspaces");
+        let entry = |name: &str| {
+            workspaces
+                .iter()
+                .find(|w| w["name"] == name)
+                .cloned()
+                .expect("项目")
+        };
+        assert_eq!(entry("api")["command_policy"], "all", "{listed}");
+        assert!(entry("api")["risk"].as_str().is_some(), "{listed}");
+        assert!(entry("web").get("risk").is_none(), "{listed}");
+
+        let api = call(
+            &fixture.hub,
+            WORKSPACE_CONTEXT,
+            json!({ "workspace": "api" }),
+        );
+        assert_eq!(api["command_policy"], "all", "{api}");
+        assert!(api["risk"]
+            .as_str()
+            .unwrap_or("")
+            .contains("tell the user this is on"));
+        let web = call(
+            &fixture.hub,
+            WORKSPACE_CONTEXT,
+            json!({ "workspace": "web" }),
+        );
+        assert_eq!(web["command_policy"], "guarded", "{web}");
+        assert!(web.get("risk").is_none(), "{web}");
+
+        let (initialized, _) = fixture.hub.handle_request(
+            &caller(),
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+        );
+        let text = initialized["result"]["instructions"]
+            .as_str()
+            .expect("instructions");
+        let api_line = text
+            .lines()
+            .find(|line| line.starts_with("- api "))
+            .unwrap_or_default();
+        assert!(api_line.contains("command-policy=all"), "{text}");
+        let web_line = text
+            .lines()
+            .find(|line| line.starts_with("- web "))
+            .unwrap_or_default();
+        assert!(!web_line.contains("command-policy"), "{text}");
     }
 
     /// 配置一变，hub 就按新配置重建成员上下文。正在跑的命令不该被这件事顺手

@@ -148,6 +148,15 @@ const FIELDS: &[Field] = &[
         }
     ),
     field!(
+        "mcp.command-policy",
+        "guarded | all",
+        "AI 跑命令要过哪些关：guarded（默认）照白名单、装东西和危险命令要它先问你；all 一律放行，AI 能以你的账号跑任何命令，见 docs/security.md",
+        |p, v| {
+            p.runtime.command_policy = parse_choice(v, &["guarded", "all"])?;
+            Ok(())
+        }
+    ),
+    field!(
         "mcp.agent-delegation",
         "off | ask | auto",
         "AI 能不能把活委派给本机 Agent（codex、claude……，全权跑，做完交回审核）：off 不能（默认）；ask 每次要你在本机 gld agent approve；auto 直接起",

@@ -2275,6 +2275,7 @@ history-recording         true | false                           是否允许把
 history-context           逗号分隔的编号，或空                   新会话注入哪些历史档案（有界快照）
 allowed-commands          逗号分隔                               在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md
 confine-reads             true | false                           读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
+command-policy            guarded | all                          AI 跑命令要过哪些关：guarded（默认）照白名单、装东西和危险命令要它先问你；all 一律放行，AI 能以你的账号跑任何命令，见 docs/security.md
 agent-delegation          off | ask | auto                       AI 能不能把活委派给本机 Agent（codex、claude……，全权跑，做完交回审核）：off 不能（默认）；ask 每次要你在本机 gld agent approve；auto 直接起
 executable-paths          路径列表（换行或分号分隔）             额外的可执行文件搜索路径
 ai-instructions           文本                                   注入 Agent 的工作区级说明

@@ -587,6 +587,19 @@ fn dispatch_tool(
             .map(|state| attach_planning_context(output.clone(), state))
             .unwrap_or(output);
     }
+    // command-policy=all 放行的命令：按默认关卡再判一次，会拦的话回包里告诉 AI 它这次绕过了哪道关，
+    // 好让它把装了什么、删了什么说给用户（审查 §60：ChatGPT 这些网页自己不弹警告，只能靠 AI 转告）。
+    let bypassed = (name == "exec_command" && ctx.policy.allows_all_commands())
+        .then(|| {
+            validate_tool_arguments_for_workspace(
+                name,
+                &effective_args,
+                &ctx.policy.guarded(),
+                Some(&ctx.workspace),
+            )
+            .err()
+        })
+        .flatten();
     // 名字对不上的参数不能悄悄丢掉（审查 A19）。
     //
     // 放在策略之后：策略对某几个名字有**自己的说法**，比"没有这个参数"有用
@@ -763,6 +776,17 @@ fn dispatch_tool(
         Ok(v) => v,
         Err(e) => tool_err(e),
     };
+    if let (Some(error), Some(object)) = (&bypassed, output.as_object_mut()) {
+        object.insert(
+            "policy_bypassed".into(),
+            json!({
+                "code": error.reason.code(),
+                "rule": error.reason.slug(),
+                "message": error.message,
+                "note": crate::tools::policy::ALLOW_ALL_BYPASS_NOTE,
+            }),
+        );
+    }
     if task_id.is_none()
         && standalone_operation(name)
         && output.get("ok") == Some(&Value::Bool(true))
