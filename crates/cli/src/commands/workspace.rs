@@ -78,7 +78,10 @@ pub async fn run(ctx: &mut Ctx, command: WorkspaceCmd) -> CliResult {
 
 /// `gld add`：登记即加入服务。已经登记过的，确认它在服务里。
 pub async fn add(ctx: &mut Ctx, args: AddArgs) -> CliResult {
-    let (paths, name) = (args.paths, args.name);
+    let (paths, name, understood) = name_given_positionally(args.paths, args.name);
+    if let Some(understood) = understood {
+        ctx.out.note(understood);
+    }
     let paths = if paths.is_empty() {
         vec![std::path::PathBuf::from(".")]
     } else {
@@ -150,6 +153,28 @@ pub async fn add(ctx: &mut Ctx, args: AddArgs) -> CliResult {
 fn is_bare_word(path: &std::path::Path) -> bool {
     let text = path.to_string_lossy();
     !text.is_empty() && text != "." && text != ".." && !text.contains(['/', '\\'])
+}
+
+/// `gld add devdocs ~/xdw/devdocs`：名字写在目录前面（或后面）。`gld remote add <名字>` 就是名字在前，照着敲很自然，
+/// 以前会把名字也当目录、按当前目录去找，报"目录不存在"（2026-10-23 用户撞到）。
+///
+/// 只认没有歧义的那种：没给 `--name`、正好两个参数、一个是当前目录下不存在的单个词、另一个是存在的目录。
+/// 别的情况照旧都当目录，不猜。
+fn name_given_positionally(
+    paths: Vec<std::path::PathBuf>,
+    name: Option<String>,
+) -> (Vec<std::path::PathBuf>, Option<String>, Option<String>) {
+    let looks_like_name = |path: &std::path::PathBuf| is_bare_word(path) && !path.exists();
+    if name.is_none() && paths.len() == 2 {
+        for (word, dir) in [(0, 1), (1, 0)] {
+            if looks_like_name(&paths[word]) && paths[dir].is_dir() {
+                let name = paths[word].to_string_lossy().into_owned();
+                let understood = format!("「{name}」不是目录，当成项目名称（同 --name {name}）。");
+                return (vec![paths[dir].clone()], Some(name), Some(understood));
+            }
+        }
+    }
+    (paths, name, None)
 }
 
 /// `gld rm`：从服务里拿掉，并删掉它在 gld 这边的配置和记账。项目文件不动。

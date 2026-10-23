@@ -154,6 +154,7 @@ pub enum Command {
     ///   gld add                 当前目录
     ///   gld add ~/code/api ~/code/web
     ///   gld add . --name api    起个名字（默认是目录名）
+    ///   gld add api ~/code/api  名字写在前面也行（那个词不是目录时）
     ///
     /// 给了几个目录，先全部核对存在再加；有一个不存在就一个都不加。
     /// 另一台机器上 ccnm 管着的项目用 gld remote add。

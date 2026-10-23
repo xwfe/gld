@@ -1,4 +1,5 @@
-//! `gld add` 的参数怎么理解：有一个目录不存在就一个都不加，单个词不存在时提示 --name。
+//! `gld add` 的参数怎么理解：名字写在目录前后都认；有一个目录不存在就一个都不加（2026-10-23 用户撞到
+//! `gld add devdocs-node ~/xdw/devdocs-node` 把名字当目录、按当前目录去找）。
 
 mod common;
 
@@ -14,6 +15,38 @@ fn names(env: &Env) -> Vec<String> {
         .iter()
         .filter_map(|member| member["name"].as_str().map(str::to_string))
         .collect()
+}
+
+#[test]
+fn a_name_before_or_after_the_directory_is_taken_as_the_name() {
+    let env = Env::new();
+    let docs = env.home.path().join("devdocs-node");
+    let web = env.home.path().join("web-app");
+    std::fs::create_dir_all(&docs).expect("docs");
+    std::fs::create_dir_all(&web).expect("web");
+
+    let first = env.gld(&["add", "devdocs", docs.to_str().expect("path")]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&first.stderr).contains("当成项目名称"),
+        "要说清是怎么理解的"
+    );
+    let after = env.gld(&["add", web.to_str().expect("path"), "frontend"]);
+    assert!(
+        after.status.success(),
+        "{}",
+        String::from_utf8_lossy(&after.stderr)
+    );
+    let listed = names(&env);
+    assert!(
+        listed.contains(&"devdocs".to_string()) && listed.contains(&"frontend".to_string()),
+        "{listed:?}"
+    );
+    env.ok(&["daemon", "stop"]);
 }
 
 #[test]
