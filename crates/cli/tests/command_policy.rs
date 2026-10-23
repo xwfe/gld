@@ -64,5 +64,11 @@ fn allowing_all_commands_warns_marks_and_reports_what_it_bypassed() {
     let refused = exec(&env, r#"["sh","-c","echo ran"]"#);
     assert_eq!(refused["ok"], false, "改回来就又拦：{refused}");
 
+    // 委派开成 auto 也说一声。
+    let auto = env.ok(&["set", "it", "agent-delegation=auto"]);
+    assert!(
+        auto.contains("不用你在本机放行") && auto.contains("agent-delegation=ask"),
+        "{auto}"
+    );
     env.ok(&["daemon", "stop"]);
 }

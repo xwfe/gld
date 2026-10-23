@@ -298,7 +298,7 @@ async fn set_fields(
     report_restarts(ctx, &update)
 }
 
-/// 一键放开的开关，打开的那一刻把风险说清楚、说怎么改回来（审查 §60）。只看存下来的值，
+/// 一键放开的两个开关，打开的那一刻把风险说清楚、说怎么改回来（审查 §60）。只看存下来的值，
 /// 写错被拒的不会走到这里。
 fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
     let name = &update.profile.name;
@@ -309,6 +309,13 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
              能读写你账号碰得到的一切，不只是项目目录；网页、issue 里夹着的提示注入也能借 AI 让它跑。\
              接到公网（ChatGPT、DeepSeek 网页这些）的服务尤其要想清楚。\n  连着的 AI 每次进这个项目都会被告知这个设置，并被要求先跟你说一声。\
              \n  改回来：gld set {name} command-policy=guarded",
+            ctx.out.yellow("⚠")
+        ));
+    }
+    if keys.iter().any(|key| key == "agent-delegation") && runtime.agent_delegation == "auto" {
+        ctx.out.line(format!(
+            "{} AI 现在可以直接起本机 Agent，不用你在本机放行；Agent 是全权跑的，能动你账号能动的一切。\
+             对外接触多的项目用 ask。\n  改回来：gld set {name} agent-delegation=ask",
             ctx.out.yellow("⚠")
         ));
     }
