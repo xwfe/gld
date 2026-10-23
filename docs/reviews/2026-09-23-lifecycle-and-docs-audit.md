@@ -2760,3 +2760,19 @@ gld 内部字段（`owner`、`owner_pid`、`pid`、`project_id` 等）一共约 
 - 第 5 条不值：请求日志已经按次记了回包字节数，上面三轮的对比就是从它算的。
 
 没推送。
+
+## 58. 给 AI 的委派回包不带提示预览和本机记账字段（2026-10-23）
+
+**要求：**用户对 §57 的取舍说"好的，按照你的建议"：给 AI 的回包去掉 `prompt_preview` 和 gld 内部字段，`list` 的预览和本机
+`gld agent show` 不变；另外四条不做。
+
+**改了什么（`13dabeb`）：**`tools::agent::present` 去掉 `prompt_preview`、`owner`、`owner_pid`、`pid`、`project_id`（`caller`
+以前就去掉了）。按 §57 量的那个任务算，每次回包少约 1.4 KB、线上约 2.9 KB；等审核那种回包从约 9 KB 降到 6 KB 上下（按字段大小算的，
+没真跑）。`action=list` 里 200 字的预览照留；本机 `gld agent show` 照样打提示和这些字段。concepts.md 写明给 AI 的少了什么、为什么。
+
+**工具表没变：**已装的 `2022624` 和新编的版本 `gld --json tool list` 一字不差，换装后不用 Refresh。
+
+**验证：**新增回包单元测试一条（这六个字段不在、审核要的都在）；端到端加 start 和等审核的回包都没有这些字段、`list` 里还有预览、
+show 里还有提示原文，这条临时撤掉改动跑过，旧代码上失败。全仓 1034 passed / 0 failed，clippy、fmt、文档门禁通过。
+
+**没做：**换装（本机还是 `2022624`）。没推送。
