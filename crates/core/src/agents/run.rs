@@ -131,8 +131,16 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
     let before = snapshot(&root, &task_dir, "before");
     let result_file = task_dir.join(store::RESULT_FILE);
     let _ = fs::remove_file(&result_file);
-    let (argv, prompt_on_stdin) =
-        profile.argv(task.agent_approval == "self", &root, &result_file, &prompt);
+    let (argv, prompt_on_stdin) = profile.argv(
+        super::profile::Choice {
+            self_approval: task.agent_approval == "self",
+            model: &task.model,
+            effort: &task.effort,
+        },
+        &root,
+        &result_file,
+        &prompt,
+    );
     if argv.is_empty() {
         // 调用方（agents::launch）已经查过；万一漏了也是起不来，不换成全放开的那条命令。
         task.state = State::Failed;

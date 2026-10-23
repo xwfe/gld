@@ -147,6 +147,8 @@ fn start(
         client_request_id: args.get("client_request_id").and_then(Value::as_str),
         approval,
         agent_approval: &ctx.agent_approval,
+        model: args.get("model").and_then(Value::as_str),
+        effort: args.get("effort").and_then(Value::as_str),
         timeout_minutes: Some(crate::tools::args::bounded(
             args,
             "agent_manage",
@@ -182,6 +184,12 @@ fn agent_profiles(ctx: &ToolContext, data_home: &Path) -> Result<Value, Workspac
                 "installed": on_path(&program),
                 "result_from": profile.result.from,
                 "self_approval": profile.supports_self_approval(),
+                // 默认模型、推理强度（null 就是用这家自己配置里的），能不能在 start 时提议，强度能取哪些值。
+                "model": (!profile.model.is_empty()).then_some(&profile.model),
+                "effort": (!profile.effort.is_empty()).then_some(&profile.effort),
+                "model_choice": !profile.model_args.is_empty(),
+                "effort_choice": !profile.effort_args.is_empty(),
+                "efforts": profile.efforts,
             })
         })
         .collect();

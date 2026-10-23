@@ -93,6 +93,32 @@ impl Fixture {
             client_request_id,
             approval,
             agent_approval,
+            model: None,
+            effort: None,
+            timeout_minutes: None,
+        })
+    }
+
+    /// auto 档起一个，带上 AI 提议的模型和推理强度。
+    fn start_choosing(
+        &self,
+        agent: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<AgentTask, AgentError> {
+        start(StartRequest {
+            data_home: self.data_home(),
+            workspace_root: self.project.path(),
+            workspace_name: "demo",
+            caller: "local",
+            agent,
+            prompt: "把 README 改好",
+            brief: None,
+            client_request_id: None,
+            approval: Approval::Auto,
+            agent_approval: "all",
+            model,
+            effort,
             timeout_minutes: None,
         })
     }
@@ -414,6 +440,8 @@ fn unknown_agents_and_empty_prompts_are_refused() {
         client_request_id: None,
         approval: Approval::Auto,
         agent_approval: "all",
+        model: None,
+        effort: None,
         timeout_minutes: None,
     })
     .expect_err("空提示");
@@ -543,6 +571,48 @@ fn self_approval_never_falls_back_to_full_access() {
     assert_eq!(error.code, "AGENT_APPROVAL_UNSUPPORTED");
     assert!(!f.root().join("ran.txt").exists(), "不能换成全放开的命令跑");
     assert!(running_in(&f.root()).is_none());
+}
+
+/// AI 提议的模型、推理强度按档案的参数模板传给 Agent，记进任务；没提就用档案默认；提了这家没有的值，
+/// 起之前就拒、不留任务（用户问"model 和 effort 怎么设"，2026-10-24）。
+#[test]
+fn proposed_model_and_effort_reach_the_agent_and_are_recorded() {
+    let f = Fixture::new();
+    f.agent(
+        "fake",
+        "cat >/dev/null\necho \"$@\" > args.txt\necho ok",
+        STDOUT,
+        "model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{effort}\"]\nefforts = [\"low\", \"high\"]\nmodel = \"base-model\"",
+    );
+    let args = || std::fs::read_to_string(f.root().join("args.txt")).expect("args.txt");
+
+    let done = f.finished(
+        &f.start_choosing("fake", Some("big-model"), Some("high"))
+            .expect("起"),
+    );
+    assert_eq!(
+        (done.model.as_str(), done.effort.as_str()),
+        ("big-model", "high")
+    );
+    assert_eq!(args(), "--model big-model --effort high\n");
+
+    let default = f.finished(&f.start_choosing("fake", None, None).expect("起"));
+    assert_eq!(
+        (default.model.as_str(), default.effort.as_str()),
+        ("base-model", "")
+    );
+    assert_eq!(
+        args(),
+        "--model base-model\n",
+        "没提强度就不传，用它自己的配置"
+    );
+
+    let error = f
+        .start_choosing("fake", None, Some("turbo"))
+        .expect_err("不在 efforts 里");
+    assert_eq!(error.code, "INVALID_ARGUMENT");
+    assert!(error.message.contains("low、high"), "{error}");
+    assert_eq!(list(f.data_home(), None).len(), 2, "拒了就不留任务");
 }
 
 /// 起它的进程已经不在了（这里假装一个死掉的实例）：读到时改成 unknown，不猜结局。

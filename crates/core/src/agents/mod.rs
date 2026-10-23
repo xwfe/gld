@@ -74,6 +74,9 @@ pub struct StartRequest<'a> {
     pub approval: Approval,
     /// 项目的 `agent-approval`：all | self。
     pub agent_approval: &'a str,
+    /// AI 提议的模型、推理强度；不给就用档案默认。
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
     pub timeout_minutes: Option<u64>,
 }
 
@@ -125,6 +128,9 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         "all"
     };
     check_approval(request.data_home, &profile, agent_approval)?;
+    let (model, effort) = profile
+        .resolve(request.model, request.effort)
+        .map_err(|message| AgentError::new("INVALID_ARGUMENT", message))?;
     let root = request
         .workspace_root
         .canonicalize()
@@ -162,6 +168,8 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         client_request_id: request.client_request_id.map(str::to_string),
         prompt_preview: preview,
         agent_approval: agent_approval.to_string(),
+        model,
+        effort,
         state: State::WaitingLocalApproval,
         created_at_ms: run::now_ms(),
         timeout_minutes,

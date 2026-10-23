@@ -378,6 +378,74 @@ fn the_agent_list_limits_what_the_ai_sees_and_starts() {
     env.ok(&["daemon", "stop"]);
 }
 
+/// AI 发起时可以提议模型和推理强度；`action=agents` 说清每家能不能选、强度能取哪些值。
+#[test]
+fn start_can_propose_model_and_effort() {
+    let env = Env::new();
+    agent(
+        &env,
+        "fake",
+        "cat >/dev/null\necho \"$@\" > args.txt\necho ok",
+    );
+    let toml = env.home.path().join("agents.toml");
+    let mut text = std::fs::read_to_string(&toml).expect("agents.toml");
+    text.push_str("model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{effort}\"]\nefforts = [\"low\", \"high\"]\n");
+    std::fs::write(&toml, text).expect("agents.toml");
+    project(&env);
+    env.ok(&["set", "it", "agent-delegation=auto"]);
+
+    let agents = manage(&env, &["action=agents"]);
+    let row = |name: &str| {
+        agents["agents"]
+            .as_array()
+            .expect("agents")
+            .iter()
+            .find(|a| a["name"] == name)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(row("codex")["model_choice"], true, "{agents}");
+    assert_eq!(row("qwen")["effort_choice"], false, "{agents}");
+    assert_eq!(row("claude")["efforts"].as_array().map(Vec::len), Some(5));
+    assert!(
+        row("codex")["model"].is_null(),
+        "没设默认就用它自己的配置：{agents}"
+    );
+
+    let bad = manage(
+        &env,
+        &[
+            "action=start",
+            "agent=fake",
+            "prompt=改一下",
+            "effort=turbo",
+        ],
+    );
+    assert_eq!(bad["error"]["code"], "INVALID_ARGUMENT", "{bad}");
+    let started = manage(
+        &env,
+        &[
+            "action=start",
+            "agent=fake",
+            "prompt=改一下",
+            "model=m1",
+            "effort=high",
+        ],
+    );
+    let task_id = started["task_id"].as_str().expect("task_id").to_string();
+    let done = wait_done(&env, &task_id);
+    assert_eq!(
+        (&done["model"], &done["effort"]),
+        (&serde_json::json!("m1"), &serde_json::json!("high")),
+        "{done}"
+    );
+    let args = std::fs::read_to_string(env.project.path().join("args.txt")).expect("args.txt");
+    assert_eq!(args, "--model m1 --effort high\n");
+    let shown = env.ok(&["agent", "show", &task_id[..8]]);
+    assert!(shown.contains("模型 m1，推理强度 high"), "{shown}");
+    env.ok(&["daemon", "stop"]);
+}
+
 /// `agent-approval=self`：AI 从 `action=agents` 看得到哪几家有"自行判断"那一档；拿没有的去起，
 /// 报错说清有哪几家、怎么改，不退回全放开。
 #[test]

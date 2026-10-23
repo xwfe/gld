@@ -99,6 +99,11 @@ pub struct AgentTask {
     /// ask 档放行时照这个跑，不看放行那一刻的设置：用户在本机点头的就是这一档。
     #[serde(default = "default_agent_approval")]
     pub agent_approval: String,
+    /// 这次跑用的模型、推理强度（AI 提议的，没提就是档案默认）。空串就是没传，用这家自己配置里的。
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
     pub state: State,
     pub created_at_ms: u64,
     /// 总时长上限。ask 档等放行之后才起，所以要记下来。
@@ -276,6 +281,8 @@ mod tests {
             client_request_id: None,
             prompt_preview: "fix".into(),
             agent_approval: "all".into(),
+            model: String::new(),
+            effort: String::new(),
             state: State::Running,
             created_at_ms: created,
             timeout_minutes: 30,

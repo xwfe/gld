@@ -1551,6 +1551,25 @@ diff 超过 64 KB 时不附，是因为文件按路径排序，生成的数据�
 | Pi | `pi` | 本来就没有审批 | 没有 | |
 | Kimi Code | `kimi` | `-p` 本身就是全放开 | 没有（`-p` 下加 `--auto` / `--yolo` 会报错） | 本机 0.29.1 比最新的 2.x 旧很多，升级后参数可能变 |
 
+**模型和推理强度：**不设就用这家自己配置里的（比如 `~/.codex/config.toml` 的 `model`、`model_reasoning_effort`）。
+AI 发起时可以提议（`action=start … model=… effort=…`），`action=agents` 里每家写着默认值、能不能选（`model_choice`、`effort_choice`）、
+强度能取哪些值（`efforts`）。提议了这家没有的参数、或者取值不在列表里，起之前就回 `INVALID_ARGUMENT`，不白花额度。
+想换某一家的默认，在 `agents.toml` 里只写这两项就行，不写 `command` 就是在内置档案上改：
+
+```toml
+[agents.codex]
+model = "gpt-5.4"
+effort = "high"
+```
+
+| Agent | 模型参数 | 推理强度参数 | 强度能取的值 |
+| --- | --- | --- | --- |
+| Codex | `-m` | `-c model_reasoning_effort=…` | 帮助里没列，gld 不核对，写错了 Codex 自己报错 |
+| Claude Code | `--model` | `--effort` | low、medium、high、xhigh、max |
+| Antigravity | `--model` | `--effort` | low、medium、high |
+| Pi | `--model` | `--thinking` | off、minimal、low、medium、high、xhigh |
+| Qwen Code、Kimi Code | `-m` | 没有 | |
+
 **别的 Agent 在数据目录的 `agents.toml` 里加**（同名的会整条换掉内置的）。写坏了 `action=agents` 会报出哪一行；字段的意思见
 [RFC-0009 第 4.1 节](rfc/0009-agent-delegation.md#41-agent-档案一张配置表)。下面三家本机没装，是照官方文档写的，**没跑过**，
 用之前先拿它的 `--help` 对一下：

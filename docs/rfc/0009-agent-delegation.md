@@ -97,6 +97,10 @@ stop_signal = "INT"                        # SIGTERM 会直接退出 143、这�
 - **`env_pass`**：放行哪些环境变量。gld 一律去掉名字像密钥的变量，有的 Agent 靠环境变量里的 key 登录（比如 DeepSeek Harness），要点名放行。
 - **`idle_timeout_secs`**：多久没输出算卡住，默认 300。跑完才一次性吐结果的（Pi、Antigravity 的 json）设成 7200，交给总时长管。
 - **`stop_signal`**：停的时候先发什么信号；**`verified`**：验过的 `--version`（不在里面照样跑，回包标出来）。
+- **`model`、`effort`**：默认模型和推理强度，空的就是用这家自己的配置；**`model_args`、`effort_args`**：怎么传，参数模板里的
+  `{model}`、`{effort}` 换成取值，加在命令末尾（最后一项是 `-` 的加在它前面）；**`efforts`**：强度能取哪些值，起之前核对。
+  AI 发起时可以提议，没提就用默认（2026-10-24 用户要的，审查 §64）。
+- `agents.toml` 里**不写 `command` 的条目是在同名内置档案上改字段**（比如只改 `model`、`effort`）；写了 `command` 的才整条换掉。
 - 用的是**用户自己的配置**（模型、MCP server、全局规则），和平时在终端里用它一样。
 - 内置哪几份、各用什么参数、哪些真跑过，以 concepts.md 的
   [能用哪些 Agent、怎么放权](../concepts.md#能用哪些-agent怎么放权) 为准；本机没装的 OpenCode、Qoder CLI、DeepSeek Harness 的写法也在那里。

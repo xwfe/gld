@@ -220,7 +220,19 @@ fn agent_text(task: &AgentTask) -> String {
     } else {
         "一键批准所有操作"
     };
-    format!("{}（{version}{flag}；放权：{approval}）", task.agent)
+    let pick = |value: &str| {
+        if value.is_empty() {
+            "按它自己的配置".to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    format!(
+        "{}（{version}{flag}；模型 {}，推理强度 {}；放权：{approval}）",
+        task.agent,
+        pick(&task.model),
+        pick(&task.effort)
+    )
 }
 
 fn state_text(state: State) -> &'static str {

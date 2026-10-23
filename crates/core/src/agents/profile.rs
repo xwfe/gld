@@ -73,6 +73,28 @@ pub struct AgentProfile {
     /// 验过的 `--version` 输出（包含就算）。不在里面照样跑，回包标出来。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verified: Vec<String>,
+    /// 默认模型、默认推理强度。空的就是不传，用这家自己配置里的（比如 `~/.codex/config.toml`）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// 怎么把模型、推理强度传给这家：参数模板，`{model}` / `{effort}` 换成取值，加在命令末尾
+    /// （命令最后一项是 `-`、从 stdin 读提示的，加在它前面）。空的就是这家不支持指定。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effort_args: Vec<String>,
+    /// 推理强度能取哪些值，起之前先核对，写错了不白花额度。空的就是不在 gld 这边核对，交给这家自己报错。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+}
+
+/// 这一次怎么跑：哪一档放权、什么模型和推理强度（空串就是不传，用这家自己的配置）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Choice<'a> {
+    pub self_approval: bool,
+    pub model: &'a str,
+    pub effort: &'a str,
 }
 
 fn default_idle_timeout_secs() -> u64 {
@@ -90,21 +112,21 @@ impl AgentProfile {
     }
 
     /// 起这个 Agent 的 argv。`self_approval` 选 `self_command`：没有就是空的，不退回 `command`（那是全放开）。
-    /// `prompt_on_stdin` 为真时提示要从 stdin 喂。
+    /// 给了模型、推理强度就按模板加上（调用方先用 [`Self::resolve`] 核对过）。`prompt_on_stdin` 为真时提示要从 stdin 喂。
     pub fn argv(
         &self,
-        self_approval: bool,
+        choice: Choice<'_>,
         workdir: &Path,
         result_file: &Path,
         prompt: &str,
     ) -> (Vec<String>, bool) {
-        let command = if self_approval {
+        let command = if choice.self_approval {
             &self.self_command
         } else {
             &self.command
         };
         let mut prompt_on_stdin = true;
-        let argv = command
+        let mut argv: Vec<String> = command
             .iter()
             .map(|part| {
                 if part.contains("{prompt}") {
@@ -115,7 +137,88 @@ impl AgentProfile {
                     .replace("{prompt}", prompt)
             })
             .collect();
+        if argv.is_empty() {
+            return (argv, prompt_on_stdin);
+        }
+        let fill = |template: &[String], key: &str, value: &str| -> Vec<String> {
+            if value.is_empty() {
+                return Vec::new();
+            }
+            template
+                .iter()
+                .map(|part| part.replace(key, value))
+                .collect()
+        };
+        let extra: Vec<String> = fill(&self.model_args, "{model}", choice.model)
+            .into_iter()
+            .chain(fill(&self.effort_args, "{effort}", choice.effort))
+            .collect();
+        // 最后一项是 `-`（提示从 stdin 读）的，参数要加在它前面：`-` 是位置参数，放后面有的命令行不认。
+        let at = if argv.last().is_some_and(|last| last == "-") {
+            argv.len() - 1
+        } else {
+            argv.len()
+        };
+        argv.splice(at..at, extra);
         (argv, prompt_on_stdin)
+    }
+
+    /// AI 提议的（或放行时改的）模型和推理强度，没给就用档案默认；核对这家传不传得了、取值对不对。
+    /// 返回实际要传的两个值（空串就是不传，用这家自己的配置）。
+    pub fn resolve(
+        &self,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<(String, String), String> {
+        let pick = |given: Option<&str>, default: &str| -> String {
+            given
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(default)
+                .to_string()
+        };
+        let model = pick(model, &self.model);
+        let effort = pick(effort, &self.effort);
+        // 取值进的是 argv 的一格，不经过 shell；挡的是以 `-` 开头被当成开关，和明显写错的。
+        let plain = |value: &str, extra: &str| {
+            value.len() <= 100
+                && !value.starts_with('-')
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+        };
+        if !model.is_empty() {
+            if self.model_args.is_empty() {
+                return Err(format!(
+                    "{} 的档案没写怎么指定模型（model_args），不能选模型，用它自己配置里的",
+                    self.name
+                ));
+            }
+            if !plain(&model, "._:/@+-") {
+                return Err(format!(
+                    "模型名「{model}」只能用字母、数字和 . _ : / @ + -，不能以 - 开头"
+                ));
+            }
+        }
+        if !effort.is_empty() {
+            if self.effort_args.is_empty() {
+                return Err(format!(
+                    "{} 没有推理强度参数，不能指定 effort（去掉它，或者换一家）",
+                    self.name
+                ));
+            }
+            if !plain(&effort, "-_") {
+                return Err(format!("推理强度「{effort}」只能用字母、数字、- 和 _"));
+            }
+            if !self.efforts.is_empty() && !self.efforts.contains(&effort) {
+                return Err(format!(
+                    "{} 的推理强度只能是 {}，给的是「{effort}」",
+                    self.name,
+                    self.efforts.join("、")
+                ));
+            }
+        }
+        Ok((model, effort))
     }
 
     fn check(&self) -> Result<(), String> {
@@ -143,6 +246,19 @@ impl AgentProfile {
                 self.name
             ));
         }
+        for (key, template, placeholder) in [
+            ("model_args", &self.model_args, "{model}"),
+            ("effort_args", &self.effort_args, "{effort}"),
+        ] {
+            if !template.is_empty() && !template.iter().any(|part| part.contains(placeholder)) {
+                return Err(format!(
+                    "档案 {} 的 {key} 里得有 {placeholder}，不然取值传不进去",
+                    self.name
+                ));
+            }
+        }
+        self.resolve(None, None)
+            .map_err(|error| format!("档案 {} 的默认模型或推理强度不对：{error}", self.name))?;
         for (key, command) in [
             ("command", &self.command),
             ("self_command", &self.self_command),
@@ -180,7 +296,26 @@ fn builtin_profile(
         idle_timeout_secs,
         stop_signal,
         verified: Vec::new(),
+        model: String::new(),
+        effort: String::new(),
+        model_args: Vec::new(),
+        effort_args: Vec::new(),
+        efforts: Vec::new(),
     }
+}
+
+/// 这家怎么传模型、推理强度，强度能取哪些值（帮助里没列出取值的给空，交给它自己报错）。
+fn choices(
+    mut profile: AgentProfile,
+    model_args: &[&str],
+    effort_args: &[&str],
+    efforts: &[&str],
+) -> AgentProfile {
+    let owned = |parts: &[&str]| parts.iter().map(|part| part.to_string()).collect();
+    profile.model_args = owned(model_args);
+    profile.effort_args = owned(effort_args);
+    profile.efforts = owned(efforts);
+    profile
 }
 
 fn from(from: ResultFrom, field: &str) -> ResultSpec {
@@ -303,7 +438,38 @@ fn builtin() -> BTreeMap<String, AgentProfile> {
     ];
     profiles
         .into_iter()
-        .map(|(name, mut profile)| {
+        .map(|(name, profile)| {
+            // 模型、推理强度怎么传，都在本机 --help 里核过：codex `-m`、`-c model_reasoning_effort=`（取值帮助里没列，
+            // 不在 gld 这边核对）；claude `--model`、`--effort`（low…max）；agy `--model`、`--effort`（low|medium|high）；
+            // pi `--model`、`--thinking`（off…xhigh）；qwen、kimi 只有 `-m`，没有推理强度参数。
+            let mut profile = match name {
+                "codex" => choices(
+                    profile,
+                    &["-m", "{model}"],
+                    &["-c", "model_reasoning_effort={effort}"],
+                    &[],
+                ),
+                "claude" => choices(
+                    profile,
+                    &["--model", "{model}"],
+                    &["--effort", "{effort}"],
+                    &["low", "medium", "high", "xhigh", "max"],
+                ),
+                "agy" => choices(
+                    profile,
+                    &["--model", "{model}"],
+                    &["--effort", "{effort}"],
+                    &["low", "medium", "high"],
+                ),
+                "pi" => choices(
+                    profile,
+                    &["--model", "{model}"],
+                    &["--thinking", "{effort}"],
+                    &["off", "minimal", "low", "medium", "high", "xhigh"],
+                ),
+                "qwen" | "kimi" => choices(profile, &["-m", "{model}"], &[], &[]),
+                _ => profile,
+            };
             profile.name = name.into();
             (name.to_string(), profile)
         })
@@ -314,14 +480,87 @@ fn builtin() -> BTreeMap<String, AgentProfile> {
 #[serde(deny_unknown_fields)]
 struct AgentsFile {
     #[serde(default)]
-    agents: BTreeMap<String, AgentProfile>,
+    agents: BTreeMap<String, ProfileEntry>,
 }
 
-/// 内置档案加上 `agents_toml` 里的（同名的整条换掉）。文件不存在就只有内置的。
+/// `agents.toml` 里的一条。写了 `command` 就是一整份新档案（同名的内置整条换掉）；没写 `command` 就是在同名内置档案上
+/// 改几个字段——最常见的是只改默认模型和推理强度，不用把一长串启动参数抄一遍。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileEntry {
+    command: Option<Vec<String>>,
+    self_command: Option<Vec<String>>,
+    result: Option<ResultSpec>,
+    env_pass: Option<Vec<String>>,
+    idle_timeout_secs: Option<u64>,
+    stop_signal: Option<StopSignal>,
+    verified: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
+    model_args: Option<Vec<String>>,
+    effort_args: Option<Vec<String>>,
+    efforts: Option<Vec<String>>,
+}
+
+impl ProfileEntry {
+    fn into_profile(
+        self,
+        name: &str,
+        builtins: &BTreeMap<String, AgentProfile>,
+    ) -> Result<AgentProfile, String> {
+        let mut profile = match self.command {
+            Some(command) => AgentProfile {
+                name: String::new(),
+                command,
+                self_command: Vec::new(),
+                result: self.result.clone().ok_or_else(|| {
+                    format!("档案 {name} 写了 command，也要写 result（结果从哪取）")
+                })?,
+                env_pass: Vec::new(),
+                idle_timeout_secs: default_idle_timeout_secs(),
+                stop_signal: default_stop_signal(),
+                verified: Vec::new(),
+                model: String::new(),
+                effort: String::new(),
+                model_args: Vec::new(),
+                effort_args: Vec::new(),
+                efforts: Vec::new(),
+            },
+            None => builtins.get(name).cloned().ok_or_else(|| {
+                format!(
+                    "档案 {name} 没写 command，又不是内置的（{}），gld 不知道怎么起它",
+                    builtins.keys().cloned().collect::<Vec<_>>().join("、")
+                )
+            })?,
+        };
+        macro_rules! take {
+            ($($field:ident),*) => {
+                $(if let Some(value) = self.$field { profile.$field = value; })*
+            };
+        }
+        take!(
+            self_command,
+            result,
+            env_pass,
+            idle_timeout_secs,
+            stop_signal,
+            verified,
+            model,
+            effort,
+            model_args,
+            effort_args,
+            efforts
+        );
+        Ok(profile)
+    }
+}
+
+/// 内置档案加上 `agents_toml` 里的：写了 `command` 的整条换掉同名内置，没写的在同名内置上改。文件不存在就只有内置的。
 ///
 /// 写坏了不悄悄退回内置：报错带文件路径和哪一行，免得用户以为改的档案生效了。
 pub fn load(agents_toml: &Path) -> Result<BTreeMap<String, AgentProfile>, String> {
-    let mut profiles = builtin();
+    let builtins = builtin();
+    let mut profiles = builtins.clone();
     let text = match std::fs::read_to_string(agents_toml) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(profiles),
@@ -329,7 +568,7 @@ pub fn load(agents_toml: &Path) -> Result<BTreeMap<String, AgentProfile>, String
     };
     let file: AgentsFile = toml::from_str(&text)
         .map_err(|error| format!("{} 写得不对：{error}", agents_toml.display()))?;
-    for (name, mut profile) in file.agents {
+    for (name, entry) in file.agents {
         if name.is_empty()
             || !name
                 .chars()
@@ -340,6 +579,9 @@ pub fn load(agents_toml: &Path) -> Result<BTreeMap<String, AgentProfile>, String
                 agents_toml.display()
             ));
         }
+        let mut profile = entry
+            .into_profile(&name, &builtins)
+            .map_err(|error| format!("{}：{error}", agents_toml.display()))?;
         profile.name = name.clone();
         profile.check()?;
         profiles.insert(name, profile);
@@ -424,22 +666,136 @@ mod tests {
     #[test]
     fn placeholders_are_filled_and_the_prompt_goes_to_stdin_unless_named() {
         let codex = &builtin()["codex"];
-        let (argv, on_stdin) = codex.argv(false, Path::new("/w"), Path::new("/t/result.txt"), "hi");
+        let (argv, on_stdin) = codex.argv(
+            Choice::default(),
+            Path::new("/w"),
+            Path::new("/t/result.txt"),
+            "hi",
+        );
         assert!(on_stdin);
         assert!(argv.contains(&"/w".to_string()) && argv.contains(&"/t/result.txt".to_string()));
         assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
-        let (argv, _) = codex.argv(true, Path::new("/w"), Path::new("/t/result.txt"), "hi");
+        let own = Choice {
+            self_approval: true,
+            ..Choice::default()
+        };
+        let (argv, _) = codex.argv(own, Path::new("/w"), Path::new("/t/result.txt"), "hi");
         assert!(argv.contains(&"--approve-for-me".to_string()), "{argv:?}");
 
         let inline = &builtin()["kimi"];
-        let (argv, on_stdin) = inline.argv(false, Path::new("/w"), Path::new("/r"), "fix it");
+        let (argv, on_stdin) = inline.argv(
+            Choice::default(),
+            Path::new("/w"),
+            Path::new("/r"),
+            "fix it",
+        );
         assert!(!on_stdin);
         assert_eq!(argv, vec!["kimi", "-p", "fix it"]);
         // 没有自行判断那一档：给空的，绝不退回全放开的 command。
         assert!(inline
-            .argv(true, Path::new("/w"), Path::new("/r"), "fix it")
+            .argv(own, Path::new("/w"), Path::new("/r"), "fix it")
             .0
             .is_empty());
+    }
+
+    /// 模型、推理强度按各家的参数加上：命令最后是 `-`（stdin 读提示）的加在它前面，别的加在末尾，
+    /// 不能插进 `-p {prompt}` 中间。
+    #[test]
+    fn model_and_effort_are_passed_where_each_agent_takes_them() {
+        let profiles = builtin();
+        let pick = Choice {
+            self_approval: false,
+            model: "m1",
+            effort: "high",
+        };
+        let argv = |name: &str, choice: Choice<'_>| {
+            profiles[name]
+                .argv(choice, Path::new("/w"), Path::new("/r"), "fix")
+                .0
+        };
+        let codex = argv("codex", pick);
+        assert_eq!(
+            codex[codex.len() - 5..],
+            ["-m", "m1", "-c", "model_reasoning_effort=high", "-"],
+            "{codex:?}"
+        );
+        let qwen = argv("qwen", Choice { effort: "", ..pick });
+        assert_eq!(qwen, ["qwen", "-p", "fix", "--yolo", "-m", "m1"]);
+        let claude = argv(
+            "claude",
+            Choice {
+                self_approval: true,
+                ..pick
+            },
+        );
+        assert_eq!(
+            claude[claude.len() - 4..],
+            ["--model", "m1", "--effort", "high"]
+        );
+        let pi = argv("pi", pick);
+        assert_eq!(pi[pi.len() - 4..], ["--model", "m1", "--thinking", "high"]);
+        // 没给就一个都不加，用这家自己配置里的。
+        assert!(!argv("codex", Choice::default()).contains(&"-m".to_string()));
+    }
+
+    /// AI 提议的（或放行时改的）取值，起之前就核对：这家没有那个参数、取值不在列表里、像开关的，都拒，不白花额度。
+    #[test]
+    fn proposals_are_checked_before_anything_runs() {
+        let profiles = builtin();
+        let error = |name: &str, model: Option<&str>, effort: Option<&str>| {
+            profiles[name].resolve(model, effort).expect_err("该拒")
+        };
+        assert!(error("qwen", None, Some("high")).contains("没有推理强度"));
+        assert!(error("kimi", None, Some("high")).contains("没有推理强度"));
+        assert!(error("claude", None, Some("turbo")).contains("只能是"));
+        assert!(error("agy", None, Some("xhigh")).contains("只能是"));
+        assert!(error("codex", Some("-c"), None).contains("不能以 - 开头"));
+        assert!(error("codex", Some("gpt 5"), None).contains("只能用"));
+        assert_eq!(
+            profiles["codex"].resolve(Some("gpt-5.4"), Some("ultra")),
+            Ok(("gpt-5.4".into(), "ultra".into())),
+            "codex 的取值帮助里没列，不在 gld 这边核对"
+        );
+        assert_eq!(
+            profiles["claude"].resolve(None, None),
+            Ok((String::new(), String::new()))
+        );
+    }
+
+    /// `agents.toml` 里不写 command 就是在同名内置档案上改：只改默认模型和推理强度，启动参数照旧。
+    #[test]
+    fn agents_toml_can_set_just_the_default_model_and_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agents.toml");
+        std::fs::write(
+            &path,
+            "[agents.codex]\nmodel = \"gpt-5.4\"\neffort = \"high\"\n",
+        )
+        .expect("write");
+        let profiles = load(&path).expect("读得进来");
+        let codex = &profiles["codex"];
+        assert_eq!(codex.command, builtin()["codex"].command, "启动参数照旧");
+        assert_eq!(
+            codex.resolve(None, None),
+            Ok(("gpt-5.4".into(), "high".into()))
+        );
+        assert_eq!(
+            codex.resolve(Some("o4"), None),
+            Ok(("o4".into(), "high".into())),
+            "提议了模型就用提议的，强度还是默认"
+        );
+
+        for (text, expected) in [
+            ("[agents.nobody]\nmodel = \"x\"\n", "没写 command"),
+            ("[agents.claude]\neffort = \"turbo\"\n", "默认模型或推理强度不对"),
+            ("[agents.qwen]\neffort = \"high\"\n", "没有推理强度"),
+            ("[agents.x]\ncommand = [\"x\"]\n", "也要写 result"),
+            ("[agents.x]\ncommand = [\"x\"]\nresult = { from = \"stdout\" }\nmodel_args = [\"-m\"]\n", "{model}"),
+        ] {
+            std::fs::write(&path, text).expect("write");
+            let error = load(&path).expect_err(text);
+            assert!(error.contains(expected), "{text} → {error}");
+        }
     }
 
     #[test]
