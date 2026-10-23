@@ -323,7 +323,7 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
             "AI 起本机 Agent 前要你在本机 gld agent approve"
         };
         let power = if runtime.agent_approval == "self" {
-            "Agent 用它自己的自动审批模式，自行判断哪些操作能做（codex、claude 有这一档，别的起不来）。\
+            "Agent 用它自己的自动审批模式，自行判断哪些操作能做（codex、claude、qwen 有这一档，别的起不来）。\
              那是 Agent 自己的分类器，会看走眼，不是安全边界"
         } else {
             "Agent 一键批准所有操作，能动你账号能动的一切，不只是项目目录"

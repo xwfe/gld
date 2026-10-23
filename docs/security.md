@@ -182,7 +182,7 @@ SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 
 网页、issue、依赖里的提示注入能借 ChatGPT 传给这个 Agent。所以：
 
 - 默认 off；对外接触多的项目用 `ask`，每次在本机看一眼 `gld agent show` 的提示再 `approve`，别用 `auto`；
-  能用 `self` 的 Agent（Codex、Claude Code）就别用 `all`。打开或改这两个开关时 `gld set` 会说清现在是哪种组合、怎么收紧。
+  能用 `self` 的 Agent（Codex、Claude Code、Qwen）就别用 `all`。打开或改这两个开关时 `gld set` 会说清现在是哪种组合、怎么收紧。
 - 只有服务自己的凭据能发起，`gld grant` 发的凭据（哪怕 `--write`）不行。
 - 做完一律"等审核"，改动留在工作区不提交；审的时候看 diff，别只看 Agent 自己写的 recap。
 

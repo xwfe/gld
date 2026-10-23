@@ -168,7 +168,7 @@ const FIELDS: &[Field] = &[
     field!(
         "mcp.agent-approval",
         "all | self",
-        "委派出去的 Agent 怎么放权：all（默认）一键批准所有操作，能动你账号能动的一切；self 由 Agent 自行判断、自行批准（codex、claude 有这一档，别的起不来）",
+        "委派出去的 Agent 怎么放权：all（默认）一键批准所有操作，能动你账号能动的一切；self 由 Agent 自行判断、自行批准（codex、claude、qwen 有这一档，别的起不来）",
         |p, v| {
             p.runtime.agent_approval = parse_choice(v, &["all", "self"])?;
             Ok(())

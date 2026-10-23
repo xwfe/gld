@@ -2277,7 +2277,7 @@ allowed-commands          逗号分隔                               在默认�
 confine-reads             true | false                           读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
 command-policy            guarded | all                          AI 跑命令要过哪些关：guarded（默认）照白名单、装东西和危险命令要它先问你；all 一律放行，AI 能以你的账号跑任何命令，见 docs/security.md
 agent-delegation          off | ask | auto                       AI 能不能把活委派给本机 Agent（codex、claude……，做完交回审核）：off 不能（默认）；ask 每次要你在本机 gld agent approve；auto 直接起
-agent-approval            all | self                             委派出去的 Agent 怎么放权：all（默认）一键批准所有操作，能动你账号能动的一切；self 由 Agent 自行判断、自行批准（codex、claude 有这一档，别的起不来）
+agent-approval            all | self                             委派出去的 Agent 怎么放权：all（默认）一键批准所有操作，能动你账号能动的一切；self 由 Agent 自行判断、自行批准（codex、claude、qwen 有这一档，别的起不来）
 executable-paths          路径列表（换行或分号分隔）             额外的可执行文件搜索路径
 ai-instructions           文本                                   注入 Agent 的工作区级说明
 actions.port              1-65535                                Actions 本地监听端口

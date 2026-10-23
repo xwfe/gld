@@ -1541,9 +1541,34 @@ diff 超过 64 KB 时不附，是因为文件按路径排序，生成的数据�
 | --- | --- | --- | --- | --- |
 | Codex | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--approve-for-me`（审查模型自动批或拒，工作区可写的沙箱） | 真跑过 |
 | Claude Code | `claude` | `--dangerously-skip-permissions` | `--permission-mode auto --permission-prompts none` | 按官方文档，auto 模式要较新的模型（Opus / Sonnet 4.6 以上），Team / Enterprise 管理员能关掉 |
+| Qwen Code | `qwen` | `--yolo` | `--approval-mode auto` | 这两个参数 0.19.12 的顶层帮助里不显示，参数定义里有 |
+| Antigravity | `agy` | `--dangerously-skip-permissions` | 没有（本机 1.1.28 的 `--mode` 只有 accept-edits、plan） | 已知打印完结果进程不退（官方 issue #1313），会拖到总时长被停、记成 `timeout`，结果照样取得到 |
+| Pi | `pi` | 本来就没有审批 | 没有 | |
+| Kimi Code | `kimi` | `-p` 本身就是全放开 | 没有（`-p` 下加 `--auto` / `--yolo` 会报错） | 本机 0.29.1 比最新的 2.x 旧很多，升级后参数可能变 |
 
 **别的 Agent 在数据目录的 `agents.toml` 里加**（同名的会整条换掉内置的）。写坏了 `action=agents` 会报出哪一行；字段的意思见
-[RFC-0009 第 4.1 节](rfc/0009-agent-delegation.md#41-agent-档案一张配置表)。
+[RFC-0009 第 4.1 节](rfc/0009-agent-delegation.md#41-agent-档案一张配置表)。下面三家本机没装，是照官方文档写的，**没跑过**，
+用之前先拿它的 `--help` 对一下：
+
+```toml
+# OpenCode：没有"自行判断"那一档；--auto 批准所有没被显式 deny 的请求。stdout 会打出每一段文字，不只最后一条。
+[agents.opencode]
+command = ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"]
+result = { from = "stdout" }
+
+# Qoder CLI：self 用它的两阶段分类器。不在它信任的目录里时，非默认模式会悄悄退回默认（--yolo 失效），先在交互模式里信任项目目录。
+[agents.qoder]
+command = ["qodercli", "-p", "{prompt}", "-w", "{workdir}", "--yolo"]
+self_command = ["qodercli", "-p", "{prompt}", "-w", "{workdir}", "--permission-mode", "auto"]
+result = { from = "stdout" }
+
+# DeepSeek Harness（dsh，官方还在 developer preview）：全放开没有命令行参数，要先在 dsh 的 headless 配置里把预设设成
+# danger-full-access；它只认环境变量里的 key，变量名按 dsh 文档写进 env_pass（gld 默认去掉名字像密钥的变量）。
+[agents.dsh]
+command = ["dsh", "--profile", "headless", "-"]
+result = { from = "stdout" }
+env_pass = ["DEEPSEEK_API_KEY"]
+```
 
 ### 交接文件、谁能发起
 

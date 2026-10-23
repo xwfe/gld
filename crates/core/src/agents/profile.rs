@@ -161,6 +161,9 @@ impl AgentProfile {
     }
 }
 
+/// 跑完才一次性吐结果、中途不出声的 Agent 用：5 分钟没输出就当卡住的规矩对它不成立，交给总时长管。
+const SILENT_UNTIL_DONE_SECS: u64 = 2 * 60 * 60;
+
 fn builtin_profile(
     command: &[&str],
     self_command: &[&str],
@@ -191,8 +194,9 @@ fn from(from: ResultFrom, field: &str) -> ResultSpec {
 /// RFC-0009 4.4）；有自动审批模式的另给 `self_command`（2026-10-23 用户要的"由 Agent 自行判断、自行批准"）。
 ///
 /// 参数都在本机 `--help` 或安装包的参数定义里核过：codex 0.163.0（`--approve-for-me`：审查模型自动批或拒，工作区可写沙箱）、
-/// claude 2.1.304（`--permission-mode auto` 分类器把关，`--permission-prompts none` 让 `-p` 下没人答的提示直接拒而不是等）。
-/// **真跑过的只有 codex**（审查 §43–§57）。
+/// claude 2.1.304（`--permission-mode auto` 分类器把关，`--permission-prompts none` 让 `-p` 下没人答的提示直接拒而不是等）、
+/// qwen 0.19.12（`--yolo`、`--approval-mode auto` 在顶层帮助里不显示，参数定义里有）、agy 1.1.28、pi 0.78.1、kimi 0.29.1。
+/// **真跑过的只有 codex**（审查 §43–§57）；其余没花额度跑过，见 concepts.md 的表。
 fn builtin() -> BTreeMap<String, AgentProfile> {
     let codex_head = [
         "codex",
@@ -232,6 +236,60 @@ fn builtin() -> BTreeMap<String, AgentProfile> {
                 from(ResultFrom::Json, "result"),
                 default_idle_timeout_secs(),
                 StopSignal::Int,
+            ),
+        ),
+        (
+            "qwen",
+            builtin_profile(
+                &["qwen", "-p", "{prompt}", "--yolo"],
+                &["qwen", "-p", "{prompt}", "--approval-mode", "auto"],
+                from(ResultFrom::Stdout, ""),
+                default_idle_timeout_secs(),
+                StopSignal::Term,
+            ),
+        ),
+        (
+            // Antigravity。提示只能放参数（纯文本 stdin 不读）；它自己的 print 模式默认 5 分钟就不等了，放到 2 小时。
+            // 1.1.28 没有自动审批模式（`--mode` 只有 accept-edits、plan）。json 跑完才吐，按"中途不出声"算。
+            // 已知 bug：打印完结果进程不退（官方 issue #1313），会拖到总时长被停、记成 timeout，结果照样取得到。
+            "agy",
+            builtin_profile(
+                &[
+                    "agy",
+                    "-p",
+                    "{prompt}",
+                    "--output-format",
+                    "json",
+                    "--print-timeout",
+                    "120m",
+                    "--dangerously-skip-permissions",
+                ],
+                &[],
+                from(ResultFrom::Json, "response"),
+                SILENT_UNTIL_DONE_SECS,
+                StopSignal::Term,
+            ),
+        ),
+        (
+            // Pi 没有审批：本来就全权，也就没有"自行判断"那一档。text 模式只在最后打出最后一条消息。
+            "pi",
+            builtin_profile(
+                &["pi", "-p", "--no-session"],
+                &[],
+                from(ResultFrom::Stdout, ""),
+                SILENT_UNTIL_DONE_SECS,
+                StopSignal::Term,
+            ),
+        ),
+        (
+            // Kimi 0.29.1 的 `-p` 本身就是全放开，`--yolo` / `--auto` 只能在交互模式用，加了反而报错。
+            "kimi",
+            builtin_profile(
+                &["kimi", "-p", "{prompt}"],
+                &[],
+                from(ResultFrom::Stdout, ""),
+                default_idle_timeout_secs(),
+                StopSignal::Term,
             ),
         ),
     ];
@@ -285,7 +343,7 @@ pub fn load(agents_toml: &Path) -> Result<BTreeMap<String, AgentProfile>, String
 mod tests {
     use super::*;
 
-    /// 每份内置档案的 `command` 是这家全放开的参数；有自动审批模式的给 `self_command`，
+    /// 每份内置档案的 `command` 是这家全放开的参数；有自动审批模式的三家给 `self_command`，
     /// 里面不能混进全放开的参数（那就不是"自行判断"了）。
     #[test]
     fn the_builtin_profiles_give_full_access_and_self_approval_where_the_agent_has_it() {
@@ -301,6 +359,8 @@ mod tests {
         };
         full("codex", "--dangerously-bypass-approvals-and-sandbox");
         full("claude", "--dangerously-skip-permissions");
+        full("qwen", "--yolo");
+        full("agy", "--dangerously-skip-permissions");
 
         let own = |name: &str, flags: &[&str]| {
             let command = &profiles[name].self_command;
@@ -326,7 +386,17 @@ mod tests {
             "claude",
             &["--permission-mode", "auto", "--permission-prompts", "none"],
         );
+        own("qwen", &["--approval-mode", "auto"]);
+        for name in ["agy", "pi", "kimi"] {
+            assert!(
+                !profiles[name].supports_self_approval(),
+                "{name} 没有自行判断那一档"
+            );
+        }
         assert_eq!(profiles["claude"].stop_signal, StopSignal::Int);
+        // 跑完才吐结果的，不能按"5 分钟没输出就是卡住"停掉。
+        assert!(profiles["pi"].idle_timeout_secs >= 3600);
+        assert!(profiles["agy"].idle_timeout_secs >= 3600);
     }
 
     #[test]
@@ -339,11 +409,7 @@ mod tests {
         let (argv, _) = codex.argv(true, Path::new("/w"), Path::new("/t/result.txt"), "hi");
         assert!(argv.contains(&"--approve-for-me".to_string()), "{argv:?}");
 
-        let inline = AgentProfile {
-            command: vec!["kimi".into(), "-p".into(), "{prompt}".into()],
-            self_command: Vec::new(),
-            ..codex.clone()
-        };
+        let inline = &builtin()["kimi"];
         let (argv, on_stdin) = inline.argv(false, Path::new("/w"), Path::new("/r"), "fix it");
         assert!(!on_stdin);
         assert_eq!(argv, vec!["kimi", "-p", "fix it"]);

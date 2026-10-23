@@ -95,11 +95,11 @@ stop_signal = "INT"                        # SIGTERM 会直接退出 143、这�
 - **`self_command`**：`agent-approval=self` 时用，这家自己的自动审批模式。不写就是没有这一档，选了起不来，不退回 `command`。
 - **`result`**：最后一条消息从哪取：`file`、`json`（带 `field`；整份 stdout 不是一个 JSON 就从最后一行往前找）、`stdout`。
 - **`env_pass`**：放行哪些环境变量。gld 一律去掉名字像密钥的变量，有的 Agent 靠环境变量里的 key 登录（比如 DeepSeek Harness），要点名放行。
-- **`idle_timeout_secs`**：多久没输出算卡住，默认 300。
+- **`idle_timeout_secs`**：多久没输出算卡住，默认 300。跑完才一次性吐结果的（Pi、Antigravity 的 json）设成 7200，交给总时长管。
 - **`stop_signal`**：停的时候先发什么信号；**`verified`**：验过的 `--version`（不在里面照样跑，回包标出来）。
 - 用的是**用户自己的配置**（模型、MCP server、全局规则），和平时在终端里用它一样。
 - 内置哪几份、各用什么参数、哪些真跑过，以 concepts.md 的
-  [能用哪些 Agent、怎么放权](../concepts.md#能用哪些-agent怎么放权) 为准。
+  [能用哪些 Agent、怎么放权](../concepts.md#能用哪些-agent怎么放权) 为准；本机没装的 OpenCode、Qoder CLI、DeepSeek Harness 的写法也在那里。
 - 接着同一个会话（`session`）是 D3 的事，现在没有这个字段。
 
 ### 4.2 一次委派怎么跑
@@ -145,7 +145,7 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 
 2026-10-23 用户加了第二档（审查 §60）："一键批准 Agent 运行所有操作，或者由 Agent 自行判断、自行批准，直接执行"。
 项目开关 `agent-approval`：`all`（默认，就是上面这种）| `self`（档案的 `self_command`，用这家自己的自动审批模式：
-Codex `--approve-for-me`、Claude `--permission-mode auto`）。两家在无人值守时拦下的操作都是
+Codex `--approve-for-me`、Claude `--permission-mode auto`、Qwen `--approval-mode auto`）。三家在无人值守时拦下的操作都是
 拒掉、让 Agent 换办法，不会卡住等人。没有这一档的 Agent 选了 `self` 就起不来，不退回全放开。`self` 靠的是 Agent 自己的分类器，
 不是安全边界，下面这些把关照旧。
 
@@ -187,6 +187,7 @@ Codex `--approve-for-me`、Claude `--permission-mode auto`）。两家在无人�
 | --- | --- | --- | --- |
 | D1 | 档案表、执行和收尾、`agent_manage`（含 `review`）、`gld agent`、三档开关、项目写锁、`.gld/handoff/`；内置 Codex 和 Claude 两份档案 | 用假 Agent 脚本（按档案吐结果、卡住、不关 stdin、被停、改文件）测全部状态、超时和互斥；Codex、Claude 各在临时项目里真跑一次改一处，ChatGPT 审、gld 跑测试 | 真跑那两次要用户点头 |
 | D2 | 更多档案：Pi、agy、Kimi、Qwen；Gemini、Grok、dsh、OpenCode、Qoder CLI 装了再加 | 每个档案先核帮助，再在临时项目里真跑一次 | 同上 |
+| | **2026-10-23 进展**：qwen、agy、pi、kimi 进了内置档案，参数核过本机帮助或安装包的参数定义，**还没真跑**；OpenCode、Qoder CLI、DeepSeek Harness 没装，concepts.md 给了 `agents.toml` 写法（照官方文档，没跑过）；`agent-approval=self` 一并做了（审查 §60） | | |
 | D3 | 打回后接着同一个会话：只用明确的 session id，不用 `--continue` / `--last`（并发时会接错） | 假脚本覆盖；真跑一次打回、接着改 | 同上 |
 | D4 | 要中途补充指令时换 ACP；远端成员经 `ccnm.machine/1` | 另起小节 | 同上 |
 
