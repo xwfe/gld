@@ -2716,3 +2716,47 @@ status/wait 只给 file_stats、不附第一页；顺手把 offset 的说明写�
 `statistics.quantiles(method="inclusive")` 算期望值，3000 条用例的 CSV 和读它的测试。模拟估 CSV 那段约 193 KB。这次不规定怎么读，
 只要求按回包的 next_action 和 `file_stats` 自己定、数据文件只用小的 `max_bytes` 瞄开头、不用 `read_file` / `git_diff` 读这次的改动；
 看回包总量是不是到了 §55 估的几十 KB。结果等用户试完再核对、记下一节；请求日志从第 16553 行起是这一轮。没推送。
+
+## 57. 大 diff 不附第一页之后：ChatGPT 审 195 KB 的委派 diff，回包合计 46 KB（2026-10-23 19:30–19:40）
+
+**结论：大 diff 的审核传输量问题解决了。**diff 199,569 字节（CSV 一段 193,429，代码三段 1,871 / 703 / 3,566）。`awaiting_review`
+那次回包 `diff` 为 null，ChatGPT 照 next_action 和 `file_stats` 用 `path` 读三个代码文件、用 `max_bytes=4096` 瞄 CSV 开头，一共读
+diff 正文 10,182 字节（5.1%）。`math_utils.py` 那段没有 import `statistics`，四分位是手写插值，没混进前几轮的改动。accept。
+
+| 本地时间 | ChatGPT 做了什么（项目自己的请求日志、运行记录） |
+| --- | --- |
+| 19:30:57 | 用户点 Refresh，`tools/list` 回 47,837 字节 |
+| 19:31:34 | `start agent=codex`，回 `waiting_local_approval`（5,138 字节）；用户放行，Codex 19:31:52–19:34:44 跑了 172 秒 |
+| 19:39:23 | `agent_manage` 回 9,142 字节，`awaiting_review`、`diff` 为 null。这之前 8 分钟没有 `wait`：ChatGPT 那一轮在等用户放行后停下了 |
+| 19:39:35–41 | 四次 `action=diff`，都带 `path` 和 `max_bytes=4096`：4,966、2,317、8,455、9,266 字节 |
+| 19:39:47–52 | `exec_command`：numstat、`python3 gen_iqr_cases.py --check`、`python3 -m unittest -v`，退出码都是 0 |
+| 19:40:22 | `review verdict=accept`，回 11,909 字节 |
+
+**三轮按线上回包比**（等审核之后的 `agent_manage` 回包，含 JSON 封装和双份内容，`response_bytes` 加总）：§50 790,539 字节，
+§54 305,813，这一轮 46,055，比 §50 少 94%。三轮 diff 分别是 175 KB、172 KB、200 KB。ChatGPT 说的 94.9% 只算 diff 正文，它自己也注明了。
+
+**我这边核对：**三个代码文件按 `path` 重读，和 `task.diff` 对应段逐字节相同；CSV 4 KB 小页回 4,042 字节、截在整行上；`math_utils.py`
+整个文件没有 import，新增段只有 `quartiles`、`iqr`，相对 HEAD +53 −1（之前 +34 −1 加这 19 行），`test_math_utils.py` 没动，没有新提交；
+`--check` 退出码 0，测试 OK。
+
+**回包里还剩什么：**用 `status` 量等审核那种回包各字段（JSON 一份约 3.7 KB，线上翻倍）：`prompt_preview` 1,320 字节最大（最多 2 KB，
+是 AI 自己写的提示，每次 `status` / `wait` / `review` 都原样回），recap 774，`file_stats` 413，next_action 在等审核时约 650，
+gld 内部字段（`owner`、`owner_pid`、`pid`、`project_id` 等）一共约 150。
+
+**ChatGPT 第 6 步的评价**（用户贴回来的）：核心问题基本解决，`file_stats` 足够指导审查，不用再动分页机制。还能改的：
+
+1. next_action 偏长，给结构化的 `recommended_action`。
+2. 回包字段多（`prompt_preview`、`owner_pid` 等），加 `response_mode=compact`。
+3. 分页回 `page_bytes`：这一轮它要自己算 UTF-8 字节数。
+4. 加文件内的相对偏移 `file_offset`。
+5. 累计传输指标 `diff_bytes_served`、`diff_calls`。
+
+**我的看法**（还没定，等用户选）：
+
+- 第 2 条对一半：不用加模式，直接让给 AI 的回包不带 `prompt_preview`（它自己写的，`list` 里还有 200 字的预览）和 gld 内部字段，
+  每次省约 1.5 KB、线上约 3 KB；本机 `gld agent show` 照样打提示全文的预览，放行前要看。
+- 第 3、4 条不值：要算字节数、对 offset，是我提示词要它报"每页多少字节、占多少"，正常审核用不上；`next_offset` 照抄就接得上。
+- 第 1 条不值：next_action 只在等放行、在跑、等审核时长，约 650 字节，结构化以后 AI 还是得读懂它。
+- 第 5 条不值：请求日志已经按次记了回包字节数，上面三轮的对比就是从它算的。
+
+没推送。
