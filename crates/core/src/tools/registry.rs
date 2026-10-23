@@ -574,8 +574,9 @@ fn agent_manage_schema() -> Value {
             "timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 120, "default": 30, "description": "start: stop the agent after this long." },
             "task_id": { "type": "string", "minLength": 4, "description": "status / wait / diff / review / stop: the task id (a unique prefix of at least 4 characters also works)." },
             "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 30, "default": 30, "description": "wait: return as soon as the task leaves running, or after this many seconds." },
-            "offset": { "type": "integer", "minimum": 0, "description": "diff: byte offset into this task's full diff (default 0, or where path starts). Pass diff_next_offset from status / wait, then next_offset from each page, until next_offset is null. Pages are up to 64 KB, cut on whole lines." },
+            "offset": { "type": "integer", "minimum": 0, "description": "diff: a byte position in this task's whole diff, also when path is given (it is never relative to the file). Leave it out to start at 0, or at the file's diff_offset with path. Then pass next_offset from each page until it is null." },
             "path": { "type": "string", "minLength": 1, "description": "diff: read only this file's part of the diff, a path from file_stats (each entry has its diff_offset and diff_bytes). Pages stop at the end of that file." },
+            "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 65536, "default": 65536, "description": "diff: page size. Pages are cut on whole lines; use a small one (e.g. 4096) to peek at the start of a big data file." },
             "verdict": { "type": "string", "enum": ["accept", "reject"], "description": "review: your verdict after checking the diff and running the tests." },
             "note": { "type": "string", "maxLength": 16384, "description": "review: what you checked and what is wrong; saved with the task and in .gld/handoff/<task>/review.md." }
         },

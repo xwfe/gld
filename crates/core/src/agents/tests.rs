@@ -617,7 +617,7 @@ fn one_file_can_be_read_alone_out_of_a_big_diff() {
 
     // 排在最后的小文件：一页就完。
     let (offset, z) = section("z.py");
-    let page = diff_page(&dir, &task, None, Some("z.py")).expect("z.py");
+    let page = diff_page(&dir, &task, None, Some("z.py"), DIFF_MAX_BYTES).expect("z.py");
     assert_eq!(page.offset, offset);
     assert_eq!(page.next_offset, None);
     assert_eq!(page.path.as_deref(), Some("z.py"));
@@ -628,7 +628,7 @@ fn one_file_can_be_read_alone_out_of_a_big_diff() {
     assert!(big.len() > DIFF_MAX_BYTES, "{}", big.len());
     let (mut read, mut next) = (Vec::new(), None);
     loop {
-        let page = diff_page(&dir, &task, next, Some("big.txt")).expect("一页");
+        let page = diff_page(&dir, &task, next, Some("big.txt"), DIFF_MAX_BYTES).expect("一页");
         assert!(page.diff.len() <= DIFF_MAX_BYTES);
         if next.is_none() {
             assert_eq!(page.offset, offset, "不给 offset 就从这个文件开头读");
@@ -641,8 +641,30 @@ fn one_file_can_be_read_alone_out_of_a_big_diff() {
     }
     assert_eq!(read, big);
 
+    // 只想看大文件开头几行：页小到 1 KB，照样截在整行上，下一页紧接着这一页（审查 §54：看 CSV 格式只要 247 字节，
+    // 以前最少得收 64 KB）。一页页读下去拼起来也还是它那一段。
+    let peek = diff_page(&dir, &task, None, Some("big.txt"), 1024).expect("小页");
+    assert!(
+        peek.diff.len() <= 1024 && peek.diff.ends_with('\n'),
+        "{}",
+        peek.diff.len()
+    );
+    assert!(peek.diff.starts_with("diff --git a/big.txt b/big.txt\n"));
+    assert_eq!(peek.next_offset, Some(offset + peek.diff.len() as u64));
+    let (mut read, mut next) = (Vec::new(), None);
+    loop {
+        let page = diff_page(&dir, &task, next, Some("big.txt"), 1024).expect("小页");
+        assert!(page.diff.len() <= 1024);
+        read.extend_from_slice(page.diff.as_bytes());
+        match page.next_offset {
+            Some(offset) => next = Some(offset),
+            None => break,
+        }
+    }
+    assert_eq!(read, big);
+
     let error = |offset: Option<u64>, path: &str| {
-        diff_page(&dir, &task, offset, Some(path))
+        diff_page(&dir, &task, offset, Some(path), DIFF_MAX_BYTES)
             .expect_err("该报错")
             .code
     };
@@ -660,7 +682,7 @@ fn one_file_can_be_read_alone_out_of_a_big_diff() {
         stat.diff_bytes = None;
     }
     assert_eq!(
-        diff_page(&dir, &old, None, Some("z.py"))
+        diff_page(&dir, &old, None, Some("z.py"), DIFF_MAX_BYTES)
             .expect_err("没记位置")
             .code,
         "AGENT_DIFF_UNAVAILABLE"
@@ -710,7 +732,7 @@ fn outside_git_the_changes_are_unknown_and_there_are_no_trees() {
     assert_eq!((&done.before_tree, &done.after_tree), (&None, &None));
     assert_eq!(done.diff_bytes, None);
     let (dir, _) = get(f.data_home(), &task.task_id).expect("任务");
-    let error = diff_page(&dir, &done, Some(0), None).expect_err("没有 diff");
+    let error = diff_page(&dir, &done, Some(0), None, DIFF_MAX_BYTES).expect_err("没有 diff");
     assert_eq!(error.code, "AGENT_DIFF_UNAVAILABLE");
     assert!(error.message.contains("不是 git 仓库"), "{error}");
 }
@@ -764,7 +786,7 @@ fn a_huge_diff_is_cut_on_a_line_boundary() {
     let (dir, task) = get(f.data_home(), &done.task_id).expect("任务");
     let (mut whole, mut offset, mut pages) = (String::new(), 0, 0);
     loop {
-        let page = diff_page(&dir, &task, Some(offset), None).expect("一页");
+        let page = diff_page(&dir, &task, Some(offset), None, DIFF_MAX_BYTES).expect("一页");
         assert!(page.diff.len() <= DIFF_MAX_BYTES, "{}", page.diff.len());
         assert_eq!(Some(page.total_bytes), done.diff_bytes);
         if pages == 0 {
@@ -787,10 +809,10 @@ fn a_huge_diff_is_cut_on_a_line_boundary() {
     );
 
     let total = done.diff_bytes.expect("diff_bytes");
-    let end = diff_page(&dir, &task, Some(total), None).expect("正好在末尾");
+    let end = diff_page(&dir, &task, Some(total), None, DIFF_MAX_BYTES).expect("正好在末尾");
     assert!(end.diff.is_empty() && end.next_offset.is_none());
     assert_eq!(
-        diff_page(&dir, &task, Some(total + 1), None)
+        diff_page(&dir, &task, Some(total + 1), None, DIFF_MAX_BYTES)
             .expect_err("超过总长")
             .code,
         "INVALID_ARGUMENT"
@@ -829,7 +851,7 @@ fn the_diff_cannot_be_paged_before_the_task_has_run() {
     let waiting = f.start("fake", Approval::Ask).expect("存下");
     let (dir, task) = get(f.data_home(), &waiting.task_id).expect("任务");
     assert_eq!(
-        diff_page(&dir, &task, Some(0), None)
+        diff_page(&dir, &task, Some(0), None, DIFF_MAX_BYTES)
             .expect_err("还没跑")
             .code,
         "AGENT_TASK_STATE"

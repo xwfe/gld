@@ -166,7 +166,7 @@ gld 在用户的提示后面固定加一段尾巴，要求 Agent 结尾写一段
 - 工具表多一项，指纹会变，**要在 ChatGPT 点一次 Refresh**。没开委派的项目照样看得到这个工具，调用时回"这个项目没开"和怎么开。
 - `wait` 单次最多 30 秒，经 OpenAI 隧道时官方上限 120 秒。
 - 回包有界、先脱敏：recap 最多 32 KB，report 最多 64 KB，这次任务的 diff 最多 64 KB（截在整行上，标 `diff_truncated`、
-  给 `diff_next_offset`；`action=diff` 每页也是 64 KB；`review` 的回包不带 diff），
+  给 `diff_next_offset`；`action=diff` 每页默认也是 64 KB，`max_bytes` 能小到 1 KB；`review` 的回包不带 diff），
   改动文件最多 200 个；在跑时的输出尾巴每个流 768 字节，收尾后（失败、超时、被停）4 KB。
 - 本机命令行：`gld agent ls | show | approve | deny | stop`。
 

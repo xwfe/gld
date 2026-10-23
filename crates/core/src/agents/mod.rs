@@ -438,16 +438,17 @@ pub struct DiffPage {
     pub diff: String,
 }
 
-/// 跑完的任务的 diff，从 `offset` 字节起最多 [`DIFF_MAX_BYTES`]。回包里的 diff 截断了，剩下的靠它一页页读：
-/// AI 读不到 gld 数据目录里的 `task.diff`（审查 §47）。
+/// 跑完的任务的 diff，从 `offset` 字节起一页最多 `max` 字节（调用方限在 1 KB 到 [`DIFF_MAX_BYTES`]）。
+/// 回包里的 diff 截断了，剩下的靠它一页页读：AI 读不到 gld 数据目录里的 `task.diff`（审查 §47）。
 ///
 /// 给了 `path` 只读那个文件的一段，`offset` 默认是它的开头、页到它的结尾为止：大 diff 里先看源代码，
-/// 不用先读完前面一百多 KB 的生成数据（审查 §50）。
+/// 不用先读完前面一百多 KB 的生成数据（审查 §50）。`offset` 一直是整份 diff 里的位置，给了 `path` 也一样。
 pub fn diff_page(
     dir: &Path,
     task: &AgentTask,
     offset: Option<u64>,
     path: Option<&str>,
+    max: usize,
 ) -> Result<DiffPage, AgentError> {
     if !task.state.is_finished() {
         return Err(not_in_state(task, "已经跑完"));
@@ -478,13 +479,12 @@ pub fn diff_page(
         };
         return Err(AgentError::new("INVALID_ARGUMENT", message));
     }
-    let (diff, next_offset) =
-        read_diff(&diff_file, offset, end, DIFF_MAX_BYTES).map_err(|error| {
-            AgentError::new(
-                "AGENT_STATE_UNAVAILABLE",
-                format!("读不了 {}：{error}", diff_file.display()),
-            )
-        })?;
+    let (diff, next_offset) = read_diff(&diff_file, offset, end, max.max(1)).map_err(|error| {
+        AgentError::new(
+            "AGENT_STATE_UNAVAILABLE",
+            format!("读不了 {}：{error}", diff_file.display()),
+        )
+    })?;
     Ok(DiffPage {
         task_id: task.task_id.clone(),
         path: path.map(str::to_string),

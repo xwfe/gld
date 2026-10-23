@@ -252,8 +252,9 @@ fn ask_mode_goes_from_approval_to_review() {
 }
 
 /// diff 超过 64 KB 时 `gld agent show` 只打前一段，要说清全文在本机哪个文件，而且那个文件真在、就是全文。
+/// 同一份大 diff 顺带测 `action=diff max_bytes`：只看开头几行不用收一整页。
 #[test]
-fn show_points_to_the_full_diff_when_it_is_cut() {
+fn a_big_diff_can_be_peeked_and_show_points_to_the_full_one() {
     let env = Env::new();
     agent(
         &env,
@@ -269,6 +270,31 @@ fn show_points_to_the_full_diff_when_it_is_cut() {
     let task_id = started["task_id"].as_str().expect("task_id").to_string();
     let done = wait_done(&env, &task_id);
     assert_eq!(done["diff_truncated"], true, "{done}");
+
+    let peek = |max: &str| {
+        manage(
+            &env,
+            &[
+                "action=diff",
+                &format!("task_id={task_id}"),
+                "path=big.txt",
+                max,
+            ],
+        )
+    };
+    let page = peek("max_bytes:=4096");
+    let text = page["diff"].as_str().unwrap_or("");
+    assert!(
+        text.len() <= 4096 && text.ends_with('\n') && text.starts_with("diff --git a/big.txt"),
+        "{page}"
+    );
+    assert!(page["next_offset"].as_u64().is_some(), "{page}");
+    let tiny = peek("max_bytes:=10");
+    let tiny_len = tiny["diff"].as_str().unwrap_or("").len();
+    assert!(
+        (11..=1024).contains(&tiny_len),
+        "小于 1 KB 按 1 KB 算，不报错：{tiny_len}"
+    );
 
     let shown = env.ok(&["agent", "show", &task_id[..8]]);
     let path = shown

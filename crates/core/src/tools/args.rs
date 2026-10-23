@@ -46,6 +46,8 @@ const BOUNDED: &[(&str, &str, u64, u64, u64)] = &[
     // 委派（RFC-0009）：总时长默认半小时、最长 2 小时；wait 单次最多 30 秒，和 exec_command 一致。
     ("agent_manage", "timeout_minutes", 30, 1, 120),
     ("agent_manage", "wait_seconds", 30, 0, 30),
+    // action=diff 每页最多多少字节：只想看大数据文件开头几行时不用收一整页（审查 §54）。
+    ("agent_manage", "max_bytes", 65_536, 1_024, 65_536),
     ("view_image", "max_height", 2_000, 1, 10_000),
     ("operation_log", "limit", 50, 1, 200),
     ("list_task_events", "limit", 50, 1, 200),

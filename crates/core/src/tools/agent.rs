@@ -65,7 +65,8 @@ pub fn agent_manage(
                 .get("path")
                 .and_then(Value::as_str)
                 .filter(|path| !path.is_empty());
-            let page = agents::diff_page(&dir, &task, offset, path).map_err(convert)?;
+            let max = crate::tools::args::bounded(args, "agent_manage", "max_bytes") as usize;
+            let page = agents::diff_page(&dir, &task, offset, path, max).map_err(convert)?;
             Ok(present_page(page))
         }
         "review" => {
