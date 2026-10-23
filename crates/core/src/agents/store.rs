@@ -123,9 +123,12 @@ pub struct AgentTask {
     pub recap: Option<String>,
     #[serde(default)]
     pub failure: Option<String>,
-    /// 跑之前、跑完各记一次 git 状态，两次一比。不是 git 仓库时为空，`changes_unknown` 为真。
+    /// 跑前跑后两棵工作区树之间改了的文件。不是 git 仓库时为空，`changes_unknown` 为真。
     #[serde(default)]
     pub changed_files: Vec<String>,
+    /// 每个文件增删了几行，和 `changed_files` 同样的文件、同样的顺序。
+    #[serde(default)]
+    pub file_stats: Vec<FileStat>,
     #[serde(default)]
     pub changed_files_truncated: bool,
     #[serde(default)]
@@ -138,6 +141,14 @@ pub struct AgentTask {
     pub head_moved: bool,
     #[serde(default)]
     pub review: Option<Review>,
+}
+
+/// 一个文件这次增删了几行（`git diff --numstat`）。二进制文件数不了行，两个都是 None。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStat {
+    pub path: String,
+    pub added: Option<u64>,
+    pub deleted: Option<u64>,
 }
 
 fn default_timeout_minutes() -> u64 {
@@ -258,6 +269,7 @@ mod tests {
             recap: None,
             failure: None,
             changed_files: Vec::new(),
+            file_stats: Vec::new(),
             changed_files_truncated: false,
             changes_unknown: false,
             diff_bytes: None,

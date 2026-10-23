@@ -152,6 +152,11 @@ fn ask_mode_goes_from_approval_to_review() {
         serde_json::json!(["prompt-seen.txt", "touched.txt"])
     );
     assert!(done.get("caller").is_none(), "发起人标识不回给 AI：{done}");
+    assert_eq!(
+        done["file_stats"][1],
+        serde_json::json!({ "path": "touched.txt", "added": 1, "deleted": 0 }),
+        "{done}"
+    );
     let diff = done["diff"].as_str().unwrap_or("");
     assert!(
         diff.contains("+changed") && diff.contains("touched.txt"),
@@ -182,7 +187,7 @@ fn ask_mode_goes_from_approval_to_review() {
     assert_eq!(reviewed["state"], "accepted", "{reviewed}");
     let shown = env.ok(&["agent", "show", &task_id[..8]]);
     assert!(
-        shown.contains("已通过") && shown.contains("touched.txt"),
+        shown.contains("已通过") && shown.contains("+1 -0\ttouched.txt"),
         "{shown}"
     );
     env.ok(&["daemon", "stop"]);

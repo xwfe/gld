@@ -1444,7 +1444,8 @@ gld agent approve 3f2a               # 放行（任务 id 给前 4 位以上就�
    能动你账号能动的一切，不只是项目目录。gld 在提示后面加一段：交接目录在哪、结尾写四段 recap、别 git commit。
 3. 跑的时候，gld 对这个项目的 `apply_patch`、`exec_command` 回 `AGENT_TASK_RUNNING`，同一个项目同时只许一个委派。
    总时长默认 30 分钟（最长 2 小时），5 分钟没有任何输出按卡住停掉。
-4. 跑完进入"等审核"：AI 拿到 Agent 的 recap、交接报告（有的话）、改了哪些文件，和**这次任务自己的 diff**（`diff` 字段，
+4. 跑完进入"等审核"：AI 拿到 Agent 的 recap、交接报告（有的话）、改了哪些文件（`changed_files`）和每个文件增删几行
+   （`file_stats`，同样的文件、同样的顺序，二进制文件的行数是 `null`），和**这次任务自己的 diff**（`diff` 字段，
    最多 64 KB，全文在 gld 数据目录的任务记录里）。它是跑前跑后各把整个工作区写成一棵 git 树、两棵一比得出来的，
    之前没提交的改动、没跟踪的文件不会混进来——`git_diff` 跟 HEAD 比就会混（上一轮委派没提交时撞过）。
    AI 自己看 diff、跑测试，再 `action=review verdict=accept|reject`。**Agent 说"测试都过了"不算数**，验收照旧只认

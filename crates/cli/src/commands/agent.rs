@@ -137,7 +137,7 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
         ctx.out.line(format!(
             "\n改了 {} 个文件{more}：\n{}",
             task.changed_files.len(),
-            task.changed_files.join("\n")
+            changed_files_text(task)
         ));
         if task.head_moved {
             ctx.out.line("（跑的时候 HEAD 动了：Agent 被叮嘱别提交，还是提交了。改动照样都在下面的 diff 里。）");
@@ -169,6 +169,21 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
         ));
     }
     Ok(())
+}
+
+/// 每个文件一行，前面是增删行数。早于记行数的任务只有文件名。
+fn changed_files_text(task: &AgentTask) -> String {
+    if task.file_stats.is_empty() {
+        return task.changed_files.join("\n");
+    }
+    task.file_stats
+        .iter()
+        .map(|stat| match (stat.added, stat.deleted) {
+            (Some(added), Some(deleted)) => format!("+{added} -{deleted}\t{}", stat.path),
+            _ => format!("二进制\t{}", stat.path),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn short(task_id: &str) -> &str {

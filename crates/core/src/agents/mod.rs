@@ -167,6 +167,7 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         recap: None,
         failure: None,
         changed_files: Vec::new(),
+        file_stats: Vec::new(),
         changed_files_truncated: false,
         changes_unknown: false,
         diff_bytes: None,

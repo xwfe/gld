@@ -118,7 +118,7 @@ result = { from = "stdout" }
    到点按档案的信号停：SIGINT，等一会儿，SIGTERM，再 SIGKILL，停的是整个进程组。"是 gld 主动停的"由 gld 自己记，不靠退出码猜。
 5. 取结果：按档案读结果文件、JSON 字段或 stdout。取不到、或者格式不认识，记 `failed`，带输出前 2 KB 和 Agent 的 `--version`。
 6. 算改动：跑之前、跑完各用任务目录里的临时 index（`GIT_INDEX_FILE`，从用户的 index 复制一份当底）`git add -A` + `write-tree`，
-   把整个工作区记成一棵树；两棵树一比就是这次任务自己改了哪些文件和完整 diff（存成任务目录的 `task.diff`）。
+   把整个工作区记成一棵树；两棵树一比就是这次任务自己改了哪些文件、各增删几行（`--numstat`）和完整 diff（存成任务目录的 `task.diff`）。
    第一版用两次 `git status` 比文件内容摘要，文件列表对，但回给审核的只有文件名，审核时跟 HEAD 比的 diff 会混进上一轮
    没提交的改动（审查 §44）。不碰用户的 index 和工作区；会往对象库写没人引用的对象，`git gc` 过期后清掉。
 7. 状态变成 `awaiting_review`，放开项目写锁（ChatGPT 审的时候要跑测试）。

@@ -362,10 +362,11 @@ fn watch(
     let after = snapshot(&root, &task_dir, "after");
     match (&before, &after) {
         (Some(before), Some(after)) => match task_diff(&root, &task_dir, before, after) {
-            Some((mut changed, bytes)) => {
-                task.changed_files_truncated = changed.len() > CHANGED_FILES_MAX;
-                changed.truncate(CHANGED_FILES_MAX);
-                task.changed_files = changed;
+            Some((mut stats, bytes)) => {
+                task.changed_files_truncated = stats.len() > CHANGED_FILES_MAX;
+                stats.truncate(CHANGED_FILES_MAX);
+                task.changed_files = stats.iter().map(|stat| stat.path.clone()).collect();
+                task.file_stats = stats;
                 task.diff_bytes = Some(bytes);
                 // Agent 被叮嘱了别提交；提交了也照样算进 diff（树比的是工作区），只是要让审核的人知道。
                 task.head_moved = before.head != after.head;
@@ -529,31 +530,31 @@ pub(crate) fn snapshot(root: &Path, task_dir: &Path, label: &str) -> Option<Snap
     Some(Snapshot { tree, head })
 }
 
-/// 两棵树之间改了哪些文件，并把完整 diff 写进任务目录的 [`store::DIFF_FILE`]。返回文件列表和 diff 字节数。
+/// 两棵树之间改了哪些文件、各增删几行，并把完整 diff 写进任务目录的 [`store::DIFF_FILE`]。
+/// 返回每个文件的行数和 diff 字节数。
 ///
 /// 不跑仓库配置的外部 diff 和 textconv：那是项目里配的程序，审核时不该替它执行。
+/// `--numstat` 要读文件内容才数得出行，所以它也得带 `--no-textconv`。
 fn task_diff(
     root: &Path,
     task_dir: &Path,
     before: &Snapshot,
     after: &Snapshot,
-) -> Option<(Vec<String>, u64)> {
-    let names = git(
+) -> Option<(Vec<store::FileStat>, u64)> {
+    let numstat = git(
         root,
         &[
             "diff",
-            "--name-only",
+            "--numstat",
             "-z",
             "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
             &before.tree,
             &after.tree,
         ],
     )?;
-    let files = names
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect();
+    let stats = parse_numstat(&numstat);
     let patch = git(
         root,
         &[
@@ -570,7 +571,27 @@ fn task_diff(
     if let Err(error) = written {
         eprintln!("任务 diff 写不进 {}：{error}", task_dir.display());
     }
-    Some((files, patch.len() as u64))
+    Some((stats, patch.len() as u64))
+}
+
+/// `git diff --numstat -z --no-renames` 的输出：每个文件一条 `增\t删\t路径\0`，二进制文件的增删是 `-`。
+/// 不带 `--no-renames` 的话改名会变成另一种格式（路径分两段），这里不认。
+pub(crate) fn parse_numstat(raw: &[u8]) -> Vec<store::FileStat> {
+    raw.split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let mut fields = record.splitn(3, |byte| *byte == b'\t');
+            let count = |field: &[u8]| std::str::from_utf8(field).ok()?.parse::<u64>().ok();
+            let added = fields.next()?;
+            let deleted = fields.next()?;
+            let path = fields.next().filter(|path| !path.is_empty())?;
+            Some(store::FileStat {
+                path: String::from_utf8_lossy(path).into_owned(),
+                added: count(added),
+                deleted: count(deleted),
+            })
+        })
+        .collect()
 }
 
 pub fn now_ms() -> u64 {

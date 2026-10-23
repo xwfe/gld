@@ -521,6 +521,61 @@ fn the_diff_is_only_this_tasks_own_change_and_the_index_is_left_alone() {
     assert!(leftovers.is_empty(), "临时 index 没收拾：{leftovers:?}");
 }
 
+/// 每个改了的文件带增删行数，和 changed_files 一一对上；二进制文件数不了行（审查 §47 ChatGPT 提的）。
+#[test]
+fn each_changed_file_comes_with_its_line_counts() {
+    let f = Fixture::new();
+    f.write("a.txt", "1\n2\n3\n");
+    f.write("gone.txt", "x\ny\n");
+    f.git(&["add", "-A"]);
+    f.git(&["commit", "-q", "-m", "base"]);
+    f.agent(
+        "fake",
+        "cat >/dev/null\nprintf '1\\nTWO\\n3\\n' > a.txt\nrm gone.txt\nprintf '\\000\\001\\002' > blob.bin\necho new > new.txt\necho ok",
+        STDOUT,
+        "",
+    );
+    let done = f.finished(&f.start("fake", Approval::Auto).expect("起"));
+    assert_eq!(done.state, State::AwaitingReview, "{done:?}");
+    let stat = |path: &str, added: Option<u64>, deleted: Option<u64>| store::FileStat {
+        path: path.into(),
+        added,
+        deleted,
+    };
+    assert_eq!(
+        done.file_stats,
+        vec![
+            stat("a.txt", Some(1), Some(1)),
+            stat("blob.bin", None, None),
+            stat("gone.txt", Some(0), Some(2)),
+            stat("new.txt", Some(1), Some(0)),
+        ]
+    );
+    let paths: Vec<String> = done.file_stats.iter().map(|s| s.path.clone()).collect();
+    assert_eq!(done.changed_files, paths, "两份列表要一一对上");
+}
+
+/// `--numstat -z` 的路径原样带着，里面有制表符也不切开。
+#[test]
+fn numstat_records_keep_tabs_in_paths_and_mark_binaries() {
+    let stats = run::parse_numstat(b"3\t1\ta\tb.txt\0-\t-\timg.png\0\0");
+    assert_eq!(
+        stats,
+        vec![
+            store::FileStat {
+                path: "a\tb.txt".into(),
+                added: Some(3),
+                deleted: Some(1),
+            },
+            store::FileStat {
+                path: "img.png".into(),
+                added: None,
+                deleted: None,
+            },
+        ]
+    );
+}
+
 /// Agent 被叮嘱别提交，还是提交了：标出来，改动照样在 diff 里（比的是工作区，不是 HEAD）。
 #[test]
 fn a_commit_by_the_agent_is_flagged_and_still_in_the_diff() {
