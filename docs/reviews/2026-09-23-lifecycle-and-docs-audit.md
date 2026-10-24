@@ -3139,3 +3139,35 @@ codex-bridge 也是用静态请求头。不用 `Authorization` 头是因为文�
 `runs/`、`agents/`、OAuth 注册表没有残留，没有"还在跑、这次不动"的。没推送。
 
 **删：**用户看过清单说删。`gld prune -y` 报"删了 0 个项目、14 项残留，腾出 4.3 MB"，没有失败项；`logs/` 从 12M 到 9.7M、`harness/` 从 15M 到 14M（`du -sh` 按块取整）。再跑 `--dry-run` 是"没有要清的"；`gld ls` 还是 20 个项目，`gld health` 四项全 ✓。
+
+## 72. 10-18 之后 ChatGPT 日用记录复核：§28 的毛病基本没了，新的大头是测试产物逼出来的基线刷新（2026-10-24）
+
+**要求：**用户说"继续任务"。队列里剩的多是"等 ChatGPT 下一轮实测再看"，而 10-18 之后已经用了一周，就拿本机记录核一遍。
+范围是 10-18 06:13Z（ChatGPT 点完 Refresh，§35）到 10-24 07:57Z，只读 `operations.jsonl`、任务事件、运行记录和服务请求日志，没动数据。
+
+**量：**请求日志 2,586 次 `tools/call`（10-19 687 次、10-22 764 次最多），几乎全是原来那条 ChatGPT 连接器；`operations.jsonl` 里
+RAGCheck 1,327 条、keex 721 条、hpsrv-docs 185 条、delegation-test 68 条，gld 自己 24 条（这一周 ChatGPT 没在 gld 仓库里开发）。13 个任务都收成 completed。
+
+| §28 / task_plan 里要看的 | 这一周 | 结论 |
+| --- | --- | --- |
+| 提交后还要不要 `refresh_baseline` | 13 次 `head_advanced`（gld 自己把提交记上账），提交后紧跟着刷新的 0 次 | §30 的修复管用 |
+| 每秒轮询 | `write_stdin` / `read_output` 共 85 次，同一主体前后两次隔 2 秒以内的 5 次 | 不算问题了 |
+| 用 `python3 -c` 读文件 | 运行记录里的 `python3 -c` 都是跑测试片段，没有读文件的 | 没再出现 |
+| `FILE_VERSION_CONFLICT` | 0 次 | 没再出现 |
+| 补丁失败 | `apply_patch` 287 次，失败 10 次（3.5%，10-09 的基线约 10%）；诊断 21 条：`anchor_not_found` 12、`context_not_found` 5、`context_ambiguous` 3、`context_drifted` 1，缩进、行尾空白、标点 0 | 维持逐字比对，没有放宽的依据 |
+| 提交说明 | keex、RAGCheck 里经 gld 的 9 个提交都没有 `类型(范围):` 前缀（keex 用自己的 `K002：`），10-23 起有 2 个带正文 | gld 仓库的规矩这一周没机会验，等它在 gld 里开发一轮 |
+
+**新的大头：被 `.gitignore` 忽略的测试产物让写操作报 `FILE_CHANGED_EXTERNALLY`。**这一周被拒的写操作里它占 9 次（`apply_patch` 5、
+`exec_command` 4），每次之后 AI 要 `refresh_baseline` 先看、再接纳，共 13 次刷新；RAGCheck 10-20 一个任务里刷了 7 次。逐次把
+刷新时列出的改动交给 `git check-ignore`：**13 次里 11 次，改动全是被忽略的文件**——`.data/tests/…`（测试建的临时库和日志）、
+`.pytest_cache/…`、`tests/secret_scan/.scratch/…`、`.DS_Store`；另外 1 次夹着 keex 没忽略的 `tests/fixtures/kdbx/.matrix-work-*`，
+1 次是初始化 git 时只有 HEAD 变。
+
+原因：gld 每条命令回包后会把工作区重新记账（`refresh_expected_state`），但测试转到后台继续跑时，回包之后才写出、删掉的文件
+算不到它头上（有意的：那段时间分不清是不是别人改的，§30）。扫描（`harness/scan.rs`）只跳过一张固定的目录名单
+（`target`、`node_modules`、`.venv`、`test-results` 等），不看 `.gitignore`，所以 `.data/`、`.pytest_cache/` 这类每个项目自己的产物目录都算进指纹。
+
+**可以怎么改（没做，要用户定）：**项目是 Git 仓库时，扫描不进被 `.gitignore` 忽略的文件和目录（`git ls-files --others --ignored
+--exclude-standard --directory` 拿清单，遍历时整目录跳过）。照这一周的记录能省掉 11 次刷新、约 8 次被拒的写；顺带少哈希
+`.data/` 下的库文件。代价和固定名单一样，只是范围变成"项目自己声明不要的"：任务期间有人改了被忽略的文件（比如本地 `.env`），
+gld 不再报外部改动；任务的改动清单也不列被忽略的文件。单个文件的版本冲突检查不受影响。
