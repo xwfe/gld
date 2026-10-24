@@ -219,9 +219,9 @@ pub enum Command {
     /// 只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
     ///
     ///   gld grant add alice api web           只开 api、web，只读：能看能搜，改不了文件、跑不了命令
-    ///   gld grant add me-laptop api --write   能写能跑命令（等于把这台机器交出去，见下）
+    ///   gld grant add me-laptop api --write   能写能跑命令，项目开了委派还能委派给本机 Agent（等于把这台机器交出去，见下）
     ///   gld grant ls                          有哪些、各开了什么（--reveal 显示口令和令牌）
-    ///   gld grant rm alice                    立即作废，并停掉它起的命令
+    ///   gld grant rm alice                    立即作废，并停掉它起的命令和委派的 Agent
     ///
     /// 客户端地址不变：OAuth 在授权页填 grant 的口令（不是服务口令），bearer 用 grant 的令牌。
     /// 服务自己的口令和令牌照旧管全部项目。
@@ -1048,7 +1048,8 @@ pub enum GrantCmd {
         /// 开放的项目，至少一个
         #[arg(required = true, value_name = "PROJECT")]
         projects: Vec<String>,
-        /// 能写文件、能跑命令。能跑命令就读得到服务口令，等于全权：只给你信得过的
+        /// 能写文件、能跑命令；项目开了 agent-delegation 的话还能委派给本机 Agent（全权跑）。
+        /// 能跑命令就读得到服务口令，等于全权：只给你信得过的
         #[arg(long)]
         write: bool,
     },
@@ -1072,7 +1073,7 @@ pub enum GrantCmd {
         /// 允许的请求 Origin，可重复；省略时允许 Chrome 商店版 SuperAssistant
         #[arg(long, value_name = "ORIGIN")]
         origin: Vec<String>,
-        /// 能写文件、能跑命令。命令以你的账号执行，等于全权：只给你信得过的
+        /// 能写文件、能跑命令（委派给本机 Agent 不行：地址谁拿到谁能用）。命令以你的账号执行，等于全权：只给你信得过的
         #[arg(long)]
         write: bool,
     },
@@ -1082,7 +1083,7 @@ pub enum GrantCmd {
         #[arg(long)]
         reveal: bool,
     },
-    /// 作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉
+    /// 作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令和委派的 Agent 一起停掉
     #[command(visible_alias = "rm")]
     Remove { name: String },
 }

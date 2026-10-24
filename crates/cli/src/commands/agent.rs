@@ -83,8 +83,13 @@ async fn list(ctx: &mut Ctx) -> CliResult {
     for task in &tasks {
         let age = human_duration(now.saturating_sub(task.created_at_ms) / 1000);
         let preview: String = task.prompt_preview.chars().take(40).collect();
+        let by = task
+            .grant
+            .as_ref()
+            .map(|grant| format!("（grant {}）", grant.name))
+            .unwrap_or_default();
         ctx.out.line(format!(
-            "{}  {}  {}  {}  {age}前  {}",
+            "{}  {}  {}{by}  {}  {age}前  {}",
             short(&task.task_id),
             task.workspace_name,
             task.agent,
@@ -124,7 +129,16 @@ async fn show(ctx: &mut Ctx, task: String) -> CliResult {
         ),
         ("Agent", agent_text(task)),
         ("状态", state_text(task.state).to_string()),
-        ("发起人", task.caller.clone()),
+        (
+            "发起人",
+            match &task.grant {
+                Some(grant) => format!(
+                    "grant「{}」（{}；撤销它会停掉这个任务：gld grant rm {}）",
+                    grant.name, task.caller, grant.name
+                ),
+                None => task.caller.clone(),
+            },
+        ),
         ("交接目录", detail.handoff_dir.clone()),
     ];
     if let Some(code) = task.exit_code {

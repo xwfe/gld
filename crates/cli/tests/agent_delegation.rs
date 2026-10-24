@@ -593,3 +593,150 @@ fn a_running_task_holds_writes_and_restart_until_stopped() {
     env.ok(&["daemon", "restart"]);
     env.ok(&["daemon", "stop"]);
 }
+
+/// 经服务调 agent_manage：返回工具结果，或者 JSON-RPC 层的错误（比如工具表里没有）。
+fn hub_manage(port: u16, path: &str, headers: &[(&str, &str)], arguments: Value) -> Value {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "agent_manage", "arguments": arguments },
+    });
+    let mut all = vec![
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json, text/event-stream"),
+        ("Mcp-Protocol-Version", "2025-06-18"),
+    ];
+    all.extend_from_slice(headers);
+    let reply = common::http::request(port, "POST", path, &all, &body.to_string());
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let packet = reply.json();
+    match packet["result"]["content"][0]["text"].as_str() {
+        Some(text) => serde_json::from_str(text).expect("工具结果是 JSON"),
+        None => packet,
+    }
+}
+
+/// `--write` grant 能委派，只看得见、动得了自己起的；只读 grant、浏览器地址的 grant 不行；
+/// `gld grant rm` 把它委派的任务一起停掉（在跑的叫停、等放行的作废）。RFC-0009 第 5 节。
+#[test]
+fn a_write_grant_can_delegate_and_revoking_it_stops_its_tasks() {
+    let env = Env::new();
+    agent(
+        &env,
+        "ticker",
+        "cat >/dev/null\nwhile true; do echo tick; sleep 0.2; done",
+    );
+    let ok = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(env.project.path())
+        .status()
+        .expect("git init")
+        .success();
+    assert!(ok);
+    let port = common::env::free_port();
+    env.ok(&["add", ".", "--name", "it"]);
+    env.ok(&["upgrade", "--port", &port.to_string(), "--auth", "bearer"]);
+    env.ok(&["start"]);
+    env.ok(&["set", "it", "agent-delegation=ask"]);
+
+    let token = |args: &[&str]| -> String {
+        env.json(args)["bearerToken"]
+            .as_str()
+            .expect("令牌")
+            .to_string()
+    };
+    let worker = token(&["--json", "grant", "add", "worker", "it", "--write"]);
+    let other = token(&["--json", "grant", "add", "other", "it", "--write"]);
+    let viewer = token(&["--json", "grant", "add", "viewer", "it"]);
+    let bearer = |token: &str| format!("Bearer {token}");
+    let as_grant = |token: &str, arguments: Value| {
+        let auth = bearer(token);
+        hub_manage(port, "/mcp", &[("Authorization", auth.as_str())], arguments)
+    };
+    let start = serde_json::json!({
+        "workspace": "it", "action": "start", "agent": "ticker", "prompt": "一直跑"
+    });
+
+    // 只读 grant：工具表里本来就没有 agent_manage，硬发也是不认识的工具。
+    let refused = as_grant(&viewer, start.clone());
+    assert_eq!(
+        refused["error"]["data"]["reason"], "unknown_tool",
+        "{refused}"
+    );
+
+    // 浏览器地址的 grant 带了 --write 也不行：地址谁拿到谁能用。
+    let created = env.json(&[
+        "--json", "grant", "browser", "page", "it", "--ttl", "1h", "--write",
+    ]);
+    let url = created["localUrl"].as_str().expect("localUrl");
+    let (_, key) = url.split_once("/mcp/browser/").expect("浏览器地址");
+    let refused = hub_manage(
+        port,
+        &format!("/mcp/browser/{key}"),
+        &[(
+            "Origin",
+            "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef",
+        )],
+        start.clone(),
+    );
+    assert_eq!(
+        refused["error"]["code"], "AGENT_DELEGATION_NOT_ALLOWED",
+        "{refused}"
+    );
+    assert_eq!(refused["error"]["details"]["grant"], "browser", "{refused}");
+
+    // --write grant：ask 档起得来，停在等本机放行；本机看得出是哪把 grant 要跑。
+    let waiting = as_grant(&worker, start.clone());
+    assert_eq!(waiting["state"], "waiting_local_approval", "{waiting}");
+    assert!(
+        waiting.get("grant").is_none(),
+        "grant 是本机记账用的：{waiting}"
+    );
+    let waiting_id = waiting["task_id"].as_str().expect("task_id").to_string();
+    let listed = env.ok(&["agent", "ls"]);
+    assert!(listed.contains("ticker（grant worker）"), "{listed}");
+    let shown = env.ok(&["agent", "show", &waiting_id[..8]]);
+    assert!(shown.contains("grant「worker」"), "{shown}");
+
+    // 另一把 --write grant 看不见、动不了它；服务自己的凭据（这里是本机）看得见。
+    let mine = |token: &str| {
+        as_grant(
+            token,
+            serde_json::json!({ "workspace": "it", "action": "list" }),
+        )["tasks"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+    assert_eq!(mine(&other), 0);
+    assert_eq!(mine(&worker), 1);
+    for action in ["status", "stop"] {
+        let hidden = as_grant(
+            &other,
+            serde_json::json!({ "workspace": "it", "action": action, "task_id": waiting_id }),
+        );
+        assert_eq!(
+            hidden["error"]["code"], "AGENT_TASK_NOT_FOUND",
+            "{action}：{hidden}"
+        );
+    }
+    let all = manage(&env, &["action=list"]);
+    assert_eq!(all["tasks"].as_array().map_or(0, Vec::len), 1, "{all}");
+
+    // auto 档再起一个在跑的，然后撤销：两个都停掉。
+    env.ok(&["set", "it", "agent-delegation=auto"]);
+    let running = as_grant(&worker, start);
+    assert_eq!(running["state"], "running", "{running}");
+    let running_id = running["task_id"].as_str().expect("task_id").to_string();
+    let removed = env.json(&["--json", "grant", "rm", "worker"]);
+    assert_eq!(removed["stoppedAgentTasks"], 2, "{removed}");
+    let said = env.ok(&["grant", "rm", "other"]);
+    assert!(!said.contains("Agent 任务"), "other 没委派过：{said}");
+
+    let voided = manage(&env, &["action=status", &format!("task_id={waiting_id}")]);
+    assert_eq!(voided["state"], "stopped", "{voided}");
+    let stopped = wait_done(&env, &running_id);
+    assert_eq!(stopped["state"], "stopped", "{stopped}");
+    env.ok(&["stop"]);
+    env.ok(&["daemon", "stop"]);
+}

@@ -3,9 +3,9 @@
 //! 把关都在这一层：
 //!
 //! - 项目开关 `agent-delegation` 是 off 就不让起（默认 off）；ask 档存下来等用户在本机 `gld agent approve`。
-//! - 起、审、停只有服务主凭据能做（D1）。grant 来的一律不行：现在分不出浏览器 grant，
-//!   而 Agent 是全权跑的，等于把全权借给了 grant 的持有人。
-//! - 只看得见、只动得了**这个项目**的任务。
+//! - 起、审、停：服务自己的凭据，和 `gld grant add --write` 发的 grant。只读 grant、浏览器地址的 grant 不行：
+//!   Agent 是全权跑的，等于把全权借给了凭据的持有人（RFC-0009 第 5 节）。
+//! - 只看得见、只动得了**这个项目**的任务；grant 进来的只看得见自己起的，别人的当作不存在（和命令会话按调用方分开同一个道理）。
 //! - Plan 模式下起不了（`manage::action_is_mutating` 把 start 算成写，分发层统一拦）。
 
 use std::path::Path;
@@ -42,24 +42,24 @@ pub fn agent_manage(
     })?;
     match action {
         "agents" => agent_profiles(ctx, &data_home),
-        "list" => Ok(list(ctx, &data_home)),
+        "list" => Ok(list(ctx, caller, &data_home)),
         "start" => {
-            only_operator(caller, "start")?;
+            may_delegate(caller, "start")?;
             start(ctx, caller, &data_home, args)
         }
         "status" => {
-            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            let (dir, task) = this_project_task(ctx, caller, &data_home, args)?;
             Ok(present(agents::detail(&dir, task)))
         }
         "wait" => {
             let secs = crate::tools::args::bounded(args, "agent_manage", "wait_seconds");
-            let (_, task) = this_project_task(ctx, &data_home, args)?;
+            let (_, task) = this_project_task(ctx, caller, &data_home, args)?;
             let (dir, task) = agents::wait(&data_home, &task.task_id, Duration::from_secs(secs))
                 .map_err(convert)?;
             Ok(present(agents::detail(&dir, task)))
         }
         "diff" => {
-            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            let (dir, task) = this_project_task(ctx, caller, &data_home, args)?;
             let offset = args.get("offset").and_then(Value::as_u64);
             let path = args
                 .get("path")
@@ -70,8 +70,8 @@ pub fn agent_manage(
             Ok(present_page(page))
         }
         "review" => {
-            only_operator(caller, "review")?;
-            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            may_delegate(caller, "review")?;
+            let (dir, task) = this_project_task(ctx, caller, &data_home, args)?;
             let verdict = string_arg(args, "verdict")?;
             let note = args.get("note").and_then(Value::as_str).unwrap_or_default();
             let task = agents::review(&data_home, &task.task_id, verdict, note).map_err(convert)?;
@@ -85,8 +85,8 @@ pub fn agent_manage(
             Ok(value)
         }
         "stop" => {
-            only_operator(caller, "stop")?;
-            let (dir, task) = this_project_task(ctx, &data_home, args)?;
+            may_delegate(caller, "stop")?;
+            let (dir, task) = this_project_task(ctx, caller, &data_home, args)?;
             let task = agents::stop(&data_home, &task.task_id).map_err(convert)?;
             Ok(present(agents::detail(&dir, task)))
         }
@@ -141,6 +141,10 @@ fn start(
         workspace_root: ctx.workspace.root(),
         workspace_name: &ctx.workspace_name,
         caller: caller.key(),
+        grant: caller.grant().map(|grant| agents::store::TaskGrant {
+            id: grant.id.clone(),
+            name: grant.name.clone(),
+        }),
         agent,
         prompt: string_arg(args, "prompt")?,
         brief: args.get("brief").and_then(Value::as_str),
@@ -209,10 +213,11 @@ fn agent_profiles(ctx: &ToolContext, data_home: &Path) -> Result<Value, Workspac
     }))
 }
 
-fn list(ctx: &ToolContext, data_home: &Path) -> Value {
+fn list(ctx: &ToolContext, caller: &Caller, data_home: &Path) -> Value {
     let project_id = crate::tools::runs::project_id(&canonical(ctx.workspace.root()));
     let tasks: Vec<Value> = agents::list(data_home, Some(&project_id))
         .into_iter()
+        .filter(|task| visible_to(caller, task))
         .take(50)
         .map(|task| {
             json!({
@@ -227,16 +232,25 @@ fn list(ctx: &ToolContext, data_home: &Path) -> Value {
     json!({ "tasks": tasks })
 }
 
-/// 按 task_id 找，而且必须是这个项目的：别的项目的任务当作不存在。
+/// grant 进来的只看得见自己起的任务；服务自己的凭据看得见这个项目的全部。
+fn visible_to(caller: &Caller, task: &agents::store::AgentTask) -> bool {
+    match caller.grant_id() {
+        None => true,
+        Some(id) => task.grant.as_ref().is_some_and(|grant| grant.id == id),
+    }
+}
+
+/// 按 task_id 找，而且必须是这个项目的、这个调用方看得见的：别的项目的、别人用 grant 看不到的任务当作不存在。
 fn this_project_task(
     ctx: &ToolContext,
+    caller: &Caller,
     data_home: &Path,
     args: &Value,
 ) -> Result<(std::path::PathBuf, agents::store::AgentTask), WorkspaceError> {
     let given = string_arg(args, "task_id")?;
     let (dir, task) = agents::get(data_home, given).map_err(convert)?;
     let here = crate::tools::runs::project_id(&canonical(ctx.workspace.root()));
-    if task.project_id != here {
+    if task.project_id != here || !visible_to(caller, &task) {
         return Err(convert(AgentError {
             code: "AGENT_TASK_NOT_FOUND",
             message: format!("这个项目没有任务 {given}"),
@@ -290,9 +304,10 @@ fn present(mut detail: TaskDetail) -> Value {
         object.insert("next_action".into(), Value::String(next));
         // 原样输出、提示全文只在本机看：给 AI 的是 recap、报告和最后一段输出。
         // 提示预览是 AI 自己写的，每次 status / wait / review 原样回去最多 2 KB、线上翻倍（审查 §57 量的：等审核那次回包里
-        // 它最大）；发起人、gld 进程和项目哈希是本机记账用的，AI 拿去也做不了什么。本机 `gld agent show` 照样都有。
+        // 它最大）；发起人（含哪把 grant）、gld 进程和项目哈希是本机记账用的，AI 拿去也做不了什么。本机 `gld agent show` 照样都有。
         for key in [
             "caller",
+            "grant",
             "prompt_preview",
             "owner",
             "owner_pid",
@@ -326,18 +341,23 @@ fn present_page(page: agents::DiffPage) -> Value {
     value
 }
 
-fn only_operator(caller: &Caller, action: &str) -> Result<(), WorkspaceError> {
-    if caller.grant_id().is_none() {
+fn may_delegate(caller: &Caller, action: &str) -> Result<(), WorkspaceError> {
+    let Some(grant) = caller.grant().filter(|grant| !grant.may_delegate()) else {
         return Ok(());
-    }
+    };
+    let kind = if grant.browser {
+        "browser"
+    } else {
+        "read_only"
+    };
     Err(WorkspaceError::ToolDetails {
         code: "AGENT_DELEGATION_NOT_ALLOWED",
         message: format!(
-            "grant 的凭据不能 {action} 委派：Agent 是全权跑的。用服务自己的凭据连进来才行。"
+            "这把 grant 不能 {action} 委派：Agent 是全权跑的，只有用户用 gld grant add <名字> <项目> --write 发的 grant 才行，只读的、浏览器地址的都不行。"
         ),
         category: "permission",
         retryable: false,
-        details: json!({ "action": action }),
+        details: json!({ "action": action, "grant": kind }),
     })
 }
 

@@ -23,7 +23,7 @@
 //! - **分不开**：同一个入口上共用一条 bearer 令牌的多个客户端。共享密钥本来
 //!   就是一个主体，要分得开就得给每个客户端单独注册 OAuth 客户端。
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, Grant};
 
 /// 命令行、守护进程内部调用和测试用的入口名。
 ///
@@ -38,9 +38,9 @@ pub const LOCAL_SCOPE: &str = "local";
 pub struct Caller {
     key: String,
     scope: String,
-    /// 用 grant 的钥匙进来的，记下是哪个：`gld grant rm` 要按它停命令（RFC-0007）。
-    /// 它已经在 `key` 里了，单独放一格是为了不去拆字符串。
-    grant: Option<String>,
+    /// 用 grant 的钥匙进来的，记下是哪个：`gld grant rm` 要按它停命令（RFC-0007），委派要看它能不能
+    /// 起全权的 Agent、任务记下它的名字（RFC-0009）。id 已经在 `key` 里了，单独放一格是为了不去拆字符串。
+    grant: Option<Grant>,
 }
 
 impl Caller {
@@ -66,12 +66,16 @@ impl Caller {
         Self {
             key: auth.tag(),
             scope: auth.scope().to_string(),
-            grant: auth.grant().map(|grant| grant.id.clone()),
+            grant: auth.grant().cloned(),
         }
     }
 
     pub fn grant_id(&self) -> Option<&str> {
-        self.grant.as_deref()
+        self.grant.as_ref().map(|grant| grant.id.as_str())
+    }
+
+    pub fn grant(&self) -> Option<&Grant> {
+        self.grant.as_ref()
     }
 
     /// 主体的标识，也写进运行记录（[`crate::tools::runs::RunRecord::caller`]）：重启之后

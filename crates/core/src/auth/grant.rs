@@ -20,7 +20,7 @@ use super::bearer::constant_time_eq_str;
 use crate::data::DataStore;
 
 /// 一个 grant 的范围。跟着 [`super::AuthContext`] 往下走，**不带钥匙本身**。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Grant {
     /// 随机 id，写进令牌里。不用名字：删了再建一个同名的，旧令牌不能跟着复活。
     pub id: String,
@@ -30,11 +30,31 @@ pub struct Grant {
     /// 只读：工具按 read-only 工具集取交集，远端只给读的那几个。
     #[serde(default)]
     pub read_only: bool,
+    /// 浏览器专用短期地址发的。不落盘，查 grant 时按记录里有没有 `browser` 现算：
+    /// 委派要分得出它（RFC-0009 第 5 节），而数据文件里本来就有这个事实，存两份迟早对不上。
+    #[serde(skip)]
+    pub browser: bool,
 }
 
 impl Grant {
     pub fn allows(&self, member_id: &str) -> bool {
         self.workspaces.iter().any(|id| id == member_id)
+    }
+
+    /// 能不能把活委派给本机 Agent（RFC-0009 第 5 节）：只有 `gld grant add --write` 发的。
+    /// 只读的本来就调不到；浏览器地址嵌在网页扩展里、谁拿到 URL 谁就能用，带了 `--write` 也不给起全权的 Agent。
+    pub fn may_delegate(&self) -> bool {
+        !self.read_only && !self.browser
+    }
+}
+
+impl GrantRecord {
+    /// 往下传的范围，带上"是不是浏览器地址"。
+    fn scope(&self) -> Grant {
+        Grant {
+            browser: self.browser.is_some(),
+            ..self.grant.clone()
+        }
     }
 }
 
@@ -128,9 +148,9 @@ impl StoredGrants {
     fn find(matches: impl Fn(&GrantRecord) -> bool) -> Option<Grant> {
         DataStore::read_file(|data| Ok(data.grants.clone()))
             .ok()?
-            .into_iter()
+            .iter()
             .find(|record| matches(record))
-            .map(|record| record.grant)
+            .map(GrantRecord::scope)
     }
 }
 
@@ -190,7 +210,7 @@ impl FixedGrants {
             .unwrap()
             .iter()
             .find(|record| matches(record))
-            .map(|record| record.grant.clone())
+            .map(GrantRecord::scope)
     }
 }
 
@@ -254,7 +274,8 @@ mod tests {
                 id: "browser".into(),
                 name: "browser".into(),
                 workspaces: vec!["api".into()],
-                read_only: true,
+                read_only: false,
+                browser: false,
             },
             // 即使记录损坏写入了旧字段，browser 类型也不能进入永久认证通道。
             oauth_password: "unexpected-password".into(),
@@ -274,10 +295,12 @@ mod tests {
         assert!(grants.by_bearer_token("unexpected-bearer").is_none());
         assert!(grants.by_password("").is_none());
         assert!(grants.by_bearer_token("").is_none());
-        assert_eq!(
-            grants.by_browser_token("url-key", None).unwrap().id,
-            "browser"
-        );
+        let browser = grants.by_browser_token("url-key", None).unwrap();
+        assert_eq!(browser.id, "browser");
+        // 记录里没存这个标记（read_only 也是 false，能写），查出来照样认得出是浏览器地址，不能委派。
+        assert!(browser.browser && !browser.may_delegate());
+        let old = grants.by_bearer_token("old-bearer").unwrap();
+        assert!(!old.browser && !old.may_delegate(), "只读的也不能委派");
         grants.revoke("browser");
         assert!(grants.by_browser_token("url-key", None).is_none());
     }

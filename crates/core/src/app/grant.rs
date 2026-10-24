@@ -92,6 +92,9 @@ pub struct GrantRemoved {
     pub grant: GrantDto,
     /// 它起的、被一起停掉的命令会话数。
     pub stopped_commands: usize,
+    /// 它起的委派任务里，叫停的（在跑）和作废的（等放行）一共几个（RFC-0009）。
+    #[serde(default)]
+    pub stopped_agent_tasks: usize,
 }
 
 impl App {
@@ -232,6 +235,8 @@ impl App {
                 name,
                 workspaces,
                 read_only: !spec.writable,
+                // 浏览器 grant 的这一项不落盘，查的时候按记录里的 `browser` 现算（`GrantRecord::scope`）。
+                browser: false,
             },
             members,
         ))
@@ -282,17 +287,27 @@ impl App {
         // 先删记录再停命令：反过来的话，停完到删掉之间它还能再起一条。
         let grant_id = record.grant.id.clone();
         let stopped_commands = crate::tools::workspace_runtime::terminate_grant_sessions(&grant_id);
+        // 委派的 Agent 是全权跑的，撤销了还接着跑说不过去；等放行的也作废，免得用户在本机顺手放了。
+        // 数据目录找不到时任务记录也读不到，就当没有可停的。
+        let data_home = crate::home::data_home().ok();
+        let stopped_agent_tasks = data_home
+            .as_deref()
+            .map_or(0, |home| crate::agents::stop_for_grant(home, &grant_id));
         // 删之前已经过了鉴权的那一次调用还在跑：它要起命令的话，可能正排在写锁上（最多等
         // 30 秒），起来时已经在上面那次清理之后了，没人读得到、停得掉，一直跑到它自己的
-        // timeout（上限 10 分钟）。35 秒后再清一次。
+        // timeout（上限 10 分钟）。35 秒后再清一次，委派任务同理。
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(35));
             crate::tools::workspace_runtime::terminate_grant_sessions(&grant_id);
+            if let Some(home) = data_home {
+                crate::agents::stop_for_grant(&home, &grant_id);
+            }
         });
         let members = self.hub_member_names()?;
         Ok(GrantRemoved {
             grant: grant_dto(&record, &members),
             stopped_commands,
+            stopped_agent_tasks,
         })
     }
 

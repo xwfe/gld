@@ -156,7 +156,7 @@ Codex `--approve-for-me`、Claude `--permission-mode auto`、Qwen `--approval-mo
 
 所以把关放在**起之前**和**做完之后**：
 
-- **起之前**：项目开关默认 off；`ask` 档每次要你在本机点头；只有服务主凭据和 `--write` grant 能发起（D1 更紧，grant 都不行，见第 5 节）。
+- **起之前**：项目开关默认 off；`ask` 档每次要你在本机点头；只有服务主凭据和 `--write` grant 能发起（见第 5 节）。
   ChatGPT 读的网页、issue 里要是夹着提示注入，能借 ChatGPT 传给 Agent，而 Agent 是全权的——**对外接触多的项目用 `ask`，别用 `auto`**。
 - **做完之后**：状态停在 `awaiting_review`，审核结论记进任务；验收只认 gld 自己跑的命令。
 - **不递归**：委派出去的 Agent 不能再经 gld 发起委派（它的主体没有 `agent_manage`）。
@@ -181,8 +181,12 @@ Codex `--approve-for-me`、Claude `--permission-mode auto`、Qwen `--approval-mo
    路线 §5.6 已跟着改。
 2. **谁能发起**：按项目开关 `agent-delegation=off|ask|auto`，默认 off；只有服务主凭据和 `--write` grant 能发起，
    只读 grant、浏览器 grant 一律不能；ask 档 24 小时没人放行就作废。
-   **D1 实际做得更紧：所有 grant 都不能起、审、停**——调用方身份里分不出浏览器 grant（它往下传时不带标记），
-   要放开 `--write` grant 得先给 grant 加上这个标记，放到 D2。
+   D1 做得更紧，所有 grant 都不能起、审、停：调用方身份里分不出浏览器 grant（它往下传时不带标记）。
+   **2026-10-24 放开了 `--write` grant**：查 grant 时按数据记录里有没有浏览器钥匙现算出标记（不落盘），
+   只读的、浏览器地址的照旧不行；grant 只看得见、动得了自己起的任务（和命令会话按调用方分开同一个道理），
+   任务记下是哪把 grant，`gld agent ls / show` 显示名字；`gld grant rm` 把它委派的任务一起停掉（在跑的叫停、等放行的作废，
+   35 秒后再扫一次）。没有给 grant 额外强制 ask：`--write` 本来就等于全权，同一个开关对不同凭据含义不同反而难懂，
+   文档里写明开给 grant 的项目用 `ask`。
 3. **在哪跑**：在项目目录里跑，同一个项目同时只许一个。跑着的时候 gld 对这个项目拦写文件和 `exec_command`，读的照常；
    跑完、进入 `awaiting_review` 就放开。不开 git worktree。
 

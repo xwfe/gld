@@ -67,6 +67,8 @@ pub struct StartRequest<'a> {
     pub workspace_root: &'a Path,
     pub workspace_name: &'a str,
     pub caller: &'a str,
+    /// 用 `--write` grant 发起的是哪一把；服务自己的凭据是 None。
+    pub grant: Option<store::TaskGrant>,
     pub agent: &'a str,
     pub prompt: &'a str,
     pub brief: Option<&'a str>,
@@ -165,6 +167,7 @@ pub fn start(request: StartRequest<'_>) -> Result<AgentTask, AgentError> {
         workspace_name: request.workspace_name.to_string(),
         agent: request.agent.to_string(),
         caller: request.caller.to_string(),
+        grant: request.grant,
         client_request_id: request.client_request_id.map(str::to_string),
         prompt_preview: preview,
         agent_approval: agent_approval.to_string(),
@@ -378,6 +381,21 @@ pub fn stop(data_home: &Path, task_id: &str) -> Result<AgentTask, AgentError> {
         )),
         _ => Err(not_in_state(&task, "在跑或等放行")),
     }
+}
+
+/// `gld grant rm` 时收尾：这把 grant 起的任务，在跑的叫停、等放行的作废（RFC-0009 第 5 节）。
+/// 返回动了几个。在跑的只有起它的进程停得了，`gld grant rm` 走守护进程，正是那个进程。
+pub fn stop_for_grant(data_home: &Path, grant_id: &str) -> usize {
+    list(data_home, None)
+        .into_iter()
+        .filter(|task| {
+            task.grant
+                .as_ref()
+                .is_some_and(|grant| grant.id == grant_id)
+                && matches!(task.state, State::Running | State::WaitingLocalApproval)
+        })
+        .filter(|task| stop(data_home, &task.task_id).is_ok())
+        .count()
 }
 
 /// 审核：Agent 跑完以后给结论，意见存进任务记录和交接目录的 `review.md`。

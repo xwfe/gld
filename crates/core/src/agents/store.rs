@@ -91,6 +91,10 @@ pub struct AgentTask {
     pub agent: String,
     /// 发起人（[`crate::tools::caller::Caller::key`]），不含令牌。
     pub caller: String,
+    /// 用 `--write` grant 的钥匙发起的：哪一把。grant 只看得见、动得了自己起的任务，`gld grant rm` 按 id 停掉它们，
+    /// 本机列表显示名字（ask 档放行前看得出是谁要跑）。服务自己的凭据发起的没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<TaskGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
     /// 用户给的提示，脱敏后最多 2 KB，给人看。全文在 `prompt.md`。
@@ -159,6 +163,12 @@ pub struct AgentTask {
     pub head_moved: bool,
     #[serde(default)]
     pub review: Option<Review>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskGrant {
+    pub id: String,
+    pub name: String,
 }
 
 /// 一个文件这次增删了几行（`git diff --numstat`）。二进制文件数不了行，两个都是 None。
@@ -281,6 +291,7 @@ mod tests {
             workspace_name: "w".into(),
             agent: "codex".into(),
             caller: "local".into(),
+            grant: None,
             client_request_id: None,
             prompt_preview: "fix".into(),
             agent_approval: "all".into(),

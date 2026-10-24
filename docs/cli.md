@@ -972,9 +972,9 @@ Options:
 只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
 
   gld grant add alice api web           只开 api、web，只读：能看能搜，改不了文件、跑不了命令
-  gld grant add me-laptop api --write   能写能跑命令（等于把这台机器交出去，见下）
+  gld grant add me-laptop api --write   能写能跑命令，项目开了委派还能委派给本机 Agent（等于把这台机器交出去，见下）
   gld grant ls                          有哪些、各开了什么（--reveal 显示口令和令牌）
-  gld grant rm alice                    立即作废，并停掉它起的命令
+  gld grant rm alice                    立即作废，并停掉它起的命令和委派的 Agent
 
 客户端地址不变：OAuth 在授权页填 grant 的口令（不是服务口令），bearer 用 grant 的令牌。
 服务自己的口令和令牌照旧管全部项目。
@@ -988,7 +988,7 @@ Commands:
   add      发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
   browser  为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
   list     列出全部（默认脱敏，--reveal 显示普通口令和令牌；浏览器 URL 只在创建时显示） [alias: ls]
-  remove   作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉 [alias: rm]
+  remove   作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令和委派的 Agent 一起停掉 [alias: rm]
 
 Options:
   -w, --workspace <WS>
@@ -1033,7 +1033,8 @@ Arguments:
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
-      --write           能写文件、能跑命令。能跑命令就读得到服务口令，等于全权：只给你信得过的
+      --write           能写文件、能跑命令；项目开了 agent-delegation 的话还能委派给本机 Agent（全权跑）。
+                        能跑命令就读得到服务口令，等于全权：只给你信得过的
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
@@ -1062,7 +1063,7 @@ Options:
       --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --origin <ORIGIN>  允许的请求 Origin，可重复；省略时允许 Chrome 商店版 SuperAssistant
       --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --write            能写文件、能跑命令。命令以你的账号执行，等于全权：只给你信得过的
+      --write            能写文件、能跑命令（委派给本机 Agent 不行：地址谁拿到谁能用）。命令以你的账号执行，等于全权：只给你信得过的
       --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help             Print help
@@ -1091,7 +1092,7 @@ Options:
 ## gld grant remove
 
 ```text
-作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令一起停掉
+作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令和委派的 Agent 一起停掉
 
 Usage: gld grant remove [OPTIONS] <NAME>
 

@@ -235,6 +235,12 @@ async fn remove(ctx: &mut Ctx, name: String) -> CliResult {
             removed.stopped_commands
         ));
     }
+    if removed.stopped_agent_tasks > 0 {
+        ctx.out.line(format!(
+            "停掉了它委派的 {} 个 Agent 任务（在跑的叫停，等你放行的作废）。",
+            removed.stopped_agent_tasks
+        ));
+    }
     ctx.out
         .note("用这把凭据的客户端会开始报 401，把那边的连接删掉就行。");
     Ok(())

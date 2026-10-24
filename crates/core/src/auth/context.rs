@@ -156,6 +156,7 @@ mod tests {
             name: id.into(),
             workspaces: vec![],
             read_only: false,
+            browser: false,
         };
         let owner = AuthContext::new(Principal::SharedSecret, "hub");
         let alice = owner.clone().with_grant(Some(grant("a1")));

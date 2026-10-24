@@ -251,9 +251,9 @@ coding 会话采用前述 2 分钟 / 挂后台命令 10 分钟的规则。
 
 ```bash
 gld grant add alice api web           # 只开 api、web，只读
-gld grant add me-laptop api --write   # 能写能跑命令（等于全权，见下）
+gld grant add me-laptop api --write   # 能写能跑命令、能委派给本机 Agent（等于全权，见下）
 gld grant ls                          # 有哪些、各开了什么（--reveal 显示口令和令牌）
-gld grant rm alice                    # 立即作废
+gld grant rm alice                    # 立即作废，停掉它起的命令和委派的 Agent
 ```
 
 `add` 当场打印这把 grant 的口令（OAuth）或令牌（bearer）。客户端连的还是服务那个地址：
@@ -280,9 +280,11 @@ OAuth 的在授权页填 **grant 的口令**（不是服务口令），bearer �
   项目外面。要开给 grant 就先 `gld set <项目> confine-reads=true`。
 - **命令会话是自己的**：别的 grant、服务凭据都读不到它起的命令。但**同一个项目里的 Task、
   History、Planning 是共用的**——那是项目的记录，开了同一个项目的几把凭据都看得到、都能改。
+- **委派**：`--write` 的能把活委派给本机 Agent（项目得先开 `agent-delegation`），只看得见、动得了自己起的任务；
+  只读的、浏览器地址的（带了 `--write` 也一样）不行（`AGENT_DELEGATION_NOT_ALLOWED`）。见[谁能发起](#交接文件谁能发起)。
 
 `gld grant rm` 下一次请求就生效，不用重启：它的访问令牌 401，刷新令牌也换不来新的，它起的命令
-被停掉（35 秒后再清一次，收掉撤销那一刻还在排队的调用起的命令）；正在执行的那一次调用会跑完。
+被停掉、委派的 Agent 被叫停、等你放行的委派作废（35 秒后再清一次，收掉撤销那一刻还在排队的调用起的）；正在执行的那一次调用会跑完。
 删了再建一个同名的是新的一把，旧令牌不会复活。
 
 - **改范围 = 删了重建**：换一把新口令，客户端重新授权一次。
@@ -1605,8 +1607,17 @@ env_pass = ["DEEPSEEK_API_KEY"]
 你为了共享 Planning 删掉了 `.gld/.gitignore` 也一样（委派不会把它补回来）。
 gld 自己的记录（提示全文、Agent 的原样输出）在数据目录的 `agents/` 下，`gld agent show` 看得到。
 
-**谁能发起**：只有用服务自己的凭据连进来的才能起、审、停；`gld grant` 发的凭据不行（Agent 能动你的账号，等于把权借出去）。
-Plan 模式下起不了。**风险**见 [security.md](security.md#委派出去的-agent-是全权跑的)。
+**谁能发起**：服务自己的凭据，和 `gld grant add <名字> <项目> --write` 发的 grant，能起、审、停。只读 grant、
+浏览器地址的 grant（`gld grant browser`，带了 `--write` 也一样）不行，报 `AGENT_DELEGATION_NOT_ALLOWED`：Agent 能动你的账号，
+浏览器地址又是谁拿到谁能用。Plan 模式下起不了。
+
+- **grant 只看得见自己起的任务**：`list` 只列它自己的，别人（别的 grant、服务凭据）的任务按 id 去查、审、停，
+  报的是 `AGENT_TASK_NOT_FOUND`，和没有这个任务一样。服务自己的凭据看得见项目里的全部，包括 grant 起的。
+- **本机看得出是谁要跑**：`gld agent ls` 在 Agent 后面标"（grant 名字）"，`gld agent show` 的"发起人"写着哪把 grant。
+  ask 档放行前看一眼，不认得就 `deny`。
+- **撤销就停**：`gld grant rm` 把这把 grant 委派的任务一起收掉，在跑的叫停、等放行的作废，回显"停掉了它委派的 N 个 Agent 任务"。
+
+**风险**见 [security.md](security.md#委派出去的-agent-是全权跑的)。
 
 **还没有的**：打回之后接着同一个会话改（现在要重新起一个，把审核意见写进提示）、中途补充指令、Windows。
 

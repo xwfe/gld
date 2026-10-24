@@ -87,7 +87,7 @@ grant，行为和以前一模一样：ChatGPT 连接器不用动。新发的全�
 | 服务口令、服务 bearer 令牌、升级前的旧令牌 | 全部项目，行为不变 |
 | grant 的 OAuth 令牌 / bearer 令牌 | `list_workspaces`、`initialize` 只有授权的项目；调范围外的报 `WORKSPACE_NOT_IN_HUB`，候选里没有它；工具表里没有本机 MCP 转发 |
 | 只读 grant | `exec_command`、`apply_patch` 这类被拒，`read_file`、`git_diff` 正常；工具表按只读列 |
-| `gld grant rm` | 下一次请求 401；刷新令牌换不来新令牌；它起的后台命令被停掉；同名重建后旧令牌仍然 401 |
+| `gld grant rm` | 下一次请求 401；刷新令牌换不来新令牌；它起的后台命令被停掉（2026-10-24 起委派的 Agent 也停，RFC-0009 第 5 节）；同名重建后旧令牌仍然 401 |
 | 两把 grant 开同一个项目 | 各自的命令会话互相看不见 |
 | 真实二进制 | 隔离数据目录里走一遍真的 OAuth 授权页（填 grant 口令）和 bearer，结果同上 |
 

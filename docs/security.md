@@ -183,7 +183,9 @@ SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 
 
 - 默认 off；对外接触多的项目用 `ask`，每次在本机看一眼 `gld agent show` 的提示再 `approve`，别用 `auto`；
   能用 `self` 的 Agent（Codex、Claude Code、Qwen）就别用 `all`。打开或改这两个开关时 `gld set` 会说清现在是哪种组合、怎么收紧。
-- 只有服务自己的凭据能发起，`gld grant` 发的凭据（哪怕 `--write`）不行。
+- 能发起的是服务自己的凭据和 `--write` grant；只读 grant、浏览器地址的 grant 不行。**`--write` grant 的持有人在 `auto` 档的项目里
+  不用你点头就能起一个全权 Agent**——`--write` 本来就等于把这台机器交出去（能跑命令就读得到服务口令），委派只是让这件事更顺手。
+  开给 grant 的项目用 `ask`，`gld agent ls` 会标出是哪把 grant 要跑；不放心就 `gld grant rm`，它委派的任务一起停掉。
 - 做完一律"等审核"，改动留在工作区不提交；审的时候看 diff，别只看 Agent 自己写的 recap。
 
 ### 一键放行全部命令，等于把账号交给 AI

@@ -3741,6 +3741,7 @@ mod tests {
             name: "alice".into(),
             workspaces: ids.iter().map(|id| id.to_string()).collect(),
             read_only,
+            browser: false,
         }))
     }
 
@@ -3750,6 +3751,7 @@ mod tests {
             name: id.into(),
             workspaces: ids.iter().map(|id| id.to_string()).collect(),
             read_only: false,
+            browser: false,
         }))
     }
 

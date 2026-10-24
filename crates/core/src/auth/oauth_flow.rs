@@ -954,6 +954,7 @@ mod tests {
                 name: "alice".into(),
                 workspaces: vec!["ws-a".into()],
                 read_only: false,
+                browser: false,
             },
             oauth_password: password.into(),
             bearer_token: format!("{id}-bearer"),

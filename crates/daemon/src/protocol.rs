@@ -38,7 +38,9 @@ use serde_json::Value;
 ///    `stop_agent_task`（`gld agent`，RFC-0009）。
 /// 8：`approve_agent_task` 多了 `agent`、`model`、`effort`（放行时换 Agent、模型、推理强度）。旧守护进程不认这几个字段，
 ///    会照 AI 的提议跑、悄悄丢掉用户的修改，所以递增，让命令行先报"请重启"。
-pub const PROTOCOL_VERSION: u32 = 8;
+/// 9：`remove_grant` 的回包多了 `stoppedAgentTasks`，委派任务多了 `grant`（`--write` grant 能委派了）。旧守护进程
+///    撤销 grant 时不停它委派的 Agent，新命令行却会当成"停了 0 个"，所以递增。
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
