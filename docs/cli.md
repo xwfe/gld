@@ -16,6 +16,7 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld list](#gld-list)
 - [gld add](#gld-add)
 - [gld remove](#gld-remove)
+- [gld prune](#gld-prune)
 - [gld set](#gld-set)
 - [gld fields](#gld-fields)
 - [gld share](#gld-share)
@@ -103,6 +104,7 @@ Commands:
   list         客户端要填的地址、凭据，和所有项目；给项目名就看这个项目的配置 [alias: ls]
   add          加项目：登记目录并加入服务（服务在跑就立即生效，不用重启）
   remove       删项目：从服务里拿掉，并删掉它在 gld 这边的配置和凭据（项目文件一个字节都不动） [alias: rm]
+  prune        清理：删掉目录已经不在的项目，和已删项目留在数据目录里的日志、记录
   set          改项目配置：gld set api tool-profile=read-only（字段见 gld fields）
   fields       列出 set 支持的项目字段及取值（--all 连 GPT Actions 那条线路一起列）
   share        给服务拿一个公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
@@ -482,6 +484,55 @@ Arguments:
 Options:
   -a, --all
           删掉全部本地项目
+
+  -w, --workspace <WS>
+          目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
+          
+          [env: GLD_WORKSPACE=]
+
+      --json
+          以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+
+  -y, --yes
+          不询问，直接删
+
+      --no-autostart
+          守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+
+      --timeout <SECS>
+          等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+
+      --home <DIR>
+          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld）
+          
+          [env: GLD_HOME=]
+
+      --no-color
+          关闭彩色输出（也可设置环境变量 NO_COLOR）
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+## gld prune
+
+```text
+清理：删掉目录已经不在的项目，和已删项目留在数据目录里的日志、记录
+
+  gld prune             列出来，确认后删（-y 不问）
+  gld prune --dry-run   只列，不删
+
+只是搬了目录、还要这个项目：先 gld upgrade <项目> --path <新目录>，它就不算了。
+里面还有命令或 Agent 在跑的那几项这次不动；项目文件本身一个都不碰。
+
+Usage: gld prune [OPTIONS]
+
+Options:
+      --dry-run
+          只列出来，什么都不删
 
   -w, --workspace <WS>
           目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断

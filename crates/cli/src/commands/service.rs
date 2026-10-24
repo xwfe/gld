@@ -440,10 +440,13 @@ pub async fn show_service(ctx: &mut Ctx, reveal: bool) -> CliResult {
                 } else if allows_all_commands(&profiles, &member.id) {
                     (
                         format!("{}，{}", member.tool_profile, out.yellow("命令全放行")),
-                        member.path.clone(),
+                        local_location(out, &member.path),
                     )
                 } else {
-                    (member.tool_profile.clone(), member.path.clone())
+                    (
+                        member.tool_profile.clone(),
+                        local_location(out, &member.path),
+                    )
                 };
                 vec![
                     member.name.clone(),
@@ -474,6 +477,15 @@ pub async fn show_service(ctx: &mut Ctx, reveal: bool) -> CliResult {
         if !outside.is_empty() {
             out.line(out.yellow(
                 "标了「不在服务里」的 AI 看不见（以前的版本登记的）。gld start 会把它们加进来。",
+            ));
+        }
+        if status
+            .members
+            .iter()
+            .any(|member| member.kind == "local" && directory_is_gone(&member.path))
+        {
+            out.line(out.yellow(
+                "标了「目录不在了」的：只是搬了目录用 gld upgrade <项目> --path <新目录>；不要了就 gld prune 一次清掉（连它们留下的记录）。",
             ));
         }
     }
@@ -607,6 +619,20 @@ pub fn print_endpoints(ctx: &Ctx, status: &HubStatusDto) {
         ("认证方式", status.config.auth_type.clone()),
         ("项目", status.members.len().to_string()),
     ]);
+}
+
+/// 本机项目那一列：目录不在了就在路径后面标出来。
+fn local_location(out: crate::output::Output, path: &str) -> String {
+    if directory_is_gone(path) {
+        format!("{path}  {}", out.yellow("（目录不在了）"))
+    } else {
+        path.to_string()
+    }
+}
+
+/// 和 `gld prune` 同一个口径，规则写在 core 那边。
+fn directory_is_gone(path: &str) -> bool {
+    gld_core::app::directory_is_gone(std::path::Path::new(path))
 }
 
 /// 这个项目设成了 `command-policy=all`。

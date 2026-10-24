@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use gld_core::app::{
     BrowserGrantSpec, CcnmMemberSpec, GlobalRuntimeSettingsDto, GrantSpec, PlanStepUpdate,
-    WorkspaceCreateOptions, WorkspaceTarget,
+    PruneReport, WorkspaceCreateOptions, WorkspaceTarget,
 };
 use gld_core::planning::{GoalStatus, PlanStatus, PlanningMode};
 use gld_core::runtime::ServiceKind;
@@ -42,6 +42,7 @@ use serde_json::Value;
 ///    撤销 grant 时不停它委派的 Agent，新命令行却会当成"停了 0 个"，所以递增。
 /// 10：服务配置多了 `openaiTunnelId`、隧道类型多了 `openai`。旧守护进程收到 `--tunnel openai:…` 会报
 ///    "看不懂的隧道类型"，还会把 ID 字段丢掉，所以递增，让命令行先报"请重启"。
+///    同一版（还没换装过）里又加了 `prune`（`gld prune`），没再递增。
 pub const PROTOCOL_VERSION: u32 = 10;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
@@ -86,6 +87,10 @@ pub enum Request {
     },
     DeleteWorkspace {
         target: WorkspaceTarget,
+    },
+    /// `gld prune`：`confirmed` 为空只列清单；给了就删其中这次还扫得出来的。
+    Prune {
+        confirmed: Option<PruneReport>,
     },
     UseWorkspace {
         target: WorkspaceTarget,
@@ -448,6 +453,8 @@ impl Request {
                 | Request::TestMcpServer { .. }
                 // 要停它起的命令，每条最多等 1.5 秒收尾。
                 | Request::RemoveGrant { .. }
+                // 要算目录大小、删整棵目录，日志攒久了有几百 MB。
+                | Request::Prune { .. }
         )
     }
 

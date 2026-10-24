@@ -477,7 +477,7 @@ pub fn fields(ctx: &Ctx, all: bool) -> CliResult {
     Ok(())
 }
 
-fn confirm(question: &str) -> CliResult<bool> {
+pub(super) fn confirm(question: &str) -> CliResult<bool> {
     if !std::io::stdin().is_terminal() {
         return Err(CliError::new("非交互环境，请加 -y 确认。"));
     }

@@ -531,6 +531,19 @@ pub fn service_checks(
             "gld start（会把它们加进来并逐个列出）",
         ));
     }
+    let gone: Vec<&str> = profiles
+        .iter()
+        .filter(|profile| super::prune::directory_is_gone(Path::new(&profile.path)))
+        .map(|profile| profile.name.as_str())
+        .collect();
+    if !gone.is_empty() {
+        checks.push(DoctorCheck::warn(
+            SERVICE_SCOPE,
+            "项目",
+            format!("目录不在了：{}", gone.join("、")),
+            "不要了就 gld prune；只是搬了目录就 gld upgrade <项目> --path <新目录>",
+        ));
+    }
 
     checks
 }

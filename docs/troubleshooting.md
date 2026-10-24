@@ -115,6 +115,7 @@ gld tool call exec_command cmd='cargo test'
 | `当前目录 … 不是项目，没加进来` | 在不是项目的目录里敲了 `gld start` / `gld share`，而你已经有别的项目了：只起服务，不登记这个目录（免得把主目录这种地方交给 AI） | 真想加它：`gld add .` |
 | 多出来一个没印象的项目 | 在某个目录里敲过 `gld start <目录>` 或 `gld add`，它登记了。输出第一行有"已加入项目「x」" | `gld ls` 看都有谁；不要的 `gld rm <名称>`（只删 gld 这边的配置） |
 | `gld ls` 里有项目标着"不在服务里" | 旧版本登记的：那时可以"登记了但不在 hub 里"。AI 看不见它 | `gld start`（会把它们加进来并逐个说出名字），或 `gld add <目录>` |
+| `gld ls` 里有项目标着"目录不在了" | 项目目录被搬走、改名或删了（外接盘没插上也会这样） | 搬了目录：`gld upgrade <项目> --path <新目录>`；不要了：`gld prune`（先 `--dry-run` 看清单），连它留在数据目录里的记录一起清 |
 | `「api」匹配到多个项目` | 名称重复 | 用 id 前缀（≥4 位） |
 | `该目录已经是项目「x」` | `gld upgrade --path` 指到了别的项目的目录 | 一个目录只能属于一个项目。确实要腾出来先 `gld rm` 掉占着的那个 |
 | `port 是项目自己那个 MCP 服务的字段…` | 用 `gld set` 改了以前单项目服务的字段（`port`、`auth`、`tunnel`、`public-url`、`frp-*`…）。现在只有一个服务，项目上没有这些 | 报错下一行就是该用的命令：端口 / 认证用 `gld upgrade`，公网入口用 `gld share --tunnel`，凭据用 `gld secret` |

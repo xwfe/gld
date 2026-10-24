@@ -42,7 +42,7 @@ unset GLD_HOME GLD_WORKSPACE
 # 命令树：一行一个，子命令用空格分隔。
 COMMANDS=(
   ""
-  "start" "stop" "restart" "status" "list" "add" "remove" "set" "fields" "share" "upgrade"
+  "start" "stop" "restart" "status" "list" "add" "remove" "prune" "set" "fields" "share" "upgrade"
   "remote" "remote add" "remote remove"
   "mcp" "mcp list" "mcp on" "mcp off" "mcp test"
   "grant" "grant add" "grant browser" "grant list" "grant remove"

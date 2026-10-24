@@ -360,6 +360,19 @@ fn sweep_project(root: &Path, project: &Path) {
     }
 }
 
+/// 一个项目目录（`runs/<项目>`）里有没有还在跑的命令：记录是 `running`、起它的 gld 进程也还在。
+/// `gld prune` 删已删项目的运行记录前看一眼，还在跑的不动。
+pub(crate) fn project_has_running(root: &Path, project: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(project) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        entry.file_name().to_str().is_some_and(valid_id)
+            && read_record(&path).is_some_and(|record| settle(root, &path, record).is_running())
+    })
+}
+
 /// 这个进程的实例 id：记录里的 `owner` 等于它，就是本进程起的。
 pub fn instance_id() -> &'static str {
     INSTANCE.as_str()

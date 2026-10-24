@@ -55,6 +55,7 @@ pub async fn dispatch(
             let profile = resolve(app, &target)?;
             ok(&app.delete_workspace(&profile.id).await?)
         }
+        R::Prune { confirmed } => ok(&app.prune(confirmed).await?),
         R::UseWorkspace { target } => {
             let profile = resolve(app, &target)?;
             app.set_last_workspace(&profile.id)?;

@@ -13,6 +13,7 @@ mod inspect;
 mod logs;
 mod mcp;
 mod planning;
+mod prune;
 mod secret;
 mod service;
 mod settings;
@@ -77,6 +78,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::List(args) => service::list(&mut ctx, args).await,
         Command::Add(args) => workspace::add(&mut ctx, args).await,
         Command::Remove(args) => workspace::remove(&mut ctx, args).await,
+        Command::Prune(args) => prune::run(&mut ctx, args).await,
         Command::Set(args) => workspace::set(&mut ctx, args).await,
         Command::Fields { all } => workspace::fields(&ctx, all),
         Command::Share(args) => share::run(&mut ctx, args).await,

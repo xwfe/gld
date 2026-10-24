@@ -172,6 +172,16 @@ pub enum Command {
     #[command(verbatim_doc_comment, visible_alias = "rm", alias = "destroy")]
     Remove(RemoveArgs),
 
+    /// 清理：删掉目录已经不在的项目，和已删项目留在数据目录里的日志、记录
+    ///
+    ///   gld prune             列出来，确认后删（-y 不问）
+    ///   gld prune --dry-run   只列，不删
+    ///
+    /// 只是搬了目录、还要这个项目：先 gld upgrade <项目> --path <新目录>，它就不算了。
+    /// 里面还有命令或 Agent 在跑的那几项这次不动；项目文件本身一个都不碰。
+    #[command(verbatim_doc_comment)]
+    Prune(PruneArgs),
+
     /// 改项目配置：gld set api tool-profile=read-only（字段见 gld fields）
     ///
     ///   gld set tool-profile=read-only              当前目录对应的项目
@@ -639,6 +649,17 @@ pub struct RemoveArgs {
     /// 删掉全部本地项目
     #[arg(short = 'a', long, conflicts_with = "target")]
     pub all: bool,
+
+    /// 不询问，直接删
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PruneArgs {
+    /// 只列出来，什么都不删
+    #[arg(long, conflicts_with = "yes")]
+    pub dry_run: bool,
 
     /// 不询问，直接删
     #[arg(short = 'y', long)]
