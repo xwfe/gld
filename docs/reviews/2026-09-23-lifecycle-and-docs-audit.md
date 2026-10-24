@@ -2941,3 +2941,30 @@ Pi `--model`、`--thinking off|minimal|low|medium|high|xhigh`；Qwen、Kimi 只�
 
 **换装要知道的：**工具表变了（`agent_manage` 多了 `model`、`effort`，说明也改了），要点 Refresh；协议号变了，换二进制后必须重启守护进程
 （换装流程本来就有这步），命令行和守护进程版本对不上时命令行会先报"请重启"。没换装、没推送。
+
+## 65. 本机换成 `3dc98e4`（2026-10-24 10:37）；昨晚五份新档案的真跑结果
+
+**要求：**用户说"按 install.md 换装本机（先查没有在跑的命令），换完核对，不推送"。
+
+**换之前：**守护进程 pid 37079（`b81b144`，协议 7）没有子进程，没有在跑的委派，请求日志 22 分钟没动。
+
+**换装：**release 构建 2 分 58 秒；备份 `gld-b81b144-20261024-1037` 和 `gld-config-20261024-1037.tgz`（0600）；写 `.new` 再改名，
+新命令行（协议 8）照样能对旧守护进程 `restart`，去掉 `CLAUDE*` 变量重启，pid 37079 → 92371。带上 `d0bef0e`、`4559682`、`5234bba`、`9e7dd10`。
+
+**换完：**命令行和服务的构建提交都是 `3dc98e4c819c`，**协议 8**；`gld ls`、两份凭据指纹前后一致；`CLAUDE*` 变量 0 个；`gld health` 全 ✓。
+工具表指纹 `d7b4fcbe928d3203` → `f0e996d1217ba15b`，旧、新二进制逐个工具比只有 `agent_manage` 变了（多了 `model`、`effort`，说明改了），
+**要点 Refresh**。新版实调 `action=agents`：codex、claude、agy、pi 的 `effort_choice` 为真，qwen、kimi 为假，各家 `efforts` 和档案一致。
+
+**昨晚五份新档案的真跑**（换装前看任务列表才发现：用户 10-23 23:30 前后已经让 ChatGPT 按 §63 的提示词跑过，之后说"先通过"）。五个都在
+1–6 秒内失败，都是登录问题，各家自己报的原因：
+
+| 任务 | Agent | 原因 |
+| --- | --- | --- |
+| `a3d7759e` | claude 2.1.304 | `authentication_failed: Not logged in · Please run /login`（命令行版 claude 没登录） |
+| `2663e1a8` | qwen 0.19.12 | Qwen OAuth 免费额度已停，要用 `/auth` 换成 Coding Plan 或别的服务商 |
+| `2b3a05d8` | agy 1.1.28 | `authentication failed or timed out`，要先跑 `agy` 登录 |
+| `d145f7dd` | pi | `No API key found for the selected model` |
+| `0e70d729` | kimi 0.29.1 | 服务商 kimi 的 API key 无效或过期（401） |
+
+gld 这边：每个都记成 `failed`、原因在 `output_tail` 里，ChatGPT 逐个读了原因、打回，都没改文件。几家都走到了登录这一步才失败，
+没有一家报"不认识的参数"，说明档案里的启动参数至少都被接受了；真正干活的部分还没验证。没推送。
