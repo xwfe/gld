@@ -1,6 +1,6 @@
 # gld 当前任务与后续规划
 
-更新日期：2026-10-23。**本文件是当前排队与认领入口**；审查与验收过程保留在
+更新日期：2026-10-24。**本文件是当前排队与认领入口**；审查与验收过程保留在
 [生命周期审查](docs/reviews/2026-09-23-lifecycle-and-docs-audit.md)，用户用法见
 [项目开发生命周期](docs/project-lifecycle.md)。已完成项怎么做、怎么验的在审查和 git 历史里，这里不再留勾选清单。
 沿用 D / L 原有归属，不新增平行的 Goal、Task 或执行状态系统。
@@ -45,6 +45,7 @@
 | D09 | 结局与有界输出落盘，重启后可按已知 id 读取；`list_runs` 只列自己的（0.8.1） | 不恢复进程、不重放；跨重启旧结果不自动成为有效验收证据 |
 | D10 | Rust、Web、gld 自身三轮实测（审查 §10–§12）；`list_project_commands` 与 `ci_steps`、装依赖要 `confirm`（0.8.2，§13–§17）；服务模式与浏览器配法（0.8.3，§19–§21） | 就绪只到端口连得上，不验业务；浏览器的截图和 console 记录不进项目、不绑任务 |
 | D12–D13 | 0.8.0–0.8.3 发布流程、校验和、来源证明已有记录；glibc 包在 Debian 12 容器实跑过；既有协议回退已核对 | 下载包验收必须匹配版本；协议回退不是全面支持新协议 |
+| Agent 委派（RFC-0009） | `agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`、`agent-approval=all/self`、Agent 名单与默认模型 / 强度、按文件分页读 diff、`--write` grant 委派都已换上，ChatGPT 真机发起、审核、撤销都测过（审查 §42–§69）；2026-10-24 用户定收尾 | 内置六份档案只有 codex 真跑通；qwen、agy、pi、kimi、claude 卡在各家登录（§65）；OpenCode、Qoder CLI、DeepSeek Harness 只给了 `agents.toml` 写法、没装。真要用哪家再装、再调，全局安装先问 |
 
 `gld tool call` 的 CLI 退出码表示工具调用是否成功，这是已确认的契约，**不要再次当缺陷改掉**；
 命令结果看 `command_ok` / `exit_code`。
@@ -54,14 +55,12 @@
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
 | 补丁失败的原因分布 | 2026-10-18 数过一次，维持逐字比对 | 30 个原因里缩进 2 个、行尾空格和标点 0 个，没有放宽的依据；最多的是版本冲突（18 个），`3eb5fe4` 已处理（审查 §31）。再攒一阵，`indentation` 等明显变多再议 |
-| SuperAssistant 接 DeepSeek 网页 | 本机已换上（2026-10-17），没实测 | 用户自己在终端 `gld grant browser web-mcp --all`（或点名项目）拿地址（地址就是凭据，不经过 AI），扩展选 Streamable HTTP 连上，在 DeepSeek 页面走一圈 `list_workspaces` → `workspace_context` → `read_file`，看结果填回、DeepSeek 接着说。报 `Failed to fetch` 且 `gld logs` 没有请求，先查 Chrome 的本地网络访问权限。结果记审查 |
 | 用户规则送到 ChatGPT | 已部署（2026-10-18，审查 §32） | `gld context -w gld` 里全局规则和仓库 `AGENTS.md` 都打 ✓。看 ChatGPT 下一轮经 gld 开发：提交说明有没有类型前缀和正文、文档有没有照规则写、撞到 gld 的毛病有没有写出来。没改善再考虑工具层提醒（比如回包里报未提交改动量）。见审查 §26 |
 | 零中断升级（RFC-0008） | 草案，未实现 | 让在跑的命令和请求跨版本都不断。要不要做、先做哪段由用户定；先确认真实痛点（比如长跑的开发服务器被重启停掉）再立项 |
 | 任务收尾与大输入回传 | 10-18 随 `4a6d098` 换上（审查 §32、§33），没从连接器专门验 | `8fb5e31`、`63719bc`：收尾可只读重试、附加摘要失败不覆盖终态、命令回显有界；新增 8 条回归先失败后通过，全仓 test / clippy / fmt 通过，见审查 §27，复核见 §28。是预防性修复，记录里没见过 `finish` 被重试；等 ChatGPT 真重试一次 `finish` 或撞到命令回显截断时再看回包 |
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
 | 一键放行全部命令 | 10-23 22:34 已换上（审查 §60、§61） | `6a840e2`：`gld set <项目> command-policy=all` 放开白名单和 `confirm=true` 这些限制类关卡，删 `.git` 等照拦；本机 `gld set` / `gld ls` 提示风险，AI 那边初始化说明、`list_workspaces`、`workspace_context` 告知、绕过关卡的命令回包带 `policy_bypassed`。ChatGPT 没被提示就从 `list_workspaces` 看到并转告了风险，两条绕过关卡的命令它都认出来（§62）。还没做的：GPT Actions 那条线路没有这个开关 |
-| Agent 委派 | D1 本机已换上；Codex 真跑、ChatGPT 自己发起并审核一轮都通过（2026-10-23，审查 §42–§44） | [RFC-0009](docs/rfc/0009-agent-delegation.md)：`agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`，内置 codex、claude 两份档案，全权跑、做完交回审核。`7f0a87a`（不补回 `.gld/.gitignore`）、`f9bc7f0`（回包给这次任务自己的 diff、在跑时输出尾巴收到 768 字节，§45）10-23 已换上（§46），ChatGPT 再审一轮确认 diff 字段只含这次任务的改动、够它审（§47）。它提的三条 `a5cf900`（每文件增删行数 `file_stats`）、`ba6aaff`（`before_tree` / `after_tree`）、`188f60c`（`action=diff offset=` 分页读完整 diff）10-23 14:31 已换上（§49），ChatGPT Refresh 后委派了一个 175 KB 的改动，三页读完再审、accept，分页和 `task.diff` 逐字节对得上（§50）。§50 末尾 ChatGPT 的五条建议里用户选了按文件读：`0b483f0`（`file_stats` 带每个文件在 `task.diff` 里的位置，`action=diff path=`）、`c8efb4d`（`review` 回包不带 diff）和 `ab28d2b`（`gld agent show` 截断时给出全文路径）10-23 18:50 已换上（§53），要在 ChatGPT 点一次 Refresh；委派文档对账、README 精简（§52）；大 diff 时 `status` / `wait` 仍附第一页（用户定的）。ChatGPT 用 `path` 先读代码审了一个 172 KB 的 diff，三个代码文件各一页，accept（§54）。§54 的建议里用户选了两条：`b06730d`（`action=diff` 加 `max_bytes`，offset 说明写明白）、`6ce3ba1`（diff 超过 64 KB 时 `status` / `wait` 不附第一页，只给 `file_stats`）10-23 19:26 已换上（§56），要在 ChatGPT 点一次 Refresh。ChatGPT 再审了一个 200 KB 的 diff：等审核之后的回包合计 46 KB（§50 是 791 KB），只读了 diff 正文的 5%，accept（§57）。`13dabeb` 给 AI 的回包去掉 `prompt_preview` 和 gld 内部字段（每次线上约 3 KB，§58）10-23 21:18 已换上（§59），工具表没变、不用 Refresh。10-23 加了 `agent-approval=all|self` 两档放权和 qwen、agy、pi、kimi 内置档案，OpenCode、Qoder CLI、DeepSeek Harness 给了 `agents.toml` 写法（`fb9195d`–`dd2d4a7`，§60），10-23 22:34 已换上（§61）。Codex 的 self 档真跑通过，会话日志证实是 on-request + auto_review + workspace-write（§62）。五份新档案的真跑用户先不做（不是每家都有订阅，具体 Agent 的问题遇到再调，§63 有预检）。Agent 名单 `agents=…`、档案默认模型和推理强度（AI 发起时可提议）、ask 档放行时能换 Agent / 模型 / 强度（`4559682`–`9e7dd10`，§64）10-24 10:37 已换上（§65），要点 Refresh。五份新档案 10-23 晚上真跑过一次，全卡在各家的登录上（§65），用户说先通过。ChatGPT 实测名单（起 claude 被拒、没建任务）、提议 `gpt-6-luna` / `medium`、放行时改成 `low` 都通过，Codex 会话记录证实真用的是改后的强度；delegation-test 现在是 `agents=codex`（§66）。放开了 `--write` grant 委派（只读、浏览器地址的不行，grant 只看得见自己起的，`grant rm` 一起停；协议 9，§67），10-24 13:28 已换上、不用 Refresh（§68）；ChatGPT 另建一条用 grant 口令授权的连接器真机测过：只看得到一个项目、看不到别人的任务、起得了审得了自己的、撤销后等放行的那个作废且 401（§69）。下一步：没装的三家要不要装（全局安装，先问） |
 | OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
 | 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 
@@ -73,6 +72,7 @@
 
 | 项 | 什么时候做 / 怎么做 |
 | --- | --- |
+| SuperAssistant 接 DeepSeek 网页 | 代码已实现、本机已换上（`gld grant browser`，审查 §23–§25）。用户真用时自己在终端 `gld grant browser web-mcp --all`（或点名项目）拿地址（地址就是凭据，不经过 AI），扩展选 Streamable HTTP。报 `Failed to fetch` 且 `gld logs` 没有请求，先查 Chrome 的本地网络访问权限。遇到问题再修，结果记审查 |
 | Windows 下载包真机实跑 | 有 Windows 机器时。CI 的 Windows job 跑过 `daemon_lifecycle.rs` 9 条，跑的是构建产物，不是下载包 |
 | Windows CI 下一组测试 | 改到 Windows 相关代码时，从 `run_records.rs`、按 cwd 找项目（8.3 短路径）里挑 |
 | ChatGPT grant 的两处没验 | 真实共享场景时：删了 grant 用同名重建、逐字核对 ChatGPT 拿到的回包（审查 §9） |
