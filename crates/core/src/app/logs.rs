@@ -57,6 +57,7 @@ impl App {
         let tunnel = match hub.tunnel_type.as_str() {
             "cloudflare" => Some("cloudflared.log"),
             "frp" => Some("frpc-mcp.log"),
+            "openai" => Some("tunnel-client.log"),
             _ => None,
         };
         let mut chunks = Vec::new();

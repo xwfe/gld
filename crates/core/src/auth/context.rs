@@ -29,6 +29,11 @@ pub enum Principal {
     SharedSecret,
     /// 过了 OAuth 访问令牌。`client_id` 来自令牌里已验签的 claim。
     OAuthClient { client_id: String },
+    /// 经 OpenAI 隧道转进来、带着服务凭据 `openai_tunnel_key` 的请求。
+    ///
+    /// 和 bearer 分开算：两边都是一串共享密钥，合成一个主体的话，本机 bearer 客户端
+    /// 和 ChatGPT 能互相读到对方的命令输出。
+    OpenAiTunnel,
 }
 
 /// 一条请求验完鉴权之后剩下的东西。
@@ -100,6 +105,7 @@ impl AuthContext {
             Principal::OAuthClient { client_id } => {
                 format!("oauth:{}:{client_id}", self.scope)
             }
+            Principal::OpenAiTunnel => format!("openai-tunnel:{}", self.scope),
         };
         match &self.grant {
             Some(grant) => format!("{base}#grant:{}", grant.id),
@@ -146,6 +152,9 @@ mod tests {
         assert_ne!(one, other);
         assert_ne!(one, shared);
         assert_ne!(shared, AuthContext::anonymous("hub").tag());
+        let tunnel = AuthContext::new(Principal::OpenAiTunnel, "hub");
+        assert!(tunnel.is_authenticated());
+        assert_eq!(tunnel.tag(), "openai-tunnel:hub");
     }
 
     /// 两把 grant 的 bearer 令牌都是 SharedSecret，标识必须分开；全权的标识和以前一样。

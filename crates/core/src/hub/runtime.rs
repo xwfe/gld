@@ -110,6 +110,24 @@ pub async fn stop() {
     }
 }
 
+/// 监听器起好之后再挂上隧道：OpenAI 隧道一起来就要探本机服务，只能排在监听器后面。
+/// 这中间服务被停掉了的话隧道没人用，直接停。
+pub async fn attach_tunnel(outcome: TunnelOutcome) {
+    let mut guard = RUNTIME.lock().await;
+    let Some(runtime) = guard.as_mut() else {
+        if let Some(tunnel) = outcome.tunnel {
+            tunnel.stop().await;
+        }
+        return;
+    };
+    let previous = std::mem::replace(&mut runtime.tunnel, outcome.tunnel);
+    runtime.public_base = outcome.public_base;
+    runtime.tunnel_error = outcome.error;
+    if let Some(previous) = previous {
+        previous.stop().await;
+    }
+}
+
 /// 跑着的服务此刻对客户端 tools/list 给出的工具表；没在跑是 `None`。
 ///
 /// 和监听器用的是同一个 `Hub`，所以就是客户端拿到的那一份——不是按当前 CLI 的

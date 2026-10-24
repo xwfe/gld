@@ -102,6 +102,9 @@ gld tool call exec_command cmd='cargo test'
 | `… 是 frp 0.44，太老了` | gld 生成的是 TOML 配置，frp 0.52 以前用 INI 格式 | `brew upgrade frpc`，或从 releases 换 ≥0.52 的版本 |
 | FRP 子域名冲突 | 服务和某个项目的 Actions 用了同一个子域名，或者两台机器上的 gld 连同一台 frps、都用了默认的 gld | 换一个：`gld share --tunnel frp:<配置名> --subdomain <别的名字>` |
 | Cloudflare 临时地址每次都变 | quick 模式设计如此：服务每重启一次换一个 | 改用固定域名：`gld share --tunnel cf:<你的域名>`（会问你要 Tunnel Token）。重复敲 `gld start` / `gld share` 不会重启服务 |
+| `未找到 tunnel-client` | OpenAI 隧道要的 tunnel-client 没装，或不在 PATH 里 | macOS `brew install openai/tools/tunnel-client`；Windows / Linux 从 https://github.com/openai/tunnel-client/releases 下 zip，把 `tunnel-client-runtime` 放进 PATH |
+| `tunnel-client 没起来：…` | 报错后面附着它日志的最后几行；进程自己退了多半是隧道 ID 或 Runtime Key 不对 | 照日志改，`gld secret set openai_runtime_key <key>` 换 key，`gld share --tunnel openai:<隧道 ID>` 换 ID |
+| `gld share --tunnel openai:…` 成功了，ChatGPT 里选不到隧道或连不上 | gld 只查得到它在本机就绪，连 OpenAI 那一段看不到：隧道没关联这个 ChatGPT 工作区、Runtime Key 没有 Tunnels Read + Use、新权限还没生效（最长 30 分钟） | 看 `~/.config/gld/logs/hub/tunnel-client.log`；在 Platform 的 Tunnels 里核对关联的工作区和权限 |
 | 服务停了、frpc / cloudflared 还在 | 上次是 `kill -9` 退出的 | 按数据目录 `frpc/` 下对应的 `frpc.pid` 里的 pid 手动 kill；cloudflared 用 `pgrep -fl cloudflared` 找 |
 
 ## 项目与配置

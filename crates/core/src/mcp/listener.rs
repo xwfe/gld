@@ -19,12 +19,13 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, bearer_token, external_base_url,
-    hub_audience, protected_resource_metadata, protected_resource_metadata_url, register_client,
-    token_exchange, verify_bearer_header, verify_oauth_bearer_header, workspace_audience,
-    AuthContext, AuthorizeForm, AuthorizeParams, ClientRegistrationRequest, ClientRegistry,
-    GrantBook, NoGrants, OAuthRuntime, Principal, StoredGrants, TokenForm,
+    header_secret_matches, hub_audience, protected_resource_metadata,
+    protected_resource_metadata_url, register_client, token_exchange, verify_bearer_header,
+    verify_oauth_bearer_header, workspace_audience, AuthContext, AuthorizeForm, AuthorizeParams,
+    ClientRegistrationRequest, ClientRegistry, GrantBook, NoGrants, OAuthRuntime, Principal,
+    StoredGrants, TokenForm,
 };
-use crate::hub::{Hub, HubSecrets, HUB_SCOPE};
+use crate::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER};
 use crate::local_network;
 use crate::logs::append_profile_log;
 use crate::mcp::server::{handle_request, SharedState};
@@ -140,6 +141,8 @@ struct ListenerState {
     oauth_client_secret: Option<String>,
     /// bearer 令牌对不上服务令牌时，去这里看是不是哪个 grant 的（RFC-0007）。
     grants: Arc<dyn GrantBook>,
+    /// 公网入口是 OpenAI 隧道时才有：带着它的请求是 tunnel-client 转进来的。
+    openai_tunnel_key: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -215,6 +218,7 @@ pub fn spawn_listener(
         oauth,
         oauth_client_secret,
         grants: Arc::new(NoGrants),
+        openai_tunnel_key: None,
     })
 }
 
@@ -269,6 +273,7 @@ pub fn spawn_hub_listener(
         oauth,
         oauth_client_secret: None,
         grants,
+        openai_tunnel_key: secrets.openai_tunnel_key,
     })
 }
 
@@ -766,6 +771,13 @@ fn require_mcp_auth(
     state: &ListenerState,
     headers: &HeaderMap,
 ) -> Result<AuthContext, Box<Response>> {
+    // 放在认证方式前面：经 OpenAI 隧道来的请求不再走 oauth / bearer 那一套，
+    // 能进隧道的只有关联了这条隧道的 ChatGPT 工作区（OpenAI 那边管）。
+    if let Some(expected) = state.openai_tunnel_key.as_deref() {
+        if header_secret_matches(headers, OPENAI_TUNNEL_HEADER, expected) {
+            return Ok(AuthContext::new(Principal::OpenAiTunnel, &state.scope));
+        }
+    }
     if state.auth.bearer_enabled() {
         let expected = state.bearer_token.as_deref().unwrap_or("");
         let Some(refused) = verify_bearer_header(headers, expected) else {
@@ -948,6 +960,7 @@ mod tests {
             oauth: None,
             oauth_client_secret: None,
             grants: Arc::new(crate::auth::NoGrants),
+            openai_tunnel_key: None,
         }
     }
 

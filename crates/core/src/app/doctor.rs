@@ -325,7 +325,11 @@ fn environment_checks(settings: &AppSettings, profiles: &[WorkspaceProfile]) -> 
             || (settings.global_gateway.enabled
                 && settings.global_gateway.tunnel_type == tunnel_type)
     };
-    for (kind, tunnel_type) in [("frpc", "frp"), ("cloudflared", "cloudflare")] {
+    for (kind, tunnel_type) in [
+        ("frpc", "frp"),
+        ("cloudflared", "cloudflare"),
+        ("tunnel-client", "openai"),
+    ] {
         if !uses(tunnel_type) {
             continue;
         }
@@ -461,6 +465,28 @@ pub fn service_checks(
                 )
             }
         }
+        "openai" if !crate::tunnel::openai::is_tunnel_id(&hub.openai_tunnel_id) => {
+            DoctorCheck::fail(
+                SERVICE_SCOPE,
+                ENTRY,
+                format!("OpenAI 隧道 ID 不对：「{}」", hub.openai_tunnel_id),
+                "gld share --tunnel openai:<隧道 ID>",
+            )
+        }
+        "openai" if !token_present("openai_runtime_key") => DoctorCheck::fail(
+            SERVICE_SCOPE,
+            ENTRY,
+            "OpenAI 隧道缺少 Runtime Key",
+            "gld secret set openai_runtime_key <key>",
+        ),
+        "openai" => DoctorCheck::ok(
+            SERVICE_SCOPE,
+            ENTRY,
+            format!(
+                "OpenAI 隧道 {}：没有公网地址，ChatGPT 里 Connection 选 Tunnel",
+                hub.openai_tunnel_id
+            ),
+        ),
         // 这不算错，但得说出来：用户来跑 doctor 常常就是因为"地址昨天还好好的"。
         "cloudflare" => DoctorCheck::ok(
             SERVICE_SCOPE,
@@ -551,7 +577,12 @@ pub fn tunnel_check(hub: &HubConfig, snapshot: Option<&TunnelSnapshot>) -> Docto
             );
         }
         let temporary = hub.tunnel_type == "cloudflare" && hub.cloudflare_mode != "named";
-        let detail = if effective.is_empty() {
+        let detail = if hub.tunnel_type == "openai" {
+            format!(
+                "OpenAI 隧道在跑（{pid}），ChatGPT 按隧道 ID {} 连过来",
+                hub.openai_tunnel_id
+            )
+        } else if effective.is_empty() {
             format!("{} 隧道在跑（{pid}），但还没拿到公网地址", hub.tunnel_type)
         } else if temporary {
             format!(

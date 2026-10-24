@@ -188,12 +188,14 @@ gld 那边命令停了，先看结果再决定，别直接重发写操作。
 
 ## ChatGPT（MCP 连接器）
 
-ChatGPT 在 OpenAI 的服务器上，必须通过**公网 HTTPS** 地址访问，`127.0.0.1` 填进去会连不上。
+ChatGPT 在 OpenAI 的服务器上，必须通过**公网 HTTPS** 地址访问，`127.0.0.1` 填进去会连不上；
+唯一的例外是办法五的 OpenAI 隧道，它不要公网地址。
 
 `gld share` 负责整件事：给服务配好公网入口、把服务拉起来、起隧道、打印地址和凭据。
-公网入口用一个 `--tunnel` 参数表达，底下四种走法选一种。
+公网入口用一个 `--tunnel` 参数表达，底下五种走法选一种，同时只能有一种：换成别的会停掉原来那条隧道、
+清掉原来登记的地址，ChatGPT 里按旧地址建的连接器就连不上了。
 
-（这四种写法在 `gld start` 和 `gld upgrade` 上完全一样：
+（这五种写法在 `gld start` 和 `gld upgrade` 上完全一样：
 启动时就想连公网用 `gld start --tunnel …`，之后要换地址用 `gld upgrade --tunnel …`。）
 
 **`gld share` 不带 `--tunnel` 时沿用已经配好的入口**；一个都没配过才用 Cloudflare 临时地址。
@@ -297,6 +299,48 @@ gld share --tunnel https://mcp.example.com/mcp
 地址末尾那个 `/mcp` 写不写都行：存下来的是基地址，端点是拼出来的，
 所以从客户端复制过来的完整地址可以直接粘，不会变成 `…/mcp/mcp`。
 反代要把 `/.well-known/` 也转过来，否则 OAuth 客户端找不到授权页。
+
+### 办法五：OpenAI 隧道（不要域名、不开端口，只给 ChatGPT）
+
+OpenAI 官方的 [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)：
+本机跑一个 `tunnel-client`，它只往外连 OpenAI，把 ChatGPT 发来的请求取回来交给 gld。
+没有公网地址，互联网上找不到这台机器。
+
+先在 OpenAI Platform 做两件事，gld 替不了：
+
+1. 组织设置的 Tunnels 里建一条隧道，**关联上你要用的 ChatGPT 工作区**（只属于 Platform 组织不够，
+   ChatGPT 里会选不到），记下 `tunnel_` 开头的隧道 ID。建隧道要 Tunnels Read + Manage 权限。
+2. 准备一把 Runtime Key（`sk-…`），要有 Tunnels Read + Use 权限。新分配的权限最长 30 分钟才生效。
+
+```bash
+brew install openai/tools/tunnel-client     # Windows / Linux：发布页下 zip，把 tunnel-client-runtime 放进 PATH
+gld share --tunnel openai:tunnel_0123…       # Runtime Key 没配过会当场问（输入不显示）
+```
+
+不想交互就放环境变量 `CONTROL_PLANE_API_KEY`（和 tunnel-client 自己认的同名），或者 `--token <key>`；
+给过一次就存成服务凭据 `openai_runtime_key`。gld **不认** `OPENAI_API_KEY`：那多半是你调 API 的 key，不是隧道的。
+发布页是 <https://github.com/openai/tunnel-client/releases>；macOS 上直接下的 zip 没做公证，会被系统拦，所以用 brew。
+
+ChatGPT 里：Plugins → `+` → Add custom MCP server，**Connection 选 Tunnel**，选这条隧道（或贴隧道 ID），
+认证选不需要认证的那项。`gld ls` 最后一行也写着这句。
+
+**怎么认证的。**gld 自己生成一把服务凭据 `openai_tunnel_key`，起 tunnel-client 时让它给每个转发进来的请求加上
+请求头 `X-Gld-Tunnel-Key`，服务认出它就放行，所以 ChatGPT 这边不走 OAuth；服务本身的认证方式（oauth / bearer）
+对本机和别的客户端照旧。Runtime Key 和这把 key 都经环境变量交给 tunnel-client，不在它的命令行里。
+换这把 key：`gld secret regen openai_tunnel_key`（服务和隧道一起重启，ChatGPT 那边不用动）。
+
+**谁能用它。**关联了这条隧道的 ChatGPT 工作区里，能选到这条隧道建连接器的人，都等于拿到了服务凭据
+（全部项目），见 [security.md](security.md#openai-隧道能选到隧道的人就有服务凭据)。
+
+**官方限制：**单个请求从排队到回包最长 120 秒，请求或回包最大 10 MiB，每条隧道每分钟 600 次。
+gld 单次调用最多等 30 秒、回包最大 1 MiB，都在范围内。
+
+**起不来时**，`gld share` 的报错里附着 tunnel-client 日志的最后几行，完整的在
+`~/.config/gld/logs/hub/tunnel-client.log`（`gld logs` 也有）。gld 只等它在本机就绪：它的 `/readyz` 回 200，
+说明它带着请求头连得上服务。连 OpenAI 那一段（隧道 ID 不对、Runtime Key 不对或权限不够）不在这个检查里，
+`gld share` 成功了 ChatGPT 还是选不到、连不上，就看这份日志。
+
+这一节是对着 tunnel-client v0.0.18 的源码写的，还没在真的 OpenAI 隧道上跑过（审查 §70）。
 
 ### 关掉公网入口
 

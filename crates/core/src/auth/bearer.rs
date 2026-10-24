@@ -44,6 +44,16 @@ pub(crate) fn bearer_token(header: &str) -> Option<&str> {
     (!token.is_empty()).then_some(token)
 }
 
+/// 请求头 `name` 的值是不是 `expected`，常数时间比对。期望值为空一律不算：
+/// 理由和 [`verify_bearer_header`] 开头那段一样。
+pub(crate) fn header_secret_matches(headers: &HeaderMap, name: &str, expected: &str) -> bool {
+    !expected.is_empty()
+        && headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| constant_time_eq_str(value.trim(), expected))
+}
+
 pub(crate) fn constant_time_eq_str(left: &str, right: &str) -> bool {
     constant_time_eq(left.as_bytes(), right.as_bytes())
 }

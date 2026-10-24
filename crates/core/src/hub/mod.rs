@@ -85,6 +85,7 @@ pub const HUB_SECRET_KEYS: &[&str] = &[
     "oauth_password",
     "oauth_token_secret",
     "oauth_client_id",
+    "openai_tunnel_key",
 ];
 
 /// 启动监听器要的凭据，由调用方（`App`）从它的数据存储里取出来传进来。
@@ -93,11 +94,20 @@ pub struct HubSecrets {
     pub oauth_client_id: String,
     pub oauth_password: String,
     pub oauth_token_secret: String,
+    /// 只有公网入口是 OpenAI 隧道时才有：tunnel-client 给每个转发进来的请求带上
+    /// [`OPENAI_TUNNEL_HEADER`]，监听器认出它就放行，ChatGPT 那边不用再授权。
+    pub openai_tunnel_key: Option<String>,
 }
 
+/// OpenAI 隧道转发进来的请求带的请求头，值是服务凭据 `openai_tunnel_key`。
+///
+/// 不用 `Authorization`：tunnel-client 会把 ChatGPT 带来的请求头最后套上、
+/// 同名的盖掉静态值，连接器要是配了别的认证就把它冲掉了。
+pub const OPENAI_TUNNEL_HEADER: &str = "x-gld-tunnel-key";
+
 /// 起隧道要的密钥，只能由用户给（`gld secret set`），不能重新生成：
-/// 随机一串 Cloudflare 不认。
-pub const HUB_TUNNEL_SECRET_KEYS: &[&str] = &["cloudflare_token"];
+/// 随机一串 Cloudflare、OpenAI 都不认。
+pub const HUB_TUNNEL_SECRET_KEYS: &[&str] = &["cloudflare_token", "openai_runtime_key"];
 
 /// 按配置推得出的公网基地址（不带 `/mcp`）；没有公网入口、或者要等隧道起来才知道
 /// （Cloudflare 临时地址）时为空串。跑着的服务以 [`runtime::public_base`] 为准。
@@ -112,7 +122,8 @@ pub fn public_base_url(settings: &AppSettings) -> String {
         "cloudflare" if hub.cloudflare_mode == "named" => {
             return hub.public_url.trim_end_matches('/').to_string()
         }
-        "cloudflare" => return String::new(),
+        // 临时地址要等隧道起来才知道；OpenAI 隧道根本没有公网地址，ChatGPT 按隧道 ID 找过来。
+        "cloudflare" | "openai" => return String::new(),
         _ => {}
     }
     if settings.hub.use_global_gateway && settings.global_gateway.enabled {

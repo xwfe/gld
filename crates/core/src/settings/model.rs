@@ -107,9 +107,15 @@ pub struct HubConfig {
     /// 老路子：服务有了自己的隧道（下面几项）之后命令行不再提供它，老配置照旧生效。
     #[serde(default)]
     pub use_global_gateway: bool,
-    /// 服务自己的公网隧道：none | cloudflare | frp（RFC-0004）。
+    /// 服务自己的公网隧道：none | cloudflare | frp | openai（RFC-0004）。
+    ///
+    /// openai 是 OpenAI 的 Secure MCP Tunnel：本机 tunnel-client 只往外连 OpenAI，
+    /// 没有公网地址，ChatGPT 按隧道 ID 找过来。
     #[serde(default = "default_hub_tunnel_type")]
     pub tunnel_type: String,
+    /// openai 时的隧道 ID（Platform 上建隧道给的 `tunnel_…`）。
+    #[serde(default)]
+    pub openai_tunnel_id: String,
     /// cloudflare 时：quick（临时地址，每次重启都变）| named（固定域名，要
     /// Tunnel Token，存在服务凭据 `cloudflare_token` 里）。
     #[serde(default = "default_global_gateway_cloudflare_mode")]
@@ -146,6 +152,7 @@ impl Default for HubConfig {
             public_url: String::new(),
             use_global_gateway: false,
             tunnel_type: default_hub_tunnel_type(),
+            openai_tunnel_id: String::new(),
             cloudflare_mode: default_global_gateway_cloudflare_mode(),
             frp_profile_id: String::new(),
             frp_subdomain: String::new(),

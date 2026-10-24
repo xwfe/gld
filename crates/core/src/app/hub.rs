@@ -23,7 +23,7 @@ use crate::hub::{self, HubSecrets, HUB_SCOPE, HUB_SECRET_KEYS, HUB_TUNNEL_SECRET
 use crate::logs::append_profile_log;
 use crate::runtime::ServiceKind;
 use crate::settings::{AppSettings, HubConfig};
-use crate::tunnel::standalone::{self, CloudflareSpec};
+use crate::tunnel::standalone::{self, CloudflareSpec, OpenAiSpec};
 use crate::workspace::WorkspaceProfile;
 
 /// 服务的起、停、按新配置重启一次只做一件。
@@ -201,9 +201,10 @@ impl App {
             "" | "none" | "off" => "none".to_string(),
             "cf" | "cloudflare" => "cloudflare".to_string(),
             "frp" => "frp".to_string(),
+            "openai" => "openai".to_string(),
             other => {
                 return Err(AppError::Message(format!(
-                    "看不懂的隧道类型「{other}」，只能是 none、cloudflare 或 frp"
+                    "看不懂的隧道类型「{other}」，只能是 none、cloudflare、frp 或 openai"
                 )))
             }
         };
@@ -219,6 +220,7 @@ impl App {
             cloudflare_mode,
             frp_profile_id,
             frp_subdomain: config.frp_subdomain.trim().to_string(),
+            openai_tunnel_id: config.openai_tunnel_id.trim().to_string(),
             members: before.members.clone(),
             restore_on_launch: before.restore_on_launch,
             ..config
@@ -565,6 +567,7 @@ impl App {
             }
             global_gateway::ensure_started().await?;
         }
+        let openai = config.tunnel_type == "openai";
         let secrets = self.with_data(|store| {
             Ok(HubSecrets {
                 bearer_token: store.get_or_create_app_secret(HUB_SCOPE, "bearer_token")?,
@@ -572,12 +575,28 @@ impl App {
                 oauth_password: store.get_or_create_app_secret(HUB_SCOPE, "oauth_password")?,
                 oauth_token_secret: store
                     .get_or_create_app_secret(HUB_SCOPE, "oauth_token_secret")?,
+                openai_tunnel_key: if openai {
+                    Some(store.get_or_create_app_secret(HUB_SCOPE, "openai_tunnel_key")?)
+                } else {
+                    None
+                },
             })
         })?;
+        let tunnel_key = secrets.openai_tunnel_key.clone().unwrap_or_default();
 
         hub::runtime::stop().await;
         ensure_port_available(config.local_port, "MCP 服务").await?;
-        let outcome = self.start_hub_tunnel(&config).await;
+        // 别的隧道要先起：拿到的公网地址要写进监听器的 OAuth 元数据。OpenAI 隧道没有地址，
+        // 而且一起来就要探本机服务，所以等监听器应答了再起。
+        let outcome = if openai {
+            TunnelOutcome {
+                public_base: String::new(),
+                tunnel: None,
+                error: String::new(),
+            }
+        } else {
+            self.start_hub_tunnel(&config, "").await
+        };
         hub::runtime::start(&config, outcome, secrets).await?;
         // 和工作区服务一样，报 running 之前确认它真的开始应答，理由见 wait_until_answering。
         if !wait_until_answering(config.local_port, ServiceKind::Mcp, READY_PROBE_BUDGET).await {
@@ -592,12 +611,18 @@ impl App {
                 ),
             );
         }
+        if openai {
+            let outcome = self.start_hub_tunnel(&config, &tunnel_key).await;
+            hub::runtime::attach_tunnel(outcome).await;
+        }
         Ok(())
     }
 
     /// 起服务自己的隧道（配了的话）。起不来不拦着服务：本机客户端照样能用，
     /// 原因记下来，`gld ls` / `gld share` 把它报出来。
-    async fn start_hub_tunnel(&self, config: &HubConfig) -> TunnelOutcome {
+    ///
+    /// `openai_tunnel_key` 只有 OpenAI 隧道用，别的传空串。
+    async fn start_hub_tunnel(&self, config: &HubConfig, openai_tunnel_key: &str) -> TunnelOutcome {
         let settings = AppSettings::load_or_default();
         let started = match config.tunnel_type.as_str() {
             "cloudflare" => {
@@ -613,6 +638,19 @@ impl App {
                 .await
             }
             "frp" => standalone::start_frp(hub::frp_spec(config), &settings).await,
+            "openai" => {
+                let runtime_key = self.hub_secret("openai_runtime_key").unwrap_or_default();
+                standalone::start_openai(OpenAiSpec {
+                    port: config.local_port,
+                    log_name: "logs/hub/tunnel-client.log",
+                    tunnel_id: &config.openai_tunnel_id,
+                    runtime_key: &runtime_key,
+                    tunnel_key: openai_tunnel_key,
+                    use_proxy: config.use_proxy,
+                })
+                .await
+                .map(|tunnel| (String::new(), tunnel))
+            }
             _ => {
                 return TunnelOutcome {
                     public_base: hub::public_base_url(&settings),
@@ -703,6 +741,13 @@ fn validate_tunnel(config: &HubConfig) -> AppResult<()> {
         "frp" if config.frp_subdomain.is_empty() => Err(AppError::Message(
             "FRP 隧道要一个子域名：gld share --tunnel frp:<配置名> --subdomain <子域名>".into(),
         )),
+        "openai" if !crate::tunnel::openai::is_tunnel_id(&config.openai_tunnel_id) => {
+            Err(AppError::Message(format!(
+                "OpenAI 隧道要一个隧道 ID（Platform → Tunnels 里复制，tunnel_ 开头），现在是「{}」：\
+                 gld share --tunnel openai:tunnel_…",
+                config.openai_tunnel_id
+            )))
+        }
         _ => Ok(()),
     }
 }
@@ -713,6 +758,7 @@ fn tunnel_label(config: &HubConfig) -> String {
         "cloudflare" if config.cloudflare_mode == "named" => "Cloudflare 固定域名".into(),
         "cloudflare" => "Cloudflare 临时地址（每次重启都会变）".into(),
         "frp" => format!("FRP（子域名 {}）", config.frp_subdomain),
+        "openai" => format!("OpenAI 隧道 {}（没有公网地址）", config.openai_tunnel_id),
         _ if config.use_global_gateway => "经全局入口（/hub）".into(),
         _ if !config.public_url.trim().is_empty() => "固定地址（自建入口）".into(),
         _ => "没有".into(),

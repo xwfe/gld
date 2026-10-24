@@ -25,6 +25,11 @@ use crate::error::{CliError, CliResult};
 /// 服务的 FRP 子域名不给时用它。服务只有一个，没有"项目名"可以拿来当子域名。
 const DEFAULT_SERVICE_SUBDOMAIN: &str = "gld";
 
+/// GPT Actions 是 ChatGPT 按 OpenAPI 文档去调一个公网地址，OpenAI 隧道给不了地址。
+const OPENAI_IS_SERVICE_ONLY: &str =
+    "OpenAI 隧道只接 MCP 服务（ChatGPT 的连接器），GPT Actions 要公网地址：\
+     --tunnel cf 或 --tunnel frp:<配置名>";
+
 pub async fn run(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
     if matches!(args.service, TunnelService::Actions) {
         return run_actions(ctx, args).await;
@@ -95,13 +100,13 @@ pub async fn configure_service(
     }
     // token 必须赶在写配置之前落实：配置一写进去，在跑的服务就会带着固定域名
     // 模式重启，而那一步没有 token 是起不来的。
-    if matches!(spec, TunnelSpec::Cloudflare { named: true, .. }) {
-        ensure_service_token(ctx, token).await?;
-    } else if token.is_some() {
-        return Err(CliError::new(
-            "--token 是 Cloudflare 固定域名用的，配合 --tunnel cf:<域名>。\n  \
-             临时地址（--tunnel cf）不需要它；FRP 的 token 配在 gld frp add --token 里。",
-        ));
+    match spec {
+        TunnelSpec::Cloudflare { named: true, .. } => {
+            ensure_service_secret(ctx, token, &CLOUDFLARE_TOKEN).await?
+        }
+        TunnelSpec::OpenAi { .. } => ensure_service_secret(ctx, token, &OPENAI_RUNTIME_KEY).await?,
+        _ if token.is_some() => return Err(CliError::new(TOKEN_MISPLACED)),
+        _ => {}
     }
     let subdomain = subdomain.map(str::to_string);
     let status = service::update_service(ctx, |config| {
@@ -151,6 +156,21 @@ pub async fn configure_service(
                 };
                 config.public_url.clear();
             }
+            TunnelSpec::OpenAi { tunnel_id } => {
+                config.tunnel_type = "openai".into();
+                match tunnel_id {
+                    Some(id) => config.openai_tunnel_id = id.clone(),
+                    None if config.openai_tunnel_id.is_empty() => {
+                        return Err(CliError::new(
+                            "OpenAI 隧道要一个隧道 ID（Platform → Tunnels 里复制）：\n  \
+                             gld share --tunnel openai:tunnel_…",
+                        ))
+                    }
+                    None => {}
+                }
+                // 这条入口没有公网地址，留着上一种写法的地址只会让 `gld ls` 显示一个不相干的域名。
+                config.public_url.clear();
+            }
         }
         Ok(())
     })
@@ -164,59 +184,99 @@ pub async fn configure_service(
     Ok(())
 }
 
-/// `--token` 没给时认的环境变量，名字和 cloudflared 自己的一样。token 写在命令行里，
-/// 本机别的账号用 `ps` 看得到，shell 历史里也留一份；放环境变量就没这两处。
-const TOKEN_ENV: &str = "TUNNEL_TOKEN";
+/// `--token` 给错了地方。
+const TOKEN_MISPLACED: &str = "--token 是 Cloudflare 固定域名（--tunnel cf:<域名>）和 OpenAI 隧道\
+     （--tunnel openai:<隧道 ID>）用的。\n  \
+     临时地址（--tunnel cf）不需要它；FRP 的 token 配在 gld frp add --token 里。";
 
-/// 用户这次给的 Tunnel Token：`--token` 优先，其次环境变量。
+/// 起隧道要、只能由用户给的那把密钥：存在哪、没给时认哪个环境变量、当场问时怎么说。
+struct TunnelSecret {
+    /// 服务凭据名（`gld secret set <key>`）。
+    key: &'static str,
+    /// 给人看的名字。
+    label: &'static str,
+    /// `--token` 没给时认的环境变量，名字和对应程序自己认的一样。写在命令行里，本机别的账号
+    /// 用 `ps` 看得到，shell 历史里也留一份；放环境变量就没这两处。
+    env: &'static str,
+    prompt: &'static str,
+    /// 空值时的报错。
+    empty: &'static str,
+}
+
+const CLOUDFLARE_TOKEN: TunnelSecret = TunnelSecret {
+    key: "cloudflare_token",
+    label: "Tunnel Token",
+    env: "TUNNEL_TOKEN",
+    prompt: "Cloudflare Tunnel Token（Zero Trust 后台复制，输入不显示）：",
+    empty: "Tunnel Token 是空的，没往下走。临时地址不需要 token：--tunnel cf",
+};
+
+/// 不认 `OPENAI_API_KEY`：那多半是你调 API 用的 key，不是隧道的 Runtime Key。
+const OPENAI_RUNTIME_KEY: TunnelSecret = TunnelSecret {
+    key: "openai_runtime_key",
+    label: "OpenAI Runtime Key",
+    env: "CONTROL_PLANE_API_KEY",
+    prompt: "OpenAI Runtime Key（sk-…，要有 Tunnels Read + Use 权限，输入不显示）：",
+    empty: "Runtime Key 是空的，没往下走。",
+};
+
+/// 用户这次给的密钥：`--token` 优先，其次环境变量。
 ///
-/// 只在固定域名这条路上调用：shell 里常年 export 着 `TUNNEL_TOKEN` 的人，
+/// 只在要这把密钥的那条路上调用：shell 里常年 export 着 `TUNNEL_TOKEN` 的人，
 /// 用临时地址或 FRP 时不该因此撞上"--token 是固定域名用的"。
-fn given_token(ctx: &Ctx, flag: Option<&str>) -> Option<String> {
+fn given_secret(ctx: &Ctx, flag: Option<&str>, secret: &TunnelSecret) -> Option<String> {
     if let Some(flag) = flag {
         return Some(flag.trim().to_string());
     }
-    let value = std::env::var(TOKEN_ENV).ok()?.trim().to_string();
+    let value = std::env::var(secret.env).ok()?.trim().to_string();
     if value.is_empty() {
         return None;
     }
-    // 说一声用的是哪份：环境变量里可能是别的隧道的旧 token，它会覆盖已保存的那份。
+    // 说一声用的是哪份：环境变量里可能是别的隧道的旧值，它会覆盖已保存的那份。
     ctx.out.note(format!(
-        "Tunnel Token 取自环境变量 {TOKEN_ENV}，这次会把它存下来。"
+        "{} 取自环境变量 {}，这次会把它存下来。",
+        secret.label, secret.env
     ));
     Some(value)
 }
 
-/// 服务的 Cloudflare Tunnel Token：命令行或环境变量给了就存下来，都没给也没配过就当场问。
-async fn ensure_service_token(ctx: &mut Ctx, token: Option<&str>) -> CliResult {
-    let value = match given_token(ctx, token) {
+/// 服务隧道的密钥：命令行或环境变量给了就存下来，都没给也没配过就当场问。
+async fn ensure_service_secret(
+    ctx: &mut Ctx,
+    flag: Option<&str>,
+    secret: &TunnelSecret,
+) -> CliResult {
+    let value = match given_secret(ctx, flag, secret) {
         Some(given) => given,
         None => {
             let saved: String = ctx
                 .backend
                 .call_typed(Request::HubSecret {
-                    key: "cloudflare_token".into(),
+                    key: secret.key.into(),
                 })
                 .await?;
             if !saved.trim().is_empty() {
                 return Ok(());
             }
             crate::prompt::secret(
-                "Cloudflare Tunnel Token（Zero Trust 后台复制，输入不显示）：",
-                "Cloudflare 固定域名要 Tunnel Token。非交互环境这样给：\n  \
-                 gld secret set cloudflare_token <token>\n  \
-                 或者设环境变量 TUNNEL_TOKEN=<token>，或者在命令里带上：--token <token>",
+                secret.prompt,
+                &format!(
+                    "要 {label}。非交互环境这样给：\n  \
+                     gld secret set {key} <值>\n  \
+                     或者设环境变量 {env}=<值>，或者在命令里带上：--token <值>",
+                    label = secret.label,
+                    key = secret.key,
+                    env = secret.env
+                ),
             )?
         }
     };
     if value.is_empty() {
-        return Err(CliError::new(
-            "Tunnel Token 是空的，没往下走。临时地址不需要 token：--tunnel cf",
-        ));
+        return Err(CliError::new(secret.empty));
     }
     ctx.backend
         .call(Request::SetHubSecret {
-            key: "cloudflare_token".into(),
+            key: secret.key.into(),
             value,
         })
         .await?;
@@ -234,7 +294,9 @@ pub async fn ensure_service_public(ctx: &mut Ctx, status: &HubStatusDto) -> CliR
             status.tunnel_error
         )));
     }
-    if status.config.tunnel_type != "none" && status.public_endpoint.is_empty() {
+    // OpenAI 隧道本来就没有公网地址。
+    let has_address = !matches!(status.config.tunnel_type.as_str(), "none" | "openai");
+    if has_address && status.public_endpoint.is_empty() {
         return Err(CliError::new(
             "隧道起来了，但没拿到公网地址。gld logs 看隧道输出。",
         ));
@@ -295,6 +357,9 @@ async fn run_actions(ctx: &mut Ctx, args: ShareArgs) -> CliResult {
             domain: None,
         },
     };
+    if matches!(spec, TunnelSpec::OpenAi { .. }) {
+        return Err(CliError::new(OPENAI_IS_SERVICE_ONLY));
+    }
     configure(
         ctx,
         &target,
@@ -396,10 +461,7 @@ async fn ensure_cloudflare_token(
     let named = matches!(spec, TunnelSpec::Cloudflare { named: true, .. });
     if !named {
         if token.is_some() {
-            return Err(CliError::new(
-                "--token 是 Cloudflare 固定域名用的，配合 --tunnel cf:<域名>。\n  \
-                 临时地址（--tunnel cf）不需要它；FRP 的 token 配在 gld frp add --token 里。",
-            ));
+            return Err(CliError::new(TOKEN_MISPLACED));
         }
         return Ok(());
     }
@@ -408,7 +470,7 @@ async fn ensure_cloudflare_token(
         TunnelService::Mcp => "cloudflare_token",
         TunnelService::Actions => "actions_cloudflare_token",
     };
-    let value = match given_token(ctx, token) {
+    let value = match given_secret(ctx, token, &CLOUDFLARE_TOKEN) {
         Some(given) => given,
         None => {
             let saved: Option<String> = ctx
@@ -539,6 +601,7 @@ fn assignments(
     }
 
     match spec {
+        TunnelSpec::OpenAi { .. } => return Err(CliError::new(OPENAI_IS_SERVICE_ONLY)),
         TunnelSpec::Off => {
             pairs.push(field("tunnel", "none".into()));
             pairs.push(field("public-url", String::new()));
@@ -747,6 +810,36 @@ mod tests {
         assert!(error.contains("quick、named 或一个固定域名"), "{error}");
         // 忘了协议头的地址不能被当成模式名默默吃掉。
         assert!(parse("mcp.example.com").unwrap_err().contains("看不懂"));
+
+        let id = "tunnel_0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            parse(&format!("openai:{id}")).unwrap(),
+            TunnelSpec::OpenAi {
+                tunnel_id: Some(id.into())
+            }
+        );
+        assert_eq!(
+            parse("openai").unwrap(),
+            TunnelSpec::OpenAi { tunnel_id: None }
+        );
+        // 把 Runtime Key 贴到隧道 ID 的位置上：报错要说清两样东西各放哪，且不回显成功。
+        let error = parse("openai:sk-proj-abc").unwrap_err();
+        assert!(error.contains("--token"), "{error}");
+    }
+
+    /// GPT Actions 要一个公网地址给 ChatGPT 按 OpenAPI 去调，OpenAI 隧道给不了。
+    #[test]
+    fn actions_refuse_the_openai_tunnel() {
+        let profile = WorkspaceProfile::new("/tmp/x".into(), Some("x".into()));
+        let error = assignments(
+            &TunnelSpec::OpenAi { tunnel_id: None },
+            None,
+            &profile,
+            "actions.",
+            TunnelService::Actions,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("GPT Actions"), "{error}");
     }
 
     /// 用户手里的地址通常是从客户端复制的完整端点，存下去前要去掉端点后缀。

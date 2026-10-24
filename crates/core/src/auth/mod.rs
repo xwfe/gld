@@ -5,8 +5,8 @@ mod grant;
 mod oauth;
 mod oauth_flow;
 
-pub(crate) use bearer::bearer_token;
 pub use bearer::verify_bearer_header;
+pub(crate) use bearer::{bearer_token, header_secret_matches};
 pub use client_registry::{remove_scope as remove_client_registry, ClientRegistry};
 pub use context::{AuthContext, Principal};
 #[cfg(test)]

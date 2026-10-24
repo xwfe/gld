@@ -171,6 +171,7 @@ Options:
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
   --tunnel cf:mcp.example.com             Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
   --tunnel frp:公司                       FRP 固定域名，子域名默认 gld
+  --tunnel openai:tunnel_…                OpenAI 隧道：不要域名、不开端口，只给 ChatGPT 用，要 Runtime Key
   --tunnel off                            关掉公网入口，只留本地地址
 
 项目定位：
@@ -179,7 +180,7 @@ Options:
 
 数据目录：
   默认 ~/.config/gld，可用 --home 或环境变量 GLD_HOME 覆盖。里面有配置、密钥、日志，
-  以及守护进程的 socket 与 pid 文件。frpc / cloudflared 由你自己安装，gld 从 PATH 里找。
+  以及守护进程的 socket 与 pid 文件。frpc / cloudflared / tunnel-client 由你自己安装，gld 从 PATH 里找。
 
 更多：docs/cli.md（完整命令参考）、docs/daemon.md（后台进程说明）
 ```
@@ -205,7 +206,7 @@ Arguments:
 
 Options:
       --tunnel <TUNNEL>
-          公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
+          公网入口：https://… | cf | cf:<域名> | frp:<配置名> | openai:<隧道 ID> | off
 
   -w, --workspace <WS>
           目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
@@ -216,7 +217,8 @@ Options:
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
       --token <TOKEN>
-          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
+          cf:<域名> 的 Cloudflare Tunnel Token，或 openai:<隧道 ID> 的 OpenAI Runtime Key；
+          不给先看环境变量（TUNNEL_TOKEN / CONTROL_PLANE_API_KEY），再没有就当场问
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
@@ -587,6 +589,7 @@ Options:
   gld share                             沿用已配好的入口；一个都没配就用 Cloudflare 临时地址
   gld share --tunnel cf:mcp.example.com Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
   gld share --tunnel frp:公司           FRP 固定域名，子域名默认 gld
+  gld share --tunnel openai:tunnel_…    OpenAI 隧道，ChatGPT 按隧道 ID 连（要 Runtime Key，没配过会当场问）
   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
   gld share --off                       关掉公网入口，只留本地地址
 
@@ -601,7 +604,7 @@ Arguments:
 
 Options:
       --tunnel <TUNNEL>
-          公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off（默认沿用已配好的，没有就 cf）
+          公网入口：https://… | cf | cf:<域名> | frp:<配置名> | openai:<隧道 ID> | off（默认沿用已配好的，没有就 cf）
 
   -w, --workspace <WS>
           目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断
@@ -612,7 +615,8 @@ Options:
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
       --token <TOKEN>
-          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
+          cf:<域名> 的 Cloudflare Tunnel Token，或 openai:<隧道 ID> 的 OpenAI Runtime Key；
+          不给先看环境变量（TUNNEL_TOKEN / CONTROL_PLANE_API_KEY），再没有就当场问
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
@@ -678,13 +682,14 @@ Options:
           以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
 
       --tunnel <TUNNEL>
-          换公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
+          换公网入口：https://… | cf | cf:<域名> | frp:<配置名> | openai:<隧道 ID> | off
 
       --no-autostart
           守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
 
       --token <TOKEN>
-          Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
+          cf:<域名> 的 Cloudflare Tunnel Token，或 openai:<隧道 ID> 的 OpenAI Runtime Key；
+          不给先看环境变量（TUNNEL_TOKEN / CONTROL_PLANE_API_KEY），再没有就当场问
 
       --subdomain <SUB>
           FRP 子域名（配合 --tunnel frp:<配置名>）
@@ -2344,6 +2349,8 @@ oauth_client_id              服务        OAuth 静态 Client ID（ChatGPT 这�
 oauth_token_secret           服务        签发访问令牌的密钥；换了所有已授权的客户端都要重新授权
 bearer_token                 服务        认证方式为 bearer 时客户端携带的 Token
 cloudflare_token             服务        Cloudflare 固定域名的 Tunnel Token（只能 set，不能 regen）
+openai_runtime_key           服务        OpenAI 隧道的 Runtime Key，tunnel-client 拿它连 OpenAI（只能 set，不能 regen）
+openai_tunnel_key            服务        tunnel-client 转发请求时带的请求头，gld 自己生成、自己核对，不用填进 ChatGPT
 actions_api_key              项目（-w）  Actions 认证方式为 api_key 时的 Key
 actions_oauth_client_secret  项目（-w）  Actions OAuth Client Secret
 actions_oauth_password       项目（-w）  Actions OAuth 授权口令

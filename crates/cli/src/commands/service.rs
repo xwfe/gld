@@ -481,7 +481,13 @@ pub async fn show_service(ctx: &mut Ctx, reveal: bool) -> CliResult {
     out.line(out.dim(
         "客户端里只配上面这一条地址。AI 每次调用都要带 workspace 参数（项目名称或 id），说明见 docs/concepts.md",
     ));
-    if status.public_endpoint.is_empty() {
+    if status.config.tunnel_type == "openai" {
+        // 这条入口不填地址也不填凭据：tunnel-client 转进来的请求自带服务凭据 openai_tunnel_key。
+        out.line(format!(
+            "ChatGPT 里这样连：Plugins → 加号 → Add custom MCP server，Connection 选 Tunnel、选 {}，认证选不需要（No auth）。",
+            status.config.openai_tunnel_id
+        ));
+    } else if status.public_endpoint.is_empty() {
         out.line(out.yellow("还没有公网地址：ChatGPT 只能连公网 HTTPS。一条命令拿一个：gld share"));
     }
     if !reveal && !status.config.auth_type.eq("noauth") {

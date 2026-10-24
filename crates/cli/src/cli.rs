@@ -27,6 +27,7 @@ const AFTER_HELP: &str = "\
   --tunnel cf                             Cloudflare 临时地址，零配置，重启会变
   --tunnel cf:mcp.example.com             Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
   --tunnel frp:公司                       FRP 固定域名，子域名默认 gld
+  --tunnel openai:tunnel_…                OpenAI 隧道：不要域名、不开端口，只给 ChatGPT 用，要 Runtime Key
   --tunnel off                            关掉公网入口，只留本地地址
 
 项目定位：
@@ -35,7 +36,7 @@ const AFTER_HELP: &str = "\
 
 数据目录：
   默认 ~/.config/gld，可用 --home 或环境变量 GLD_HOME 覆盖。里面有配置、密钥、日志，
-  以及守护进程的 socket 与 pid 文件。frpc / cloudflared 由你自己安装，gld 从 PATH 里找。
+  以及守护进程的 socket 与 pid 文件。frpc / cloudflared / tunnel-client 由你自己安装，gld 从 PATH 里找。
 
 更多：docs/cli.md（完整命令参考）、docs/daemon.md（后台进程说明）";
 
@@ -193,6 +194,7 @@ pub enum Command {
     ///   gld share                             沿用已配好的入口；一个都没配就用 Cloudflare 临时地址
     ///   gld share --tunnel cf:mcp.example.com Cloudflare 固定域名，要 Tunnel Token（没配过会当场问）
     ///   gld share --tunnel frp:公司           FRP 固定域名，子域名默认 gld
+    ///   gld share --tunnel openai:tunnel_…    OpenAI 隧道，ChatGPT 按隧道 ID 连（要 Runtime Key，没配过会当场问）
     ///   gld share --tunnel https://x.com/mcp  已经有公网地址（自建反代等），只登记不起隧道
     ///   gld share --off                       关掉公网入口，只留本地地址
     ///
@@ -452,11 +454,12 @@ pub struct StartArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
+    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | openai:<隧道 ID> | off
     #[arg(long, value_name = "TUNNEL")]
     pub tunnel: Option<TunnelSpec>,
 
-    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
+    /// cf:<域名> 的 Cloudflare Tunnel Token，或 openai:<隧道 ID> 的 OpenAI Runtime Key；
+    /// 不给先看环境变量（TUNNEL_TOKEN / CONTROL_PLANE_API_KEY），再没有就当场问
     #[arg(
         long = "token",
         alias = "tunnel-token",
@@ -494,6 +497,9 @@ pub enum TunnelSpec {
     Cloudflare { named: bool, domain: Option<String> },
     /// FRP，带一个 `gld frp list` 里的配置名或 id。
     Frp { profile: String },
+    /// OpenAI 的 Secure MCP Tunnel，只有服务能用（GPT Actions 要公网地址）。
+    /// `tunnel_id` 是 `None` 表示沿用已经配好的那个。
+    OpenAi { tunnel_id: Option<String> },
     /// 关掉公网入口。
     Off,
 }
@@ -541,12 +547,27 @@ impl std::str::FromStr for TunnelSpec {
             "frp" => {
                 Err("frp 要带配置名，例如 --tunnel frp:公司（`gld frp list` 看有哪些）".into())
             }
+            "openai" if tail.is_empty() => Ok(Self::OpenAi { tunnel_id: None }),
+            "openai" => {
+                let id = value[head.len() + 1..].trim();
+                if gld_core::tunnel::openai::is_tunnel_id(id) {
+                    Ok(Self::OpenAi {
+                        tunnel_id: Some(id.to_string()),
+                    })
+                } else {
+                    Err(format!(
+                        "openai: 后面跟隧道 ID（tunnel_ 开头，Platform → Tunnels 里复制），收到「{id}」。\n  \
+                         Runtime Key（sk-…）不写在这里，用 --token 给或者等它当场问"
+                    ))
+                }
+            }
             _ => Err(format!(
                 "看不懂的公网入口「{value}」。可用写法：\n  \
                  https://mcp.example.com/mcp   已有的公网地址\n  \
                  cf                            Cloudflare 临时地址\n  \
                  cf:mcp.example.com            Cloudflare 固定域名\n  \
                  frp:<配置名>                  FRP（gld frp list 看有哪些）\n  \
+                 openai:tunnel_…               OpenAI 隧道（只给 ChatGPT，没有公网地址）\n  \
                  off                           关掉公网入口"
             )),
         }
@@ -644,11 +665,12 @@ pub struct ShareArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off（默认沿用已配好的，没有就 cf）
+    /// 公网入口：https://… | cf | cf:<域名> | frp:<配置名> | openai:<隧道 ID> | off（默认沿用已配好的，没有就 cf）
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 
-    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
+    /// cf:<域名> 的 Cloudflare Tunnel Token，或 openai:<隧道 ID> 的 OpenAI Runtime Key；
+    /// 不给先看环境变量（TUNNEL_TOKEN / CONTROL_PLANE_API_KEY），再没有就当场问
     #[arg(
         long = "token",
         alias = "tunnel-token",
@@ -680,11 +702,12 @@ pub struct UpgradeArgs {
     #[arg(long, value_name = "DIR")]
     pub path: Option<PathBuf>,
 
-    /// 换公网入口：https://… | cf | cf:<域名> | frp:<配置名> | off
+    /// 换公网入口：https://… | cf | cf:<域名> | frp:<配置名> | openai:<隧道 ID> | off
     #[arg(long, value_name = "TUNNEL", conflicts_with = "off")]
     pub tunnel: Option<TunnelSpec>,
 
-    /// Cloudflare Tunnel Token（配合 --tunnel cf:<域名>）；不给先看环境变量 TUNNEL_TOKEN，再没有就当场问
+    /// cf:<域名> 的 Cloudflare Tunnel Token，或 openai:<隧道 ID> 的 OpenAI Runtime Key；
+    /// 不给先看环境变量（TUNNEL_TOKEN / CONTROL_PLANE_API_KEY），再没有就当场问
     #[arg(
         long = "token",
         alias = "tunnel-token",

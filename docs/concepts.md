@@ -496,8 +496,9 @@ ChatGPT 跑在 OpenAI 的服务器上，只能连公网 HTTPS，`127.0.0.1` 填�
 | `cf:<域名>` | `https://<域名>/mcp`，固定 | 本机跑的 cloudflared（Named Tunnel，要 token） | 有 Cloudflare 账号和域名 |
 | `frp:<配置名>` | `https://<子域名>.<frps 域名>/mcp`，固定（子域名默认 gld） | 本机跑的 frpc | 自己有一台跑 frps 的公网机器 |
 | `https://…` | 你自己定 | 你自己的 Caddy / Nginx | 已经有公网机器和反代，不需要 gld 打洞 |
+| `openai:<隧道 ID>` | 没有地址，ChatGPT 按隧道 ID 连 | 本机跑的 tunnel-client，只往外连 OpenAI | 只接 ChatGPT、不想要域名和公网端口（[怎么配](connect-clients.md#办法五openai-隧道不要域名不开端口只给-chatgpt)） |
 
-要装 `cloudflared` 或 `frpc` 的那几种，gld 不代管，PATH 里有就自动认。
+要装 `cloudflared`、`frpc` 或 `tunnel-client` 的那几种，gld 不代管，PATH 里有就自动认。
 
 ```bash
 gld share                              # 沿用已配好的入口；一个都没配过就是 cf

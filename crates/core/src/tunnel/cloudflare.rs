@@ -61,9 +61,9 @@ pub fn extract_trycloudflare_url(line: &str) -> Option<String> {
     None
 }
 
-/// Apply the global proxy to a tunnel child process environment.
-pub(crate) fn apply_proxy_env(cmd: &mut Command, proxy: &ProxyConfig) {
-    let url = match proxy.mode.as_str() {
+/// 全局出站代理此刻落到哪个地址；不走代理是 `None`。
+pub(crate) fn proxy_url(proxy: &ProxyConfig) -> Option<String> {
+    match proxy.mode.as_str() {
         "manual" if !proxy.url.trim().is_empty() => Some(proxy.url.trim().to_string()),
         "system" => std::env::var("HTTPS_PROXY")
             .ok()
@@ -71,8 +71,12 @@ pub(crate) fn apply_proxy_env(cmd: &mut Command, proxy: &ProxyConfig) {
             .or_else(|| std::env::var("HTTP_PROXY").ok().filter(|s| !s.is_empty()))
             .or_else(|| std::env::var("ALL_PROXY").ok().filter(|s| !s.is_empty())),
         _ => None,
-    };
-    if let Some(url) = url {
+    }
+}
+
+/// Apply the global proxy to a tunnel child process environment.
+pub(crate) fn apply_proxy_env(cmd: &mut Command, proxy: &ProxyConfig) {
+    if let Some(url) = proxy_url(proxy) {
         for key in [
             "HTTPS_PROXY",
             "HTTP_PROXY",

@@ -27,6 +27,14 @@ const SERVICE_KEYS: &[(&str, &str)] = &[
         "cloudflare_token",
         "Cloudflare 固定域名的 Tunnel Token（只能 set，不能 regen）",
     ),
+    (
+        "openai_runtime_key",
+        "OpenAI 隧道的 Runtime Key，tunnel-client 拿它连 OpenAI（只能 set，不能 regen）",
+    ),
+    (
+        "openai_tunnel_key",
+        "tunnel-client 转发请求时带的请求头，gld 自己生成、自己核对，不用填进 ChatGPT",
+    ),
 ];
 
 const KEY_DOCS: &[(&str, &str)] = &[
@@ -292,7 +300,9 @@ fn client_impact(key: &str) -> &'static str {
         "oauth_client_id" => {
             "只影响手填了静态 Client ID 的客户端；ChatGPT 这类自动注册的不受影响。"
         }
-        "cloudflare_token" => "隧道下次起来时用它；服务在跑的话已经按它重启了。",
+        "cloudflare_token" | "openai_runtime_key" | "openai_tunnel_key" => {
+            "隧道下次起来时用它；服务在跑的话已经按它重启了。"
+        }
         _ => "旧值立即失效，记得更新客户端里的配置。",
     }
 }

@@ -76,6 +76,8 @@ impl Env {
             .env_remove("GLD_WORKSPACE")
             // 开发机 shell 里 export 着的 Tunnel Token 会被当成用户给的，"没给 token"类测试就不成立了。
             .env_remove("TUNNEL_TOKEN")
+            // 同理：照 OpenAI 文档 export 过 Runtime Key 的机器上，它会被当成 --token。
+            .env_remove("CONTROL_PLANE_API_KEY")
             .current_dir(self.project.path());
         if let Some(prefix) = &self.path_prefix {
             let existing = std::env::var("PATH").unwrap_or_default();

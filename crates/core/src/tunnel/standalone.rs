@@ -8,12 +8,12 @@ use std::path::Path;
 
 use tokio::process::Child;
 
-use super::{cloudflare, frp, TunnelServiceKind};
+use super::{cloudflare, frp, openai, TunnelServiceKind};
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
 use crate::workspace::WorkspaceProfile;
 
-/// 一条跑着的隧道进程（cloudflared 或 frpc）。
+/// 一条跑着的隧道进程（cloudflared、frpc 或 tunnel-client）。
 pub struct StandaloneTunnel {
     child: Child,
     pid: Option<u32>,
@@ -81,6 +81,34 @@ pub async fn start_cloudflare(spec: CloudflareSpec<'_>) -> AppResult<(String, St
             pid: handle.pid,
         },
     ))
+}
+
+/// OpenAI 隧道要的东西。
+pub struct OpenAiSpec<'a> {
+    pub port: u16,
+    pub log_name: &'a str,
+    pub tunnel_id: &'a str,
+    pub runtime_key: &'a str,
+    pub tunnel_key: &'a str,
+    pub use_proxy: bool,
+}
+
+/// 起一条 OpenAI 隧道。没有公网地址可返回：ChatGPT 按隧道 ID 找过来。
+pub async fn start_openai(spec: OpenAiSpec<'_>) -> AppResult<StandaloneTunnel> {
+    let log = crate::home::data_home()?.join(spec.log_name);
+    let handle = openai::spawn_openai_tunnel(openai::OpenAiTunnelSpec {
+        port: spec.port,
+        tunnel_id: spec.tunnel_id,
+        runtime_key: spec.runtime_key,
+        tunnel_key: spec.tunnel_key,
+        log_path: &log,
+        use_proxy: spec.use_proxy,
+    })
+    .await?;
+    Ok(StandaloneTunnel {
+        child: handle.child,
+        pid: handle.pid,
+    })
 }
 
 /// FRP 这一边要的东西。

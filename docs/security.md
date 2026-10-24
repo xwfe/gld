@@ -14,7 +14,7 @@ gld ls                     # 客户端要用的地址、认证方式、公网入
 gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
 ```
 
-`gld ls` 里 **公网地址** 那一行一旦不是 `-`（或者某个项目的 GPT Actions 配了公网），
+`gld ls` 里 **公网地址** 那一行一旦不是 `-`（或者公网入口是 OpenAI 隧道、某个项目的 GPT Actions 配了公网），
 下面的内容就跟你有关。
 
 ## 拿到 token 的人能做什么
@@ -61,6 +61,16 @@ desktop-commander 就是以你的身份跑任意命令，开了不带 `cwd` 的 
 到期只拦后面的请求，不会杀掉之前起的命令；要立刻停，用 `gld grant rm`，它会一起停掉这把 grant 起的命令。
 带 `--write` 的照样能以你的账号跑命令，有效期短不等于有隔离。接法见
 [DeepSeek 网页与 SuperAssistant](connect-clients.md#deepseek-网页与-superassistant)。
+
+### OpenAI 隧道：能选到隧道的人就有服务凭据
+
+`--tunnel openai:<隧道 ID>` 时，tunnel-client 给每个转发进来的请求带上服务凭据 `openai_tunnel_key`，
+gld 认出它就按服务凭据放行，**不管服务的认证方式是什么**。能把请求送进这条隧道的，是关联了它的
+ChatGPT 工作区里、能选到它建连接器的人（OpenAI 那边按 Tunnels Use 权限管）。个人账号就是你自己；
+团队或企业工作区先确认只有你有这条隧道的 Use 权限，否则同事建个连接器就能进你的全部项目。
+
+Runtime Key 只能用来跑这条隧道，拿到它的人能顶替你的 tunnel-client 接 ChatGPT 的请求，但进不了 gld；
+`openai_tunnel_key` 才是进 gld 的那把，它只在本机，`gld secret regen openai_tunnel_key` 随时换。
 
 ### 读文件的范围：0.3.0 改了默认值
 
