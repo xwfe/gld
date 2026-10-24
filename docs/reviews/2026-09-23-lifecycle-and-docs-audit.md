@@ -3193,3 +3193,20 @@ troubleshooting 已有那条补上了这次。本机现在没有活动或暂停�
 **换完：**命令行和服务的构建提交都是 `7959dfc9eba5`，协议 10；工具表 34 项、指纹 `f0e996d1217ba15b` 没变，**ChatGPT 不用 Refresh**；
 `gld ls` 前后逐字一样，`data/profiles.json`、`data/oauth-clients/hub.json` 指纹一致；守护进程环境里 `CLAUDE*` 变量 0 个；
 `gld health` 四项全 ✓。基线扫描跳过被忽略文件的效果要等 ChatGPT 下一轮跑测试再看。没推送。
+
+## 74. 推送到 `fd20155`：第一次 CI 红在一条靠睡眠攒输出的测试，修完 8 个 job 全绿（2026-10-24）
+
+**要求：**用户说"推送 main 到 origin，然后看 CI 结果，红了就修"。推之前本机做过 Rust 1.89 的编译检查（通过）和
+`docs/cli.md` 重新生成比对（没差异）；Windows 交叉检查卡在 `ring` 要 Windows 的 C 编译器，本机没有，没装。
+
+**第一次（`efa32cd..7503b3b`，92 个提交，run 40082451488）：**8 个 job 里 7 个过（含 Windows 编译和补丁落盘测试、Linux 测试、
+三个平台的 MSRV、格式与 Clippy、命令参考），**macOS 测试红了一条**：`agents::tests::a_running_task_reports_only_a_short_output_tail`
+（10-23 `f9bc7f0` 加的），断言"收尾后给长一点"拿到 504 字节。cargo test 在 core 这组失败后就停了，macOS 上后面的集成测试没跑到。
+
+原因：假 Agent 每 0.05 秒打一行（约 84 字节），测试睡 0.8 秒就停掉它，再断言停掉后的尾巴超过在跑时的 768 字节上限；
+慢机器上 0.8 秒只打出 6 行。本机 `taskpolicy -b` 跑 6 次全红（504–672 字节），和 CI 一样。和这次推的功能无关。
+
+**修（`fd20155`）：**假 Agent 一上来先打 2 KB 再循环，测试不再看睡多久，等到"在跑且有输出"再查（最多 10 秒）。
+改后 `taskpolicy -b` 跑 8 次全过；全仓在 `taskpolicy -b`、`--no-fail-fast` 下 1069 passed / 0 failed，clippy、fmt 通过。
+
+**第二次（run 40083478303）：**8 个 job 全过。没打 tag、没发版。
