@@ -3038,3 +3038,32 @@ auto 档再起一个在跑的，`grant rm` 回 `stoppedAgentTasks=2`，两个都
 **换完：**命令行和服务的构建提交都是 `a4993f0f923a`，**协议 9**；工具表 34 项、指纹 `f0e996d1217ba15b` 前后一样，**不用 Refresh**；
 `gld ls`、两份凭据指纹（`profiles.json`、`oauth-clients/hub.json`）前后一致；守护进程环境里 `CLAUDE*` 变量 0 个；`gld health` 全 ✓。
 `gld agent ls`、`gld grant ls`、本机 `agent_manage action=list`（13 个任务）照常。本机现在没有 grant，`--write` grant 委派还没真机测过。没推送。
+
+## 69. ChatGPT 用 `--write` grant 真机委派、撤销（2026-10-24 13:47–13:53）
+
+**做法**（照 §9）：用户自己跑 `gld grant add deleg-grant delegation-test --write` 拿口令（口令不经过这边），在 ChatGPT 新建
+一条连接器 `gld-grant`（同一个公网地址），授权页填 grant 口令，新对话里只勾这一条。delegation-test 是 ask 档、`agents=codex`。
+
+**请求日志**（17022 行起，时间 UTC）：16 次请求全是同一个主体 `oauth:hub:dcr-ec4d…#grant:ea1e…`，原来那条连接器没出现。
+
+| 时间 | 调用 | 回包 | 对照 |
+| --- | --- | --- | --- |
+| 04:47:28 | `list_workspaces` | 898 B | 服务凭据那次（§66）6,258 B：只看得到 delegation-test |
+| 04:47:37 | `action=agents` | 1,388 B | 和服务凭据一样，只有 codex |
+| 04:47:39 | `action=list` | 416 B | 服务凭据那次 12,110 B：自己没起过任务，列表是空的 |
+| 04:47:42 | `status` 查服务凭据起的 `ad6eb28a` | 3,663 B | 是报错的大小（§66 的拒绝 4,155 B），不是任务详情（8 KB 上下）；ChatGPT 这一段的回复用户没贴，错误码原文没看到 |
+| 04:48:08 | `start codex model=gpt-6-luna effort=low` | 2,340 B | `43c156f2` 等放行；用户 04:50:14 在本机放行 |
+| 04:50:42 | `wait` | 8,011 B | `awaiting_review`，退出码 0，两个文件 +18 −1 |
+| 04:51:08–21 | `diff`、`exec_command`（unittest 16/16）、`review accept` | 4,183 / 3,094 / 4,424 B | grant 审得了自己起的任务 |
+| 04:51:29 | 第二个 `start` | 2,340 B | `3b211edd` 等放行，用户不放 |
+| 04:53:10 | （撤销之后） | — | 两次 `[auth] rejected`，`openai-mcp/1.0.0` |
+
+**本机：**`gld agent ls` 两个任务都标"codex（grant deleg-grant）"；任务记录里 `grant` 是 `{id: ea1e…, name: deleg-grant}`，`caller` 带 `#grant:`。
+用户在 04:52:14 前后 `gld grant rm deleg-grant`：`3b211edd` 在 04:52:14 变 `stopped`、`started_at` 为空（没起过）；`43c156f2` 停在 `accepted`
+不受影响；`gld grant ls` 回到"还没有 grant"。Codex 这段时间只有一个会话（04:50:16Z 开始，`gpt-6-luna` / `low`、`never` + `danger-full-access`），
+第二个任务确实没跑。
+
+**没看到的：**`gld grant rm` 那一屏的输出（"停掉了它委派的 1 个 Agent 任务"那行）用户没贴，从任务状态看是停了；
+`status` 查别人任务的错误码只能从回包大小推断（端到端测试里钉的是 `AGENT_TASK_NOT_FOUND`）；撤销后 ChatGPT 怎么提示用户没贴。
+测试连接器要用户在 chatgpt.com/plugins 删，它注册的 OAuth 客户端留在 `hub.json`（和 §9 一样，没有 grant 就只能用服务口令授权）。
+第一个任务的改动留在 delegation-test 工作区。没推送。
