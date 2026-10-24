@@ -61,7 +61,6 @@
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
 | 一键放行全部命令 | 10-23 22:34 已换上（审查 §60、§61） | `6a840e2`：`gld set <项目> command-policy=all` 放开白名单和 `confirm=true` 这些限制类关卡，删 `.git` 等照拦；本机 `gld set` / `gld ls` 提示风险，AI 那边初始化说明、`list_workspaces`、`workspace_context` 告知、绕过关卡的命令回包带 `policy_bypassed`。ChatGPT 没被提示就从 `list_workspaces` 看到并转告了风险，两条绕过关卡的命令它都认出来（§62）。还没做的：GPT Actions 那条线路没有这个开关 |
-| 清理命令 `gld prune` | 10-24 15:59 已换上（审查 §71） | 本机 `gld prune --dry-run`：没有目录不在了的项目；对不上项目的 14 项共 4.3 MB（`logs/` 12 个目录、`harness/workspaces/` 2 个，最后改动在 9-06 到 10-23 之间），用户说删再 `gld prune -y` |
 | 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
