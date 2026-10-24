@@ -3051,7 +3051,7 @@ auto 档再起一个在跑的，`grant rm` 回 `stoppedAgentTasks=2`，两个都
 | 04:47:28 | `list_workspaces` | 898 B | 服务凭据那次（§66）6,258 B：只看得到 delegation-test |
 | 04:47:37 | `action=agents` | 1,388 B | 和服务凭据一样，只有 codex |
 | 04:47:39 | `action=list` | 416 B | 服务凭据那次 12,110 B：自己没起过任务，列表是空的 |
-| 04:47:42 | `status` 查服务凭据起的 `ad6eb28a` | 3,663 B | 是报错的大小（§66 的拒绝 4,155 B），不是任务详情（8 KB 上下）；ChatGPT 这一段的回复用户没贴，错误码原文没看到 |
+| 04:47:42 | `status` 查服务凭据起的 `ad6eb28a` | 3,663 B | ChatGPT 报 `AGENT_TASK_NOT_FOUND`、分类 `not_found`；大小也是报错的（§66 的拒绝 4,155 B），不是任务详情（8 KB 上下） |
 | 04:48:08 | `start codex model=gpt-6-luna effort=low` | 2,340 B | `43c156f2` 等放行；用户 04:50:14 在本机放行 |
 | 04:50:42 | `wait` | 8,011 B | `awaiting_review`，退出码 0，两个文件 +18 −1 |
 | 04:51:08–21 | `diff`、`exec_command`（unittest 16/16）、`review accept` | 4,183 / 3,094 / 4,424 B | grant 审得了自己起的任务 |
@@ -3063,7 +3063,14 @@ auto 档再起一个在跑的，`grant rm` 回 `stoppedAgentTasks=2`，两个都
 不受影响；`gld grant ls` 回到"还没有 grant"。Codex 这段时间只有一个会话（04:50:16Z 开始，`gpt-6-luna` / `low`、`never` + `danger-full-access`），
 第二个任务确实没跑。
 
-**没看到的：**`gld grant rm` 那一屏的输出（"停掉了它委派的 1 个 Agent 任务"那行）用户没贴，从任务状态看是停了；
-`status` 查别人任务的错误码只能从回包大小推断（端到端测试里钉的是 `AGENT_TASK_NOT_FOUND`）；撤销后 ChatGPT 怎么提示用户没贴。
+ChatGPT 第一段如实报了：看到 1 个项目 `delegation-test`，`allowed=["codex"]`，codex 那行 `model` / `effort` 为 null、两个 `*_choice` 为真，
+列出 0 个任务。守护进程日志里 `remove_grant` 在 04:52:14、6 毫秒完成，和 `3b211edd` 变 `stopped` 是同一秒。
+
+**撤销后 ChatGPT 那边看到的不是 gld 的话：**用户让它再调一次 `action=list`，它拿回来的是
+"The previous Code Mode continuation is no longer available. Ask the user to retry the original request."，自己说"没收到明确的撤销错误码，无法确认"。
+gld 这边 04:53:10 记了两次 401（`openai-mcp/1.0.0`），之后这个主体再没有请求进来，所以是 ChatGPT 把 401 包成了它自己的通用错误；
+§9 那次它说的是"连接已过期，重新连接后才能使用"。撤销到底生效没有，以服务端日志为准，AI 的转述证明不了。
+
+**没看到的：**`gld grant rm` 那一屏的输出（"停掉了它委派的 1 个 Agent 任务"那行）用户没贴，从任务状态和守护进程日志看是停了。
 测试连接器要用户在 chatgpt.com/plugins 删，它注册的 OAuth 客户端留在 `hub.json`（和 §9 一样，没有 grant 就只能用服务口令授权）。
 第一个任务的改动留在 delegation-test 工作区。没推送。
