@@ -23,6 +23,7 @@
   §62 测完已改回 guarded / all；工作区里故意留着前几轮委派没提交的改动）还挂在服务上，不要了就 `gld rm delegation-test`。
   回滚用 `~/.local/opt/gld-3dc98e4-20261024-1327`（换之前那版，协议 8）和 `gld-config-20261024-1327.tgz`（0600，有明文凭据）；
   另有更早的 `gld-b81b144-…`（协议 7）、`gld-b052102-…`、`gld-2022624-…`、`gld-2f50e09-…`、`gld-c99c8cd-…`、`gld-59f40ad-…`、`gld-a8f9993-…`、`gld-6268bb0-…`（协议 6）、`gld-fba39d0-…`、官方 0.8.3 包和几份旧数据备份，要清的话说一声。
+- main 上还没换装的：`b4bb400` OpenAI 隧道（`--tunnel openai:<隧道 ID>`）、`516e989` `gld prune`，**协议 10**（审查 §70）；工具表没变。
 - 另一台 Mac、Linux 服务器的普通账号和 root：还是 `fba39d0`，`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）；
   只装了命令行，没起守护进程（审查 §33）。
 - 全仓：本机 1052 passed / 0 failed（`--write` grant 委派那次，§67）；Linux 服务器 989 是 `fba39d0` 那次的（差一条只在 macOS 编译的）；
@@ -61,7 +62,7 @@
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
 | 经 gld 开发时的摩擦（审查 §28） | 已部署、ChatGPT 已 Refresh，等下一轮实测（2026-10-18） | §28 的 9 条和复核时另查出的 4 条，能改的都改了（§29–§31），本机已换上（§32），ChatGPT 15:13 已 Refresh（§35）。下一轮看：提交后还有没有 `refresh_baseline`、有没有每秒轮询、还会不会用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 多不多。没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
 | 一键放行全部命令 | 10-23 22:34 已换上（审查 §60、§61） | `6a840e2`：`gld set <项目> command-policy=all` 放开白名单和 `confirm=true` 这些限制类关卡，删 `.git` 等照拦；本机 `gld set` / `gld ls` 提示风险，AI 那边初始化说明、`list_workspaces`、`workspace_context` 告知、绕过关卡的命令回包带 `policy_bypassed`。ChatGPT 没被提示就从 `list_workspaces` 看到并转告了风险，两条绕过关卡的命令它都认出来（§62）。还没做的：GPT Actions 那条线路没有这个开关 |
-| OpenAI Secure MCP Tunnel 接入 | 未开始，要用户自己的 Platform 账号 | 第一步不写代码：用户在 Platform 建隧道（勾上要用的 ChatGPT 工作区）、建只开 Tunnels Read + Use 的 Runtime Key，`tunnel-client --mcp-server-url` 指到 gld 本地地址，ChatGPT 里选 Tunnel 建连接器走一圈，重点看 gld 的 OAuth 经隧道通不通。通了再做 `--tunnel openai`（gld 托管 tunnel-client，钉版本、校验摘要）。限制和依据见审查 §39 |
+| 清理命令 `gld prune` | 源码已实现（`516e989`），没换装 | 换装后先 `gld prune --dry-run` 看本机清单（§70 只读统计：`logs/` 12 个目录、`harness/workspaces/` 2 个对不上项目），用户看过再删 |
 | 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
@@ -73,6 +74,7 @@
 | 项 | 什么时候做 / 怎么做 |
 | --- | --- |
 | SuperAssistant 接 DeepSeek 网页 | 代码已实现、本机已换上（`gld grant browser`，审查 §23–§25）。用户真用时自己在终端 `gld grant browser web-mcp --all`（或点名项目）拿地址（地址就是凭据，不经过 AI），扩展选 Streamable HTTP。报 `Failed to fetch` 且 `gld logs` 没有请求，先查 Chrome 的本地网络访问权限。遇到问题再修，结果记审查 |
+| OpenAI Secure MCP Tunnel | 代码已实现（`b4bb400`，审查 §70），没换装、没连过真隧道。真要用时：Platform 建隧道（关联要用的 ChatGPT 工作区）和有 Tunnels Read + Use 的 Runtime Key，`brew install openai/tools/tunnel-client`，`gld share --tunnel openai:<隧道 ID>`。会顶掉现在的自建公网地址，切之前用户定。遇到问题再修，结果记审查 |
 | Windows 下载包真机实跑 | 有 Windows 机器时。CI 的 Windows job 跑过 `daemon_lifecycle.rs` 9 条，跑的是构建产物，不是下载包 |
 | Windows CI 下一组测试 | 改到 Windows 相关代码时，从 `run_records.rs`、按 cwd 找项目（8.3 短路径）里挑 |
 | ChatGPT grant 的两处没验 | 真实共享场景时：删了 grant 用同名重建、逐字核对 ChatGPT 拿到的回包（审查 §9） |

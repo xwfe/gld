@@ -3075,3 +3075,44 @@ gld 这边 04:53:10 记了两次 401（`openai-mcp/1.0.0`），之后这个主�
 测试连接器 `gld-grant` 用户事后在 chatgpt.com/plugins 删了（10-24 下午，gld 这边 04:53:10 之后再没有这个主体的请求）。它注册的
 OAuth 客户端（13:44 建的那个）留在 `data/oauth-clients/hub.json`，和 §9 一样：gld 没有删客户端的命令，grant 没了它只能用服务口令授权，不手改。
 第一个任务的改动留在 delegation-test 工作区。没推送。
+
+## 70. OpenAI 隧道接上；`gld prune` 清目录不在的项目和已删项目的残留（2026-10-24）
+
+**要求：**§69 收尾后用户说：OpenCode、Qoder CLI、DeepSeek Harness 先不装，Agent 委派在 task_plan 里收尾；
+"SuperAssistant 与 OpenAI MCP Tunnel 功能需要完全实现即可，实际遇到问题再说"；数据目录里已删项目的残留要有清理命令；
+`gld ls` 里有的项目目录被搬走了，要一键清。
+
+**SuperAssistant：**10-17 就实现并换上了（§23–§25），这次没改代码，只把它从待办挪进"等遇到再做"（`d5c136a`）。
+
+**OpenAI 隧道（`b4bb400`）。**依据是官方文档和 openai/tunnel-client v0.0.18（2026-10-23 发布）：从它的 Release 下了 darwin-arm64 包和
+源码包，两个的 SHA-256 都和 `SHA256SUMS.txt` 对得上。跑过一次 `--version`（`0.0.18 git sha: 274a558…`），再往下执行它被本机的权限策略拦了，
+没绕，改成只读源码核对：
+
+| 源码 | 核出来的 | 落到 gld 里 |
+| --- | --- | --- |
+| `pkg/runtimeconfig/config.go` | `--mcp.extra-headers` / `--mcp.discovery-extra-headers` 的值认 `env:VAR`；没给 `--control-plane.api-key` 时先读 `CONTROL_PLANE_API_KEY`、再读 `OPENAI_API_KEY`；健康端口默认 `127.0.0.1:8080`；`--control-plane.http-proxy` 认 `env:VAR` | 两把密钥都放 gld 自己起名的环境变量，参数里只写 `env:` 引用；显式给 `--control-plane.api-key`，不会退去读 `OPENAI_API_KEY`；健康端口由 gld 现分一个空闲的 |
+| `pkg/runtimehealth/health.go` | `/readyz`：OAuth 发现和启动探测都过了才 200；探测拿 401 时也回 200，正文 `ready (mcp initialize requires auth: …)`；控制面连没连上不在 `/readyz` 里 | 等 `/readyz` 200 且正文不含 "requires auth" 才算起好；先起监听器、应答了再起它 |
+| `pkg/proxy/route.go` | 按 `HTTP(S)_PROXY` 走代理时只认 `NO_PROXY`，回环地址不自动绕开 | 子进程环境补 `NO_PROXY=…,127.0.0.1,localhost` |
+
+认证不走 OAuth：gld 生成服务凭据 `openai_tunnel_key`，让 tunnel-client 给转发的请求带 `X-Gld-Tunnel-Key`，监听器认出来就放行，
+主体记成 `openai-tunnel:hub`。§39 没弄清的"ChatGPT 经隧道走 gld 的 OAuth 通不通"就此绕开：token 端点在本机，ChatGPT 的服务器够不着，
+codex-bridge 也是用静态请求头。不用 `Authorization` 头是因为文档写着连接器带来的请求头最后套上、同名的盖掉静态值。
+
+和 task_plan 原计划的出入：原写"gld 托管 tunnel-client，钉版本、校验摘要"，托管做了，钉版本和校验摘要没做——`tunnel/mod.rs` 里
+已有的决定是 gld 不代下载隧道程序、只从 PATH 找（cloudflared、frpc 一样），macOS 让 brew 装（发布页的 zip 没公证）。
+原计划还要先让用户手工走一遍再写代码，用户这次说直接实现。
+
+**没验证的：**没连过真的 OpenAI 隧道；ChatGPT 连接器里"不需要认证"那一项的确切菜单名没见过；隧道 ID、Runtime Key、权限不对这类
+控制面那一段的问题，gld 的就绪检查看不到，只能看 `logs/hub/tunnel-client.log`。公网入口仍然只能有一个：本机现在是自建反代地址，
+换成 `openai:` 会清掉那条登记，按旧地址建的 ChatGPT 连接器就连不上了，切之前要用户自己定。
+
+**`gld prune`（`516e989`）。**本机数据目录的只读统计（10-24，算法和命令里的一样）：20 个项目目录都在；`logs/` 下 12 个目录对不上
+任何项目，`harness/workspaces/` 2 个，`runs/`、`agents/` 没有（`runs/` 自己 7 天清一次）。命令先列清单，确认后把清单发回守护进程，
+它重扫一遍、只删两次都在的；目录不在了的项目走 `gld rm` 同一条路，删不掉的话它的记录也不动；有命令在跑、有委派没结束的目录不动；
+"目录不在了"只认 NotFound（或成了文件），父目录没权限读不算——外接盘没插上会被列进来，所以要确认。
+
+**验证：**OpenAI 隧道 3 条集成测试（假 tunnel-client 照真版本带请求头探测、按结果答 `/readyz`）加解析、主体标识、日志尾巴的单元测试；
+`gld prune` 1 条集成测试加 5 条单元测试。各把一处关键判断改坏（监听器不认那个请求头、留下项目的日志也算残留）时对应集成测试变红。
+全仓第一遍 1058、第二遍 1065 passed / 0 failed，clippy `-D warnings`、fmt 通过，`docs/cli.md` 重新生成。
+
+**没做：**没换装、没推送；`write-locks/` 不管；本机的 12 个日志目录和 2 个任务记录目录没删（新命令没换装）。
