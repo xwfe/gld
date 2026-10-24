@@ -3024,3 +3024,17 @@ gld 这边：每个都记成 `failed`、原因在 `output_tail` 里，ChatGPT �
 ask 档起任务、本机列表和详情标出 grant 名、另一把 `--write` grant 列表为空且查和停都是 `AGENT_TASK_NOT_FOUND`、本机看得见；
 auto 档再起一个在跑的，`grant rm` 回 `stoppedAgentTasks=2`，两个都变 `stopped`），grant 单元测试补浏览器标记和 `may_delegate` 的断言。
 全仓 1052 passed / 0 failed（§64 是 1051，多的就是这一条），clippy、fmt、文档门禁通过。工具表没变，换装后不用 Refresh；没换装、没推送。
+
+## 68. 本机换成 `a4993f0`（2026-10-24 13:28）
+
+**要求：**用户说"按 install.md 换装本机（先查没有在跑的命令），换完核对，不推送"。
+
+**换之前：**守护进程 pid 92371（`3dc98e4`，协议 8）没有子进程，没有在跑的委派，请求日志最后一条是 04:04:49Z（20 分钟没动），
+重启前再看还是这一条。
+
+**换装：**release 构建 2 分 25 秒（照旧有 `rust-objcopy` 缺 `libLLVM.dylib` 的去符号警告，不影响运行）；备份 `gld-3dc98e4-20261024-1327`
+和 `gld-config-20261024-1327.tgz`（0600）；写 `.new` 再改名，去掉 `CLAUDE*` 变量重启，pid 92371 → 95309。带上 `6a21eae`、`a4993f0`。
+
+**换完：**命令行和服务的构建提交都是 `a4993f0f923a`，**协议 9**；工具表 34 项、指纹 `f0e996d1217ba15b` 前后一样，**不用 Refresh**；
+`gld ls`、两份凭据指纹（`profiles.json`、`oauth-clients/hub.json`）前后一致；守护进程环境里 `CLAUDE*` 变量 0 个；`gld health` 全 ✓。
+`gld agent ls`、`gld grant ls`、本机 `agent_manage action=list`（13 个任务）照常。本机现在没有 grant，`--write` grant 委派还没真机测过。没推送。
