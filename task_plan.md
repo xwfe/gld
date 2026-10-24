@@ -16,14 +16,13 @@
 `825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40）；`e265ca6` `gld remote add <项目名>` 精简、默认 coding；
 `0324602`–`267cdf9` Agent 委派 D1：`agent_manage`、`gld agent`、项目开关 `agent-delegation`（§42）。
 **守护进程协议从 7 起**（`85804aa`），工具表多了 `agent_manage`。
-- 本机：`baf8e32`，守护进程 2026-10-24 15:59 换上（审查 §71），带上了 `b4bb400`（OpenAI 隧道）、`516e989`（`gld prune`）。
+- 本机：`7959dfc`，守护进程 2026-10-24 18:07 换上（审查 §73），带上了 `b4bb400`（OpenAI 隧道）、`516e989`（`gld prune`）、`e32023c`（基线扫描跳过被忽略的文件）。
   **协议 10**；工具表 34 项、指纹 `f0e996d1217ba15b` 没变，ChatGPT 不用 Refresh（10:37 换 `3dc98e4` 那次已经要点过，§65）。
   守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`。本机现在没有 grant（§69 测试用的 `deleg-grant` 已撤销）。
   临时项目 `delegation-test`（`~/xdw/gld-delegation-test`，`agent-delegation=ask`，测试时临时开过 `command-policy=all`、`agent-approval=self`，
   §62 测完已改回 guarded / all；工作区里故意留着前几轮委派没提交的改动）还挂在服务上，不要了就 `gld rm delegation-test`。
-  回滚用 `~/.local/opt/gld-a4993f0-20261024-1558`（换之前那版，协议 9）和 `gld-config-20261024-1558.tgz`（0600，有明文凭据）；
-  另有更早的 `gld-3dc98e4-…`（协议 8）、`gld-b81b144-…`（协议 7）、`gld-b052102-…`、`gld-2022624-…`、`gld-2f50e09-…`、`gld-c99c8cd-…`、`gld-59f40ad-…`、`gld-a8f9993-…`、`gld-6268bb0-…`（协议 6）、`gld-fba39d0-…`、官方 0.8.3 包和几份旧数据备份，要清的话说一声。
-- main 上还没换装的：`e32023c` Git 项目的基线扫描不进被 `.gitignore` 忽略的文件（审查 §72），协议和工具表都没变。
+  回滚用 `~/.local/opt/gld-baf8e32-20261024-1806`（换之前那版，协议 10）和 `gld-config-20261024-1806.tgz`（0600，有明文凭据）；
+  另有更早的 `gld-a4993f0-…`（协议 9）、`gld-3dc98e4-…`（协议 8）、`gld-b81b144-…`（协议 7）、`gld-b052102-…`、`gld-2022624-…`、`gld-2f50e09-…`、`gld-c99c8cd-…`、`gld-59f40ad-…`、`gld-a8f9993-…`、`gld-6268bb0-…`（协议 6）、`gld-fba39d0-…`、官方 0.8.3 包和几份旧数据备份，要清的话说一声。
 - 另一台 Mac、Linux 服务器的普通账号和 root：还是 `fba39d0`，`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）；
   只装了命令行，没起守护进程（审查 §33）。
 - 全仓：本机 1052 passed / 0 failed（`--write` grant 委派那次，§67）；Linux 服务器 989 是 `fba39d0` 那次的（差一条只在 macOS 编译的）；
@@ -60,7 +59,7 @@
 | 零中断升级（RFC-0008） | 草案，未实现 | 让在跑的命令和请求跨版本都不断。要不要做、先做哪段由用户定；先确认真实痛点（比如长跑的开发服务器被重启停掉）再立项 |
 | 任务收尾与大输入回传 | 10-18 随 `4a6d098` 换上（审查 §32、§33），没从连接器专门验 | `8fb5e31`、`63719bc`：收尾可只读重试、附加摘要失败不覆盖终态、命令回显有界；新增 8 条回归先失败后通过，全仓 test / clippy / fmt 通过，见审查 §27，复核见 §28。是预防性修复，记录里没见过 `finish` 被重试；等 ChatGPT 真重试一次 `finish` 或撞到命令回显截断时再看回包 |
 | Claude Code 插件带的 skill | 已推送、三台已装（2026-10-22，审查 §38） | `02e1afb`：Skill 自动发现认 Claude Code 开着的、装着的插件里的 skill，名字带插件前缀（`exa:search`），不扫 `marketplaces/`。新增 6 条单元测试先红后绿，开发机真实主目录上 94 → 97 个，见审查 §37；扫哪些目录现在写在 concepts.md「本机和项目里的 Skill」。复核后补了市场清单只读一次（`f282abe`）；三台换成 `fba39d0`，本机 `gld context -w gld` 已多出 `exa:exa-agent`、`exa:search`、`frontend-design:frontend-design`。managed 策略、插件 `commands/`、claude.ai 同步的插件没做，真遇到再加 |
-| 经 gld 开发时的摩擦（审查 §28、§72） | §28 那几条 10-24 复核过：提交后刷新基线 0 次、每秒轮询基本没了、没再用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 0 次 | 新的大头：被 `.gitignore` 忽略的测试产物让写操作报 `FILE_CHANGED_EXTERNALLY`，一周 13 次刷新基线里 11 次只因为它们（§72）。`e32023c` 改成 Git 项目的扫描不进被忽略的文件，没换装；换上后看下一轮刷新基线还剩多少；没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
+| 经 gld 开发时的摩擦（审查 §28、§72） | §28 那几条 10-24 复核过：提交后刷新基线 0 次、每秒轮询基本没了、没再用 `python3 -c` 读文件、`FILE_VERSION_CONFLICT` 0 次 | 新的大头：被 `.gitignore` 忽略的测试产物让写操作报 `FILE_CHANGED_EXTERNALLY`，一周 13 次刷新基线里 11 次只因为它们（§72）。`e32023c` 改成 Git 项目的扫描不进被忽略的文件，10-24 18:07 已换上（§73）；看下一轮刷新基线还剩多少；没改的三条和原因在 §31，其中"只改文档也要重跑全仓"等用户定 |
 | 一键放行全部命令 | 10-23 22:34 已换上（审查 §60、§61） | `6a840e2`：`gld set <项目> command-policy=all` 放开白名单和 `confirm=true` 这些限制类关卡，删 `.git` 等照拦；本机 `gld set` / `gld ls` 提示风险，AI 那边初始化说明、`list_workspaces`、`workspace_context` 告知、绕过关卡的命令回包带 `policy_bypassed`。ChatGPT 没被提示就从 `list_workspaces` 看到并转告了风险，两条绕过关卡的命令它都认出来（§62）。还没做的：GPT Actions 那条线路没有这个开关 |
 | 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
 
