@@ -2998,3 +2998,29 @@ gld 这边：每个都记成 `failed`、原因在 `output_tail` 里，ChatGPT �
 
 **顺带发现：**这台的 Python 3.12（mise 装的）没有 pytest，Agent 和 ChatGPT 都如实报"没跑成"，没算通过；ChatGPT 改用
 `python3 -m unittest` 自己验了一遍，在审核意见里写明了这个限制。不是 gld 的问题。没推送。
+
+## 67. 放开 `--write` grant 委派（2026-10-24）
+
+**要求：**用户说"下一步做放开 --write grant，先说清楚改什么和风险，再动手；测试、文档、提交，先不换装"。
+
+**为什么之前关着：**RFC-0009 第 5 节定的是服务凭据和 `--write` grant 能发起，D1 做得更紧、所有 grant 都不行：
+往下传的 `Grant` 只有 id、名字、项目和 `read_only`，分不出浏览器地址的 grant，而浏览器 grant 也能带 `--write`
+（`gld grant browser … --write`，`BrowserGrantSpec.writable`）。只读 grant 本来就调不到（read-only 工具集里没有 `agent_manage`）。
+
+**改了什么：**
+
+- `Grant` 加 `browser`（`serde(skip)`，不落盘），查 grant 时按数据记录里有没有浏览器钥匙现算（`GrantRecord::scope`）；
+  `may_delegate()` = 不是只读、不是浏览器。`Caller` 带整份 `Grant`（原来只有 id）。
+- `agent_manage` 起、审、停改看 `may_delegate`；不行的报 `AGENT_DELEGATION_NOT_ALLOWED`，`details.grant` 写 `browser` 或 `read_only`。
+- grant 只看得见、动得了自己起的任务（`list` 过滤，按 id 查别人的报 `AGENT_TASK_NOT_FOUND`），和命令会话按调用方分开同一个口径；
+  服务凭据照旧看得见全部。任务记下 `grant`（id、名字），给 AI 的回包里去掉（和 `caller` 一样是本机记账）。
+- `gld grant rm` 把它委派的任务一起收掉：在跑的叫停、等放行的作废，35 秒后再扫一次；回包多 `stoppedAgentTasks`，
+  命令行打"停掉了它委派的 N 个 Agent 任务"。**守护进程协议 8 → 9**（旧守护进程不停这些任务，新命令行却会当成停了 0 个）。
+- `gld agent ls` 在 Agent 后标"（grant 名字）"，`gld agent show` 的发起人写哪把 grant、怎么撤销。
+- 没给 grant 额外强制 ask：`--write` 本来就等于全权（能跑命令就读得到服务口令），同一个开关对不同凭据含义不同反而难懂；
+  security.md 写明 `auto` 档下 `--write` grant 不用你点头就能起全权 Agent，开给 grant 的项目用 `ask`。
+
+**验证：**新增端到端一条（真起 bearer 服务：只读 grant 硬发是 `unknown_tool`；`--write` 的浏览器 grant 被拒；`--write` grant
+ask 档起任务、本机列表和详情标出 grant 名、另一把 `--write` grant 列表为空且查和停都是 `AGENT_TASK_NOT_FOUND`、本机看得见；
+auto 档再起一个在跑的，`grant rm` 回 `stoppedAgentTasks=2`，两个都变 `stopped`），grant 单元测试补浏览器标记和 `may_delegate` 的断言。
+全仓 1052 passed / 0 failed（§64 是 1051，多的就是这一条），clippy、fmt、文档门禁通过。工具表没变，换装后不用 Refresh；没换装、没推送。
