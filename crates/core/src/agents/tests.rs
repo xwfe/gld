@@ -1136,18 +1136,33 @@ fn the_diff_cannot_be_paged_before_the_task_has_run() {
 }
 
 /// 在跑时每次 wait 回的输出尾巴要小（审查 §44：Codex 的事件 JSON 让一次回包到了 14 KB）。
+///
+/// 假 Agent 一上来先打 2 KB，停掉之后的尾巴才一定比在跑时的上限长。以前靠睡 0.8 秒攒输出，
+/// CI 的 macOS 机器上那段时间只打出 6 行（504 字节），收尾那条断言就红了（审查 §74）。
 #[test]
 fn a_running_task_reports_only_a_short_output_tail() {
     let f = Fixture::new();
     f.agent(
         "chatty",
-        "cat >/dev/null\nwhile true; do echo '{\"type\":\"item.completed\",\"item\":{\"text\":\"a fairly long event line from the agent\"}}'; sleep 0.05; done",
+        "cat >/dev/null\nprintf '%02000d\\n' 0\nwhile true; do echo '{\"type\":\"item.completed\",\"item\":{\"text\":\"a fairly long event line from the agent\"}}'; sleep 0.05; done",
         STDOUT,
         "",
     );
     let task = f.start("chatty", Approval::Auto).expect("起");
-    std::thread::sleep(Duration::from_millis(800));
-    let detail = f.detail_of(&task);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let detail = loop {
+        let detail = f.detail_of(&task);
+        let has_output = detail
+            .output_tail
+            .as_ref()
+            .is_some_and(|tail| !tail.stdout.is_empty());
+        if (detail.task.state == State::Running && has_output)
+            || std::time::Instant::now() >= deadline
+        {
+            break detail;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert_eq!(detail.task.state, State::Running);
     let tail = detail.output_tail.expect("在跑时有输出尾巴");
     assert!(
