@@ -2968,3 +2968,33 @@ Pi `--model`、`--thinking off|minimal|low|medium|high|xhigh`；Qwen、Kimi 只�
 
 gld 这边：每个都记成 `failed`、原因在 `output_tail` 里，ChatGPT 逐个读了原因、打回，都没改文件。几家都走到了登录这一步才失败，
 没有一家报"不认识的参数"，说明档案里的启动参数至少都被接受了；真正干活的部分还没验证。没推送。
+
+## 66. ChatGPT 实测 Agent 名单、提议模型和强度、放行时改（2026-10-24 11:11–11:19）
+
+**准备：**用户说"继续"。本机只有 Codex 登录了，所以 `gld set delegation-test agents=codex`（撤销用 `agents=`）。本机先调
+`action=agents`：只回 codex 一行，`model`、`effort` 为空（按 Codex 自己的配置，这台是 `gpt-6-astra` / `xhigh`），`model_choice`、
+`effort_choice` 为真。Codex 已自己升到 0.164.0，档案用到的 `-m`、`-c`、`--approve-for-me`、`--dangerously-bypass-approvals-and-sandbox`
+都还在。Codex 的模型缓存里每个模型列了自己支持的推理强度：`gpt-6-astra` 是 low / medium / high / xhigh / max / ultra，
+`gpt-6-luna`（"快、便宜，适合简单任务"）没有 ultra，所以 codex 档案的 `efforts` 留空、交给 Codex 核对是对的（§64）。
+提示词让 ChatGPT 查名单、故意起 claude、再用 `model=gpt-6-luna effort=medium` 起 codex，停下等用户放行时改成 low。
+
+**结果**（请求日志 16878 行起，11 次 tools/call（含一次 `list_workspaces`），都在 02:12–02:19 UTC）：
+
+| 时间（UTC） | 调用 | 回包 | 看到的 |
+| --- | --- | --- | --- |
+| 02:12:55 | `action=agents` | 1,388 B | 只有 codex（ChatGPT 报"通过"） |
+| 02:12:57 / 02:13:17 | `action=list` 前后各一次 | 都是 12,110 B | 起 claude 前后一样大：没有多出任务 |
+| 02:13:11 | `start agent=claude` | 4,155 B | 被拒；本机同样调用复现是 `AGENT_NOT_ALLOWED`（`permission`），任务列表没变 |
+| 02:13:35 | `start agent=codex model=gpt-6-luna effort=medium` | 2,492 B | `ad6eb28a` 等本机放行 |
+| 02:18:23 | 用户 `gld agent approve ad6eb28a --effort low` | — | 命令行打印"改了：effort medium → low" |
+| 02:19:09 | `wait` | 8,579 B | `awaiting_review`，`model=gpt-6-luna`、`effort=low`、`approval_changes=["effort medium → low"]` |
+| 02:19:17 | `action=diff` | 3,797 B | 1,457 B 全文一页读完 |
+| 02:19:21–23 | 两次 `exec_command` | 3,201 / 5,484 B | pytest 跑不了（见下），unittest 13/13 通过 |
+| 02:19:33 | `review accept` | 6,474 B | `accepted` |
+
+**Codex 实际用的是不是改过的：**是。那次的会话记录（02:18:24.987Z 开始，放行后 1.6 秒）里 `model=gpt-6-luna`、`effort=low`、
+`approval_policy=never`、`sandbox=danger-full-access`（all 档）。跑了 19 秒，退出码 0，改了两个文件 +18 −1，`head_moved=false`。
+说明 AI 提议的模型留下了，用户放行时改的强度真的传给了 Codex，不只是记录里改了。
+
+**顺带发现：**这台的 Python 3.12（mise 装的）没有 pytest，Agent 和 ChatGPT 都如实报"没跑成"，没算通过；ChatGPT 改用
+`python3 -m unittest` 自己验了一遍，在审核意见里写明了这个限制。不是 gld 的问题。没推送。
