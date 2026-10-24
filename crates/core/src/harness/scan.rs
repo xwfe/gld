@@ -2,7 +2,7 @@
 //!
 //! 任务基线、写前检查、验收证据都拿这里的结果比。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -69,14 +69,25 @@ pub(super) fn git_position(root: &Path) -> (Option<String>, Option<String>) {
 /// `target` 里几十万个文件照样要逐个 stat 一遍。
 /// 文件内容按固定缓冲流式算哈希：以前整个读进内存，工作区里一个 511 MB 的文件就让
 /// 峰值内存涨到 517 MB。
+///
+/// 项目是 Git 仓库时，被 `.gitignore` 忽略、又没被跟踪的文件和目录也不进，见 [`git_ignored`]。
 pub(super) fn scan_worktree(root: &Path) -> WorktreeScan {
     let mut entries = Vec::new();
     let mut unreadable = Vec::new();
+    let ignored = git_ignored(root);
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|item| {
-            item.depth() == 0 || !(item.file_type().is_dir() && is_skipped_dir(item.file_name()))
+            if item.depth() == 0 {
+                return true;
+            }
+            if item.file_type().is_dir() {
+                !is_skipped_dir(item.file_name())
+                    && !ignored.dirs.contains(&relative(root, item.path()))
+            } else {
+                !ignored.files.contains(&relative(root, item.path()))
+            }
         });
     for item in walker {
         let item = match item {
@@ -194,6 +205,58 @@ fn is_skipped_dir(name: &std::ffi::OsStr) -> bool {
                 | "System Volume Information"
         )
     )
+}
+
+/// 被 Git 忽略、又没被跟踪的路径，相对工作区根、用 `/` 分隔。
+#[derive(Default)]
+struct IgnoredPaths {
+    files: HashSet<String>,
+    /// 整个目录都被忽略的（git 只报目录本身，不展开）。
+    dirs: HashSet<String>,
+}
+
+/// 问 git 哪些文件和目录被忽略了（`.gitignore`、`.git/info/exclude`、全局 excludes 都算）。
+///
+/// 为什么不算进指纹：测试转到后台继续跑时，回包之后才写出、删掉的文件算不到那条命令头上，
+/// 下一次写就报 `FILE_CHANGED_EXTERNALLY`。2026-10-18 到 10-24 的 13 次 `refresh_baseline` 里
+/// 11 次改动全是 `.data/tests/…`、`.pytest_cache/…` 这类被忽略的测试产物（审查 §72）。项目自己
+/// 声明了不要的东西，和上面那张目录名单一个道理。代价也一样：任务期间有人改了被忽略的文件
+/// （比如本地 `.env`），gld 不再报外部改动，任务的改动清单里也没有它们。
+///
+/// 已经被跟踪的文件照样算，哪怕它也匹配忽略规则（`git add -f` 进去的）。项目在别的仓库里面时
+/// 按那个仓库的规则算。不是 Git 仓库、没装 git、git 报错都是空的：照旧全扫，不会因此漏判。
+fn git_ignored(root: &Path) -> IgnoredPaths {
+    let Some(output) = git_output(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    ) else {
+        return IgnoredPaths::default();
+    };
+    if !output.status.success() {
+        return IgnoredPaths::default();
+    }
+    let mut ignored = IgnoredPaths::default();
+    for raw in output.stdout.split(|byte| *byte == 0) {
+        let path = String::from_utf8_lossy(raw).replace('\\', "/");
+        match path.strip_suffix('/') {
+            Some(dir) if !dir.is_empty() => {
+                ignored.dirs.insert(dir.to_string());
+            }
+            Some(_) => {}
+            None if !path.is_empty() => {
+                ignored.files.insert(path);
+            }
+            None => {}
+        }
+    }
+    ignored
 }
 
 /// 每个文件相对某份清单的状态，两边的路径取并集、按路径排序。
@@ -339,6 +402,87 @@ mod tests {
             .map(|e| e.path)
             .collect();
         assert_eq!(paths, ["dist", "scripts/build"], "build/ 目录照旧跳过");
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn write(root: &Path, path: &str, content: &str) {
+        let full = root.join(path);
+        fs::create_dir_all(full.parent().unwrap()).expect("dir");
+        fs::write(full, content).expect("file");
+    }
+
+    fn scanned(root: &Path) -> Vec<String> {
+        scan_worktree(root)
+            .entries
+            .into_iter()
+            .map(|e| e.path)
+            .collect()
+    }
+
+    /// 被忽略、没被跟踪的不算：测试在后台写出的 `.data/`、`.pytest_cache/` 不该让下一次写报外部改动
+    /// （审查 §72）。被跟踪的哪怕匹配忽略规则也照算；没被忽略的新文件照样看得见。
+    #[test]
+    fn a_git_project_does_not_count_what_it_ignores() {
+        let workspace = tempdir().expect("workspace");
+        let root = workspace.path();
+        git(root, &["init", "-q"]);
+        write(root, ".gitignore", ".data/\n*.log\n.pytest_cache/\n");
+        write(root, "src/app.py", "print(1)\n");
+        write(root, "pinned.log", "tracked on purpose\n");
+        git(root, &["add", ".gitignore", "src/app.py"]);
+        git(root, &["add", "-f", "pinned.log"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        let before = scan_worktree(root).fingerprint();
+        // 测试跑出来的东西：整目录忽略的、按后缀忽略的、目录里一层层往下的。
+        write(root, ".data/tests/case-1/rag.sqlite3", "db");
+        write(root, ".pytest_cache/v/cache/lastfailed", "{}");
+        write(root, "src/debug.log", "noise");
+        assert_eq!(scan_worktree(root).fingerprint(), before);
+        assert_eq!(
+            scanned(root),
+            [".gitignore", "pinned.log", "src/app.py"],
+            "被跟踪的 pinned.log 照算"
+        );
+
+        // 没被忽略的新文件、被跟踪文件的改动，照样让指纹变。
+        write(root, "notes.md", "x");
+        let with_new_file = scan_worktree(root).fingerprint();
+        assert_ne!(with_new_file, before);
+        write(root, "pinned.log", "changed\n");
+        assert_ne!(scan_worktree(root).fingerprint(), with_new_file);
+    }
+
+    /// 项目是大仓库里的一个子目录：按那个仓库的规则算，路径照旧相对项目根。
+    #[test]
+    fn a_project_inside_a_repository_uses_that_repositorys_rules() {
+        let repo = tempdir().expect("repo");
+        git(repo.path(), &["init", "-q"]);
+        write(repo.path(), ".gitignore", "out/\n");
+        let root = repo.path().join("packages/web");
+        write(&root, "index.js", "x");
+        write(&root, "out/bundle.js", "x");
+        assert_eq!(scanned(&root), ["index.js"]);
+    }
+
+    /// 不是 Git 仓库：`.gitignore` 只是个普通文件，里面写的规则不生效，照旧全扫。
+    #[test]
+    fn without_git_every_file_still_counts() {
+        let workspace = tempdir().expect("workspace");
+        let root = workspace.path();
+        write(root, ".gitignore", ".data/\n");
+        write(root, ".data/x.db", "x");
+        assert_eq!(scanned(root), [".data/x.db", ".gitignore"]);
     }
 
     /// 读不到的文件不能当它不存在：那样它被改了指纹也对得上，还没有任何提示。

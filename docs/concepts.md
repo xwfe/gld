@@ -793,6 +793,21 @@ gld 不会替你把它们算成做完了。回包里的 `change_summary` 是精�
 名单只对**目录**生效，任意一层都算；叫 `build` 的脚本、叫 `dist` 的文件照样计入。
 History 档案（`docs/history-session/`）计入指纹，但 history 工具写完会自动把指纹记上账。
 
+**项目是 Git 仓库时，被 `.gitignore` 忽略、又没被跟踪的文件和目录也不计入**（`.gitignore`、`.git/info/exclude`、
+全局 excludes 都算，就是 `git ls-files --others --ignored --exclude-standard` 列出来的那些）。为什么：测试转到后台
+继续跑时，回包之后才写出、删掉的 `.data/`、`.pytest_cache/` 这类产物算不到那条命令头上，以前下一次写就报
+`FILE_CHANGED_EXTERNALLY`，AI 得先看、再接纳；2026-10-18 起一周里 13 次 `refresh_baseline` 有 11 次只因为它们（审查 §72）。
+
+代价，和上面那张名单一样：
+
+- 任务期间有人改了被忽略的文件（比如本地的 `.env`），任务发现不了。
+- 任务的改动清单（`action=change_summary`、`finish` 回包）里没有被忽略的文件，AI 改了也不列；要看就在项目里
+  `git status --ignored`。
+- 验收证据跑完之后只动了被忽略的文件，证据照样作数。
+
+不受影响的：已经被跟踪的文件哪怕匹配忽略规则也照算（`git add -f` 进去的）；`apply_patch` 按单个文件比的版本冲突照旧。
+项目是别的仓库里的一个子目录时，按那个仓库的规则算。不是 Git 仓库、没装 git、git 报错时，只按上面那张目录名单。
+
 读不到的文件（没权限、遍历出错）不在指纹里，内容变了也看不出来。它们不会被当成
 "不存在"悄悄略过：`task_manage action=status` 回 `baseline_complete: false` 和
 `unreadable_paths`，验收时回包 `warnings` 也会点名。

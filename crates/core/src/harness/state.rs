@@ -862,6 +862,44 @@ mod tests {
         harness.check_baseline(&task.id).expect("恢复之后可以写");
     }
 
+    /// 测试转到后台后写出的、被 `.gitignore` 忽略的产物，不该让下一次写报外部改动（审查 §72：
+    /// 一周 13 次 refresh_baseline 里 11 次只因为它们）；没被忽略的照样报。
+    #[test]
+    fn ignored_test_output_does_not_block_the_next_write() {
+        let workspace = tempdir().expect("workspace");
+        let harness_root = tempdir().expect("harness");
+        let root = workspace.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+                .args(args)
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(root.join(".gitignore"), ".data/\n").expect("file");
+        fs::write(root.join("main.py"), "print(1)\n").expect("file");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        let harness = harness(root, harness_root.path());
+        let task = harness.start_task("跑测试").expect("start");
+
+        fs::create_dir_all(root.join(".data/tests/case-1")).expect("dir");
+        fs::write(root.join(".data/tests/case-1/rag.sqlite3"), "db").expect("file");
+        harness
+            .check_baseline(&task.id)
+            .expect("被忽略的测试产物不算外部改动");
+
+        fs::write(root.join("notes.md"), "x").expect("file");
+        let error = harness
+            .check_baseline(&task.id)
+            .expect_err("没被忽略的新文件照样要报");
+        assert_eq!(error.code(), "FILE_CHANGED_EXTERNALLY");
+    }
+
     #[test]
     fn transition_never_reaches_completed_without_evidence() {
         let workspace = tempdir().expect("workspace");

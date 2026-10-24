@@ -170,7 +170,7 @@ gld tool call exec_command cmd='cargo test'
 | `STORE_CORRUPT`（`status`、写工具、`start` 都报） | Harness 数据目录里有任务文件读不出来，而且没找到没结束的任务——读不出来的那个可能就是，所以写入先停下 | 消息里有文件路径：修好，或者改名加 `.corrupt` 挪开。别的文件坏了怎么处理见 [concepts.md](concepts.md#任务数据坏了会怎样) |
 | `VERIFICATION_REJECTED`（`finish` 时） | 给的验收证据有不作数的：失败、还没结束、之后改过文件、不是这个任务起的 | `details.rejected` 逐条写了原因，对照表在 [concepts.md](concepts.md#任务怎么收尾带证据才算-completed)；任务状态没动，修好重跑再 `finish` |
 | 一开任务就报 `FILE_CHANGED_EXTERNALLY`，而且找不到谁改了文件 | 0.3.0 之前的 bug：gld 自己在项目里的状态目录（`.gld/`）和 history 档案被算进了指纹，而工具自己每次调用都会写它们——等于自己把自己锁死 | 升级。`.gld/` 现在不计入指纹，history 写完会自动记账 |
-| 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 指纹的计算范围变了：跳过名单多过 `.venv/`、`coverage/`、`Library/`、Playwright 的 `test-results/` 等目录；2026-09-23 起名单只跳目录，叫 `build`、`dist` 这类名字的**文件**开始计入（[concepts.md](concepts.md#durable-task-的工作区基线)）。跟升级前记下的指纹对不上 | `task_manage action=refresh_baseline task_id=<id>` 看一眼变化，确认只是这些文件，带 `accept_fingerprint` 和 `reason="升级 gld 后指纹范围变化"` 接纳。`<id>` 在 `action=status` 的 `task_id` 里 |
+| 升级后，升级前就开着的任务第一次写操作就报 `FILE_CHANGED_EXTERNALLY` | 指纹的计算范围变了：跳过名单多过 `.venv/`、`coverage/`、`Library/`、Playwright 的 `test-results/` 等目录；2026-09-23 起名单只跳目录，叫 `build`、`dist` 这类名字的**文件**开始计入；2026-10-24 起项目是 Git 仓库时被 `.gitignore` 忽略的文件不再计入，这时列出来的变化是那些被忽略的文件显示成 `deleted`（[concepts.md](concepts.md#durable-task-的工作区基线)）。跟升级前记下的指纹对不上 | `task_manage action=refresh_baseline task_id=<id>` 看一眼变化，确认只是这些文件，带 `accept_fingerprint` 和 `reason="升级 gld 后指纹范围变化"` 接纳。`<id>` 在 `action=status` 的 `task_id` 里 |
 
 ## 服务和项目
 
