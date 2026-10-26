@@ -3249,3 +3249,21 @@ Clippy 重试临时关闭增量缓存，未改仓库配置。本次无 Rust 行�
   三个包的 dev profile 清理可再生成产物，实际移除约 5.1 GiB；保留 release、源码、服务数据和用户产物，随后 Clippy 通过。
 
 未安装 provider、未授予 OS 权限、未操作真实桌面、未换装或重启服务、未推送。
+
+## 76. Computer Use 选型收敛为 Provider-first、Native-fallback（2026-10-26）
+
+**要求：**用户在前述桌面工具研判后要求更新实施计划，优先接社区成熟执行器，不重造三端底层驱动。
+
+**改动：**只更新 [RFC-0011](../rfc/0011-computer-use.md) 和 [task_plan.md](../../task_plan.md)。
+将先 Playwright/Cua Driver 独立 MCP，后按 macOS Peekaboo、Windows winapp ui/Windows-MCP 的真实缺口
+做同题对照明确为实施原则；Enigo/XCap 等仅在必要时补单项原生能力。gld 自己只保留任务归属、
+目标/控制权、结果/停止、产物/权限契约和薄 adapter，不内置第二套 agent 或多平台桌面驱动。
+
+**选型边界：**D10-W0 仍是下一编码入口，D10-C0 是可分开准备的最小 MCP POC，不预先安装第三方
+provider，不更换连接器。Cua Driver 若有可复现功能缺失，先核对权限/参数，再用同场景测试比较备选。
+只有复用、裁剪图片和减少往返后仍有量化瓶颈，才比较 MCP 与直连 Rust SDK 的性能、依赖和隔离成本；
+native-minimal 则需要具体缺口与负测证据。供应商能力和各平台实际支持仍为待验证，文档不是实现。
+
+**验证：**隔离 GLD_HOME，非增量构建运行全仓 cargo test（退出码 0）；Clippy 的 -D warnings、
+fmt --check 和文档命令/家目录路径/相对链接六条专项测试通过。仅编辑文档、未改代码或依赖。
+未安装 provider，未操作本机桌面，未触碰现有运行服务，也未推送。

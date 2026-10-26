@@ -56,13 +56,17 @@
 本轮交付为方案，运行时未改。设计见 [RFC-0010](docs/rfc/0010-managed-work-sessions.md)、
 [RFC-0011](docs/rfc/0011-computer-use.md)。**下一项编码入口为 D10-W0**，先完成无须用户建项目的执行空间；
 provider 的只读协议验证可提前准备，实际桌面输入须等目录/产物生命周期和控制契约通过。
-继续复用现有 MCP、权限和执行器，不另造模型循环或第二套 Goal/Plan/Task。
+**技术路线固定为 Provider-first、Native-fallback**：先沿用 Playwright MCP，并用独立 Cua Driver MCP
+做真实 POC；macOS 需要时对照 Peekaboo、Windows 对照 winapp ui/Windows-MCP。只写私有薄 adapter，
+现有机器 MCP 传输与 gld 控制层继续复用，不另造模型循环、桌面驱动或第二套 Goal/Plan/Task。
+Rust SDK 直连和 Enigo/XCap 等 native-minimal 候选只在实测出现稳定瓶颈或功能缺口后评估，
+触发条件与同场景 A/B/退出标准见 [RFC-0011 §4](docs/rfc/0011-computer-use.md#4-provider-选择及可证实边界)。
 
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
 | D10-W0 通用任务空间 | 待实施，下一编码入口 | 自动建专用目录与内部 workspace；start/status/list 幂等、owner/路径负测、缺 workspace 仍拒、无需 Git；开放执行前纳入 hub 存活集合与 prune 有主记录集合；见 RFC-0010 §7 |
 | D10-W1 产物与回收 | 待实施，依赖 W0 | 保存后核验再清临时文件；活资源核对、到期回收和关闭重试；活跃命令/委派/桌面不被误清、最终产物关闭后可取；见 RFC-0010 §6–§7 |
-| D10-C0 桌面执行器验证 | 待验证；未安装 provider | 优先 Cua Driver MCP，按同一验收比较必要的平台备选；锁版本/许可/schema，验证图像+树、权限诊断、输出归属和停止能力；见 RFC-0011 §4、§9 |
+| D10-C0 桌面执行器验证 | 待验证；未安装 provider | **MCP-first POC**：锁 Cua Driver 版本/许可/schema，借已有 machine_mcp 在隔离环境验图像、元素树、输入回读、权限诊断、输出路径和停止；只有明确失败才让 macOS Peekaboo/Windows winapp ui 等做同题 A/B，不先编入 Rust SDK；见 RFC-0011 §4、§9 |
 | D10-C1 macOS 控制闭环 | 待实施，依赖 W1/C0 | 观察→输入→读回核实；中文、高 DPI、目标变化、两个任务争用、stop 和 unknown 负测；普通操作沿已授权范围执行；见 RFC-0011 §5–§6、§9 |
 | D10-C2 托管浏览器与 W2 | 待实施，复用现有 Playwright | 独立 profile、下载/截图与任务绑定、DOM/console 验证、产物交付和资源回收；保持旧 browser 转发契约；见 RFC-0011 §7 |
 | D10-C3/C4 Windows 与 Linux | 待真机验证，依赖公共契约 | Windows 区分交互会话/Session 0/锁屏/UAC；Linux 先 x86_64/X11，再指定原生 Wayland，按环境报告能力；不以编译或上游宣传代替验收 |
