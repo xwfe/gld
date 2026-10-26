@@ -3210,3 +3210,42 @@ troubleshooting 已有那条补上了这次。本机现在没有活动或暂停�
 改后 `taskpolicy -b` 跑 8 次全过；全仓在 `taskpolicy -b`、`--no-fail-fast` 下 1069 passed / 0 failed，clippy、fmt 通过。
 
 **第二次（run 40083478303）：**8 个 job 全过。没打 tag、没发版。
+
+## 75. 通用任务空间与 Computer Use 方案落盘（2026-10-26）
+
+**要求：**用户提出非项目任务直接在 gld 数据目录中运行，避免手动建项目；随后要求落实类似 computer use 的跨平台操作计划。
+
+**依据与范围：**读取源码基线 `f6f3e02`；连接中的服务仍报告 `7959dfc`。
+已有本机 MCP、Playwright 和 ImageContent 可复用；本轮交付为设计与排期，不代表桌面 provider 已安装或真机验收通过。
+
+**已保存：**
+
+- [RFC-0010](../rfc/0010-managed-work-sessions.md)：自动管理内部 workspace，任务根与保留产物分开，元数据由服务持有；
+  首版仅已鉴权完整主体可用，缺 workspace 的原有调用仍拒绝。W0 即接入 hub 完整存活集合与 prune 有主记录集合，
+  W1 再做保存核验、活资源核对和到期删除。最终产物不随临时目录 TTL 删除。
+- [RFC-0011](../rfc/0011-computer-use.md)：Playwright 负责浏览器，优先验证 Cua Driver 的独立桌面执行能力；
+  当前客户端模型继续决定步骤。三个 computer 工具保持显式 workspace，受控 desktop 后端不作为 raw relay 旁路公开。
+  明确目标、图像/树、坐标变换、单桌面控制权、结果不明不重放和独立 stop；停止不明时 blocked，确认旧执行端静默后才能接管。
+- [task_plan.md](../../task_plan.md)：沿用 D10 分解 W0/W1/W2 和 C0–C6，唯一排期入口；下一编码项为 D10-W0。
+  先做本机 macOS，再按真机条件验证 Windows、Linux x86_64/X11、指定原生 Wayland、远端及后置移动端。
+
+**复核：**源码契约复核修正了三处设计问题：W0 不得把存活保护推迟到 W1；observe/act 显式携带 workspace；
+stop 或租约失效不等于执行端已停止，未知状态不能直接释放为可接管。
+官方资料复核补上 Linux 架构、原生 Wayland 的启用/helper 条件，以及移动驱动初始化对应用数据、进程和键盘设置的影响。
+RFC 内保留官方来源与研究日期；不同平台的上游声明、接入通过和真机任务通过分别记录，不混为已支持。
+
+**验证：**使用 target 下隔离的 GLD_HOME，`cargo test --workspace --all-targets --locked` 1069 passed / 0 failed；
+`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo fmt --all -- --check` 通过。
+Clippy 重试临时关闭增量缓存，未改仓库配置。本次无 Rust 行为改动、无新增测试。
+最终文档修订后，命令真实性、相对链接和公开文档路径三组测试共 6 条再次通过；末尾多余空行已整理。
+验证结束后已删除本轮新建的隔离测试目录；磁盘可用空间约 4.15 GB。
+
+**过程中遇到的实际问题：**
+
+- 首次测试请求由调用方把 timeout 设为 20 分钟，超过 gld 普通命令 10 分钟上限，被执行前拒绝；改为允许值后正常执行。
+- 一次文档修订补丁把半行文字当作整行上下文，返回 `context_drifted`、`files_changed=false`。
+  按诊断重读确认文件版本未变，改用完整行后成功；没有证据表明发生了并发覆盖。
+- 首次 Clippy 因磁盘空间不足失败（os error 28）。只读检查后，用 Cargo dry-run 预览，再限定本仓 gld/gld-core/gld-daemon
+  三个包的 dev profile 清理可再生成产物，实际移除约 5.1 GiB；保留 release、源码、服务数据和用户产物，随后 Clippy 通过。
+
+未安装 provider、未授予 OS 权限、未操作真实桌面、未换装或重启服务、未推送。
