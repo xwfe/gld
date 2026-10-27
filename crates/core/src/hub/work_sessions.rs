@@ -70,6 +70,8 @@ impl Hub {
                 "start" => &["action", "client_request_id", "purpose"],
                 "status" => &["action", "workspace"],
                 "list" => &["action", "cursor", "limit"],
+                "retain" => &["action", "workspace", "keep_paths"],
+                "artifact" => &["action", "artifact_id", "include_content"],
                 _ => return Err(WorkspaceError::invalid_argument("action must be start, list or status; artifact preservation and cleanup are not implemented in W0")),
             };
             if object.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -97,6 +99,31 @@ impl Hub {
                 "status" => {
                     let record = store.get(&owner, text(args, "workspace")?, false)?;
                     Ok(tool_ok(json!({"session": summary(&record)})))
+                }
+                "retain" => {
+                    let paths = keep_paths(args)?;
+                    let mut operation = store.operation(&owner, text(args, "workspace")?)?;
+                    let runtime =
+                        crate::tools::workspace_runtime::runtime_for(&operation.record.root);
+                    let _guard = runtime
+                        .lock_commits()
+                        .ok_or_else(crate::tools::workspace_runtime::write_lock_busy)?;
+                    let artifacts = operation.preserve(&paths)?;
+                    Ok(tool_ok(
+                        json!({"artifacts": artifacts, "source_files_kept": true, "session":summary(&operation.record)}),
+                    ))
+                }
+                "artifact" => {
+                    let id = text(args, "artifact_id")?;
+                    let workspace = crate::managed_workspaces::artifact_workspace(id)?;
+                    let include_content = match args.get("include_content") {
+                        None => false,
+                        Some(value) => value.as_bool().ok_or_else(|| {
+                            WorkspaceError::invalid_argument("include_content must be boolean")
+                        })?,
+                    };
+                    let operation = store.operation(&owner, &workspace)?;
+                    Ok(tool_ok(operation.artifact(id, include_content)?))
                 }
                 "list" => {
                     let limit = match args.get("limit") {
@@ -148,13 +175,17 @@ impl Hub {
         settings: &AppSettings,
         routed: &mut Option<Routed>,
     ) -> Result<Value, Value> {
-        let record = match self
+        let mut operation = match self
             .check_work_access(auth, settings)
-            .and_then(|()| self.work_store()?.get(&auth.tag(), id, true))
+            .and_then(|()| self.work_store()?.operation(&auth.tag(), id))
         {
-            Ok(record) => record,
+            Ok(operation) => operation,
             Err(error) => return Ok(plain_result(tool_err(error))),
         };
+        if let Err(error) = operation.touch() {
+            return Ok(plain_result(tool_err(error)));
+        }
+        let record = &operation.record;
         if remote_tools::find(tool).is_some() || remote_tools::is_session_tool(tool) {
             return Ok(plain_result(tool_err(WorkspaceError::invalid_argument(
                 "Managed workspaces are local; remote_* tools do not operate on them",
@@ -165,9 +196,9 @@ impl Hub {
             record.root.to_string_lossy().into_owned(),
             Some(format!("通用任务 {}", &record.id[5..13])),
         );
-        profile.id = record.id;
+        profile.id = record.id.clone();
         profile.runtime.history_recording = false;
-        profile.runtime.ai_instructions = "This is a managed non-project work directory. Keep temporary files here; use explicit paths for user-requested outputs. Do not assume a Git repository or another project's rules. Guarded execution is policy-only, not an OS sandbox. W0 does not implement finish, artifact retention or automatic cleanup; report retained paths truthfully.".into();
+        profile.runtime.ai_instructions = "This is a managed non-project work directory. Keep temporary files here. Use work_session retain with explicit keep_paths to save verified artifacts, then artifact to retrieve them. Do not assume a Git repository or another project's rules. Guarded execution is policy-only, not an OS sandbox. Automatic cleanup is not implemented yet; report retained paths truthfully.".into();
         self.call_local(auth, tool, &profile, args, settings, routed)
     }
 }
@@ -180,6 +211,19 @@ fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str, WorkspaceError> {
         )));
     }
     Ok(value)
+}
+
+fn keep_paths(args: &Value) -> Result<Vec<String>, WorkspaceError> {
+    let values = args.get("keep_paths").and_then(Value::as_array)
+        .filter(|v| v.len() <= 32).ok_or_else(|| WorkspaceError::invalid_argument("keep_paths must explicitly list at most 32 relative files (an empty array keeps none)"))?;
+    values
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_string).ok_or_else(|| {
+                WorkspaceError::invalid_argument("Each keep_paths entry must be a string")
+            })
+        })
+        .collect()
 }
 
 fn text_allow_empty<'a>(args: &'a Value, key: &str) -> Result<&'a str, WorkspaceError> {
@@ -195,7 +239,8 @@ fn summary(record: &Record) -> Value {
         "created_at_ms": record.created_at_ms, "last_used_at_ms": record.last_used_at_ms,
         "policy": {"confine_reads": true, "command_policy": "guarded", "agent_delegation": "off", "sandbox_enforced": false},
         "cleanup_supported": false,
-        "note": "W0 retains this directory and its records; finish/artifact/retain and automatic cleanup are not implemented. This is metadata, not a claim that processes are idle or files are delivered.",
+        "artifacts": record.artifacts,
+        "note": "Saved artifacts are retained independently. The work directory is not cleaned automatically yet; active does not imply that its processes are idle.",
     })
 }
 
@@ -203,13 +248,16 @@ pub(super) fn definition() -> Value {
     json!({
         "name": TOOL,
         "title": "Managed work sessions",
-        "description": "Create or inspect a non-project work directory managed by gld. start needs client_request_id (idempotent per caller) and optional purpose; list only shows this caller's sessions; status needs the returned workspace ID. No project registration or Git is needed. Every subsequent workspace tool still needs the returned workspace ID. W0 does not clean files or preserve artifacts automatically.",
+        "description": "Manage non-project work directories. start is idempotent by client_request_id; list/status show owned sessions. retain saves explicit keep_paths as verified artifacts without deleting sources; artifact reads metadata or bounded UTF-8 content. No project registration or Git is needed. Workspace tools require the returned exact ID. Automatic cleanup is not implemented yet.",
         "inputSchema": {"type":"object", "properties": {
-            "action": {"type":"string", "enum":["start","list","status"]},
+            "action": {"type":"string", "enum":["start","list","status","retain","artifact"]},
             "client_request_id": {"type":"string","minLength":1,"maxLength":128},
             "purpose": {"type":"string","maxLength":256},
             "workspace": {"type":"string","minLength":1},
             "cursor": {"type":"string","minLength":1},
+            "keep_paths": {"type":"array","maxItems":32,"items":{"type":"string"}},
+            "artifact_id": {"type":"string","minLength":1},
+            "include_content": {"type":"boolean","default":false},
             "limit": {"type":"integer","minimum":1,"maximum":100,"default":20}
         },"required":["action"],"additionalProperties":false},
         "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}

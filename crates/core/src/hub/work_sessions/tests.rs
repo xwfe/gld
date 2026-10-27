@@ -249,3 +249,35 @@ fn reloaded_hub_keeps_ids_and_rejects_unknown_action_fields() {
     }
     new_hub.shutdown();
 }
+
+#[test]
+fn retain_and_artifact_route_only_owned_results() {
+    let fixture = Fixture::new(true);
+    let a = owner("a");
+    let id = fixture.start(&a, "one");
+    let ctx = fixture.call(&a, WORKSPACE_CONTEXT, json!({"workspace":id}));
+    fs_write(ctx["path"].as_str().unwrap(), "result.txt", "saved result");
+    let saved = fixture.call(
+        &a,
+        TOOL,
+        json!({"action":"retain","workspace":id,"keep_paths":["result.txt"]}),
+    );
+    assert_eq!(saved["ok"], true, "{saved}");
+    let artifact = &saved["artifacts"][0]["id"];
+    let read = fixture.call(
+        &a,
+        TOOL,
+        json!({"action":"artifact","artifact_id":artifact,"include_content":true}),
+    );
+    assert_eq!(read["content"], "saved result");
+    let other = fixture.call(
+        &owner("b"),
+        TOOL,
+        json!({"action":"artifact","artifact_id":artifact}),
+    );
+    assert_eq!(other["error"]["code"], "WORK_SESSION_NOT_FOUND");
+}
+
+fn fs_write(root: &str, path: &str, content: &str) {
+    std::fs::write(PathBuf::from(root).join(path), content).unwrap();
+}

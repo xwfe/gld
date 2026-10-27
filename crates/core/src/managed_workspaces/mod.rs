@@ -1,5 +1,11 @@
 //! 服务管理的非项目执行目录。登记在工作目录之外；同主体同请求只创建一次。
 
+mod artifacts;
+mod operation;
+pub(crate) use artifacts::artifact_workspace;
+pub(crate) use artifacts::Artifact;
+pub(crate) use operation::Operation;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -13,7 +19,7 @@ use crate::tools::workspace::WorkspaceError;
 
 type Result<T> = std::result::Result<T, WorkspaceError>;
 const MAX_RECORDS: usize = 512;
-const MAX_RECORD_BYTES: u64 = 16 * 1024;
+const MAX_RECORD_BYTES: u64 = 64 * 1024;
 const REGISTRY: &str = "managed-workspaces";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +41,8 @@ pub(crate) struct Record {
     pub state: State,
     pub created_at_ms: u64,
     pub last_used_at_ms: u64,
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +70,11 @@ impl Store {
             if record.purpose != purpose {
                 return Err(error("WORK_SESSION_REQUEST_CONFLICT", "The request ID already belongs to a different purpose; reuse the original request or choose a new ID", "conflict"));
             }
-            self.activate(&guard.home, &mut record)?;
+            if record.state == State::Creating {
+                self.activate(&guard.home, &mut record)?;
+            } else {
+                verify_root(&guard.home, &record)?;
+            }
             return Ok((record, false));
         }
         if count >= MAX_RECORDS {
@@ -80,6 +92,7 @@ impl Store {
             state: State::Creating,
             created_at_ms: now,
             last_used_at_ms: now,
+            artifacts: Vec::new(),
         };
         // 先登记再建目录：中断后同请求能完成 creating，prune 也能保护其记录。
         save(&guard.home, &record)?;
@@ -232,6 +245,7 @@ impl Store {
                     "storage",
                 ));
             }
+            artifacts::validate_manifest(&record)?;
             records.push(record);
         }
         records.sort_by(|a, b| a.id.cmp(&b.id));

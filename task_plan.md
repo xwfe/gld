@@ -78,7 +78,7 @@ Rust SDK 直连和 Enigo/XCap 等 native-minimal 候选只在实测出现稳定�
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
 | D10-W0 通用任务空间 | 已编码并验证，未部署 | `work_session` start/status/list、持久登记、显式旧工具路由、完整主体归属和 prune 保护已完成；默认关闭。新增 17 项回归，含隔离守护进程真实 HTTP/重启验收；源码协议 11，现有服务未换装；见审查 §78 |
-| D10-W1 产物与回收 | 待实施，下一编码入口 | 先补 artifact/retain 的保存与完整性核验，再补 finish、活资源核对、到期回收和关闭重试；失败不删唯一源、活跃目录不误清、结果关闭后可取；不把 W0 的 active 状态当成命令结束；见 RFC-0010 §6–§7 |
+| D10-W1 产物与回收 | 当前实施中 | 分步验证并提交：先做保留产物与按归属读回，再做持久资源检查、可重试 finish 和到期回收。原始文件未核验保存前不删除；只在隔离 GLD_HOME 验证，现有服务不换装；见 RFC-0010 §6–§7 |
 | D10-C0 桌面执行器验证 | 待验证；未安装 provider | **MCP-first POC**：锁 Cua Driver 版本/许可/schema，借已有 machine_mcp 在隔离环境验图像、元素树、输入回读、权限诊断、输出路径和停止；只有明确失败才让 macOS Peekaboo/Windows winapp ui 等做同题 A/B，不先编入 Rust SDK；见 RFC-0011 §4、§9 |
 | D10-C1 macOS 控制闭环 | 待实施，依赖 W1/C0 | 观察→输入→读回核实；中文、高 DPI、目标变化、两个任务争用、stop 和 unknown 负测；普通操作沿已授权范围执行；见 RFC-0011 §5–§6、§9 |
 | D10-C2 托管浏览器与 W2 | 待实施，复用现有 Playwright | 独立 profile、下载/截图与任务绑定、DOM/console 验证、产物交付和资源回收；保持旧 browser 转发契约；见 RFC-0011 §7 |
