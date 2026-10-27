@@ -55,13 +55,14 @@
 **2026-10-27 补充：**`~/.agents/skills` 已被现有 Skill 发现器支持；用户要求补齐
 `~/.agents/prompts` 的可发现、按需读取，项目级 `.agents/prompts` 同时纳入。
 不增加第二套 Skill，不自动执行或注入 Prompt。方案、授权边界及测试详见
-[RFC-0012](docs/rfc/0012-agent-prompts.md)。**当前认领 D15-P1**（P0 已核对现状并落下方案）。
-P1 验收后再按本队列继续 D10-W0；本轮编码和测试不等于运行服务已经更新。
+[RFC-0012](docs/rfc/0012-agent-prompts.md)。**D15-P1 已在本地代码完成并通过回归，但未部署**；
+本机目录已只核对文件名，D15-P2 的已认证连接器实际调用需取得换装授权后进行。
+**下一编码入口仍为 D10-W0**；代码通过测试不等于现有服务或 ChatGPT 已拿到新工具。
 
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
-| D15-P1 本机 Prompt 读取 | 待编码 | 新增只读 `prompt_manage` list/read；global/workspace 规则、隐私范围、重名、坏文件/链接/过大负测；默认与其他工具档可见；完成同一提交更新 concepts/security，见 RFC-0012 |
-| D15-P2 真机与连接器验收 | 待验证（需要部署授权） | 检查本机发现的三个文件名、不展示原文；用户批准部署后在 ChatGPT 刷新工具表，并经已认证连接读回一份指定模板；不撤销 OAuth、不删连接器 |
+| D15-P1 本机 Prompt 读取 | 已编码并验证，未部署 | `prompt_manage` list/read 已落地；用户级仅完整认证可见，项目级按原授权；5 项模块测试及工具档/参数负测、全仓 test、clippy、fmt 与文档检查通过。实际说明见 concepts/security，设计见 RFC-0012 |
+| D15-P2 真机与连接器验收 | 本机文件名已核对；部署联调待授权 | 发现 `debug.md`、`refactor.md`、`review.md`，未读其正文；得到批准后按既有空闲升级流程换装，再在 ChatGPT Refresh 工具表、读取一份指定 Prompt；不变更 OAuth 地址或 client_id |
 
 **2026-10-26 新需求：**非项目任务使用 gld 数据目录下的专用空间，由服务自动管理；增加浏览器与跨平台桌面 Computer Use。
 本轮交付为方案，运行时未改。设计见 [RFC-0010](docs/rfc/0010-managed-work-sessions.md)、

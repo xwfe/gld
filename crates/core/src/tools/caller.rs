@@ -41,6 +41,8 @@ pub struct Caller {
     /// 用 grant 的钥匙进来的，记下是哪个：`gld grant rm` 要按它停命令（RFC-0007），委派要看它能不能
     /// 起全权的 Agent、任务记下它的名字（RFC-0009）。id 已经在 `key` 里了，单独放一格是为了不去拆字符串。
     grant: Option<Grant>,
+    /// 用户主目录的 Prompt 只给通过服务鉴权的完整主体；本机操作员算已认证。
+    authenticated: bool,
 }
 
 impl Caller {
@@ -53,6 +55,7 @@ impl Caller {
             key: LOCAL_SCOPE.to_string(),
             scope: LOCAL_SCOPE.to_string(),
             grant: None,
+            authenticated: true,
         }
     }
 
@@ -67,6 +70,7 @@ impl Caller {
             key: auth.tag(),
             scope: auth.scope().to_string(),
             grant: auth.grant().cloned(),
+            authenticated: auth.is_authenticated(),
         }
     }
 
@@ -76,6 +80,10 @@ impl Caller {
 
     pub fn grant(&self) -> Option<&Grant> {
         self.grant.as_ref()
+    }
+
+    pub fn may_read_user_prompts(&self) -> bool {
+        self.authenticated && self.grant.is_none()
     }
 
     /// 主体的标识，也写进运行记录（[`crate::tools::runs::RunRecord::caller`]）：重启之后

@@ -3267,3 +3267,37 @@ native-minimal 则需要具体缺口与负测证据。供应商能力和各平�
 **验证：**隔离 GLD_HOME，非增量构建运行全仓 cargo test（退出码 0）；Clippy 的 -D warnings、
 fmt --check 和文档命令/家目录路径/相对链接六条专项测试通过。仅编辑文档、未改代码或依赖。
 未安装 provider，未操作本机桌面，未触碰现有运行服务，也未推送。
+
+## 77. 复用 .agents Skill 并补全 Prompt 按需读取（2026-10-27）
+
+**需求与现状：**用户要求 `~/.agents` 下的 Skills、Prompts 都可供 gld 连接的 AI 按需读取，
+并继续落实计划。源码确认 `agent_context` 已默认扫描 `~/.agents/skills` 和项目 `.agents/skills`，
+沿用 `list_skills`/`get_skill`，不重造。用户目录只读枚举确认 `~/.agents/prompts` 共有
+`debug.md`、`refactor.md`、`review.md`；未读取三份实际模板正文。
+方案与实施切片在 [RFC-0012](../rfc/0012-agent-prompts.md)，当前状态在 [task_plan.md](../../task_plan.md)。
+
+**实现：**新增 `prompt_manage` 单个只读工具，`action=list|read`，扫描用户级/项目级
+`.agents/prompts` 第一层 Markdown；名称冲突按 ID/scope 选择，按文件实时读取，
+原始 Markdown 不进行模板变量插值，也不变成系统指令。固定 128 KiB/文件、256 个候选/根，
+排除隐藏文件、链接、目录、过大、无效 UTF-8 和空文件；失败以 `skipped` 或明确错误返回。
+将工具注册到 compact/core/advanced/read-only 和统一 dispatch，不引入新 crate、不重构 Skill。
+
+**授权：**`Caller` 保留来源是否已鉴权；用户级 Prompt 只开放给本机或通过完整服务鉴权、
+没有项目 grant 的主体。匿名和任何 grant 无法列举或按已知 ID 获取用户级模板；
+它们仍能按原有 workspace 权限读取本项目的 Prompt。只读入口不扩大 `read_file` 范围，
+也不宣称对已持全权 `exec_command` 的主体提供 OS 沙箱。具体规则同步
+[concepts.md](../concepts.md)、[security.md](../security.md) 和排障文档。
+
+**验证：**隔离的 `GLD_HOME` 下，`cargo test -p gld-core --locked tools::prompt`
+5 项通过；新增工具表四档 read-only、禁止任意 path 参数的注册回归通过。
+`cargo test --workspace --all-targets --locked` 全仓退出码 0；
+`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`
+均通过；命令真实性、公开文档路径和相对链接 6 项专项测试通过。
+仅本地源码与文档修改，未替换运行守护进程、未刷新连接器、未推送。
+
+**开发过程中 gld 的摩擦：**尝试用 `exec_command argv=["rg", …]` 查源码时被
+`POLICY_REJECTED: command_not_allowlisted` 拒绝，改用 `search_text` 完成同样的只读检查；
+初次较大的 `apply_patch` 因 registry 文件上下文不完整返回
+`PATCH_FAILED: context_drifted`（`files_changed=false`），改用更小的补丁后成功。
+第一轮模块测试 4/5：`argument-hint: [SYMPTOM=<text>]` 被 YAML 解释为数组而非文本，
+按原始 Prompt 行补兼容解析后 5/5 通过，原始模板未修改。

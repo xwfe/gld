@@ -372,6 +372,33 @@ AI 用 `get_skill` 加 `file` 读，只限这个 skill 自己的目录。项目�
 
 `gld cfg runtime --hidden-skills pdf,pptx`（按 `gld context` 里显示的名字，不分大小写；传 `""` 清空）。藏掉的和没装一样：目录里没有、`list_skills` 不列、`get_skill` 拿不到，`skipped` 里也不提。只管主目录和自定义路径里的，项目自己的 skill 由项目决定。
 
+## 本机和项目里的 Prompt
+
+`~/.agents/skills` 已由前述 `list_skills` / `get_skill` 支持；
+`~/.agents/prompts` 里的 Markdown Prompt 模板使用新的只读工具 `prompt_manage`。
+Prompt 不是 `SKILL.md`，不会自动注入会话、执行命令或替换 `$ARGUMENTS`。
+
+| MCP 调用 | 结果 |
+| --- | --- |
+| `prompt_manage action=list` | 返回可读取的 Prompt 名称、来源、描述和 ID，不返回正文 |
+| `prompt_manage action=list query=debug` | 按名称或描述筛选，不搜索模板正文 |
+| `prompt_manage action=read name=debug` | 读取唯一匹配的 Prompt 原始 Markdown |
+| `prompt_manage action=read id=<列表中的 ID>` | 同名时指定一份；也可带 `scope=workspace` |
+
+仅扫描两处第一层 `*.md`：当前项目 `.agents/prompts` 和用户级
+`~/.agents/prompts`。全局模板**只给已认证且不带 grant 的完整主体或本机 CLI**；
+匿名入口和所有项目 grant 只能看到其获准工作区内的 Prompt。请求不允许的
+`scope=global` 返回 `PROMPT_SCOPE_FORBIDDEN`；重名要求用 ID 或 scope 指明。
+文件修改后再次列举/读取即可拿到新版内容和 `contentSha256`。
+
+隐藏文件、符号链接、目录、空文件、非法 UTF-8 或超过 128 KiB 的模板不给正文，
+其他不合法的 `*.md` 在 `skipped` 说明原因。工具不允许任意路径，也不扫描
+Codex 旧版 `~/.codex/prompts`、注册斜杠菜单或展开模板变量。
+详见 [RFC-0012](rfc/0012-agent-prompts.md)。
+
+新工具在 compact/core/advanced/read-only 档都可用；**升级运行服务后**客户端可能需要
+Refresh 工具表，不需要删除连接器或重新授权。源码测试通过不表示旧服务已拥有这个工具。
+
 ---
 
 ## 本机装好的 MCP server

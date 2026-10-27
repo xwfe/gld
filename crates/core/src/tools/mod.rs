@@ -19,6 +19,7 @@ mod patch_diag;
 pub mod planning;
 pub mod policy;
 mod project_commands;
+mod prompt;
 pub mod registry;
 pub mod runs;
 mod service;

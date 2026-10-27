@@ -138,6 +138,8 @@ gld tool call exec_command cmd='cargo test'
 | 自己写的 Skill 在 `gld context` 里打 `✗` | SKILL.md 没收进来：frontmatter 写坏了（报第几行）、没写 `description`、描述超过 1024 字符，或者和另一份内容一模一样 | 照 `✗` 后面的原因改文件；`list_skills` 马上看得到，进说明里的目录要等 AI 下次连上 |
 | 装了的 Skill 在 `gld context` 里根本没有 | 它是主目录里链到别处的链接（`~/.claude/skills/x -> ~/code/...`），2026-09-22 之前的 gld 扫描不跟链接；或者被 `--hidden-skills` 藏了；或者它是 Claude Code 插件带的，插件没开（规则见 [concepts](concepts.md#claude-code-插件带的-skill)），2026-10-21 之前的 gld 插件的一个都不认；或者它不在 gld 扫的目录里（[扫哪些目录](concepts.md#从哪些目录找)） | 升级 gld；`gld cfg runtime` 看"隐藏的 Skill"那一行；`claude plugin list` 看插件是不是 `enabled: true` |
 | AI 说读不到 Skill 里的脚本（`filesUnavailable`） | 这个 skill 在主目录里、是默认的 auto 扫描扫到的：默认只给正文不给文件 | `gld cfg runtime --skill-sources claude`（换成它实际的来源）明确启用；或者 `gld set <项目> confine-reads=false` 放开读取范围 |
+| `~/.agents/prompts` 有模板但 AI 看不到 `prompt_manage` | 运行服务仍是旧版，或客户端缓存旧 tools/list | 确认新版本经现有升级流程换装，客户端 Refresh 工具表；不必删除连接器 |
+| `prompt_manage scope=global` 报 `PROMPT_SCOPE_FORBIDDEN` | 匿名入口或项目 grant，不能读取用户主目录模板 | 使用完整鉴权的连接读取全局模板；项目 grant 可继续读取当前已获准工作区的 `.agents/prompts/*.md` |
 | Plan 模式下写文件被拒 | 设计如此：Plan 模式只读 | `gld planning mode direct` 或 `goal` |
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
 | 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld set <项目> allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |

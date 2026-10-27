@@ -708,6 +708,7 @@ fn dispatch_tool(
         "set_default_cwd" => set_default_cwd(ctx, &effective_args),
         "list_skills" => skill::list_skills(ctx, &effective_args),
         "get_skill" => skill::get_skill(ctx, &effective_args),
+        "prompt_manage" => crate::tools::prompt::prompt_manage(ctx, caller, &effective_args),
         "read_file" => file::read_file(ws, &effective_args),
         "read_notebook" => notebook::read_notebook(ws, &effective_args),
         "list_dir" => file::list_dir(ws, &effective_args),

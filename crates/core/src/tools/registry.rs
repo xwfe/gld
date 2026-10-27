@@ -412,6 +412,14 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
         false,
     ),
     (
+        "prompt_manage",
+        "Read agent prompts",
+        "List or read Markdown prompt templates from ~/.agents/prompts and the workspace's .agents/prompts. Action=list returns metadata; action=read returns a selected prompt as raw text. No automatic injection, execution or variable expansion. User-level prompts require full authentication, not a scoped grant.",
+        true,
+        false,
+        false,
+    ),
+    (
         "git_status",
         "Git status",
         "Return git working tree status for the workspace.",
@@ -640,6 +648,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "set_default_cwd",
     "list_skills",
     "get_skill",
+    "prompt_manage",
     "read_file",
     "read_notebook",
     "list_dir",
@@ -678,6 +687,7 @@ pub const COMPACT_TOOLS: &[&str] = &[
     // agent_context::COMPACT_SKILL_CATALOG_CHARS。
     "list_skills",
     "get_skill",
+    "prompt_manage",
     "get_default_cwd",
     "set_default_cwd",
     "read_file",
@@ -710,6 +720,7 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "get_default_cwd",
     "list_skills",
     "get_skill",
+    "prompt_manage",
     "set_default_cwd",
     "read_file",
     "read_notebook",
@@ -757,6 +768,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "set_default_cwd",
     "list_skills",
     "get_skill",
+    "prompt_manage",
     "read_file",
     "read_notebook",
     "list_dir",
@@ -834,6 +846,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "get_default_cwd",
     "list_skills",
     "get_skill",
+    "prompt_manage",
     "read_file",
     "read_notebook",
     "list_dir",
@@ -1120,6 +1133,18 @@ pub fn input_schema(name: &str) -> Value {
                 }
             },
             "description": "Provide either id or name to load a skill. If both are provided, id takes priority.",
+            "additionalProperties": false
+        }),
+        "prompt_manage" => json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["list", "read"] },
+                "query": { "type": "string", "description": "list: filter by name or description. No prompt bodies are searched." },
+                "id": { "type": "string", "minLength": 1, "description": "read: ID from list; use this when names collide." },
+                "name": { "type": "string", "minLength": 1, "description": "read: prompt filename without .md." },
+                "scope": { "type": "string", "enum": ["workspace", "global"], "description": "Optional source filter. Global requires full authenticated access." }
+            },
+            "required": ["action"],
             "additionalProperties": false
         }),
         "history_session_bootstrap" => json!({
@@ -1816,6 +1841,22 @@ mod tests {
     }
 
     #[test]
+    fn prompt_manage_is_read_only_and_has_no_arbitrary_path_argument() {
+        for profile in ["core", "compact", "read-only", "advanced"] {
+            assert!(
+                exposed_tool_names(profile).contains(&"prompt_manage"),
+                "{profile}"
+            );
+        }
+        assert!(READ_ONLY_TOOLS.contains(&"prompt_manage"));
+        assert!(!MUTATING_TOOLS.contains(&"prompt_manage"));
+        let schema = input_schema("prompt_manage");
+        assert_eq!(schema["required"], serde_json::json!(["action"]));
+        assert!(schema["properties"].get("path").is_none());
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
     fn core_catalog_excludes_non_persistent_permission_tool() {
         let tools = list_tools_for_profile("core");
         let names: Vec<_> = tools
@@ -1824,7 +1865,7 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 43);
+        assert_eq!(tools.len(), 44);
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"agent_manage"));
         assert!(names.contains(&"history_manage"));
@@ -1866,8 +1907,8 @@ mod tests {
             .collect();
 
         // 条数预算，不是哪个客户端的硬上限：工具表每次对话都要占 token。往默认档加工具
-        // 要有意识地改这个数（30 是加 list_project_commands 时定的，31 是加 agent_manage）。
-        assert!(names.len() <= 31, "{}", names.len());
+        // 要有意识地改这个数（31 是加 agent_manage 时定的，32 是加 prompt_manage）。
+        assert!(names.len() <= 32, "{}", names.len());
         assert!(names.contains(&"agent_manage"));
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"apply_patch"));
@@ -1883,6 +1924,7 @@ mod tests {
         // 字符预算，工具只有两个，代价很小。
         assert!(names.contains(&"list_skills"));
         assert!(names.contains(&"get_skill"));
+        assert!(names.contains(&"prompt_manage"));
         assert!(!names.contains(&"request_permissions"));
         assert_eq!(tool_api_descriptor()["version"], "2");
     }
