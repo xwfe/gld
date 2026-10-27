@@ -141,6 +141,82 @@ fn capability_defaults_off_and_cannot_be_enabled_with_noauth() {
 }
 
 #[test]
+fn retained_result_survives_expiry_and_a_real_daemon_restart() {
+    let env = Env::new();
+    let port = free_port();
+    env.ok(&[
+        "upgrade",
+        "--port",
+        &port.to_string(),
+        "--auth",
+        "bearer",
+        "--work-sessions",
+        "true",
+    ]);
+    env.ok(&["start"]);
+    let token = env.service_secret("bearer_token");
+    let started = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"start","client_request_id":"result"}),
+    );
+    let id = started["workspace"].as_str().unwrap();
+    let write = call(
+        port,
+        &token,
+        "apply_patch",
+        json!({"workspace":id,"patch":"*** Begin Patch\n*** Add File: result.txt\n+retained\n*** End Patch\n"}),
+    );
+    assert_eq!(write["ok"], true, "{write}");
+    let saved = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"retain","workspace":id,"keep_paths":["result.txt"]}),
+    );
+    assert_eq!(saved["ok"], true, "{saved}");
+    let artifact = &saved["artifacts"][0]["id"];
+    let failed = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"finish","workspace":id,"keep_paths":[],"outcome":"failed"}),
+    );
+    assert_eq!(failed["closed"], false, "{failed}");
+    // 只调整隔离夹具的时间，不用实际等待一天。
+    let record_path = env
+        .home
+        .path()
+        .join("managed-workspaces")
+        .join(format!("{id}.json"));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record["expires_at_ms"] = json!(1);
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let swept = call(port, &token, "work_session", json!({"action":"sweep"}));
+    assert_eq!(swept["removed"], json!([id]), "{swept}");
+    assert!(!env.home.path().join("work").join(id).exists());
+    env.ok(&["daemon", "restart"]);
+    assert_eq!(env.service_secret("bearer_token"), token);
+    let read = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"artifact","artifact_id":artifact,"include_content":true}),
+    );
+    assert_eq!(read["content"], "retained\n", "{read}");
+    let repeated = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"finish","workspace":id,"keep_paths":[]}),
+    );
+    assert_eq!(repeated["already_closed"], true, "{repeated}");
+    let prune = env.json(&["--json", "prune", "--dry-run"]);
+    assert!(prune["leftovers"].as_array().unwrap().is_empty(), "{prune}");
+}
+
+#[test]
 fn prune_reports_corrupt_managed_registry_as_failure_not_empty_success() {
     let env = Env::new();
     std::fs::create_dir_all(env.home.path().join("managed-workspaces")).unwrap();

@@ -3,6 +3,7 @@
 mod artifacts;
 mod lifecycle;
 mod operation;
+mod retention;
 pub(crate) use artifacts::artifact_workspace;
 pub(crate) use artifacts::Artifact;
 pub(crate) use lifecycle::PendingCommand;
@@ -54,6 +55,10 @@ pub(crate) struct Record {
     /// 没有这一字段的 W0 登记不能证明历史命令已经结束，不直接清理。
     #[serde(default)]
     pub resource_tracking: bool,
+    #[serde(default)]
+    pub idle_retention_ms: Option<u64>,
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +94,7 @@ impl Store {
             return Ok((record, false));
         }
         if count >= MAX_RECORDS {
-            return Err(error("WORK_SESSION_LIMIT", "Managed workspace limit reached; no files were deleted. Artifact preservation and automatic cleanup are not available in W0", "resource"));
+            return Err(error("WORK_SESSION_LIMIT", "Managed workspace registry limit reached; directory cleanup does not discard close receipts. No retained files or records were deleted to make room", "resource"));
         }
         let id = format!("work-{}", Uuid::new_v4().simple());
         let now = now_ms();
@@ -107,6 +112,8 @@ impl Store {
             finish_paths: None,
             pending_commands: Vec::new(),
             resource_tracking: true,
+            idle_retention_ms: Some(7 * 24 * 60 * 60 * 1000),
+            expires_at_ms: Some(now + 7 * 24 * 60 * 60 * 1000),
         };
         // 先登记再建目录：中断后同请求能完成 creating，prune 也能保护其记录。
         save(&guard.home, &record)?;
@@ -346,6 +353,13 @@ fn save(home: &Path, record: &Record) -> Result<()> {
     regular_or_absent(&path)?;
     let temp = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
     let bytes = serde_json::to_vec(record).map_err(storage)?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(error(
+            "WORK_SESSION_REGISTRY_LIMIT",
+            "Record size limit reached; the previous metadata and source files were kept",
+            "resource",
+        ));
+    }
     let result = (|| {
         toexec_fs::write_durable(&temp, &bytes, None)?;
         #[cfg(unix)]

@@ -340,3 +340,35 @@ fn a_rejected_command_does_not_leave_a_false_resource_blocker() {
     );
     assert_eq!(done["closed"], true, "{done}");
 }
+
+#[test]
+fn failure_retention_and_explicit_pinning_do_not_claim_the_task_closed() {
+    let fixture = Fixture::new(true);
+    let auth = owner("retention");
+    let id = fixture.start(&auth, "one");
+    let failed = fixture.call(
+        &auth,
+        TOOL,
+        json!({"action":"finish","workspace":id,"keep_paths":[],"outcome":"failed"}),
+    );
+    assert_eq!(failed["closed"], false, "{failed}");
+    assert_eq!(failed["session"]["idle_retention_ms"], 24 * 60 * 60 * 1000);
+    let pinned = fixture.call(
+        &auth,
+        TOOL,
+        json!({"action":"retain","workspace":id,"retain_forever":true}),
+    );
+    assert_eq!(pinned["ok"], true, "{pinned}");
+    assert!(pinned["session"]["expires_at_ms"].is_null());
+    for args in [
+        json!({"action":"retain","workspace":id,"retention_hours":0}),
+        json!({"action":"retain","workspace":id,"retention_hours":24,"retain_forever":true}),
+        json!({"action":"finish","workspace":id,"keep_paths":[],"outcome":"typo"}),
+        json!({"action":"sweep","limit":100}),
+    ] {
+        assert_eq!(
+            fixture.call(&auth, TOOL, args)["error"]["code"],
+            "INVALID_ARGUMENT"
+        );
+    }
+}

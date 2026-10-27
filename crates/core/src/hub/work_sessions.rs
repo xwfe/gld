@@ -70,12 +70,19 @@ impl Hub {
                 "start" => &["action", "client_request_id", "purpose"],
                 "status" => &["action", "workspace"],
                 "list" => &["action", "cursor", "limit"],
-                "retain" => &["action", "workspace", "keep_paths"],
+                "retain" => &[
+                    "action",
+                    "workspace",
+                    "keep_paths",
+                    "retention_hours",
+                    "retain_forever",
+                ],
                 "artifact" => &["action", "artifact_id", "include_content"],
-                "finish" => &["action", "workspace", "keep_paths"],
+                "finish" => &["action", "workspace", "keep_paths", "outcome"],
+                "sweep" => &["action", "cursor", "limit"],
                 _ => {
                     return Err(WorkspaceError::invalid_argument(
-                        "action must be start, list, status, retain, artifact or finish",
+                        "action must be start, list, status, retain, artifact, finish or sweep",
                     ))
                 }
             };
@@ -96,8 +103,18 @@ impl Hub {
                         .unwrap_or("");
                     let (record, created) =
                         store.start(&owner, text(args, "client_request_id")?, purpose)?;
+                    let mut operation = store.operation(&owner, &record.id)?;
+                    if operation.record.state == crate::managed_workspaces::State::Active {
+                        operation.touch()?;
+                    }
+                    let record = operation.record.clone();
+                    drop(operation);
+                    let sweep = store
+                        .sweep(&owner, None, 8, Some(&Caller::from_auth(auth)))
+                        .unwrap_or_else(|e| json!({"error":e.message()}));
                     Ok(tool_ok(json!({
                         "workspace": record.id, "created": created, "session": summary(&record),
+                        "expiry_sweep":sweep,
                         "next": "Call workspace_context with this workspace ID, then reuse it with read_file, apply_patch or exec_command. No user project or Git repository was created."
                     })))
                 }
@@ -110,13 +127,42 @@ impl Hub {
                 }
                 "finish" => {
                     let paths = keep_paths(args)?;
+                    let outcome = args
+                        .get("outcome")
+                        .map(|_| text(args, "outcome"))
+                        .transpose()?
+                        .unwrap_or("success");
+                    if !["success", "failed"].contains(&outcome) {
+                        return Err(WorkspaceError::invalid_argument(
+                            "outcome must be success or failed",
+                        ));
+                    }
                     let mut operation = store.operation(&owner, text(args, "workspace")?)?;
-                    Ok(tool_ok(
-                        operation.finish(&paths, Some(&Caller::from_auth(auth)))?,
-                    ))
+                    let receipt = if outcome == "failed" {
+                        let artifacts = operation.preserve(&paths)?;
+                        operation.set_retention(Some(24))?;
+                        json!({"closed":false,"source_files_kept":true,"artifacts":artifacts,"session":summary(&operation.record),"note":"Failed task retained for 24 idle hours; busy or unknown resources still block expiry cleanup."})
+                    } else {
+                        operation.finish(&paths, Some(&Caller::from_auth(auth)))?
+                    };
+                    drop(operation);
+                    let mut result = tool_ok(receipt);
+                    result["expiry_sweep"] = store
+                        .sweep(&owner, None, 8, Some(&Caller::from_auth(auth)))
+                        .unwrap_or_else(|e| json!({"error":e.message()}));
+                    Ok(result)
                 }
                 "retain" => {
-                    let paths = keep_paths(args)?;
+                    let retention = retention_arg(args)?;
+                    let paths = if args.get("keep_paths").is_some() {
+                        keep_paths(args)?
+                    } else if retention.is_some() {
+                        Vec::new()
+                    } else {
+                        return Err(WorkspaceError::invalid_argument(
+                            "retain needs keep_paths, retention_hours or retain_forever=true",
+                        ));
+                    };
                     let mut operation = store.operation(&owner, text(args, "workspace")?)?;
                     let runtime =
                         crate::tools::workspace_runtime::runtime_for(&operation.record.root);
@@ -124,6 +170,11 @@ impl Hub {
                         .lock_commits()
                         .ok_or_else(crate::tools::workspace_runtime::write_lock_busy)?;
                     let artifacts = operation.preserve(&paths)?;
+                    if let Some(hours) = retention {
+                        operation.set_retention(hours)?;
+                    } else {
+                        operation.touch()?;
+                    }
                     Ok(tool_ok(
                         json!({"artifacts": artifacts, "source_files_kept": true, "session":summary(&operation.record)}),
                     ))
@@ -139,6 +190,24 @@ impl Hub {
                     };
                     let operation = store.operation(&owner, &workspace)?;
                     Ok(tool_ok(operation.artifact(id, include_content)?))
+                }
+                "sweep" => {
+                    let cursor = args
+                        .get("cursor")
+                        .map(|_| text(args, "cursor"))
+                        .transpose()?;
+                    let limit = match args.get("limit") {
+                        None => 8,
+                        Some(v) => v.as_u64().filter(|v| (1..=16).contains(v)).ok_or_else(|| {
+                            WorkspaceError::invalid_argument("sweep limit must be 1..=16")
+                        })? as usize,
+                    };
+                    Ok(tool_ok(store.sweep(
+                        &owner,
+                        cursor,
+                        limit,
+                        Some(&Caller::from_auth(auth)),
+                    )?))
                 }
                 "list" => {
                     let limit = match args.get("limit") {
@@ -272,6 +341,24 @@ fn text_allow_empty<'a>(args: &'a Value, key: &str) -> Result<&'a str, Workspace
         .ok_or_else(|| WorkspaceError::invalid_argument(format!("{key} must be a string")))
 }
 
+fn retention_arg(args: &Value) -> Result<Option<Option<u64>>, WorkspaceError> {
+    match (args.get("retention_hours"), args.get("retain_forever")) {
+        (Some(value), None) => Ok(Some(Some(
+            value
+                .as_u64()
+                .filter(|v| (1..=8760).contains(v))
+                .ok_or_else(|| {
+                    WorkspaceError::invalid_argument("retention_hours must be 1..=8760")
+                })?,
+        ))),
+        (None, Some(Value::Bool(true))) => Ok(Some(None)),
+        (None, None) => Ok(None),
+        _ => Err(WorkspaceError::invalid_argument(
+            "Use either retention_hours or retain_forever=true, not both",
+        )),
+    }
+}
+
 fn summary(record: &Record) -> Value {
     json!({
         "workspace": record.id, "kind": "managed", "root": record.root,
@@ -281,6 +368,8 @@ fn summary(record: &Record) -> Value {
         "cleanup_supported": true,
         "artifacts": record.artifacts,
         "unresolved_commands":record.pending_commands.len(),
+        "expires_at_ms":record.expires_at_ms,
+        "idle_retention_ms":record.idle_retention_ms,
         "note": "finish requires an explicit keep_paths list and verified idle resources. Artifacts survive closure. Query status for resource checks; active alone does not imply idle.",
     })
 }
@@ -289,9 +378,9 @@ pub(super) fn definition() -> Value {
     json!({
         "name": TOOL,
         "title": "Managed work sessions",
-        "description": "Manage owned non-project work directories. start is idempotent by client_request_id; status checks resources. retain saves keep_paths without deleting sources. finish requires explicit keep_paths (empty means keep none), verifies saved files and idle resources, then removes the temporary directory; retry with identical paths. artifact retrieves saved results after closure. No project or Git registration is needed.",
+        "description": "Manage owned non-project work directories. start is idempotent; status checks resources. retain saves keep_paths or sets retention_hours/retain_forever. finish with explicit keep_paths verifies artifacts and idle resources before deleting the temporary directory; outcome=failed keeps it for 24 idle hours. artifact retrieves retained results. New directories expire after 7 idle days; bounded sweeps run on start/finish or explicit sweep. Busy/unknown resources and saved artifacts are not deleted.",
         "inputSchema": {"type":"object", "properties": {
-            "action": {"type":"string", "enum":["start","list","status","retain","artifact","finish"]},
+            "action": {"type":"string", "enum":["start","list","status","retain","artifact","finish","sweep"]},
             "client_request_id": {"type":"string","minLength":1,"maxLength":128},
             "purpose": {"type":"string","maxLength":256},
             "workspace": {"type":"string","minLength":1},
@@ -299,6 +388,9 @@ pub(super) fn definition() -> Value {
             "keep_paths": {"type":"array","maxItems":32,"items":{"type":"string"}},
             "artifact_id": {"type":"string","minLength":1},
             "include_content": {"type":"boolean","default":false},
+            "retention_hours": {"type":"integer","minimum":1,"maximum":8760},
+            "retain_forever": {"type":"boolean"},
+            "outcome": {"type":"string","enum":["success","failed"],"default":"success"},
             "limit": {"type":"integer","minimum":1,"maximum":100,"default":20}
         },"required":["action"],"additionalProperties":false},
         "annotations": {"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}

@@ -12,6 +12,17 @@ pub(crate) struct PendingCommand {
 }
 
 pub(super) fn validate_record(record: &Record) -> Result<()> {
+    if record.idle_retention_ms.is_some() != record.expires_at_ms.is_some()
+        || record
+            .idle_retention_ms
+            .is_some_and(|ttl| !(60 * 60 * 1000..=8760 * 60 * 60 * 1000).contains(&ttl))
+    {
+        return Err(error(
+            "WORK_SESSION_REGISTRY_INVALID",
+            "Invalid retention policy",
+            "storage",
+        ));
+    }
     if record.pending_commands.len() > 64
         || record.pending_commands.iter().any(|p| {
             Uuid::parse_str(&p.operation).is_err()

@@ -775,7 +775,7 @@ Options:
           换服务列给客户端的工具集；项目自己的工具集照样生效，两边取交集
 
       --work-sessions <true|false>
-          开/关无需建项目的通用任务空间（默认关）；仅完整鉴权连接可用，W0 不自动清理文件
+          开/关无需建项目的通用任务空间（默认关）；仅完整鉴权连接可用，支持保存产物和安全收尾
 
   -s, --service <SERVICE>
           --tunnel / --off 改哪个：mcp（默认，服务）| actions（项目的 GPT Actions）

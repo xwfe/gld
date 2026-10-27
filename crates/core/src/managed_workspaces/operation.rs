@@ -71,6 +71,9 @@ impl Operation {
     pub fn touch(&mut self) -> Result<()> {
         self.require_active()?;
         self.record.last_used_at_ms = now_ms();
+        if let Some(ttl) = self.record.idle_retention_ms {
+            self.record.expires_at_ms = Some(self.record.last_used_at_ms.saturating_add(ttl));
+        }
         self.persist()
     }
 
