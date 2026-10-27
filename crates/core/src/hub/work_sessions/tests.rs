@@ -281,3 +281,62 @@ fn retain_and_artifact_route_only_owned_results() {
 fn fs_write(root: &str, path: &str, content: &str) {
     std::fs::write(PathBuf::from(root).join(path), content).unwrap();
 }
+
+#[test]
+fn running_command_blocks_finish_then_output_survives_closure() {
+    let fixture = Fixture::new(true);
+    let auth = owner("finish");
+    let id = fixture.start(&auth, "one");
+    let command = fixture.call(&auth, "exec_command", json!({"workspace":id,
+        "argv":["python3","-c","import sys; print('ready',flush=True); sys.stdin.read(); open('out.txt','w').write('done')"],
+        "stdin_mode":"interactive", "yield_time_ms":1,"timeout_ms":10000}));
+    assert_eq!(command["ok"], true, "{command}");
+    let blocked = fixture.call(
+        &auth,
+        TOOL,
+        json!({"action":"finish","workspace":id,"keep_paths":["out.txt"]}),
+    );
+    assert_eq!(
+        blocked["error"]["code"], "WORK_SESSION_RESOURCES_BUSY",
+        "{blocked}"
+    );
+    // 主动停止，不靠短 sleep 猜测进程已退出；另写最终文件。
+    let stop = fixture.call(
+        &auth,
+        "kill_session",
+        json!({"workspace":id,"session_id":command["session_id"],"wait_ms":5000}),
+    );
+    assert_eq!(stop["ok"], true, "{stop}");
+    let patch = fixture.call(&auth,"apply_patch",json!({"workspace":id,"patch":"*** Begin Patch\n*** Add File: out.txt\n+done\n*** End Patch\n"}));
+    assert_eq!(patch["ok"], true, "{patch}");
+    let done = fixture.call(
+        &auth,
+        TOOL,
+        json!({"action":"finish","workspace":id,"keep_paths":["out.txt"]}),
+    );
+    assert_eq!(done["closed"], true, "{done}");
+    let status = fixture.call(&auth, TOOL, json!({"action":"status","workspace":id}));
+    assert_eq!(status["session"]["state"], "closed", "{status}");
+    let read = fixture.call(&auth,TOOL,json!({"action":"artifact","artifact_id":done["artifacts"][0]["id"],"include_content":true}));
+    assert_eq!(read["content"], "done\n");
+    let write = fixture.call(&auth,"apply_patch",json!({"workspace":id,"patch":"*** Begin Patch\n*** Add File: late.txt\n+late\n*** End Patch\n"}));
+    assert_eq!(write["error"]["code"], "WORK_SESSION_NOT_ACTIVE");
+}
+
+#[test]
+fn a_rejected_command_does_not_leave_a_false_resource_blocker() {
+    let fixture = Fixture::new(true);
+    let auth = owner("rejection");
+    let id = fixture.start(&auth, "one");
+    fixture.call(
+        &auth,
+        "exec_command",
+        json!({"workspace":id,"argv":["not-an-allowed-program"]}),
+    );
+    let done = fixture.call(
+        &auth,
+        TOOL,
+        json!({"action":"finish","workspace":id,"keep_paths":[]}),
+    );
+    assert_eq!(done["closed"], true, "{done}");
+}

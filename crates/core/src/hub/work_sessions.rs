@@ -72,7 +72,12 @@ impl Hub {
                 "list" => &["action", "cursor", "limit"],
                 "retain" => &["action", "workspace", "keep_paths"],
                 "artifact" => &["action", "artifact_id", "include_content"],
-                _ => return Err(WorkspaceError::invalid_argument("action must be start, list or status; artifact preservation and cleanup are not implemented in W0")),
+                "finish" => &["action", "workspace", "keep_paths"],
+                _ => {
+                    return Err(WorkspaceError::invalid_argument(
+                        "action must be start, list, status, retain, artifact or finish",
+                    ))
+                }
             };
             if object.keys().any(|key| !allowed.contains(&key.as_str())) {
                 return Err(WorkspaceError::invalid_argument(format!(
@@ -97,8 +102,18 @@ impl Hub {
                     })))
                 }
                 "status" => {
-                    let record = store.get(&owner, text(args, "workspace")?, false)?;
-                    Ok(tool_ok(json!({"session": summary(&record)})))
+                    let mut operation = store.operation(&owner, text(args, "workspace")?)?;
+                    let resources = operation.resources(Some(&Caller::from_auth(auth)))?;
+                    Ok(tool_ok(
+                        json!({"session": summary(&operation.record), "resources":resources}),
+                    ))
+                }
+                "finish" => {
+                    let paths = keep_paths(args)?;
+                    let mut operation = store.operation(&owner, text(args, "workspace")?)?;
+                    Ok(tool_ok(
+                        operation.finish(&paths, Some(&Caller::from_auth(auth)))?,
+                    ))
                 }
                 "retain" => {
                     let paths = keep_paths(args)?;
@@ -198,8 +213,33 @@ impl Hub {
         );
         profile.id = record.id.clone();
         profile.runtime.history_recording = false;
-        profile.runtime.ai_instructions = "This is a managed non-project work directory. Keep temporary files here. Use work_session retain with explicit keep_paths to save verified artifacts, then artifact to retrieve them. Do not assume a Git repository or another project's rules. Guarded execution is policy-only, not an OS sandbox. Automatic cleanup is not implemented yet; report retained paths truthfully.".into();
-        self.call_local(auth, tool, &profile, args, settings, routed)
+        profile.runtime.ai_instructions = "This is a managed non-project work directory. Keep temporary files here. Use retain to save verified artifacts; finish with explicit keep_paths saves selected files then deletes the temporary directory only after resources are confirmed stopped. Artifact retrieval remains available after closing. Do not assume a Git repository or another project's rules. Guarded execution is policy-only, not an OS sandbox. Report saved and removed files separately.".into();
+        let started = if tool == "exec_command" {
+            match operation.begin_command() {
+                Ok(id) => Some(id),
+                Err(error) => return Ok(plain_result(tool_err(error))),
+            }
+        } else {
+            None
+        };
+        let mut result = self.call_local(auth, tool, &profile, args, settings, routed)?;
+        let recorded = match started {
+            Some(id) => operation.observe_command_result(&id, &result["structuredContent"]),
+            None => Ok(()),
+        }
+        .and_then(|()| {
+            operation
+                .resources(Some(&Caller::from_auth(auth)))
+                .map(|_| ())
+        });
+        if let Err(error) = recorded {
+            // 命令可能已经完成；不把资源记账失败伪装成命令没执行，让模型重跑。
+            result["structuredContent"]["cleanup_warning"] = json!(error.message());
+            if let Some(content) = result["content"].as_array_mut() {
+                content.push(json!({"type":"text","text":format!("Resource bookkeeping could not be confirmed; do not repeat the command. Cleanup remains conservative: {}",error.message())}));
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -238,9 +278,10 @@ fn summary(record: &Record) -> Value {
         "purpose": record.purpose, "state": record.state,
         "created_at_ms": record.created_at_ms, "last_used_at_ms": record.last_used_at_ms,
         "policy": {"confine_reads": true, "command_policy": "guarded", "agent_delegation": "off", "sandbox_enforced": false},
-        "cleanup_supported": false,
+        "cleanup_supported": true,
         "artifacts": record.artifacts,
-        "note": "Saved artifacts are retained independently. The work directory is not cleaned automatically yet; active does not imply that its processes are idle.",
+        "unresolved_commands":record.pending_commands.len(),
+        "note": "finish requires an explicit keep_paths list and verified idle resources. Artifacts survive closure. Query status for resource checks; active alone does not imply idle.",
     })
 }
 
@@ -248,9 +289,9 @@ pub(super) fn definition() -> Value {
     json!({
         "name": TOOL,
         "title": "Managed work sessions",
-        "description": "Manage non-project work directories. start is idempotent by client_request_id; list/status show owned sessions. retain saves explicit keep_paths as verified artifacts without deleting sources; artifact reads metadata or bounded UTF-8 content. No project registration or Git is needed. Workspace tools require the returned exact ID. Automatic cleanup is not implemented yet.",
+        "description": "Manage owned non-project work directories. start is idempotent by client_request_id; status checks resources. retain saves keep_paths without deleting sources. finish requires explicit keep_paths (empty means keep none), verifies saved files and idle resources, then removes the temporary directory; retry with identical paths. artifact retrieves saved results after closure. No project or Git registration is needed.",
         "inputSchema": {"type":"object", "properties": {
-            "action": {"type":"string", "enum":["start","list","status","retain","artifact"]},
+            "action": {"type":"string", "enum":["start","list","status","retain","artifact","finish"]},
             "client_request_id": {"type":"string","minLength":1,"maxLength":128},
             "purpose": {"type":"string","maxLength":256},
             "workspace": {"type":"string","minLength":1},
@@ -260,7 +301,7 @@ pub(super) fn definition() -> Value {
             "include_content": {"type":"boolean","default":false},
             "limit": {"type":"integer","minimum":1,"maximum":100,"default":20}
         },"required":["action"],"additionalProperties":false},
-        "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        "annotations": {"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}
     })
 }
 

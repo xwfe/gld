@@ -203,6 +203,10 @@ impl Operation {
             ));
         }
         // 先检查整组路径：不要保存到一半才发现最后一个是越界路径。
+        if paths.is_empty() {
+            self.verify_artifacts()?;
+            return Ok(Vec::new());
+        }
         let sources = paths
             .iter()
             .map(|p| source_file(&self.record.root, p))
@@ -231,7 +235,12 @@ impl Operation {
                     ));
                 }
             } else {
-                let temp = root.join(format!(".copy-{}", Uuid::new_v4().simple()));
+                let temp = root.join(format!(".copy-{id}"));
+                // 这是同一个内容版本的专用暂存文件；中断后重试只清这一份，不扫描其他文件。
+                regular_or_absent(&temp)?;
+                if temp.exists() {
+                    fs::remove_file(&temp).map_err(storage)?;
+                }
                 let copied = (|| {
                     let mut input = open_file(&source)?.take(MAX_ARTIFACT_BYTES + 1);
                     let mut options = OpenOptions::new();

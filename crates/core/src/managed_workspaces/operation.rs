@@ -63,11 +63,7 @@ impl Store {
 impl Operation {
     pub fn require_active(&self) -> Result<()> {
         if self.record.state != State::Active {
-            return Err(error(
-                "WORK_SESSION_INCOMPLETE",
-                "The work directory is not active",
-                "conflict",
-            ));
+            return Err(error("WORK_SESSION_NOT_ACTIVE", "This work directory is closing or closed; saved results remain available through work_session artifact", "conflict"));
         }
         verify_root(&self.home, &self.record)
     }

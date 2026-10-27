@@ -211,6 +211,13 @@ impl Drop for CommitGuard<'_> {
     }
 }
 
+impl CommitGuard<'_> {
+    /// 删除整个托管目录不能沿用普通补丁的跨进程锁降级路径。
+    pub(crate) fn is_cross_process(&self) -> bool {
+        self.across_processes.is_some()
+    }
+}
+
 impl WorkspaceRuntime {
     /// 占住这个目录的写权，直到返回的 guard 被丢掉。
     ///

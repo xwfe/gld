@@ -1,9 +1,11 @@
 //! 服务管理的非项目执行目录。登记在工作目录之外；同主体同请求只创建一次。
 
 mod artifacts;
+mod lifecycle;
 mod operation;
 pub(crate) use artifacts::artifact_workspace;
 pub(crate) use artifacts::Artifact;
+pub(crate) use lifecycle::PendingCommand;
 pub(crate) use operation::Operation;
 
 use std::fs::{self, File, OpenOptions};
@@ -27,6 +29,8 @@ const REGISTRY: &str = "managed-workspaces";
 pub(crate) enum State {
     Creating,
     Active,
+    Closing,
+    Closed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +47,13 @@ pub(crate) struct Record {
     pub last_used_at_ms: u64,
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
+    #[serde(default)]
+    pub finish_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub pending_commands: Vec<PendingCommand>,
+    /// 没有这一字段的 W0 登记不能证明历史命令已经结束，不直接清理。
+    #[serde(default)]
+    pub resource_tracking: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +83,7 @@ impl Store {
             }
             if record.state == State::Creating {
                 self.activate(&guard.home, &mut record)?;
-            } else {
+            } else if record.state == State::Active {
                 verify_root(&guard.home, &record)?;
             }
             return Ok((record, false));
@@ -83,7 +94,7 @@ impl Store {
         let id = format!("work-{}", Uuid::new_v4().simple());
         let now = now_ms();
         let mut record = Record {
-            schema_version: 1,
+            schema_version: 2,
             root: guard.home.join("work").join(&id),
             id,
             owner: owner.into(),
@@ -93,6 +104,9 @@ impl Store {
             created_at_ms: now,
             last_used_at_ms: now,
             artifacts: Vec::new(),
+            finish_paths: None,
+            pending_commands: Vec::new(),
+            resource_tracking: true,
         };
         // 先登记再建目录：中断后同请求能完成 creating，prune 也能保护其记录。
         save(&guard.home, &record)?;
@@ -117,6 +131,7 @@ impl Store {
     }
 
     /// ID 不存在与属于别人是同一个错误。访问目录前每次重新核对路径，而非只信缓存。
+    #[cfg(test)]
     pub fn get(&self, owner: &str, id: &str, touch: bool) -> Result<Record> {
         if !is_id(id) {
             return Err(not_found());
@@ -223,7 +238,7 @@ impl Store {
             let record: Record = serde_json::from_slice(&bytes).map_err(|_| {
                 error("WORK_SESSION_REGISTRY_INVALID", "A managed workspace record cannot be decoded; records and workspace files were left untouched", "storage")
             })?;
-            if record.schema_version != 1
+            if !matches!(record.schema_version, 1 | 2)
                 || !is_id(&record.id)
                 || path.file_stem().and_then(|x| x.to_str()) != Some(record.id.as_str())
                 || record.root != home.join("work").join(&record.id)
@@ -246,6 +261,7 @@ impl Store {
                 ));
             }
             artifacts::validate_manifest(&record)?;
+            lifecycle::validate_record(&record)?;
             records.push(record);
         }
         records.sort_by(|a, b| a.id.cmp(&b.id));
