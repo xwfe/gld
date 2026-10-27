@@ -16,6 +16,17 @@ pub async fn run(ctx: &mut Ctx, args: PruneArgs) -> CliResult {
         .backend
         .call_typed(Request::Prune { confirmed: None })
         .await?;
+    if !plan.failures.is_empty() {
+        if !ctx.out.json_or(&plan) {
+            for failure in &plan.failures {
+                ctx.out
+                    .line(format!("{}：{}", tilde(&failure.target), failure.error));
+            }
+        }
+        return Err(CliError::new(
+            "不能确认记录归属，本次没有清理。修复登记数据后再运行 gld prune。",
+        ));
+    }
     if plan.missing_projects.is_empty() && plan.leftovers.is_empty() {
         if !ctx.out.json_or(&plan) {
             ctx.out

@@ -3301,3 +3301,45 @@ fmt --check 和文档命令/家目录路径/相对链接六条专项测试通过
 `PATCH_FAILED: context_drifted`（`files_changed=false`），改用更小的补丁后成功。
 第一轮模块测试 4/5：`argument-hint: [SYMPTOM=<text>]` 被 YAML 解释为数组而非文本，
 按原始 Prompt 行补兼容解析后 5/5 通过，原始模板未修改。
+
+## 78. 无需登记项目的托管任务空间 W0（2026-10-27）
+
+**入口与范围：**用户要求继续下一步，沿当前队列实施 D10-W0；基线 `b2a6c23`，初始工作树干净。
+本轮实现 [RFC-0010](../rfc/0010-managed-work-sessions.md) 的创建、查询、路由和存活保护，
+不安装桌面 provider，不换装或重启现有服务，不创建或撤销 grant，不推送。
+
+**实现：**
+
+- 新增 `managed_workspaces`，在 `GLD_HOME/work/<id>` 放任务文件，`managed-workspaces` 放服务登记。
+  owner 取已认证主体，同 owner/request 幂等；先持久化 creating 再建目录，重试可续建；
+  已 active 的目录丢失不重建。文件锁协调并发，原子替换元数据，坏记录拒绝继续，不静默丢弃。
+- 新增 hub 级 `work_session` start/list/status；后续文件和命令仍显式带完整 `work-…` ID。
+  不登记进普通项目表、不创建 Git；受限文件读写、guarded 命令策略及关闭委派作为默认，
+  不继承业务项目配置。匿名、项目 grant 和其他 owner 均无法借 ID 访问。
+- `forget_departed` 在 context 锁内核对完整托管存活集合，不按当前 caller/grant 缩小集合；
+  `prune` 保留登记 ID 和路径哈希，目录不在也保留证据，删除前复核登记；损坏时 CLI 报失败，不误报“没有要清的”。
+- 增加默认关闭的 `gld upgrade --work-sessions true|false`。开关已开且零项目时，`gld start` 不登记当前目录；
+  明确给目录的旧行为不变。配置拒绝同时开 noauth，IPC 协议改为 11，防止旧守护进程忽略新字段。
+  已生成 cli.md，并同步 concepts/security、生命周期说明与排障文档；进度只改 task_plan。
+
+**验证：**新增 17 项测试（存储 7、hub 5、prune 2、CLI/HTTP 3），随全仓回归通过。
+最终源码快照全仓合计 1092 passed、0 failed；最后的 CLI 帮助调整后已重新跑完整回归与 Clippy。
+真实隔离守护进程测试完成零项目启用、MCP 工具表发现、重复 start、文件写入/读取、越界拒绝、
+运行中命令阻止 daemon restart、命令结束后重启及文件/服务凭据保持，prune 不把托管运行记录当垃圾。
+其余覆盖两个 owner、匿名/只读/可写 grant、分页、并发创建、创建中断恢复、目录丢失、坏登记与软链。
+兼容性复核补上了操作员给 GLD_HOME 设置目录别名的情形：解析这个根的别名，但拒绝其下托管目录被链接替换。
+`cargo build --workspace --locked`、`cargo test --workspace --all-targets --locked`、
+`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均退出 0；
+测试使用隔离 GLD_HOME，未引用真实配置。CLI 文档由原脚本生成，不手改输出。
+
+**尚未实现的部分：**W0 显式返回 `cleanup_supported=false`，不声称目录创建即已交付文件，
+也不声称 active 就是进程在跑或空闲。当前最多 512 个登记，超限拒绝创建、不自动删旧任务；
+产物保存、finish/retain、到期删除和磁盘预算属于下一项 W1。重启恢复的是登记和文件，不恢复或重放旧命令。
+代码已验证不等于已部署，现有运行服务、地址和 OAuth 配置均未改动。
+
+**经 gld 开发的摩擦：**一次 read_file 把存储实现误写为 `harness/storage.rs`，返回 NOT_FOUND，
+工具给出同名文件提示后，按源码搜索定位到 `harness/store.rs`；一次文档 apply_patch 带入不存在的上下文，
+返回 `PATCH_FAILED/context_not_found`、`files_changed=false`，修正锚点后整个事务成功。
+两次均为调用方定位/构造问题，无证据表明服务丢失修改或需要放宽策略。
+生成的 CLI 帮助为新布尔选项插入了含空格的空行，diff 检查拒绝；在该选项声明中关闭重复的
+possible-values 提示（true|false 已在参数名中），重新生成文档，不手工改生成文件或放宽检查。

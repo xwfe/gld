@@ -99,6 +99,14 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 拿到了你全部连接器的钥匙。数据目录里还有命令的运行记录（`runs/`，每条命令原样的
 输出，不脱敏），同样挡着，谁的记录只有谁经 `read_output` 读得到。
 
+**通用任务空间只把它自己的工作目录作为例外。** 开启 `work_session` 后，文件工具可读写
+`GLD_HOME/work/<返回ID>/`；不能借此读其他空间、登记元数据或 `data/profiles.json`。
+入口默认关闭，只向完整且已认证的服务主体提供，项目只读/可写 grant 均不扩大为通用任务权限。
+创建者由已验证的连接身份决定，客户端不能指定 owner 或根路径；普通工具按该身份和完整 ID 再检查一次。
+不同 OAuth 客户端可分开，共用 bearer 或同一客户端凭据的聊天仍是同一主体，任务 ID 不是 OS 隔离。
+guarded 命令检查和 confined 文件读写继续生效，但任意子进程仍按服务账号运行；需要更强边界应使用独立账号或容器。
+具体用法与 W0 不自动清理的限制见 [通用任务空间](concepts.md#不属于项目的任务work_session)。
+
 **一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。skill 目录是链到别处的链接时，读的是链接指向的那个目录；指向主目录本身或文件系统根的不给目录（那等于把整个主目录当成"这个 skill 的文件"）。规则和 ccnm 的 `load_skill` 是同一份（toexec-skill 的 `dir` 模块）。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
 
 **另一个固定范围的只读入口：`prompt_manage`。**默认只读取项目中的

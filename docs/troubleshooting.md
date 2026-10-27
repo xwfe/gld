@@ -140,6 +140,9 @@ gld tool call exec_command cmd='cargo test'
 | AI 说读不到 Skill 里的脚本（`filesUnavailable`） | 这个 skill 在主目录里、是默认的 auto 扫描扫到的：默认只给正文不给文件 | `gld cfg runtime --skill-sources claude`（换成它实际的来源）明确启用；或者 `gld set <项目> confine-reads=false` 放开读取范围 |
 | `~/.agents/prompts` 有模板但 AI 看不到 `prompt_manage` | 运行服务仍是旧版，或客户端缓存旧 tools/list | 确认新版本经现有升级流程换装，客户端 Refresh 工具表；不必删除连接器 |
 | `prompt_manage scope=global` 报 `PROMPT_SCOPE_FORBIDDEN` | 匿名入口或项目 grant，不能读取用户主目录模板 | 使用完整鉴权的连接读取全局模板；项目 grant 可继续读取当前已获准工作区的 `.agents/prompts/*.md` |
+| 找不到 `work_session` 或报 `WORK_SESSIONS_DISABLED` | 服务尚未换装包含 W0 的版本、开关默认关闭，或服务是 read-only 档 | 操作者按现有升级流程换装，再用 `gld upgrade --work-sessions true` 开启并 Refresh 工具表；不需要登记临时项目或重建 OAuth |
+| `work_session` 报归属/认证错误 | 使用匿名或项目 grant，或当前凭据不是创建空间的主体 | 使用原来的完整认证连接与返回的完整 ID；别把共用凭据下的两个聊天当成不同安全账户 |
+| `WORK_SESSION_REGISTRY_INVALID`，`gld prune` 拒绝清理 | 托管登记损坏、版本不符或根路径不匹配，服务无法确认归属 | 保留现场，由本机操作者检查备份及 `managed-workspaces`；不删除工作目录或伪造空登记来强行清理 |
 | Plan 模式下写文件被拒 | 设计如此：Plan 模式只读 | `gld planning mode direct` 或 `goal` |
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
 | 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld set <项目> allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |

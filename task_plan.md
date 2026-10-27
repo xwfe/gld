@@ -1,6 +1,6 @@
 # gld 当前任务与后续规划
 
-更新日期：2026-10-26。**本文件是当前排队与认领入口**；审查与验收过程保留在
+更新日期：2026-10-27。**本文件是当前排队与认领入口**；审查与验收过程保留在
 [生命周期审查](docs/reviews/2026-09-23-lifecycle-and-docs-audit.md)，用户用法见
 [项目开发生命周期](docs/project-lifecycle.md)。已完成项怎么做、怎么验的在审查和 git 历史里，这里不再留勾选清单。
 沿用 D / L 原有归属，不新增平行的 Goal、Task 或执行状态系统。
@@ -57,7 +57,7 @@
 不增加第二套 Skill，不自动执行或注入 Prompt。方案、授权边界及测试详见
 [RFC-0012](docs/rfc/0012-agent-prompts.md)。**D15-P1 已在本地代码完成并通过回归，但未部署**；
 本机目录已只核对文件名，D15-P2 的已认证连接器实际调用需取得换装授权后进行。
-**下一编码入口仍为 D10-W0**；代码通过测试不等于现有服务或 ChatGPT 已拿到新工具。
+**下一编码入口为 D10-W1**；D10-W0 已在本地代码完成，代码通过测试不等于现有服务或 ChatGPT 已拿到新工具。
 
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
@@ -65,8 +65,9 @@
 | D15-P2 真机与连接器验收 | 本机文件名已核对；部署联调待授权 | 发现 `debug.md`、`refactor.md`、`review.md`，未读其正文；得到批准后按既有空闲升级流程换装，再在 ChatGPT Refresh 工具表、读取一份指定 Prompt；不变更 OAuth 地址或 client_id |
 
 **2026-10-26 新需求：**非项目任务使用 gld 数据目录下的专用空间，由服务自动管理；增加浏览器与跨平台桌面 Computer Use。
-本轮交付为方案，运行时未改。设计见 [RFC-0010](docs/rfc/0010-managed-work-sessions.md)、
-[RFC-0011](docs/rfc/0011-computer-use.md)。**下一项编码入口为 D10-W0**，先完成无须用户建项目的执行空间；
+设计见 [RFC-0010](docs/rfc/0010-managed-work-sessions.md)、[RFC-0011](docs/rfc/0011-computer-use.md)。
+2026-10-27 已完成并验证 W0 源码，尚未部署，实际工具规则在 concepts；
+**下一项编码入口为 D10-W1**，先实现保存并核验产物，再清临时文件；
 provider 的只读协议验证可提前准备，实际桌面输入须等目录/产物生命周期和控制契约通过。
 **技术路线固定为 Provider-first、Native-fallback**：先沿用 Playwright MCP，并用独立 Cua Driver MCP
 做真实 POC；macOS 需要时对照 Peekaboo、Windows 对照 winapp ui/Windows-MCP。只写私有薄 adapter，
@@ -76,8 +77,8 @@ Rust SDK 直连和 Enigo/XCap 等 native-minimal 候选只在实测出现稳定�
 
 | 归属 | 状态 | 下一步与完成标准 |
 | --- | --- | --- |
-| D10-W0 通用任务空间 | 待实施，下一编码入口 | 自动建专用目录与内部 workspace；start/status/list 幂等、owner/路径负测、缺 workspace 仍拒、无需 Git；开放执行前纳入 hub 存活集合与 prune 有主记录集合；见 RFC-0010 §7 |
-| D10-W1 产物与回收 | 待实施，依赖 W0 | 保存后核验再清临时文件；活资源核对、到期回收和关闭重试；活跃命令/委派/桌面不被误清、最终产物关闭后可取；见 RFC-0010 §6–§7 |
+| D10-W0 通用任务空间 | 已编码并验证，未部署 | `work_session` start/status/list、持久登记、显式旧工具路由、完整主体归属和 prune 保护已完成；默认关闭。新增 17 项回归，含隔离守护进程真实 HTTP/重启验收；源码协议 11，现有服务未换装；见审查 §78 |
+| D10-W1 产物与回收 | 待实施，下一编码入口 | 先补 artifact/retain 的保存与完整性核验，再补 finish、活资源核对、到期回收和关闭重试；失败不删唯一源、活跃目录不误清、结果关闭后可取；不把 W0 的 active 状态当成命令结束；见 RFC-0010 §6–§7 |
 | D10-C0 桌面执行器验证 | 待验证；未安装 provider | **MCP-first POC**：锁 Cua Driver 版本/许可/schema，借已有 machine_mcp 在隔离环境验图像、元素树、输入回读、权限诊断、输出路径和停止；只有明确失败才让 macOS Peekaboo/Windows winapp ui 等做同题 A/B，不先编入 Rust SDK；见 RFC-0011 §4、§9 |
 | D10-C1 macOS 控制闭环 | 待实施，依赖 W1/C0 | 观察→输入→读回核实；中文、高 DPI、目标变化、两个任务争用、stop 和 unknown 负测；普通操作沿已授权范围执行；见 RFC-0011 §5–§6、§9 |
 | D10-C2 托管浏览器与 W2 | 待实施，复用现有 Playwright | 独立 profile、下载/截图与任务绑定、DOM/console 验证、产物交付和资源回收；保持旧 browser 转发契约；见 RFC-0011 §7 |

@@ -765,6 +765,10 @@ pub struct UpgradeArgs {
     #[arg(long, value_name = "PROFILE")]
     pub tool_profile: Option<String>,
 
+    /// 开/关无需建项目的通用任务空间（默认关）；仅完整鉴权连接可用，W0 不自动清理文件
+    #[arg(long, value_name = "true|false", hide_possible_values = true)]
+    pub work_sessions: Option<bool>,
+
     /// --tunnel / --off 改哪个：mcp（默认，服务）| actions（项目的 GPT Actions）
     #[arg(short = 's', long, value_enum, default_value = "mcp")]
     pub service: TunnelService,

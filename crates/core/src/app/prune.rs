@@ -44,7 +44,10 @@ pub struct PruneReport {
 
 impl PruneReport {
     pub fn is_empty(&self) -> bool {
-        self.missing_projects.is_empty() && self.leftovers.is_empty() && self.busy.is_empty()
+        self.missing_projects.is_empty()
+            && self.leftovers.is_empty()
+            && self.busy.is_empty()
+            && self.failures.is_empty()
     }
 }
 
@@ -88,6 +91,9 @@ impl App {
         let mut plan = tokio::task::spawn_blocking(move || scan(&scan_home, &profiles))
             .await
             .map_err(|error| crate::error::AppError::Message(error.to_string()))?;
+        if !plan.failures.is_empty() {
+            return Ok(plan);
+        }
         let Some(confirmed) = confirmed else {
             return Ok(plan);
         };
@@ -151,14 +157,35 @@ fn retain_confirmed(plan: &mut PruneReport, confirmed: PruneReport) {
 
 /// 找出目录不在的项目和对不上的数据，不动任何东西。
 fn scan(home: &Path, profiles: &[WorkspaceProfile]) -> PruneReport {
+    let managed = match crate::managed_workspaces::Store::new(home.into()).all() {
+        Ok(records) => records,
+        Err(error) => {
+            return PruneReport {
+                failures: vec![PruneFailure {
+                    target: "managed-workspaces".into(),
+                    error: error.message(),
+                }],
+                ..PruneReport::default()
+            }
+        }
+    };
     let (gone, kept): (Vec<&WorkspaceProfile>, Vec<&WorkspaceProfile>) = profiles
         .iter()
         .partition(|profile| directory_is_gone(Path::new(&profile.path)));
-    let kept_ids: HashSet<&str> = kept.iter().map(|profile| profile.id.as_str()).collect();
-    let kept_hashes: HashSet<String> = kept
+    let kept_ids: HashSet<&str> = kept
+        .iter()
+        .map(|profile| profile.id.as_str())
+        .chain(managed.iter().map(|record| record.id.as_str()))
+        .collect();
+    let mut kept_hashes: HashSet<String> = kept
         .iter()
         .flat_map(|profile| path_hashes(&profile.path))
         .collect();
+    kept_hashes.extend(
+        managed
+            .iter()
+            .flat_map(|record| path_hashes(&record.root.to_string_lossy())),
+    );
     // 残留属于哪个目录不在了的项目：按 id 认日志和 OAuth 注册表，按路径哈希认另外三样。
     let owner_of = |name: &str| -> String {
         let id = name.strip_suffix("-actions").unwrap_or(name);
@@ -303,8 +330,39 @@ fn size_of(path: &Path) -> u64 {
 fn remove_leftovers(home: &Path, leftovers: Vec<Leftover>) -> (Vec<Leftover>, Vec<PruneFailure>) {
     let mut removed = Vec::new();
     let mut failures = Vec::new();
+    // 确认清单之后可能已经建了通用空间；删除前再认一次登记。损坏时整体不删。
+    let managed = match crate::managed_workspaces::Store::new(home.into()).all() {
+        Ok(records) => records,
+        Err(error) => {
+            return (
+                removed,
+                vec![PruneFailure {
+                    target: "managed-workspaces".into(),
+                    error: error.message(),
+                }],
+            )
+        }
+    };
+    let kept: HashSet<String> = managed
+        .iter()
+        .flat_map(|record| {
+            let mut keys = path_hashes(&record.root.to_string_lossy());
+            keys.push(record.id.clone());
+            keys
+        })
+        .collect();
     for leftover in leftovers {
         let path = PathBuf::from(&leftover.path);
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| {
+                kept.contains(name)
+                    || kept.contains(name.trim_end_matches(".json").trim_end_matches("-actions"))
+            })
+        {
+            continue;
+        }
         if !path.starts_with(home) {
             failures.push(PruneFailure {
                 target: leftover.path.clone(),
@@ -342,6 +400,66 @@ mod tests {
     fn touch(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn managed_records_are_kept_even_without_projects_or_a_present_work_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::managed_workspaces::Store::new(home.path().into());
+        let (record, _) = store.start("owner", "one", "").unwrap();
+        let hash = crate::tools::runs::project_id(&record.root);
+        let mut pretend_confirmed = Vec::new();
+        for (kind, base) in [
+            ("harness", "harness/workspaces"),
+            ("runs", "runs"),
+            ("agents", "agents"),
+        ] {
+            let path = home.path().join(base).join(&hash);
+            touch(&path.join("evidence.txt"));
+            pretend_confirmed.push(Leftover {
+                kind: kind.into(),
+                path: path.to_string_lossy().into_owned(),
+                bytes: 1,
+                project: String::new(),
+            });
+        }
+        fs::remove_dir(&record.root).unwrap();
+        let plan = scan(home.path(), &[]);
+        assert!(plan.leftovers.is_empty(), "{plan:?}");
+        assert!(plan.failures.is_empty());
+        let (removed, failures) = remove_leftovers(home.path(), pretend_confirmed);
+        assert!(removed.is_empty());
+        assert!(failures.is_empty());
+        assert!(home
+            .path()
+            .join("runs")
+            .join(&hash)
+            .join("evidence.txt")
+            .exists());
+    }
+
+    #[test]
+    fn invalid_managed_registry_blocks_pruning_instead_of_dropping_ownership() {
+        let home = tempfile::tempdir().unwrap();
+        touch(&home.path().join("managed-workspaces/broken.json"));
+        let orphan = home.path().join("runs").join("b".repeat(32));
+        touch(&orphan.join("evidence.txt"));
+        let plan = scan(home.path(), &[]);
+        assert!(!plan.is_empty());
+        assert_eq!(plan.failures.len(), 1);
+        assert!(plan.leftovers.is_empty());
+        let (removed, failures) = remove_leftovers(
+            home.path(),
+            vec![Leftover {
+                kind: "runs".into(),
+                path: orphan.to_string_lossy().into_owned(),
+                bytes: 1,
+                project: String::new(),
+            }],
+        );
+        assert!(removed.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert!(orphan.exists());
     }
 
     /// 留下的项目的东西一样不动；删掉的、目录不在了的项目的都列出来，并且记得属于谁。

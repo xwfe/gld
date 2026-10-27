@@ -80,12 +80,18 @@ pub async fn pick_project_quietly(
     let inside = profiles
         .iter()
         .any(|profile| canonical.starts_with(&profile.path));
-    if inside || profiles.is_empty() {
+    let managed_only = if profiles.is_empty() {
+        let status: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+        status.config.work_sessions
+    } else {
+        false
+    };
+    if inside || (profiles.is_empty() && !managed_only) {
         return register(ctx, cwd, None)
             .await
             .map(|ensured| Some(ensured.profile));
     }
-    if !quiet {
+    if !quiet && !managed_only {
         ctx.out.note(format!(
             "当前目录 {} 不是项目，没加进来。要加：gld add .",
             cwd.display()

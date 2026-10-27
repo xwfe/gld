@@ -5,8 +5,8 @@
 //!
 //! 隔离靠下面三条，改代码时哪条都别松：
 //!
-//! 1. **服务端不记"当前工作区"。** 除 `list_workspaces` 和转发本机 MCP server 的
-//!    三个工具（它们不属于任何工作区，见 [`crate::machine_mcp`]）外，每次
+//! 1. **服务端不记"当前工作区"。** 除 `list_workspaces`、`work_session` 的 start/list
+//!    和转发本机 MCP server 的三个工具（见 [`crate::machine_mcp`]）外，每次
 //!    `tools/call` 都必须带 `workspace`。hub 被所有对话、所有客户端共用，服务端
 //!    一旦记住"刚切到了 api"，另一个对话里没带参数的调用就会落到 api 上——单工作区里 `set_default_cwd`
 //!    已经这么坑过人。所以 hub 连 `set_default_cwd` / `get_default_cwd` 都不暴露。
@@ -41,6 +41,7 @@
 //! 一个契约（分页、参数、错误码都不同）。
 
 pub mod runtime;
+mod work_sessions;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -157,7 +158,7 @@ pub const WORKSPACE_CONTEXT: &str = "workspace_context";
 /// 经 hub 不暴露的工具：它们改的是所有对话共享的服务端状态，见模块说明第 1 条。
 const HIDDEN_TOOLS: &[&str] = &["set_default_cwd", "get_default_cwd"];
 
-const INSTRUCTIONS: &str = "This server is a gld hub: one connection to several workspaces. Every tool call except list_workspaces must include `workspace` (an id or name returned by list_workspaces). The server keeps no current workspace, so pass it again on every call and never rely on the workspace of an earlier call. Workspaces are isolated from each other: paths are relative to the selected workspace root, command sessions and output_ref values only exist in the workspace that created them, and planning mode, permissions and tool sets are enforced per workspace. Before working in a workspace for the first time in a conversation, call workspace_context for it and follow only that workspace's instructions; never apply one workspace's instructions or skills to another. Planning mode is controlled exclusively by the gld CLI, and only the human operator can accept Goal or Plan reviews. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, retry the same tool with confirm=true only when the user's request already clearly authorizes it; otherwise ask the user. A workspace listed with kind=remote lives on another machine and is reached only through the tools named remote_*, which it lists; the hub's own tools do not work on it and the remote_* tools do not work on a local workspace. The two sets are different contracts even where the names look alike, so never substitute one for the other, and read a remote workspace only through its own tools rather than assuming anything about it from a local one.";
+const INSTRUCTIONS: &str = "This server is a gld hub: one connection to several workspaces. Every workspace tool call must include `workspace` (a project id or name returned by list_workspaces, or the exact managed ID returned by work_session). Listing projects, work_session start/list and machine MCP relay calls do not need a workspace. The server keeps no current workspace, so pass it again on every workspace call and never rely on the workspace of an earlier call. Workspaces are isolated from each other: paths are relative to the selected workspace root, command sessions and output_ref values only exist in the workspace that created them, and planning mode, permissions and tool sets are enforced per workspace. Before working in a workspace for the first time in a conversation, call workspace_context for it and follow only that workspace's instructions; never apply one workspace's instructions or skills to another. Planning mode is controlled exclusively by the gld CLI, and only the human operator can accept Goal or Plan reviews. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, retry the same tool with confirm=true only when the user's request already clearly authorizes it; otherwise ask the user. A workspace listed with kind=remote lives on another machine and is reached only through the tools named remote_*, which it lists; the hub's own tools do not work on it and the remote_* tools do not work on a local workspace. The two sets are different contracts even where the names look alike, so never substitute one for the other, and read a remote workspace only through its own tools rather than assuming anything about it from a local one.";
 
 /// 成员名单从哪儿来。
 enum Members {
@@ -235,6 +236,8 @@ pub struct Hub {
     installed: Option<Installed>,
     #[cfg(test)]
     opener: Option<Box<dyn toexec_mcp::Open>>,
+    #[cfg(test)]
+    managed_home: Option<PathBuf>,
 }
 
 impl Hub {
@@ -277,6 +280,8 @@ impl Hub {
             installed: None,
             #[cfg(test)]
             opener: None,
+            #[cfg(test)]
+            managed_home: None,
         }
     }
 
@@ -414,9 +419,13 @@ impl Hub {
             .snapshot()
             .map(|(members, settings)| (visible(members, grant), settings))
         {
-            Ok((members, _)) if members.is_empty() => {
-                "No workspaces are in this hub yet; the operator adds them from the gld CLI."
-                    .to_string()
+            Ok((members, settings)) if members.is_empty() => {
+                if self.work_sessions_offered(&settings, grant) {
+                    "No user projects are registered. For a non-project task use work_session action=start; no gld add or Git repository is needed.".into()
+                } else {
+                    "No workspaces are in this hub yet; the operator adds them from the gld CLI."
+                        .into()
+                }
             }
             Ok((members, _)) => {
                 let lines = members
@@ -499,6 +508,9 @@ impl Hub {
         // 全是只读成员时列出 `remote_coding_begin`，模型只会得到一个必然
         // 失败的调用。
         if let Ok((members, settings)) = self.snapshot() {
+            if self.work_sessions_offered(&settings, grant) {
+                tools.push(work_sessions::definition());
+            }
             if grant.is_none() {
                 tools.extend(self.relay_definitions(&settings));
             }
@@ -541,6 +553,7 @@ impl Hub {
         let read_only = grant.is_some_and(|grant| grant.read_only);
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
+            || (name == work_sessions::TOOL && grant.is_none())
             || (grant.is_none() && machine_mcp::is_tool(name))
             || remote_tools::find(name).is_some()
             || remote_tools::is_session_tool(name)
@@ -581,11 +594,27 @@ impl Hub {
         };
         // 用完整名单：按 grant 过滤之后再判"谁离开了"，就会把别的成员当成走了、
         // 停掉它们的命令。
-        self.forget_departed(&members);
+        if let Err(error) = self.forget_departed(&members) {
+            return Ok(plain_result(tool_err(error)));
+        }
         self.relay.retain(&settings.relayed_mcp_servers);
         let members = visible(members, auth.grant());
         if canonical == LIST_WORKSPACES {
-            return Ok(plain_result(list_workspaces(&members)));
+            let mut listed = list_workspaces(&members);
+            if self.work_sessions_offered(&settings, auth.grant()) && auth.is_authenticated() {
+                listed["work_sessions"] = json!({
+                    "tool": work_sessions::TOOL,
+                    "usage": "For a non-project task call work_session action=start with a unique client_request_id; use its returned workspace ID on every subsequent workspace tool call."
+                });
+            }
+            return Ok(plain_result(listed));
+        }
+        if canonical == work_sessions::TOOL {
+            return Ok(self.call_work_session(
+                auth,
+                &crate::mcp::tool_arguments(name, params),
+                &settings,
+            ));
         }
         if machine_mcp::is_tool(canonical) {
             let args = crate::mcp::tool_arguments(name, params);
@@ -606,6 +635,10 @@ impl Hub {
         else {
             return Ok(plain_result(workspace_required(canonical, &members)));
         };
+        if crate::managed_workspaces::is_id(selector) {
+            return self
+                .call_managed_workspace(auth, canonical, selector, &args, &settings, routed);
+        }
         let member = match resolve_member(&members, selector) {
             Ok(member) => member,
             Err(error) => return Ok(plain_result(error)),
@@ -1017,15 +1050,21 @@ impl Hub {
     ///
     /// 远端那半是 RFC-0002 5.1「成员删除/权限收紧/配置变化须使对应旧会话
     /// 失效」——操作员把成员摘出去了，正在开着的 bridge 不能还留着。
-    fn forget_departed(&self, members: &[Member]) {
+    fn forget_departed(&self, members: &[Member]) -> Result<(), WorkspaceError> {
         let departed: Vec<CachedContext> = {
             let mut contexts = self
                 .contexts
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // 在 context 锁内读取完整登记：并发 start 不能在过期快照之后插入一个
+            // context，紧接着就被别的请求误判为离开。此处绝不按调用方过滤。
+            let managed = self.work_store()?.all()?;
             let gone: Vec<String> = contexts
                 .keys()
-                .filter(|id| !members.iter().any(|member| member.id() == id.as_str()))
+                .filter(|id| {
+                    !members.iter().any(|member| member.id() == id.as_str())
+                        && !managed.iter().any(|record| &record.id == *id)
+                })
                 .cloned()
                 .collect();
             gone.iter().filter_map(|id| contexts.remove(id)).collect()
@@ -1044,6 +1083,7 @@ impl Hub {
             .map(|member| member.id().to_string())
             .collect();
         self.connections.retain(&still_here);
+        Ok(())
     }
 
     fn workspace_context(
@@ -1482,7 +1522,7 @@ fn workspace_property() -> Value {
     json!({
         "type": "string",
         "minLength": 1,
-        "description": "Target workspace id or name from list_workspaces. Required on every call; the hub keeps no current workspace."
+        "description": "Target project id/name from list_workspaces or exact managed workspace ID from work_session. Required on every workspace call; the hub keeps no current workspace."
     })
 }
 

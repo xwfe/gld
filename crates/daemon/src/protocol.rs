@@ -43,7 +43,8 @@ use serde_json::Value;
 /// 10：服务配置多了 `openaiTunnelId`、隧道类型多了 `openai`。旧守护进程收到 `--tunnel openai:…` 会报
 ///    "看不懂的隧道类型"，还会把 ID 字段丢掉，所以递增，让命令行先报"请重启"。
 ///    同一版（还没换装过）里又加了 `prune`（`gld prune`），没再递增。
-pub const PROTOCOL_VERSION: u32 = 10;
+/// 11：服务配置增加 workSessions 开关；旧守护进程会忽略它，不能把开关已生效报给用户。
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]

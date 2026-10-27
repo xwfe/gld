@@ -20,13 +20,19 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
         (false, spec) => spec,
     };
     let actions_line = matches!(args.service, TunnelService::Actions);
+    if actions_line && args.work_sessions.is_some() {
+        return Err(CliError::new(
+            "--work-sessions 只用于 MCP 服务，不用于项目的 GPT Actions。",
+        ));
+    }
     let project_change =
         args.path.is_some() || args.name.is_some() || args.actions_port.is_some() || actions_line;
     let service_change = !actions_line
         && (spec.is_some()
             || args.port.is_some()
             || args.auth.is_some()
-            || args.tool_profile.is_some());
+            || args.tool_profile.is_some()
+            || args.work_sessions.is_some());
     if !project_change && !service_change {
         let selector = args
             .workspace
@@ -122,6 +128,9 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
         }
         if let Some(profile) = &args.tool_profile {
             config.tool_profile = profile.clone();
+        }
+        if let Some(enabled) = args.work_sessions {
+            config.work_sessions = enabled;
         }
         Ok(())
     })

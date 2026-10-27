@@ -116,7 +116,7 @@ impl App {
         let profiles = self.list_workspaces()?;
         let (state, detail) = match hub::runtime::state().await {
             HubState::Running { .. } => ("running", String::new()),
-            HubState::Stopped if config.members.is_empty() => {
+            HubState::Stopped if config.members.is_empty() && !config.work_sessions => {
                 ("stopped", "还没有项目：gld start <项目目录>".to_string())
             }
             HubState::Stopped => ("stopped", "未启动：gld start".to_string()),
@@ -183,6 +183,11 @@ impl App {
         }
         let auth_type = parse_choice(&config.auth_type, MCP_AUTH_CHOICES)?;
         let tool_profile = parse_tool_profile(&config.tool_profile)?;
+        if config.work_sessions && auth_type == "noauth" {
+            return Err(AppError::Message(
+                "通用任务空间需要认证：请使用 oauth 或 bearer，或先关闭 --work-sessions。".into(),
+            ));
+        }
         // noauth 下谁连上都是全权：发出去的 grant 一下子全成了摆设，还照样列在 gld grant ls 里。
         if auth_type == "noauth" {
             let grants = self.with_data(|store| Ok(store.grants().len()))?;

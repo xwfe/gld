@@ -135,6 +135,9 @@ pub struct HubConfig {
     /// 会顺手从这里删掉，见 `App::delete_workspace`。
     #[serde(default)]
     pub members: Vec<String>,
+    /// 非项目任务空间。默认关闭，只给完整鉴权主体，不扩大现有项目 grant。
+    #[serde(default)]
+    pub work_sessions: bool,
     /// 启动 hub 时置为 true，用户主动停掉时置回 false；守护进程启动时据此恢复。
     ///
     /// 不跟全局的「启动时恢复」开关走：那个默认关，而 hub 是一条客户端里配死的
@@ -158,6 +161,7 @@ impl Default for HubConfig {
             frp_subdomain: String::new(),
             use_proxy: default_global_gateway_use_proxy(),
             members: Vec::new(),
+            work_sessions: false,
             restore_on_launch: false,
         }
     }
