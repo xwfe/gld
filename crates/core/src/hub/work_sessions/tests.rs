@@ -372,3 +372,56 @@ fn failure_retention_and_explicit_pinning_do_not_claim_the_task_closed() {
         );
     }
 }
+
+#[test]
+fn artifact_image_is_an_mcp_block_and_never_leaks_to_another_owner() {
+    let fixture = Fixture::new(true);
+    let a = owner("image-owner");
+    let id = fixture.start(&a, "preview");
+    let ctx = fixture.call(&a, WORKSPACE_CONTEXT, json!({"workspace":id}));
+    let root = PathBuf::from(ctx["path"].as_str().unwrap());
+    image::RgbImage::new(4, 3)
+        .save(root.join("preview.png"))
+        .unwrap();
+    let saved = fixture.call(
+        &a,
+        TOOL,
+        json!({"action":"finish","workspace":id,"keep_paths":["preview.png"]}),
+    );
+    assert_eq!(saved["closed"], true, "{saved}");
+    let artifact = &saved["artifacts"][0]["id"];
+    let params = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":TOOL,"arguments":{"action":"artifact","artifact_id":artifact,"output":"mcp_image"}}});
+    let (reply, _) = fixture.hub.handle_request(&a, &params);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let blocks = reply["result"]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["mimeType"], "image/png");
+    let data = blocks[1]["data"].as_str().unwrap();
+    assert!(!blocks[0]["text"].as_str().unwrap().contains(data));
+    assert!(!reply["result"]["structuredContent"]
+        .to_string()
+        .contains(data));
+    let (hidden, _) = fixture.hub.handle_request(&owner("other"), &params);
+    assert_eq!(
+        hidden["result"]["structuredContent"]["error"]["code"],
+        "WORK_SESSION_NOT_FOUND"
+    );
+    assert!(hidden["result"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|v| v["type"] != "image"));
+    for args in [
+        json!({"action":"artifact","artifact_id":artifact,"output":"typo"}),
+        json!({"action":"artifact","artifact_id":artifact,"output":"mcp_image","include_content":true}),
+        json!({"action":"artifact","artifact_id":artifact,"path":"../../data"}),
+    ] {
+        assert_eq!(
+            fixture.call(&a, TOOL, args)["error"]["code"],
+            "INVALID_ARGUMENT"
+        );
+    }
+}

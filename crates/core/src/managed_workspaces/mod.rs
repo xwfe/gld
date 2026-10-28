@@ -1,6 +1,7 @@
 //! 服务管理的非项目执行目录。登记在工作目录之外；同主体同请求只创建一次。
 
 mod archive;
+mod artifact_image;
 mod artifacts;
 mod capacity;
 mod lifecycle;

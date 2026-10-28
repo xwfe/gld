@@ -60,6 +60,7 @@ impl Hub {
         args: &Value,
         settings: &AppSettings,
     ) -> Value {
+        let mut image_content = None;
         let result = (|| {
             self.check_work_access(auth, settings)?;
             let object = args
@@ -77,7 +78,7 @@ impl Hub {
                     "retention_hours",
                     "retain_forever",
                 ],
-                "artifact" => &["action", "artifact_id", "include_content"],
+                "artifact" => &["action", "artifact_id", "include_content", "output"],
                 "finish" => &["action", "workspace", "keep_paths", "outcome"],
                 "sweep" => &["action", "cursor", "limit"],
                 "capacity" => &["action"],
@@ -186,14 +187,15 @@ impl Hub {
                 "artifact" => {
                     let id = text(args, "artifact_id")?;
                     let workspace = crate::managed_workspaces::artifact_workspace(id)?;
-                    let include_content = match args.get("include_content") {
-                        None => false,
-                        Some(value) => value.as_bool().ok_or_else(|| {
-                            WorkspaceError::invalid_argument("include_content must be boolean")
-                        })?,
-                    };
+                    let output = artifact_output(args)?;
                     let operation = store.operation(&owner, &workspace)?;
-                    Ok(tool_ok(operation.artifact(id, include_content)?))
+                    if output == "mcp_image" {
+                        let (metadata, block) = operation.artifact_image(id)?;
+                        image_content = Some(block);
+                        Ok(tool_ok(metadata))
+                    } else {
+                        Ok(tool_ok(operation.artifact(id, output == "text")?))
+                    }
                 }
                 "sweep" => {
                     let cursor = args
@@ -251,7 +253,14 @@ impl Hub {
         })();
         let mut structured = result.unwrap_or_else(tool_err);
         structured["operation_id"] = json!(uuid::Uuid::new_v4().simple().to_string());
-        plain_result(structured)
+        let mut response = plain_result(structured);
+        if let Some(image) = image_content {
+            response["content"]
+                .as_array_mut()
+                .expect("MCP content array")
+                .push(image);
+        }
+        response
     }
 
     pub(super) fn call_managed_workspace(
@@ -363,6 +372,38 @@ fn retention_arg(args: &Value) -> Result<Option<Option<u64>>, WorkspaceError> {
     }
 }
 
+fn artifact_output(args: &Value) -> Result<&str, WorkspaceError> {
+    let legacy = args
+        .get("include_content")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| WorkspaceError::invalid_argument("include_content must be boolean"))
+        })
+        .transpose()?;
+    let output = args
+        .get("output")
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                WorkspaceError::invalid_argument("output must be metadata, text or mcp_image")
+            })
+        })
+        .transpose()?;
+    let selected = output.unwrap_or(if legacy == Some(true) {
+        "text"
+    } else {
+        "metadata"
+    });
+    if !["metadata", "text", "mcp_image"].contains(&selected)
+        || (output.is_some() && legacy.is_some_and(|value| value != (selected == "text")))
+    {
+        return Err(WorkspaceError::invalid_argument(
+            "Use output=metadata|text|mcp_image; include_content must not contradict output",
+        ));
+    }
+    Ok(selected)
+}
+
 fn summary(record: &Record) -> Value {
     json!({
         "workspace": record.id, "kind": "managed", "root": record.root,
@@ -382,7 +423,7 @@ pub(super) fn definition() -> Value {
     json!({
         "name": TOOL,
         "title": "Managed work sessions",
-        "description": "Manage owned non-project work directories. start is idempotent, including archived closed requests; status checks resources. capacity reports aggregate limits and usage, not an OS hard quota. retain saves keep_paths or sets retention_hours/retain_forever. finish with explicit keep_paths verifies artifacts and idle resources before removing the temporary directory and archiving its receipt; outcome=failed retains it for 24 idle hours. artifact retrieves saved results after closure. Bounded expiry sweeps run on start/finish or explicit sweep; busy/unknown resources and saved artifacts are never evicted for capacity.",
+        "description": "Manage owned non-project work directories. start is idempotent, including archived closed requests; status checks resources. capacity reports aggregate limits and usage, not an OS hard quota. retain saves keep_paths or sets retention_hours/retain_forever. finish with explicit keep_paths verifies artifacts and idle resources before removing the temporary directory and archiving its receipt; outcome=failed retains it for 24 idle hours. artifact returns metadata, text or output=mcp_image previews after closure. Bounded expiry sweeps run on start/finish, explicit sweep and actual service startup; busy/unknown resources and saved artifacts are never evicted for capacity.",
         "inputSchema": {"type":"object", "properties": {
             "action": {"type":"string", "enum":["start","list","status","retain","artifact","finish","sweep","capacity"]},
             "client_request_id": {"type":"string","minLength":1,"maxLength":128},
@@ -392,6 +433,7 @@ pub(super) fn definition() -> Value {
             "keep_paths": {"type":"array","maxItems":32,"items":{"type":"string"}},
             "artifact_id": {"type":"string","minLength":1},
             "include_content": {"type":"boolean","default":false},
+            "output": {"type":"string","enum":["metadata","text","mcp_image"],"description":"artifact only: metadata (default), verified UTF-8 text, or bounded first-frame image preview. include_content=true remains an alias for text."},
             "retention_hours": {"type":"integer","minimum":1,"maximum":8760},
             "retain_forever": {"type":"boolean"},
             "outcome": {"type":"string","enum":["success","failed"],"default":"success"},

@@ -349,6 +349,48 @@ impl Operation {
         }
         Ok(())
     }
+
+    pub fn artifact_image(&self, id: &str) -> Result<(Value, Value)> {
+        let item = self
+            .record
+            .artifacts
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| {
+                error(
+                    "ARTIFACT_NOT_FOUND",
+                    "No such artifact belongs to this caller",
+                    "not_found",
+                )
+            })?;
+        if item.bytes > artifact_image::MAX_INPUT_BYTES {
+            return Err(error(
+                "ARTIFACT_IMAGE_TOO_LARGE",
+                "Image preview input is limited to 16 MiB; query metadata or export the original",
+                "resource",
+            ));
+        }
+        // 复用产物归属、路径和校验规则；读回的同一批字节再核验一次，防止核验后被外部改写。
+        let mut metadata = self.artifact(id, false)?;
+        let path = self.artifact_root(false)?.join(id);
+        let mut bytes = Vec::new();
+        open_file(&path)?
+            .take(artifact_image::MAX_INPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(storage)?;
+        if bytes.len() as u64 != item.bytes
+            || format!("{:x}", Sha256::digest(&bytes)) != item.sha256
+        {
+            return Err(error(
+                "ARTIFACT_INTEGRITY",
+                "Artifact changed during preview reading",
+                "storage",
+            ));
+        }
+        let (preview, block) = artifact_image::render(&bytes)?;
+        metadata["image"] = preview;
+        Ok((metadata, block))
+    }
 }
 
 fn mime(path: &str) -> &'static str {

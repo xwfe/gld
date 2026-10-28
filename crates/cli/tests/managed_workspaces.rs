@@ -382,3 +382,64 @@ fn startup_cleans_expired_work_without_a_client_request_and_keeps_saved_results(
     assert_eq!(read["content"], "keep across startup", "{read}");
     assert_eq!(env.service_secret("bearer_token"), token);
 }
+
+#[test]
+fn saved_image_is_returned_as_an_mcp_image_after_restart_not_as_a_path_only() {
+    // 2x1 RGB PNG，测试夹具；不引入新的 CLI 图像依赖。
+    const PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1, 8, 2,
+        0, 0, 0, 123, 64, 232, 221, 0, 0, 0, 15, 73, 68, 65, 84, 120, 156, 99, 228, 81, 178, 96,
+        96, 96, 0, 0, 1, 224, 0, 104, 166, 159, 133, 146, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+        130,
+    ];
+    let env = Env::new();
+    let port = free_port();
+    env.ok(&[
+        "upgrade",
+        "--port",
+        &port.to_string(),
+        "--auth",
+        "bearer",
+        "--work-sessions",
+        "true",
+    ]);
+    env.ok(&["start"]);
+    let token = env.service_secret("bearer_token");
+    let started = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"start","client_request_id":"image"}),
+    );
+    let id = started["workspace"].as_str().unwrap();
+    std::fs::write(
+        env.home.path().join("work").join(id).join("preview.png"),
+        PNG,
+    )
+    .unwrap();
+    let done = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"finish","workspace":id,"keep_paths":["preview.png"]}),
+    );
+    assert_eq!(done["closed"], true, "{done}");
+    env.ok(&["daemon", "restart"]);
+    let reply = rpc(
+        port,
+        &token,
+        "tools/call",
+        json!({"name":"work_session","arguments":{
+        "action":"artifact","artifact_id":done["artifacts"][0]["id"],"output":"mcp_image"}}),
+    );
+    assert_eq!(reply["isError"], false, "{reply}");
+    assert_eq!(reply["content"][1]["type"], "image");
+    assert_eq!(reply["content"][1]["mimeType"], "image/png");
+    assert!(reply["content"][1]["data"]
+        .as_str()
+        .unwrap()
+        .starts_with("iVBOR"));
+    assert_eq!(reply["structuredContent"]["image"]["width"], 2);
+    assert_eq!(reply["structuredContent"]["image"]["height"], 1);
+    assert!(!env.home.path().join("work").join(id).exists());
+}
