@@ -1058,7 +1058,7 @@ impl Hub {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // 在 context 锁内读取完整登记：并发 start 不能在过期快照之后插入一个
             // context，紧接着就被别的请求误判为离开。此处绝不按调用方过滤。
-            let managed = self.work_store()?.all()?;
+            let managed = self.work_store()?.live()?;
             let gone: Vec<String> = contexts
                 .keys()
                 .filter(|id| {

@@ -196,6 +196,10 @@ fn retained_result_survives_expiry_and_a_real_daemon_restart() {
     let swept = call(port, &token, "work_session", json!({"action":"sweep"}));
     assert_eq!(swept["removed"], json!([id]), "{swept}");
     assert!(!env.home.path().join("work").join(id).exists());
+    assert!(
+        !record_path.exists(),
+        "closed receipt must leave the active registry"
+    );
     env.ok(&["daemon", "restart"]);
     assert_eq!(env.service_secret("bearer_token"), token);
     let read = call(
@@ -212,6 +216,16 @@ fn retained_result_survives_expiry_and_a_real_daemon_restart() {
         json!({"action":"finish","workspace":id,"keep_paths":[]}),
     );
     assert_eq!(repeated["already_closed"], true, "{repeated}");
+    let same_request = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"start","client_request_id":"result"}),
+    );
+    assert_eq!(same_request["workspace"], id);
+    assert_eq!(same_request["created"], false);
+    assert_eq!(same_request["session"]["state"], "closed");
+    assert!(!env.home.path().join("work").join(id).exists());
     let prune = env.json(&["--json", "prune", "--dry-run"]);
     assert!(prune["leftovers"].as_array().unwrap().is_empty(), "{prune}");
 }

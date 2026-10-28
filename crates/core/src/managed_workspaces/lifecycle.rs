@@ -4,7 +4,7 @@ use super::*;
 use crate::tools::{runs, session::Found, workspace_runtime, Caller};
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingCommand {
     operation: String,

@@ -9,7 +9,7 @@ const MAX_ARTIFACTS: usize = 32;
 const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_TEXT_BYTES: u64 = 64 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Artifact {
     pub id: String,

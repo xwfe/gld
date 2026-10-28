@@ -1,5 +1,6 @@
 //! 服务管理的非项目执行目录。登记在工作目录之外；同主体同请求只创建一次。
 
+mod archive;
 mod artifacts;
 mod lifecycle;
 mod operation;
@@ -21,7 +22,8 @@ use uuid::Uuid;
 use crate::tools::workspace::WorkspaceError;
 
 type Result<T> = std::result::Result<T, WorkspaceError>;
-const MAX_RECORDS: usize = 512;
+const MAX_ACTIVE: usize = 512;
+const MAX_RECORDS: usize = 8192;
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 const REGISTRY: &str = "managed-workspaces";
 
@@ -34,7 +36,7 @@ pub(crate) enum State {
     Closed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
     pub schema_version: u32,
@@ -78,7 +80,11 @@ impl Store {
         validate_text(purpose, "purpose", 256, true)?;
         let guard = self.lock(true)?.expect("start creates registry");
         let records = self.read_records(&guard.home)?;
-        let count = records.len();
+        // 旧版本的 closed 回执还在主目录。先归档，不丢请求标识，也不删除产物。
+        for record in records.iter().filter(|r| r.state == State::Closed) {
+            archive::close(&guard.home, record)?;
+        }
+        let count = records.iter().filter(|r| r.state != State::Closed).count();
         if let Some(mut record) = records
             .into_iter()
             .find(|record| record.owner == owner && record.client_request_id == request)
@@ -93,8 +99,18 @@ impl Store {
             }
             return Ok((record, false));
         }
-        if count >= MAX_RECORDS {
-            return Err(error("WORK_SESSION_LIMIT", "Managed workspace registry limit reached; directory cleanup does not discard close receipts. No retained files or records were deleted to make room", "resource"));
+        if let Some(record) = archive::by_request(&guard.home, owner, request)? {
+            if record.purpose != purpose {
+                return Err(error(
+                    "WORK_SESSION_REQUEST_CONFLICT",
+                    "The archived request belongs to a different purpose; choose a new request ID",
+                    "conflict",
+                ));
+            }
+            return Ok((record, false));
+        }
+        if count >= MAX_ACTIVE || count + archive::count(&guard.home)? >= MAX_RECORDS {
+            return Err(error("WORK_SESSION_LIMIT", "Managed workspace capacity reached; closed receipts do not use active slots, but total records remain bounded. No files or receipts were deleted", "resource"));
         }
         let id = format!("work-{}", Uuid::new_v4().simple());
         let now = now_ms();
@@ -123,6 +139,16 @@ impl Store {
 
     /// 用于 hub 的完整存活集合与 prune；目录暂时丢失也保留登记，不能当孤儿删除。
     pub fn all(&self) -> Result<Vec<Record>> {
+        let Some(guard) = self.lock(false)? else {
+            return Ok(Vec::new());
+        };
+        let mut records = self.read_records(&guard.home)?;
+        archive::append(&guard.home, &mut records)?;
+        Ok(records)
+    }
+
+    /// 逐次路由和到期扫描不反复加载历史回执；prune 与显式列表仍使用完整 all。
+    pub fn live(&self) -> Result<Vec<Record>> {
         let Some(guard) = self.lock(false)? else {
             return Ok(Vec::new());
         };
@@ -228,30 +254,8 @@ impl Store {
             if records.len() >= MAX_RECORDS {
                 return Err(error("WORK_SESSION_REGISTRY_INVALID", "Too many managed workspace records; no cleanup is allowed until the registry is checked", "storage"));
             }
-            regular_or_absent(&path)?;
-            let mut bytes = Vec::new();
-            File::open(&path)
-                .map_err(storage)?
-                .take(MAX_RECORD_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .map_err(storage)?;
-            if bytes.len() as u64 > MAX_RECORD_BYTES {
-                return Err(error(
-                    "WORK_SESSION_REGISTRY_INVALID",
-                    "A managed workspace record exceeds its size limit",
-                    "storage",
-                ));
-            }
-            let record: Record = serde_json::from_slice(&bytes).map_err(|_| {
-                error("WORK_SESSION_REGISTRY_INVALID", "A managed workspace record cannot be decoded; records and workspace files were left untouched", "storage")
-            })?;
-            if !matches!(record.schema_version, 1 | 2)
-                || !is_id(&record.id)
-                || path.file_stem().and_then(|x| x.to_str()) != Some(record.id.as_str())
-                || record.root != home.join("work").join(&record.id)
-                || record.owner.is_empty()
-                || record.client_request_id.is_empty()
-            {
+            let record = read_record(home, &path)?.ok_or_else(not_found)?;
+            if path.file_stem().and_then(|x| x.to_str()) != Some(record.id.as_str()) {
                 return Err(error(
                     "WORK_SESSION_REGISTRY_INVALID",
                     "A managed workspace record has an invalid identity, version or root",
@@ -267,8 +271,6 @@ impl Store {
                     "storage",
                 ));
             }
-            artifacts::validate_manifest(&record)?;
-            lifecycle::validate_record(&record)?;
             records.push(record);
         }
         records.sort_by(|a, b| a.id.cmp(&b.id));
@@ -279,6 +281,48 @@ impl Store {
 struct RegistryGuard {
     home: PathBuf,
     _file: File,
+}
+
+fn read_record(home: &Path, path: &Path) -> Result<Option<Record>> {
+    regular_or_absent(path)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(storage(e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(storage)?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(error(
+            "WORK_SESSION_REGISTRY_INVALID",
+            "A record exceeds its size limit",
+            "storage",
+        ));
+    }
+    let record: Record = serde_json::from_slice(&bytes).map_err(|_| {
+        error(
+            "WORK_SESSION_REGISTRY_INVALID",
+            "A record cannot be decoded; files were left untouched",
+            "storage",
+        )
+    })?;
+    if !matches!(record.schema_version, 1 | 2)
+        || !is_id(&record.id)
+        || record.root != home.join("work").join(&record.id)
+        || record.owner.is_empty()
+        || record.client_request_id.is_empty()
+    {
+        return Err(error(
+            "WORK_SESSION_REGISTRY_INVALID",
+            "Invalid record identity, version or root",
+            "storage",
+        ));
+    }
+    artifacts::validate_manifest(&record)?;
+    lifecycle::validate_record(&record)?;
+    Ok(Some(record))
 }
 
 pub(crate) fn is_id(value: &str) -> bool {
@@ -372,7 +416,11 @@ fn save(home: &Path, record: &Record) -> Result<()> {
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
-    result.map_err(storage)
+    result.map_err(storage)?;
+    if record.state == State::Closed {
+        archive::close(home, record)?;
+    }
+    Ok(())
 }
 
 fn validate_text(value: &str, field: &str, max: usize, empty: bool) -> Result<()> {

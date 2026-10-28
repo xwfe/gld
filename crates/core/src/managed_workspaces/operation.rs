@@ -14,10 +14,22 @@ impl Store {
         if !is_id(id) {
             return Err(not_found());
         }
-        self.all()?
-            .into_iter()
-            .find(|r| r.id == id && r.owner == owner)
-            .ok_or_else(not_found)
+        let guard = self.lock(false)?.ok_or_else(not_found)?;
+        let record = match read_record(
+            &guard.home,
+            &guard.home.join(REGISTRY).join(format!("{id}.json")),
+        )? {
+            Some(record) if record.id == id => Some(record),
+            Some(_) => {
+                return Err(error(
+                    "WORK_SESSION_REGISTRY_INVALID",
+                    "Record ID does not match its path",
+                    "storage",
+                ))
+            }
+            None => archive::by_id(&guard.home, id)?,
+        };
+        record.filter(|r| r.owner == owner).ok_or_else(not_found)
     }
 
     pub fn operation(&self, owner: &str, id: &str) -> Result<Operation> {

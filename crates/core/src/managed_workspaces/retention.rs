@@ -46,11 +46,12 @@ impl Store {
                 "sweep takes limit 1..=16 and an optional returned cursor",
             ));
         }
-        let records = self.owned(owner)?;
+        let records = self.live()?;
         let selected: Vec<_> = records
             .iter()
             .filter(|r| {
-                r.state != State::Closed
+                r.owner == owner
+                    && r.state != State::Closed
                     && r.expires_at_ms.is_some_and(|at| at <= now)
                     && cursor.is_none_or(|id| r.id.as_str() > id)
             })
