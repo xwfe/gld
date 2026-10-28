@@ -84,6 +84,28 @@ pub fn spawn(
     cwd: &Path,
     path: Option<&OsString>,
 ) -> Result<ChildTransport, Error> {
+    spawn_with_environment(command, args, env, cwd, path, false)
+}
+
+/// 私有执行器的协议预检只继承显式提供的环境；普通 MCP 转发保持原有行为。
+pub(crate) fn spawn_isolated(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    cwd: &Path,
+    path: Option<&OsString>,
+) -> Result<ChildTransport, Error> {
+    spawn_with_environment(command, args, env, cwd, path, true)
+}
+
+fn spawn_with_environment(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    cwd: &Path,
+    path: Option<&OsString>,
+    clear: bool,
+) -> Result<ChildTransport, Error> {
     let program = which::which_in(command, path, cwd).map_err(|_| {
         // 整条 PATH 动辄几 KB，报错里只给个数和开头几个，够判断"是不是
         // 守护进程的 PATH 太短"。
@@ -102,6 +124,9 @@ pub fn spawn(
         ))
     })?;
     let mut builder = Command::new(&program);
+    if clear {
+        builder.env_clear();
+    }
     builder
         .args(args)
         .current_dir(cwd)

@@ -269,6 +269,10 @@ pub enum Command {
     #[command(subcommand, verbatim_doc_comment)]
     Mcp(McpCmd),
 
+    /// 本机桌面执行器预检；不接入现有守护进程、不安装或公开控制工具
+    #[command(subcommand)]
+    Computer(ComputerCmd),
+
     /// 查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
     // 隐藏别名：git 是 log、docker 是 logs，两边习惯的人都不该被一句
     // "unrecognized subcommand" 拦住。不用 visible_alias 是因为它只防手滑，
@@ -918,6 +922,30 @@ pub struct GatewaySetArgs {
     /// 隧道是否套用全局代理
     #[arg(long, value_name = "true|false")]
     pub use_proxy: Option<bool>,
+}
+
+// --------------------------------------------------------------- computer
+
+#[derive(Debug, Subcommand)]
+pub enum ComputerCmd {
+    /// 检查 Cua Driver；默认只找文件与摘要，--connect 才做私有 MCP 握手/列工具
+    Probe {
+        /// 已安装的可执行文件路径或 PATH 中的名称；不会下载
+        #[arg(long, default_value = "cua-driver", value_name = "PATH")]
+        binary: String,
+        /// 显式启动 mcp --direct；只握手/列工具，不调用截图、输入或授权工具
+        #[arg(long)]
+        connect: bool,
+        /// 已核实安装的可执行文件 SHA-256（不是压缩包摘要）；连接时必填
+        #[arg(long, value_name = "HEX")]
+        sha256: Option<String>,
+        /// 与上次已审查的工具目录指纹比较；不一致时报错
+        #[arg(long, value_name = "HEX", requires = "connect")]
+        tools_sha256: Option<String>,
+        /// 握手和工具分页合计的截止时间；进程停止与清理另计
+        #[arg(long, default_value_t = 10000, value_parser = clap::value_parser!(u64).range(100..=30000))]
+        timeout_ms: u64,
+    },
 }
 
 // ------------------------------------------------------------------- mcp

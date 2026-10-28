@@ -29,6 +29,8 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld mcp on](#gld-mcp-on)
 - [gld mcp off](#gld-mcp-off)
 - [gld mcp test](#gld-mcp-test)
+- [gld computer](#gld-computer)
+- [gld computer probe](#gld-computer-probe)
 - [gld grant](#gld-grant)
 - [gld grant add](#gld-grant-add)
 - [gld grant browser](#gld-grant-browser)
@@ -113,6 +115,7 @@ Commands:
   grant        只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
   agent        委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
   mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
+  computer     本机桌面执行器预检；不接入现有守护进程、不安装或公开控制工具
   logs         查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
   health       逐项检查本地 / 公网端点与 OAuth 元数据是否可达
   doctor       体检：检查配置是否自洽，并给出每个问题的修复命令
@@ -1032,6 +1035,50 @@ Options:
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
+```
+
+## gld computer
+
+```text
+本机桌面执行器预检；不接入现有守护进程、不安装或公开控制工具
+
+Usage: gld computer [OPTIONS] <COMMAND>
+
+Commands:
+  probe  检查 Cua Driver；默认只找文件与摘要，--connect 才做私有 MCP 握手/列工具
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld computer probe
+
+```text
+检查 Cua Driver；默认只找文件与摘要，--connect 才做私有 MCP 握手/列工具
+
+Usage: gld computer probe [OPTIONS]
+
+Options:
+      --binary <PATH>            已安装的可执行文件路径或 PATH 中的名称；不会下载 [default: cua-driver]
+  -w, --workspace <WS>           目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --connect                  显式启动 mcp --direct；只握手/列工具，不调用截图、输入或授权工具
+      --json                     以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart             守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --sha256 <HEX>             已核实安装的可执行文件 SHA-256（不是压缩包摘要）；连接时必填
+      --timeout <SECS>           等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --tools-sha256 <HEX>       与上次已审查的工具目录指纹比较；不一致时报错
+      --home <DIR>               数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --timeout-ms <TIMEOUT_MS>  握手和工具分页合计的截止时间；进程停止与清理另计 [default: 10000]
+      --no-color                 关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help                     Print help
+  -V, --version                  Print version
 ```
 
 ## gld grant

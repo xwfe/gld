@@ -3454,3 +3454,43 @@ MCP 增加 work_session action=capacity，只报告全服务汇总，不枚举�
 调整为 min(原最长边, 2000) 后5/5通过，并在真实 HTTP 测试固定小图尺寸。
 一次 read_file 将已有工具文件误写为 image.rs，返回 NOT_FOUND；用 search_text 定位到 image_tool.rs 后读取，
 属于调用方路径判断错误，没有绕过读取边界。下一项为 C0 执行器协议与环境验证，不把图片回传等同于已能操作桌面。
+
+## 82. C0 独立协议预检与执行器固定版本研究（2026-10-28）
+
+**范围与实际条件：**用户继续当前 C0 队列，基线 `cc2f21d`、工作树干净。只读检查确认本机为
+macOS 26.6.2 / arm64，PATH 未找到 cua-driver 或 Peekaboo，标准系统/用户 Applications 目录未发现 CuaDriver.app。
+本轮没有安装第三方执行器、申请系统授权、截屏或输入，没有换装现有 gld、修改 OAuth/grant 或推送。
+
+**上游依据：**固定 `cua-driver-rs-v0.38.0` 与提交 `85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19`，
+发行接口明确标记为 prerelease。核对了归档大小/摘要、默认许可说明、MCP 协议与上游隔离验证脚本；
+具体来源和边界见 [RFC-0011 §4.3](../rfc/0011-computer-use.md#43-c0-协议预检基线)。
+锁定的 toexec-mcp 0.2.1 与该 Driver 均支持 legacy initialize 的 2025-06-18，因此没有升级依赖或另写协议客户端。
+记录的是发行元数据与源码，不表示已经下载、验证发行签名、运行真实执行器或拿到真实 schema 指纹。
+
+**交付：**新增本机 `gld computer probe`，在 CLI 连接 Backend 之前运行；默认只解析本机可执行文件、
+读取大小与 SHA-256。显式 `--connect` 必须带核实过的可执行文件摘要，固定 `mcp --direct`，
+只执行 initialize、初始化通知和 tools/list，沿用原客户端的服务端请求处理，不执行 tools/call。
+核对名字/版本/协议后，对有界且无重复名字的工具目录做规范化指纹；可与预期摘要比较。
+忽略执行器 instructions，不输出第三方 stderr；`desktop_verified=false` 明确保留真实桌面未验证状态。
+
+**复用与回收：**沿用 machine_mcp 的进程组/关闭策略及 toexec-mcp Client；仅给私有启动增加环境清空分支，
+普通转发保持旧规则。HOME、XDG、Cua 状态和临时路径指向本次私有目录；继承 PATH 和必要 Windows 启动变量，
+设置关闭遥测变量，不继承父进程 API 密钥或真实 gld 配置。握手和全部分页共享截止时间。
+结束或失败先释放 Client/transport，再删除自己的目录；目录被重定向或清理失败时报告保留位置。
+这些不是 OS 文件/网络沙箱，也不证明 Cua 常驻 App 的输入停止；没有开放 raw MCP 白名单或公开 computer 控制工具。
+
+**验证：**新增9项：core预检7、真实CLI2。以真实 stdio 夹具进程覆盖默认不执行、缺失执行器、摘要缺失/错误、
+版本与目录错误、工具指纹、分页总超时、进程早退、环境不继承模拟密钥、进程关闭和状态目录回收、软链拒绝。
+真实 CLI 不会启动 daemon 或创建服务配置。最终 `cargo test --workspace --all-targets --locked`
+1142 passed / 0 failed；全仓 Clippy `-D warnings`、fmt --check 与构建通过，文档生成脚本同步新增命令树。
+本机新 CLI 的默认检查实测返回 `PROVIDER_NOT_FOUND`、`process_started=false`，退出1是预期缺依赖结果，
+不是执行器实测通过。所有开发测试使用本轮独立 GLD_HOME，正常构建缓存保留。
+
+**修正与工具摩擦：**首轮定向6项中4项通过，私有 HOME 拼接空后缀形成尾斜杠，触发测试执行器的
+工作目录等值检查并提前退出；改为直接使用目录路径后6项通过，随后补了分页截止时间回归。
+Clippy 拒绝测试中一次无必要的 clone，改为 from_ref 后通过。一次文档补丁误用 RFC 标题，返回
+`PATCH_FAILED/context_not_found`、`files_changed=false`；重读实际标题再提交，未放宽匹配或覆盖已有修改。
+审查发现 CLI 帮助生成器维护显式命令树，已补 computer/probe 并重新生成，不手改生成输出。
+
+**下一步边界：**真实 Driver 的安装、可执行文件/工具目录锁定、macOS 授权归属、截图/元素树、输入核验和
+桌面停止仍待实际设备验证，C0 未完成。生产 gld 换装不是本机独立 probe 的前置条件；是否安装和授权由用户决定。

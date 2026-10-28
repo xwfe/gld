@@ -1,7 +1,7 @@
 # RFC-0011：浏览器与跨平台桌面 Computer Use
 
 日期：2026-10-26。本文是拟实施架构与验收方案，当前进度只在 [task_plan.md](../../task_plan.md)。
-本文新增接口均未实现；“上游声明支持”“gld 接入通过”“真机任务通过”分别记录，不能互相替代。
+第 5 节的桌面控制接口是拟实施契约，已落地预检的实际用法见 concepts；“上游声明支持”“gld 接入通过”“真机任务通过”分别记录，不能互相替代。
 
 ## 1. 目标与默认路线
 
@@ -142,6 +142,43 @@ gld 核心。借鉴其他项目的工具设计和失败模型，也不等于要�
 **写自有 native-minimal 代码的条件：**明确列出缺失能力、复现用例和失败证据，
 且现成后端和同平台备选都不能达到要求；只实现那一项，附平台边界、权限/坐标负测和退出策略。
 不提前创建 macOS/Windows/Linux 三套平台包装层。
+
+### 4.3 C0 协议预检基线
+
+先区分“代码接入准备”“真实执行器协议通过”和“桌面任务通过”。本机预检的具体命令及回包
+统一见 [concepts.md](../concepts.md#桌面执行器预检computer-probe)，不在此重复工具参数。
+预检不是公开控制入口，不新增 raw relay 白名单，不替代 §5 的目标、归属与停止契约。
+
+2026-10-28 核对并固定以下研究版本，不使用浮动 main 或安装脚本的默认 latest：
+
+| 项 | 核对值 |
+| --- | --- |
+| Release | `cua-driver-rs-v0.38.0`，GitHub 标记 prerelease；不是“稳定版”承诺 |
+| 源码提交 | `85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19` |
+| 发布时间 | 2026-10-21 05:26:13 UTC |
+| macOS arm64 归档 | `cua-driver-rs-0.38.0-darwin-arm64.tar.gz`，85,040,496 字节 |
+| 归档 SHA-256 | `5f71191c082ca07c9dfc13b7c9a6eec60a82818c245a93534cc0eb7911471d72` |
+| 接入协议 | 固定提交仍提供 MCP `2025-06-18` initialize；与锁文件中的 toexec-mcp 0.2.1 相同，不需要升级传输库 |
+
+归档摘要来自发行元信息，**不等于已下载核验或解压后的二进制摘要**。真正执行前还需核实所装版本、
+签名及可执行文件摘要；首次真实握手所得工具目录指纹另作记录，不凭文档构造“实测 schema”。
+上游该提交说明默认 Driver 为 MIT、无需模型文件；可选感知扩展另有许可，本方案不安装它。
+
+协议预检采用上游兼容性脚本的独立运行思路：显式 `mcp --direct`、私有状态目录、环境白名单和关闭遥测变量，
+只握手/列工具。macOS 的 direct 模式继承启动宿主的 TCC 归属，不能据此推断后台服务拥有录屏/辅助功能权限。
+正式桌面 POC 要单独核对 App 身份、授权、输入控制权和资源停止，再进行截图/元素树与动作验收。
+进程使用私有环境不等于文件系统/网络隔离；程序仍以当前用户身份运行。
+
+可独立推进的切片为：协议探针与夹具 → 用户同意后安装固定执行器、核实真实工具表 → 只读观察和停止路径 →
+中文输入等真实小任务。夹具可以证明 gld 的协议路由、失败和清理，不证明该执行器在本机可用。
+
+依据（固定提交而非浮动网页）：
+
+- [发行元信息](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.38.0)。
+- [MCP 协议](https://github.com/trycua/cua/blob/85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19/libs/cua-driver/docs/mcp-protocol-and-skills.md)。
+- [上游隔离验证脚本](https://github.com/trycua/cua/blob/85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19/.github/scripts/cua-driver-mcp-compat/verify-modern.mjs)。
+- [默认许可与 macOS 身份边界](https://github.com/trycua/cua/blob/85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19/libs/cua-driver/README.md)。
+- [锁定的 toexec-mcp 客户端](https://github.com/xwfe/toexec/blob/toexec-mcp-v0.2.1/crates/toexec-mcp/src/client.rs)。
 
 ## 5. 最小接口与会话契约
 

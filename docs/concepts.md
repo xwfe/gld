@@ -208,6 +208,44 @@ gld upgrade --work-max-active 128 --work-max-records 4096 --work-max-bytes 53687
 归档布局改变后，不应直接回退到只识别主登记目录的旧二进制，否则旧程序看不到关闭回执；升级与回退先备份数据。
 设计见 [RFC-0010](rfc/0010-managed-work-sessions.md)。
 
+### 桌面执行器预检：computer probe
+
+准备接入桌面操作前，在执行器所在机器先运行：
+
+```bash
+gld computer probe
+gld computer probe --binary ./cua-driver
+```
+
+默认只找已安装的可执行文件、读取大小与 SHA-256，**不运行执行器**。没有文件就返回
+`PROVIDER_NOT_FOUND`，不会下载、安装、开启 MCP 转发或拉起 gld 守护进程。
+这个命令直接在本机执行，不通过 Backend；现有服务尚未换装也可以用新编译的 CLI 做预检。
+
+先按执行器的发行流程核验来源、归档校验值和签名，再用已安装**可执行文件**的摘要显式连接：
+
+```bash
+gld computer probe --binary ./cua-driver --connect --sha256 <SHA256>
+```
+
+下载压缩包与解压后的可执行文件摘要不同；`probe` 给出的摘要本身也不证明来源可信。
+当前接入研究基线固定为 `cua-driver-rs-v0.38.0`（预发布版），握手须报告 `cua-driver`、`0.38.0`
+和 MCP `2025-06-18`。连接固定使用 `mcp --direct`，只发送握手、初始化通知和工具列举，
+**不调用工具**，不读取窗口、截图或用户 Skill，不将执行器的 instructions 当成系统指令。
+实际安装和 macOS 的应用授权归属另按 [RFC-0011](rfc/0011-computer-use.md#43-c0-协议预检基线) 验证。
+
+`--json` 返回 `mode`、`binary`、`protocol`、`process_started`、清理结果和失败代码。
+`ok=true` 只说明对应的文件检查或协议检查通过，`desktop_verified` 始终为 false；
+权限、图像、元素树、中文输入、动作核验与桌面停止仍未被这条命令验证。
+成功发现的工具目录生成 `tools_sha256`，可用 `--tools-sha256 <SHA256>` 与上次已审查的目录比较；
+名称重复、非法输入 schema、目录过大或指纹变化均明确报错，不静默适配。
+
+显式连接使用新建的私有临时目录，HOME、XDG、Cua 状态和临时路径都指向其中；只继承 PATH 和必要的
+Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并设置关闭执行器遥测的环境变量。
+这只是启动环境约束，不是 OS 沙箱，也不证明执行器不会自行联网。gld 不提供模型 API、不联网安装组件。
+握手与分页共享 `--timeout-ms` 总期限（100～30000，默认10000）；停止进程和删除目录的时间另计。
+结束或失败后关闭本次 stdio 进程，清理本次目录；清理失败会返回保留位置，不扫描其他缓存或接管常驻 App。
+本机进程退出不等于桌面输入停止已通过验收，公开 `computer_manage/observe/act` 仍未提供。
+
 ### 成员还可以在别的机器上
 
 如果项目在另一台机器上、并且那台机器用 [ccnm](https://github.com/xwfe/ccnm) 管着，

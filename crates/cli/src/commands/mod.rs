@@ -3,6 +3,7 @@
 
 mod actions;
 mod agent;
+mod computer;
 mod daemon;
 mod doctor;
 mod frp;
@@ -54,6 +55,10 @@ pub async fn run(cli: Cli) -> CliResult {
         clap_complete::generate(*shell, &mut Cli::command(), "gld", &mut std::io::stdout());
         return Ok(());
     }
+    // 诊断新版执行器不应要求先升级正在跑的旧服务，也不读取该服务的配置或凭据。
+    if let Command::Computer(command) = &cli.command {
+        return computer::run(command, out).await;
+    }
 
     let backend = Backend::connect(
         !cli.global.no_autostart,
@@ -70,7 +75,9 @@ pub async fn run(cli: Cli) -> CliResult {
     };
 
     let result = match cli.command {
-        Command::Daemon(_) | Command::Completions { .. } => unreachable!("handled above"),
+        Command::Daemon(_) | Command::Completions { .. } | Command::Computer(_) => {
+            unreachable!("handled above")
+        }
         Command::Start(args) => service::start(&mut ctx, args).await,
         Command::Stop(args) => service::stop(&mut ctx, args).await,
         Command::Restart(args) => service::restart(&mut ctx, args).await,

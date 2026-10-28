@@ -45,6 +45,7 @@ COMMANDS=(
   "start" "stop" "restart" "status" "list" "add" "remove" "prune" "set" "fields" "share" "upgrade"
   "remote" "remote add" "remote remove"
   "mcp" "mcp list" "mcp on" "mcp off" "mcp test"
+  "computer" "computer probe"
   "grant" "grant add" "grant browser" "grant list" "grant remove"
   "agent" "agent list" "agent show" "agent approve" "agent deny" "agent stop"
   "logs" "health" "doctor"
