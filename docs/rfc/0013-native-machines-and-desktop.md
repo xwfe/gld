@@ -4,6 +4,10 @@
 当前认领与完成状态只在 [task_plan.md](../../task_plan.md)；当前可用命令以
 [concepts.md](../concepts.md) 和 [cli.md](../cli.md) 为准。下面的 join、machine 和 desktop 接口均为拟议接口。
 
+**实施顺序调整（2026-10-28）：先连通多台机器并操作各机项目，桌面最后做。**
+节点只用一条普通 WSS 连接承载标准 JSON-RPC 2.0；复用 `bridge/peer.rs` 和已有
+`handle_request`，不实现 RFC 8441、每项目/每主体连接池或自定义消息恢复协议。
+
 ## 1. 决定与用户体验
 
 用户只维护一个 gld 连接；目标机器安装 gld 后主动连回这个 Hub。每台目标机不用再配域名、
@@ -22,8 +26,11 @@
 1. 操作员在 Hub 配一次稳定入口，并把该入口连接到 AI 客户端。
 2. Hub 生成一次性配对邀请和对应平台的安装接入命令；目标机执行后自动登记、检测环境、启动连接。
    已安装 gld 的机器只需执行拟议的 `gld join --hub <HTTPS基地址>`；桌面模式加 `--desktop`。
-3. 用户说“在办公电脑打开文件”“检查测试服务器”，模型查询可见机器后自动选择内部 ID、创建任务空间并执行。
+3. 用户说“检查测试服务器上的 api 项目”“修改办公电脑上的 web 项目”，模型查询可见机器和项目后选择内部 ID 执行。
    用户不需要理解 workspace ID、网络端口和 provider。
+
+第一轮交付到列项目、读取/修改文件、运行命令、查询输出和停止命令为止；目标机只共享操作员显式选中的项目。
+远端通用任务空间、浏览器和桌面不作为这一轮的前置条件，也不以开放整个主目录来省掉项目登记。
 
 没有 gld 时，生成的安装命令负责识别 OS/CPU、下载已发布且固定版本的包、验证、安装到用户目录、再 join。
 不在本 RFC 编造一个已可运行的安装 URL；脚本和正式发布件验收后才放进安装文档。
@@ -39,6 +46,7 @@
 | 一个 MCP 地址、多 workspace、每次显式路由 | `crates/core/src/hub/mod.rs`、RFC-0004 | 保留；增加机器维度，不保存全局“当前机器” |
 | 本地与远端成员分型 | `hub/mod.rs::Member` | 当前远端只有 `Remote(CcnmMember)`；增加原生 gld 远端成员，不伪造本机根目录 |
 | ccnm 远端项目、独立 remote_* 工具 | `bridge/member.rs`、`bridge/session.rs`、`bridge/tools.rs` | 保留旧协议；不把 ccnm 字段直接改成通用机器字段 |
+| 现有 JSON-RPC 客户端与分发 | `bridge/peer.rs::Peer<T: Transport>`、`hub/mod.rs::handle_request`、`mcp/server.rs::handle_request` | 只增加 WebSocket Transport 和已认证节点的接线；握手、请求 ID、超时、工具执行不重写 |
 | 同一工具内核及调用方隔离 | `tools/dispatch.rs`、`tools/caller.rs`、`auth/context.rs` | 目标机直接执行；转发携带经 Hub 核验的主体，不将所有调用退化成 Caller::local |
 | 非项目目录与保留产物 | `managed_workspaces/`、`hub/work_sessions.rs` | 在目标机使用其实际 GLD_HOME；Hub 只保存路由映射 |
 | Hub 入口的 Cloudflare/FRP/自建反代 | `tunnel/`、`app/hub.rs`、`mcp/listener.rs` | 一次配置覆盖 MCP 与节点连接；目标机不安装每机隧道 |
@@ -58,9 +66,13 @@ AI 客户端 ── MCP / OAuth ──> 同一个 gld Hub
                             桌面/文件    桌面/文件     文件/可选桌面
 ```
 
-“一个连接”指 AI 客户端只登记一次服务；内部每台机器各有一条出站连接，不是所有机器共用一条 TCP。
-推荐 WebSocket over TLS（WSS）：Hub 复用已有 Axum，节点用 tokio-tungstenite/rustls，
-不自研 WebSocket/TLS，也不把这条内部协议冒充标准 MCP WebSocket 传输。[S1][S2]
+“一个连接”指 AI 客户端只登记一次服务；**每台目标机到同一个 Hub 只维持一条出站 WSS 连接**，
+该机全部项目和获准调用方复用它，不按项目、主体或控制/数据用途再开连接。
+使用 HTTP/1.1 Upgrade 的 WebSocket over TLS（RFC 6455），其 Text message 中直接放标准
+JSON-RPC 2.0；不使用 HTTP/2 Extended CONNECT（RFC 8441），不另外包一层消息信封。[S14][S15]
+Hub 复用已有 Axum，节点使用 tokio-tungstenite/rustls；WebSocket/TLS 交给库，
+JSON-RPC 的 initialize、tools/list、tools/call、ping 与错误结构复用现有实现。[S1][S2]
+这是在 WSS 上使用既有 JSON-RPC/MCP 方法，不宣称 WSS 是 MCP 已标准化的独立 transport。
 
 | Hub 所在位置 | 一次性准备 | 目标机要求 |
 | --- | --- | --- |
@@ -71,7 +83,8 @@ AI 客户端 ── MCP / OAuth ──> 同一个 gld Hub
 推荐同一个 HTTPS 基地址下分 `/mcp` 与 `/nodes/v1/*`；旧 `/hub` 基路径等前缀要保留，
 不能随便从 MCP URL 裁掉路径推导节点入口。两类接口同端口但鉴权完全分开。
 反代只开放了 `/mcp` 时，安装助手应报告一次性扩展节点路由的要求，不让每台机器单独改隧道。
-Cloudflare 支持 WebSocket，但会因空闲或服务更新断开；必须有心跳、重连和重连后状态核对。[S3]
+Cloudflare 支持 WebSocket，但会因空闲或服务更新断开。[S3] 使用标准 Ping/Pong 和普通退避重连；
+连接恢复后重新鉴权、初始化并列项目，不设计 resume/ack/序列号补发等恢复协议，不自动重放旧调用。
 TLS 在托管反代终止时，反代运营方处于信任边界内；本方案不声称内容对中继不可见的端到端加密。
 
 **可达性有前提。** 至少一个稳定 Hub/转发入口必须能被节点访问；所有机器都在不互通的私网且
@@ -102,9 +115,12 @@ TLS 在托管反代终止时，反代运营方处于信任边界内；本方案�
 默认不启动公网 MCP、不生成客户端 OAuth、不注册本机隧道，不把当前目录自动登记成共享项目。
 避免把“装节点”实现为又启动一个完整 Hub 再套娃转发。
 
-节点复用 `build_tool_context`、`call_tool_as`、runs、managed_workspaces；CLI 与 daemon 使用同一份节点服务实现。
-新接入/连接状态放小型 `nodes/` 模块，`hub` 只新增分发分支；不借机拆完 4000 行 hub 或重构所有 bridge。
-公共协议类型等确有两处消费后再提小模块，不先建立通用插件框架。
+节点优先复用 `handle_request` 及其下的 `build_tool_context`、`call_tool_as` 和 runs；
+项目路由沿用 Hub 的成员解析，不把每条工具逻辑再写一份。节点只创建所需的请求分发对象，不起第二个公网 Hub。
+Hub 侧保留 `Peer<T: Transport>`，把 stdio 行传输换成一条 WebSocket Text message；
+不改造 ccnm 的 `Connections` 为节点池，避免沿用其按 workspace/主体建立多连接的规则。
+新接入/连接状态放小型 `nodes/` 模块，`hub` 只新增分发分支；CLI 与 daemon 复用实现。
+不借机拆完 4000 行 hub、重构所有 bridge 或创建通用插件框架。
 
 桌面库按 Cargo feature/发行配置选入。纯服务器包不能因没有 X11/PipeWire 库而连文件命令都无法启动。
 安装助手根据用户选择取得对应发行件，二进制仍叫 gld，命令和数据格式一致；不是让用户再管理另一款软件。
@@ -124,7 +140,7 @@ macOS 如需要稳定签名 App 身份，由同一安装包提供最小原生 bu
 
 非项目任务用拟议 `work_session start machine=<ID>`，在该机器的 GLD_HOME 下创建；后续使用返回的 workspace。
 已有省略 machine 的 start 保持本机语义，说明为兼容行为；模型跨机操作必须明确选机器，不能沿用“上次机器”。
-任务与产物句柄绑定目标、主体和创建代次，重连后不能把节点 A 的产物 ID 解到 B。
+任务与产物句柄绑定目标和主体，重连后不能把节点 A 的产物 ID 解到 B；远端通用任务空间在项目链路通过后扩展。
 
 原生 gld 节点经能力校验后复用相同文件/命令工具名，不再给每台机器复制一套工具表。
 ccnm 仍走原 `remote_*` 契约；不因为两者都叫远端就强行互换参数。
@@ -133,8 +149,10 @@ ccnm 仍走原 `remote_*` 契约；不因为两者都叫远端就强行互换参
 首版节点功能只对完整认证主体开放，已有项目 grant/noauth 不自动扩展成整机权限。
 后续需要 scoped machine grant 时再增加显式范围；不先做企业多租户。
 节点请求的有效权限是 Hub 授权与目标机本地允许范围的交集，只有目标机操作员能扩大本地范围。
-目标端 Caller 按 `hub_id + 已验证主体 + grant范围` 构造，不转发原始 OAuth 令牌或 Hub 管理员密钥，
-不接受工具参数伪造身份。共享 bearer 仍是共享主体，不能宣称自然人隔离。
+目标端 Caller 按 `hub_id + 已验证主体 + grant范围` 构造，不转发原始 OAuth 令牌或 Hub 管理员密钥。
+单连接不等于单主体：调用身份放在由 Hub 填写的 `params._meta` 中，不放进用户工具参数；
+Hub 丢弃客户端伪造的内部身份字段，节点只接受已认证 Hub 带来的上下文，不再以不同身份另建 socket。
+共享 bearer 仍是共享主体，不能宣称自然人隔离。既有 ccnm 按主体分连接的兼容路径不变。
 文件路径限制与 guarded 命令策略不构成 OS 沙箱；任意获准进程仍以节点执行账号的权限运行。
 需要强隔离时使用专用系统账号或容器，不因减少配置就默认提升管理员权限。
 
@@ -153,21 +171,30 @@ ccnm 仍走原 `remote_*` 契约；不因为两者都叫远端就强行互换参
 不能让节点反过来给其他机器或 Hub 发工具调用。撤销后关闭连接、拒绝重新认证，本机 leave 可独立断开。
 节点持久身份和 Hub TLS/应用身份保持明确绑定，不做 TLS 校验失败自动降级或 `--insecure` 静默重试。
 
-### 7.2 小型内部协议，不是通用消息平台
+### 7.2 标准 JSON-RPC，复用已有处理链
 
-沿一个有界 WSS 通道传握手/能力、调用、结果、状态查询、取消和心跳；采用已有 JSON/错误/内容模型。
-每个调用携带目标、调用主体、operation_id、连接代次、能力版本与截止时间。协议版本不兼容时拒绝相关调用，
-不能忽略未知参数后执行不同动作。独立版本与现有 daemon IPC 分开；改本机 IPC 形状才递增其版本。
+每个 WebSocket Text message 对应一条现有 JSON-RPC 请求、通知或响应，形状不变：
 
-节点短调用有超时；长命令复用现有“先返回 session_id，再读输出/停止”，不把一个 HTTP 请求一直挂住。
-读写任务并发有上限，单桌面输入串行。心跳/取消不能排在整个大文件后面；媒体分小块、有限队列并有背压。
-离线返回 `MACHINE_OFFLINE`，不缓存等待未来突然执行的点击、输入或启动命令。
+```json
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"<目标机项目ID>","path":"README.md"}}}
+```
 
-网络重连可以自动做，**副作用调用不自动重放**。接收确认不等于执行成功：
-发送前已知失败可报告未执行，发送后没有终态则报告 unknown，按原 operation_id 查询。
-目标端在执行前登记请求意图，重复请求只返回已知状态；崩溃窗口、过期回执或无法核实的结果保持 unknown，
-不承诺分布式 exactly-once。桌面恢复先重新截图，再由模型决定下一动作。
-已启动命令默认继续受原 timeout/资源策略管理，断线不变成永久 Job；重连按运行记录读取，不重起同一命令。
+`Peer` 继续分配请求 ID、等待匹配响应、判断超时和传播 `result/error`；目标机把解码后的消息
+送入已有 `handle_request`。初始化/工具能力由现有 initialize 与 tools/list 获取，不建立第二份能力协议。
+请求的 `id` 只关联本次请求和响应，不是跨断线幂等键。[S15] 不新增 operation_id 数据库、收件确认、
+持久 outbox、消息补发或断点续传协议；需要主体上下文时只使用上节的受信任 `_meta`。
+
+每机只有一个 `Peer`，第一步沿用其串行请求语义，各机器之间独立执行。长命令仍先返回现有
+`session_id/output_ref`，随后使用已有 `list_runs/read_output/kill_session`，不让整段构建占住连接。
+握手、调用、写入和响应大小要有界；标准 Ping/Pong 由 socket 层处理，不新增业务心跳方法。
+不为未来截图预建媒体通道、控制连接或优先级调度器。
+
+断线使该连接的在途请求结束：发送前明确失败就报告未发送，已发送但没拿到结果则报告结果不明，
+**不自动补发**。节点普通退避重连后重新鉴权/initialize/list；只有调用方主动查询已有运行记录，
+才回读命令状态与输出。没有拿到 session_id 时按现有 list_runs 检查；无法唯一核实就保留未知，
+不把 JSON-RPC 的新 id 当成重复执行保护。已启动进程仍受原有 timeout/资源策略约束。
+离线直接返回 `MACHINE_OFFLINE`，不排队等未来突然执行。节点重复连接不另建备用连接；
+只有旧连接已确认关闭才接新连接，断线不会回退到 Hub 本机或其他同名项目。
 
 ## 8. 基础桌面：库封装，不做桌面运行平台
 
@@ -187,7 +214,7 @@ ccnm 仍走原 `remote_*` 契约；不因为两者都叫远端就强行互换参
 
 保留必要且局部的保护：目标机本地桌面开关；按显示会话短期占用避免两个任务互相打字；
 截图引用绑定本次目标和坐标变换，显示器/窗口/登录会话变化后拒绝旧引用；动作超时、断线和停止后不再发新输入。
-组合键内部配对释放；停止不能确认时标成受阻，不能马上交给下一任务。复用节点 operation_id 和任务生命周期，
+组合键内部配对释放；停止不能确认时标成受阻，不能马上交给下一任务。复用现有任务归属和运行记录，
 不另建桌面任务数据库、持续屏幕录像或 provider 调度器。
 
 ## 9. 跨平台是交付范围，不是所有环境能力相同
@@ -206,7 +233,7 @@ ccnm 仍走原 `remote_*` 契约；不因为两者都叫远端就强行互换参
 
 ## 10. 文件与清理在哪里发生
 
-目标机自己的 GLD_HOME 保存 work、artifacts、runs 和资源登记，Hub 保存路由、设备认证和必要请求回执。
+目标机自己的 GLD_HOME 保存 work、artifacts、runs 和资源登记，Hub 保存路由与设备认证；不新增跨机请求回执库。
 远端截图使用已有有界图片回传；保存只在任务要求时进行，不默认把所有屏幕留在 Hub。
 需要下载原件时，按授权产物 ID 进行有界分块读取/中转、校验大小和摘要，复用同一节点通道；不要求目标机再开文件服务器。
 Hub 转发缓存临时且有界，不把远端本机路径误称为客户端可下载链接；原件仍在目标机，离线时新取原件必须报告不可用。
@@ -222,15 +249,16 @@ finish 必须同时核对该节点命令及本次桌面动作；不因 Hub 断�
 
 | 切片 | 最小交付 | 完成证据 |
 | --- | --- | --- |
-| D10-L0 | 本机基础桌面：最小库依赖、状态/截图/打开，不依赖 Cua | 三平台构建；Mac 真实图片到客户端与打开验证；权限拒绝、不支持、空显示器准确；记录其他真机尚未验的项 |
-| D16-M0 | 原生节点窄纵切：隔离 Hub + 两个节点，出站认证连接与 workspace 读调用 | 同名目录分别返回各节点内容；节点无入站监听、无 ccnm；跨主体/节点凭据混用/断线/未知参数负测 |
-| D16-M1 | 配对、持久身份、命令与托管空间路由、撤销/重连 | 一条客户端连接读写两机；命令结果可查、失联不重跑、重复加入不新增设备、撤销节点不能再连 |
+| D16-M0 | 原生节点窄纵切：隔离 Hub + 两个节点，单 WSS + JSON-RPC，复用 Peer/handle_request 读取多项目 | 同一节点两个项目共用一条连接，两个节点同名项目分别返回正确内容；节点无入站监听、无 ccnm；凭据混用/离线/超时/未知参数负测 |
+| D16-M1 | 配对、持久机器/项目登记、项目写入与命令、撤销及普通重连 | 一条客户端连接列举/读取/修改两机项目；运行、查询、停止命令；跨主体结果隔离、失联不重跑、重复加入不新增设备；不另造恢复协议 |
 | D16-M2 | 平台安装脚本、用户级自启动、诊断/leave/卸载 | 干净 Mac/Windows/Linux 各用一次生成命令接入；不需 Node/Python/编译器；失败不破坏原配置，卸载默认保留用户产物 |
+| D16-M3 | 单一公网入口的三平台项目验收与交付收尾 | 同一域名/隧道、一个连接器列举及操作三类节点的项目；每机恰好一条连接；重启身份不变、路径/权限负测和运行输出正确，不含桌面依赖 |
+| D10-L0 | 多机项目通过后再做基础桌面：最小库依赖、状态/截图/打开，不依赖 Cua | 三平台构建；Mac 真实图片与打开验证；权限拒绝、不支持、空显示器准确；记录其他真机尚未验的项 |
 | D10-L1 | 基础输入/剪贴板及远端桌面，复用 M1 路由 | 指定机器计算器 12+30=42、中文/换行/标点文件读回；两任务争用、DPI/窗口变化、断线/停止不重放 |
-| D16-M3 | 单一公网入口真机验收与交付收尾 | 同一个固定域名/隧道支持三类节点；仅一个连接器；重启身份不变、产物分块回传正确，按平台发布已通过能力 |
 
-下一编码切片为 L0（只读观察/打开）；M0 可独立进行，不再等待 Cua 安装。
-每步先专项再回归、独立 commit；三端构建不是三端桌面验收。Windows/Linux 未有真实设备证据时明确列未验证，
+固定顺序为 **M0 → M1 → M2 → M3 → L0 → L1**。前三平台的项目链路不受桌面库、GUI 会话、录屏权限或 Cua 安装阻塞。
+M0 先验证传输与现有项目分发的最小接线，再补正式监听鉴权和路由；测试链路通过不冒充配对/安装已可用。
+每步先专项再回归、独立 commit；三端构建不是三端真机验收。Windows/Linux 未有真实设备证据时明确列未验证，
 不能把 macOS 结果外推。Wayland 单独保留能力缺口；跨平台承诺须有对应真实发行件证据。
 
 验收除功能外还要看用户负担：目标机零入站端口、零单机隧道、零手写配置、零额外 AI 运行时，
@@ -263,3 +291,5 @@ Hub/节点版本握手报告能力；滚动升级允许短暂离线，保持 mac
 - [S11 Apple 录屏授权](https://support.apple.com/guide/mac-help/control-access-screen-system-audio-recording-mchld6aa7d23/mac)、[辅助功能授权](https://support.apple.com/guide/mac-help/allow-accessibility-apps-to-access-your-mac-mh43185/mac)；发行现状见本仓库 install.md。
 - [S12 Microsoft Interactive Services](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)：服务与用户交互桌面分离。
 - [S13 XDG Remote Desktop](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)、[ScreenCast](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)：设备/屏幕授权及恢复语义。
+- [S14 RFC 6455](https://www.rfc-editor.org/rfc/rfc6455)：普通 WebSocket 握手、Text message、Ping/Pong 和关闭；本期不采用 RFC 8441。
+- [S15 JSON-RPC 2.0](https://www.jsonrpc.org/specification)：传输无关的请求/响应、id、通知和标准错误，不提供重连恢复语义。
