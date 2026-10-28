@@ -38,6 +38,7 @@ pub mod logs;
 pub mod machine_mcp;
 pub(crate) mod managed_workspaces;
 pub mod mcp;
+pub mod nodes;
 pub mod planning;
 pub mod platform;
 pub mod runtime;

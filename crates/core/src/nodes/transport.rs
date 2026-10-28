@@ -1,0 +1,152 @@
+//! 把一条已建立的 WebSocket 接到现有同步 Peer；每条 Text message 就是一条 JSON-RPC。
+//! 本模块不鉴权、不解析项目、不重连、不重放。调用者须先验证节点身份，并在阻塞线程中使用。
+
+use std::io;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
+use tokio_tungstenite::WebSocketStream;
+
+use crate::async_rt;
+use crate::bridge::peer::Transport;
+
+pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 握手或接管 HTTP/1.1 Upgrade 时使用；限制应在库接收/拼接 message 之前生效。
+pub fn socket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_MESSAGE_BYTES))
+}
+
+pub struct WebSocketTransport<S> {
+    socket: Option<WebSocketStream<S>>,
+    last_error: String,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> WebSocketTransport<S> {
+    /// 接受普通 WS 或 TLS stream；网络鉴权、TLS 校验和单机唯一连接由接入层负责。
+    /// 构造本身不会初始化 MCP、调用工具或再建任何连接。
+    pub fn new(socket: WebSocketStream<S>) -> io::Result<Self> {
+        let config = socket.get_config();
+        if config
+            .max_message_size
+            .is_none_or(|n| n > MAX_MESSAGE_BYTES)
+            || config.max_frame_size.is_none_or(|n| n > MAX_MESSAGE_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "node socket must use bounded message and frame sizes",
+            ));
+        }
+        Ok(Self {
+            socket: Some(socket),
+            last_error: String::new(),
+        })
+    }
+
+    fn disconnect(&mut self, reason: &str) {
+        self.last_error = reason.into();
+        self.socket.take();
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for WebSocketTransport<S> {
+    fn send_line(&mut self, line: &str) -> io::Result<()> {
+        if line.len() > MAX_MESSAGE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "node message exceeds the size limit; it was not sent",
+            ));
+        }
+        let socket = self.socket.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "node connection is closed")
+        })?;
+        // 写入也必须有界；不加发送队列，否则超时返回后旧请求还可能被排队发送。
+        let outcome = async_rt::block_on(async {
+            tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Text(line.into()))).await
+        });
+        match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => {
+                self.disconnect("WebSocket write failed; request outcome may be unknown");
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    self.last_error.clone(),
+                ))
+            }
+            Err(_) => {
+                self.disconnect("WebSocket write timed out; request outcome may be unknown");
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    self.last_error.clone(),
+                ))
+            }
+        }
+    }
+
+    fn recv_line(&mut self, timeout: Duration) -> Result<Option<String>, RecvTimeoutError> {
+        let Some(socket) = self.socket.as_mut() else {
+            return Ok(None);
+        };
+        let outcome = async_rt::block_on(async {
+            tokio::time::timeout(timeout, async {
+                loop {
+                    match socket.next().await {
+                        Some(Ok(Message::Text(text))) => return Ok(Some(text.to_string())),
+                        // tungstenite 自动准备 Pong；flush 发送标准响应，不引入业务心跳协议。
+                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
+                            socket
+                                .flush()
+                                .await
+                                .map_err(|_| "WebSocket control write failed")?;
+                        }
+                        Some(Ok(Message::Close(_))) => {
+                            let _ = socket.flush().await;
+                            return Ok(None);
+                        }
+                        None => return Ok(None),
+                        Some(Ok(_)) => return Err("node RPC requires a WebSocket Text message"),
+                        Some(Err(_)) => {
+                            return Err("WebSocket read failed or message exceeded its limit")
+                        }
+                    }
+                }
+            })
+            .await
+        });
+        match outcome {
+            Ok(Ok(Some(text))) => Ok(Some(text)),
+            Ok(Ok(None)) => {
+                self.disconnect("node connection closed");
+                Ok(None)
+            }
+            Ok(Err(reason)) => {
+                self.disconnect(reason);
+                Ok(None)
+            }
+            Err(_) => {
+                // 整条连接失效，晚到响应不能混入后续请求，也没有任何自动补发。
+                self.disconnect("WebSocket response timed out; request outcome may be unknown");
+                Err(RecvTimeoutError::Timeout)
+            }
+        }
+    }
+
+    fn stderr_tail(&self) -> String {
+        // 沿用 Peer 的传输诊断入口，不把原始请求、凭据或远端数据拼入错误。
+        self.last_error.clone()
+    }
+
+    fn shutdown(&mut self, grace: Duration) {
+        if let Some(mut socket) = self.socket.take() {
+            async_rt::block_on(async {
+                let _ = tokio::time::timeout(grace, socket.close(None)).await;
+            });
+        }
+    }
+}
