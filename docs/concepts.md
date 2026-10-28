@@ -210,7 +210,9 @@ gld upgrade --work-max-active 128 --work-max-records 4096 --work-max-bytes 53687
 
 ### 桌面执行器预检：computer probe
 
-准备接入桌面操作前，在执行器所在机器先运行：
+这是已经提供的 **Cua 专用研究预检**，不是使用 gld 基础功能的必经步骤。
+新的轻量桌面与原生多机方向见 [RFC-0013](rfc/0013-native-machines-and-desktop.md)，尚未实现；
+它不要求 Cua 或 ccnm。本节保留已有命令用法，只有明确选择研究 Cua 时才在执行器所在机器运行：
 
 ```bash
 gld computer probe
@@ -247,6 +249,10 @@ Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并�
 本机进程退出不等于桌面输入停止已通过验收，公开 `computer_manage/observe/act` 仍未提供。
 
 ### 成员还可以在别的机器上
+
+**当前可用的是下面的 ccnm 远端项目接法。**不依赖 ccnm、由目标机主动连接 Hub 的原生节点方案
+已写入 [RFC-0013](rfc/0013-native-machines-and-desktop.md)，但还没有提供安装加入或远端桌面接口。
+旧连接与 remote_* 工具保持不变，不需要为了新计划重配现有机器。
 
 如果项目在另一台机器上、并且那台机器用 [ccnm](https://github.com/xwfe/ccnm) 管着，
 可以把它也加进服务：

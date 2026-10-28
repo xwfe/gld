@@ -3494,3 +3494,40 @@ Clippy 拒绝测试中一次无必要的 clone，改为 from_ref 后通过。一
 
 **下一步边界：**真实 Driver 的安装、可执行文件/工具目录锁定、macOS 授权归属、截图/元素树、输入核验和
 桌面停止仍待实际设备验证，C0 未完成。生产 gld 换装不是本机独立 probe 的前置条件；是否安装和授权由用户决定。
+
+## 83. 收缩桌面范围并规划原生多机接入（2026-10-28）
+
+**用户要求与基线：**用户认为 Cua/完整桌面执行体系过重，要求直接复用简单桌面库，覆盖三种桌面平台；
+所有目标机通过一个 Hub 管理，安装/加入尽量一条命令，不强制依赖 ccnm，不为每机配置穿透。
+基线 `17ea95b`、工作树干净。本轮授权为研判及计划落盘，不进行安装、代码接入、系统授权或现网换装。
+
+**已核对的现状：**`hub::Member` 只有 Local 与 Remote(CcnmMember)；`bridge/member.rs` 启动公开
+`ccnm mcp bridge`，处理的是远端项目，不是通用目标机主动连接。已有单 MCP 入口、按调用方隔离的工具内核、
+W0/W1、服务级穿透、跨平台打包能够复用；尚无原生节点配对、回连和远端桌面能力。
+读取 auth/context、mcp/listener、hub/work_sessions 与 install/package，核对了主体、入口、数据目录和发行边界。
+
+**计划决定：**新增 [RFC-0013](../rfc/0013-native-machines-and-desktop.md)，以同一产品的 Hub/节点角色实现
+目标机出站 WSS；只在 Hub 准备稳定入口，节点不开放入站 MCP 或单机隧道。直接复用 Axum/Tokio WebSocket 库和
+既有执行内核，不新造协议栈、文件工具或完整设备平台。一次性配对换独立可撤销节点凭据；实际调用携带可信主体，
+目标机本地范围与 Hub 授权取交集，离线不回退到本机，副作用结果未知不自动重放。ccnm 和 remote_* 保持兼容。
+
+桌面改为 XCap/Enigo，按需 Arboard/open 的薄封装；一个拟议 desktop 工具，复用任务归属、操作 ID、图像和产物。
+保留必要坐标与输入互斥，不再实施原三套 computer 会话接口；不提前做录像、P2P、移动端、模型或 provider 平台。
+旧 Cua probe 保留但暂停扩建，W0/W1 不回滚。原 RFC-0011 顶部标记被替代，历史章节锚点保留；
+concepts 明确现有工具与未来计划，RFC-0010 补目标机数据归属；唯一队列已调整到 L0 与 M0 的小步验收。
+
+**外部依据与不能省略的条件：**Desktop Commander 官方 Remote Device 已采用设备出站 WebSocket 到远端 MCP
+并调用本机 MCP 的结构，借鉴这个体验但不引入其 Node 运行时。Cloudflare 官方说明支持 WebSocket 且可能断开，
+所以需要心跳/重连；OpenAI 专用 MCP Tunnel 不是任意节点的通用可达入口。Enigo/XCap 的 Wayland 限制、
+Arboard 的 Linux 剪贴板所有权、微软 Session 0 与 Apple 系统权限要求分别列在 RFC 来源，未外推为真机通过。
+跨平台打包仍需验证桌面运行库和授权身份；现有未签名 macOS 发行件不保证升级后权限自动保持。
+
+**交付界限：**新增 join、machine、desktop 都只在 RFC 标为拟议接口，不写成当前可用命令；
+不虚构安装脚本地址，不修改 CLI/schema、Cargo 依赖或锁文件。安装和系统权限仍需实际操作授权，
+单连接指一个 AI 连接器，不等于所有目标机共享一条 TCP。Hub 必须可达且在线，不承诺无共同入口也能互通。
+
+**验证：**本轮只改六份 Markdown 文档，无源码、依赖、锁文件或 CLI 帮助变更。
+隔离 GLD_HOME 下 `cargo test --workspace --all-targets --locked --quiet` 1142 passed / 0 failed；
+Clippy `-D warnings`、`cargo fmt --all -- --check` 通过，文档命令、相对链接和私人路径六项专项通过。
+这些验证只证明本次文档整理与既有仓库检查通过，不代表新桌面库、节点接入、安装脚本或三平台真机已经通过。
+没有安装第三方、重启现网、修改 OAuth/grant 或推送；下一编码切片由 task_plan 唯一维护。
