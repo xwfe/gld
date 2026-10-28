@@ -62,18 +62,7 @@ impl Store {
         let mut removed = Vec::new();
         let mut blocked = Vec::new();
         for record in selected {
-            let result: Result<bool> = (|| {
-                let mut op = self.operation(owner, &record.id)?;
-                // 拿锁之后再查；前面的名单只是快照，用户可能刚继续使用或要求保留。
-                if op.record.state == State::Closed
-                    || op.record.expires_at_ms.is_none_or(|at| at > now)
-                {
-                    return Ok(false);
-                }
-                let paths = op.record.finish_paths.clone().unwrap_or_default();
-                op.finish(&paths, caller)?;
-                Ok(true)
-            })();
+            let result = self.expire(record, caller, now);
             match result {
                 Ok(true) => removed.push(record.id.clone()),
                 Ok(false) => {}
@@ -86,6 +75,22 @@ impl Store {
             "next_cursor":if more {selected.last().map(|r| &r.id)} else {None},
             "note":"Only expired directories of this caller were checked. Artifacts and close receipts are retained; unknown or busy resources were not deleted."}),
         )
+    }
+
+    /// 名单只是快照：逐空间拿锁后重新核对期限，启动检查与客户端 sweep 用同一删除路径。
+    pub(super) fn expire(
+        &self,
+        record: &Record,
+        caller: Option<&Caller>,
+        now: u64,
+    ) -> Result<bool> {
+        let mut op = self.operation(&record.owner, &record.id)?;
+        if op.record.state == State::Closed || op.record.expires_at_ms.is_none_or(|at| at > now) {
+            return Ok(false);
+        }
+        let paths = op.record.finish_paths.clone().unwrap_or_default();
+        op.finish(&paths, caller)?;
+        Ok(true)
     }
 }
 

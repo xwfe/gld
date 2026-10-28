@@ -321,3 +321,64 @@ fn configured_limits_apply_over_http_and_preserve_archived_retries_after_restart
         "invalid config must not be saved"
     );
 }
+
+#[test]
+fn startup_cleans_expired_work_without_a_client_request_and_keeps_saved_results() {
+    let env = Env::new();
+    let port = free_port();
+    env.ok(&[
+        "upgrade",
+        "--port",
+        &port.to_string(),
+        "--auth",
+        "bearer",
+        "--work-sessions",
+        "true",
+    ]);
+    env.ok(&["start"]);
+    let token = env.service_secret("bearer_token");
+    let started = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"start","client_request_id":"startup"}),
+    );
+    let id = started["workspace"].as_str().unwrap();
+    let root = env.home.path().join("work").join(id);
+    std::fs::write(root.join("result.txt"), "keep across startup").unwrap();
+    let saved = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"retain","workspace":id,"keep_paths":["result.txt"]}),
+    );
+    assert_eq!(saved["ok"], true, "{saved}");
+    let artifact = saved["artifacts"][0]["id"].clone();
+    env.ok(&["daemon", "stop", "--wait", "5"]);
+    let path = env
+        .home
+        .path()
+        .join("managed-workspaces")
+        .join(format!("{id}.json"));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["expires_at_ms"] = json!(1);
+    std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    env.ok(&["daemon", "start"]);
+    // 不发 start/finish/sweep；文件消失只能来自监听器本次启动的维护。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while root.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        !root.exists(),
+        "startup sweep did not remove the expired fixture"
+    );
+    let read = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"artifact","artifact_id":artifact,"include_content":true}),
+    );
+    assert_eq!(read["content"], "keep across startup", "{read}");
+    assert_eq!(env.service_secret("bearer_token"), token);
+}

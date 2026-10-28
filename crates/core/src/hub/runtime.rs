@@ -21,6 +21,8 @@ struct HubRuntime {
     shutdown: Option<ShutdownSender>,
     handle: JoinHandle<()>,
     hub: Arc<Hub>,
+    /// 监听器启动后的单轮维护；停服务时取消后续项并收回任务，不留下脱管清理线程。
+    startup_sweep: Option<crate::managed_workspaces::startup::StartupSweep>,
     /// 服务自己的隧道进程，跟着监听器一起停。
     tunnel: Option<StandaloneTunnel>,
     /// 这次起来实际用的公网基地址。Cloudflare 临时地址每次都不一样，配置里推不出来。
@@ -97,6 +99,7 @@ pub async fn start(
         shutdown: Some(shutdown),
         handle,
         hub,
+        startup_sweep: crate::managed_workspaces::startup::StartupSweep::launch(config),
         tunnel: outcome.tunnel,
         public_base: outcome.public_base,
         tunnel_error: outcome.error,
@@ -199,10 +202,16 @@ pub async fn state() -> HubState {
 
 async fn stop_runtime(mut runtime: HubRuntime) {
     STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Some(sweep) = &runtime.startup_sweep {
+        sweep.cancel();
+    }
     if let Some(shutdown) = runtime.shutdown.take() {
         let _ = shutdown.send(());
     }
     await_listener_shutdown(Some(runtime.handle), runtime.port).await;
+    if let Some(sweep) = runtime.startup_sweep.take() {
+        sweep.join().await;
+    }
     if let Some(tunnel) = runtime.tunnel.take() {
         tunnel.stop().await;
     }

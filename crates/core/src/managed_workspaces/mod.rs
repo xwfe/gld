@@ -6,6 +6,7 @@ mod capacity;
 mod lifecycle;
 mod operation;
 mod retention;
+pub(crate) mod startup;
 pub(crate) use artifacts::artifact_workspace;
 pub(crate) use artifacts::Artifact;
 pub(crate) use lifecycle::PendingCommand;
