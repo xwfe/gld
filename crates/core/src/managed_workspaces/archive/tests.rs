@@ -94,7 +94,7 @@ fn more_than_512_closed_receipts_do_not_consume_active_slots() {
     let store = Store::new(home.path().into());
     let template = closed(&store, "template");
     let canonical = home.path().canonicalize().unwrap();
-    for i in 0..MAX_ACTIVE {
+    for i in 0..512 {
         let mut record = template.clone();
         record.id = format!("work-{}", Uuid::new_v4().simple());
         record.root = canonical.join("work").join(&record.id);

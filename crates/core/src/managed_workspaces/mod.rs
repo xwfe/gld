@@ -2,6 +2,7 @@
 
 mod archive;
 mod artifacts;
+mod capacity;
 mod lifecycle;
 mod operation;
 mod retention;
@@ -22,8 +23,7 @@ use uuid::Uuid;
 use crate::tools::workspace::WorkspaceError;
 
 type Result<T> = std::result::Result<T, WorkspaceError>;
-const MAX_ACTIVE: usize = 512;
-const MAX_RECORDS: usize = 8192;
+const MAX_RECORDS: usize = crate::settings::WorkSessionLimits::MAX_RECORDS as usize;
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 const REGISTRY: &str = "managed-workspaces";
 
@@ -66,11 +66,20 @@ pub(crate) struct Record {
 #[derive(Debug, Clone)]
 pub(crate) struct Store {
     home: PathBuf,
+    limits: crate::settings::WorkSessionLimits,
 }
 
 impl Store {
     pub fn new(home: PathBuf) -> Self {
-        Self { home }
+        Self {
+            home,
+            limits: crate::settings::WorkSessionLimits::default(),
+        }
+    }
+
+    pub fn with_limits(mut self, limits: crate::settings::WorkSessionLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// 不含凭据；由 hub 传入已经验过身份的 owner，客户端不能指定 owner 或路径。
@@ -109,9 +118,15 @@ impl Store {
             }
             return Ok((record, false));
         }
-        if count >= MAX_ACTIVE || count + archive::count(&guard.home)? >= MAX_RECORDS {
+        self.limits
+            .validate()
+            .map_err(WorkspaceError::invalid_argument)?;
+        if count >= self.limits.max_active as usize
+            || count + archive::count(&guard.home)? >= self.limits.max_records as usize
+        {
             return Err(error("WORK_SESSION_LIMIT", "Managed workspace capacity reached; closed receipts do not use active slots, but total records remain bounded. No files or receipts were deleted", "resource"));
         }
+        capacity::require_space(&guard.home, self.limits.max_bytes, 0)?;
         let id = format!("work-{}", Uuid::new_v4().simple());
         let now = now_ms();
         let mut record = Record {

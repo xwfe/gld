@@ -769,6 +769,18 @@ pub struct UpgradeArgs {
     #[arg(long, value_name = "true|false", hide_possible_values = true)]
     pub work_sessions: Option<bool>,
 
+    /// 通用任务在用空间数上限（默认 512）；关闭回执不占在用名额
+    #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=8192))]
+    pub work_max_active: Option<u32>,
+
+    /// 通用任务含归档的总记录上限（默认 8192）；达到上限不自动删回执
+    #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=8192))]
+    pub work_max_records: Option<u32>,
+
+    /// work 与 artifacts 的逻辑字节预算（默认 10 GiB）；限制新建和复制，不是子进程硬配额
+    #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+    pub work_max_bytes: Option<u64>,
+
     /// --tunnel / --off 改哪个：mcp（默认，服务）| actions（项目的 GPT Actions）
     #[arg(short = 's', long, value_enum, default_value = "mcp")]
     pub service: TunnelService,

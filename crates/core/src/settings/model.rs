@@ -78,6 +78,40 @@ impl Default for GlobalGatewayConfig {
     }
 }
 
+/// 托管任务的准入/保存预算，不是对子进程的文件系统硬配额。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct WorkSessionLimits {
+    pub max_active: u32,
+    pub max_records: u32,
+    pub max_bytes: u64,
+}
+
+impl Default for WorkSessionLimits {
+    fn default() -> Self {
+        Self {
+            max_active: 512,
+            max_records: 8192,
+            max_bytes: 10 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+impl WorkSessionLimits {
+    pub const MAX_RECORDS: u32 = 8192;
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_active == 0
+            || self.max_active > self.max_records
+            || self.max_records > Self::MAX_RECORDS
+            || self.max_bytes == 0
+        {
+            return Err("通用任务容量要求 1 <= maxActive <= maxRecords <= 8192，maxBytes > 0；降低上限不会删除已有数据。".into());
+        }
+        Ok(())
+    }
+}
+
 /// 聚合入口（hub）：一条 MCP 连接访问多个工作区。
 ///
 /// 它是什么、什么时候用、代价是什么见 docs/concepts.md 的「聚合入口」一节。
@@ -138,6 +172,8 @@ pub struct HubConfig {
     /// 非项目任务空间。默认关闭，只给完整鉴权主体，不扩大现有项目 grant。
     #[serde(default)]
     pub work_sessions: bool,
+    #[serde(default)]
+    pub work_session_limits: WorkSessionLimits,
     /// 启动 hub 时置为 true，用户主动停掉时置回 false；守护进程启动时据此恢复。
     ///
     /// 不跟全局的「启动时恢复」开关走：那个默认关，而 hub 是一条客户端里配死的
@@ -162,6 +198,7 @@ impl Default for HubConfig {
             use_proxy: default_global_gateway_use_proxy(),
             members: Vec::new(),
             work_sessions: false,
+            work_session_limits: WorkSessionLimits::default(),
             restore_on_launch: false,
         }
     }

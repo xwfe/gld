@@ -183,6 +183,10 @@ impl App {
         }
         let auth_type = parse_choice(&config.auth_type, MCP_AUTH_CHOICES)?;
         let tool_profile = parse_tool_profile(&config.tool_profile)?;
+        config
+            .work_session_limits
+            .validate()
+            .map_err(AppError::Message)?;
         if config.work_sessions && auth_type == "noauth" {
             return Err(AppError::Message(
                 "通用任务空间需要认证：请使用 oauth 或 bearer，或先关闭 --work-sessions。".into(),

@@ -20,9 +20,13 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
         (false, spec) => spec,
     };
     let actions_line = matches!(args.service, TunnelService::Actions);
-    if actions_line && args.work_sessions.is_some() {
+    let work_settings = args.work_sessions.is_some()
+        || args.work_max_active.is_some()
+        || args.work_max_records.is_some()
+        || args.work_max_bytes.is_some();
+    if actions_line && work_settings {
         return Err(CliError::new(
-            "--work-sessions 只用于 MCP 服务，不用于项目的 GPT Actions。",
+            "--work-sessions 和 --work-max-* 只用于 MCP 服务，不用于项目的 GPT Actions。",
         ));
     }
     let project_change =
@@ -32,7 +36,7 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
             || args.port.is_some()
             || args.auth.is_some()
             || args.tool_profile.is_some()
-            || args.work_sessions.is_some());
+            || work_settings);
     if !project_change && !service_change {
         let selector = args
             .workspace
@@ -131,6 +135,15 @@ pub async fn run(ctx: &mut Ctx, args: UpgradeArgs) -> CliResult {
         }
         if let Some(enabled) = args.work_sessions {
             config.work_sessions = enabled;
+        }
+        if let Some(max) = args.work_max_active {
+            config.work_session_limits.max_active = max;
+        }
+        if let Some(max) = args.work_max_records {
+            config.work_session_limits.max_records = max;
+        }
+        if let Some(max) = args.work_max_bytes {
+            config.work_session_limits.max_bytes = max;
         }
         Ok(())
     })

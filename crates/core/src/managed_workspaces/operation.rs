@@ -5,7 +5,7 @@ use super::*;
 pub(crate) struct Operation {
     pub record: Record,
     pub(super) home: PathBuf,
-    store: Store,
+    pub(super) store: Store,
     _file: File,
 }
 

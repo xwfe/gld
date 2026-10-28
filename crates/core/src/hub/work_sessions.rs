@@ -80,9 +80,10 @@ impl Hub {
                 "artifact" => &["action", "artifact_id", "include_content"],
                 "finish" => &["action", "workspace", "keep_paths", "outcome"],
                 "sweep" => &["action", "cursor", "limit"],
+                "capacity" => &["action"],
                 _ => {
                     return Err(WorkspaceError::invalid_argument(
-                        "action must be start, list, status, retain, artifact, finish or sweep",
+                        "action must be start, list, status, retain, artifact, finish, sweep or capacity",
                     ))
                 }
             };
@@ -92,9 +93,12 @@ impl Hub {
                     allowed.join(", ")
                 )));
             }
-            let store = self.work_store()?;
+            let store = self
+                .work_store()?
+                .with_limits(settings.hub.work_session_limits.clone());
             let owner = auth.tag();
             match action {
+                "capacity" => Ok(tool_ok(store.capacity()?)),
                 "start" => {
                     let purpose = args
                         .get("purpose")
@@ -378,9 +382,9 @@ pub(super) fn definition() -> Value {
     json!({
         "name": TOOL,
         "title": "Managed work sessions",
-        "description": "Manage owned non-project work directories. start is idempotent; status checks resources. retain saves keep_paths or sets retention_hours/retain_forever. finish with explicit keep_paths verifies artifacts and idle resources before deleting the temporary directory; outcome=failed keeps it for 24 idle hours. artifact retrieves retained results. New directories expire after 7 idle days; bounded sweeps run on start/finish or explicit sweep. Busy/unknown resources and saved artifacts are not deleted.",
+        "description": "Manage owned non-project work directories. start is idempotent, including archived closed requests; status checks resources. capacity reports aggregate limits and usage, not an OS hard quota. retain saves keep_paths or sets retention_hours/retain_forever. finish with explicit keep_paths verifies artifacts and idle resources before removing the temporary directory and archiving its receipt; outcome=failed retains it for 24 idle hours. artifact retrieves saved results after closure. Bounded expiry sweeps run on start/finish or explicit sweep; busy/unknown resources and saved artifacts are never evicted for capacity.",
         "inputSchema": {"type":"object", "properties": {
-            "action": {"type":"string", "enum":["start","list","status","retain","artifact","finish","sweep"]},
+            "action": {"type":"string", "enum":["start","list","status","retain","artifact","finish","sweep","capacity"]},
             "client_request_id": {"type":"string","minLength":1,"maxLength":128},
             "purpose": {"type":"string","maxLength":256},
             "workspace": {"type":"string","minLength":1},

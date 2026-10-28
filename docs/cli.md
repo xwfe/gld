@@ -777,6 +777,15 @@ Options:
       --work-sessions <true|false>
           开/关无需建项目的通用任务空间（默认关）；仅完整鉴权连接可用，支持保存产物和安全收尾
 
+      --work-max-active <COUNT>
+          通用任务在用空间数上限（默认 512）；关闭回执不占在用名额
+
+      --work-max-records <COUNT>
+          通用任务含归档的总记录上限（默认 8192）；达到上限不自动删回执
+
+      --work-max-bytes <BYTES>
+          work 与 artifacts 的逻辑字节预算（默认 10 GiB）；限制新建和复制，不是子进程硬配额
+
   -s, --service <SERVICE>
           --tunnel / --off 改哪个：mcp（默认，服务）| actions（项目的 GPT Actions）
           

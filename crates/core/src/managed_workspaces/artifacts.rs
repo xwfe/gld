@@ -211,6 +211,11 @@ impl Operation {
             .iter()
             .map(|p| source_file(&self.record.root, p))
             .collect::<Result<Vec<_>>>()?;
+        self.store
+            .limits
+            .validate()
+            .map_err(WorkspaceError::invalid_argument)?;
+        let _capacity = capacity::copy_guard(&self.home)?;
         let root = self.artifact_root(true)?;
         let mut kept = Vec::new();
         for (relative, source) in paths.iter().zip(sources) {
@@ -241,6 +246,7 @@ impl Operation {
                 if temp.exists() {
                     fs::remove_file(&temp).map_err(storage)?;
                 }
+                capacity::require_space(&self.home, self.store.limits.max_bytes, bytes)?;
                 let copied = (|| {
                     let mut input = open_file(&source)?.take(MAX_ARTIFACT_BYTES + 1);
                     let mut options = OpenOptions::new();

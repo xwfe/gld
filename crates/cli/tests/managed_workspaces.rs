@@ -243,3 +243,81 @@ fn prune_reports_corrupt_managed_registry_as_failure_not_empty_success() {
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("没有清理"));
 }
+
+#[test]
+fn configured_limits_apply_over_http_and_preserve_archived_retries_after_restart() {
+    let env = Env::new();
+    let port = free_port();
+    env.ok(&[
+        "upgrade",
+        "--port",
+        &port.to_string(),
+        "--auth",
+        "bearer",
+        "--work-sessions",
+        "true",
+        "--work-max-active",
+        "1",
+        "--work-max-records",
+        "2",
+        "--work-max-bytes",
+        "64",
+    ]);
+    env.ok(&["start"]);
+    let token = env.service_secret("bearer_token");
+    let first = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"start","client_request_id":"one"}),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let second_args = json!({"action":"start","client_request_id":"two"});
+    assert_eq!(
+        call(port, &token, "work_session", second_args.clone())["error"]["code"],
+        "WORK_SESSION_LIMIT"
+    );
+    let id = &first["workspace"];
+    assert_eq!(
+        call(
+            port,
+            &token,
+            "work_session",
+            json!({"action":"finish","workspace":id,"keep_paths":[]})
+        )["closed"],
+        true
+    );
+    let second = call(port, &token, "work_session", second_args);
+    assert_eq!(second["ok"], true, "{second}");
+    let usage = call(port, &token, "work_session", json!({"action":"capacity"}));
+    assert_eq!(usage["limits"]["maxActive"], 1);
+    assert_eq!(usage["limits"]["maxRecords"], 2);
+    assert_eq!(usage["limits"]["maxBytes"], 64);
+    assert_eq!(usage["usage"]["closed"], 1);
+    env.ok(&["daemon", "restart"]);
+    assert_eq!(env.service_secret("bearer_token"), token);
+    let repeated = call(
+        port,
+        &token,
+        "work_session",
+        json!({"action":"start","client_request_id":"one"}),
+    );
+    assert_eq!(repeated["workspace"], *id);
+    assert_eq!(repeated["session"]["state"], "closed");
+    assert_eq!(
+        call(
+            port,
+            &token,
+            "work_session",
+            json!({"action":"start","client_request_id":"three"})
+        )["error"]["code"],
+        "WORK_SESSION_LIMIT"
+    );
+    let invalid = env.gld(&["upgrade", "--work-max-active", "3"]);
+    assert!(!invalid.status.success());
+    let usage = call(port, &token, "work_session", json!({"action":"capacity"}));
+    assert_eq!(
+        usage["limits"]["maxActive"], 1,
+        "invalid config must not be saved"
+    );
+}
