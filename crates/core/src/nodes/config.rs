@@ -1,4 +1,4 @@
-//! M0 的显式节点登记与配置。Hub 只保存凭据摘要；邀请和凭据轮换留给后续配对流程。
+//! 显式节点登记与凭据生命周期。Hub 只保存凭据摘要，撤销和轮换保留机器身份及项目目录。
 
 use std::collections::HashSet;
 use std::fmt;
@@ -18,162 +18,8 @@ const MAX_PROJECTS: usize = 256;
 const AUTH_FAILED: &str = "Invalid node credentials";
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    const HUB: &str = "11111111111111111111111111111111";
-    const MACHINE: &str = "22222222222222222222222222222222";
-    const PROJECT: &str = "33333333333333333333333333333333";
-    const TOKEN: &str = "synthetic-node-credential-0000000000000001";
-    const OTHER_TOKEN: &str = "synthetic-node-credential-0000000000000002";
-
-    fn config(url: &str) -> NodeConfig {
-        NodeConfig {
-            hub_url: url.into(),
-            hub_id: HUB.into(),
-            machine_id: MACHINE.into(),
-            credential: TOKEN.into(),
-            workspaces: vec![PROJECT.into()],
-            ca_certificate: None,
-        }
-    }
-
-    #[test]
-    fn registration_preserves_old_data_and_never_serializes_the_credential() {
-        let mut data: AppData = serde_json::from_value(json!({})).unwrap();
-        validate_registry(&data).unwrap();
-        let registered = register_in(&mut data, "test-machine", Some(MACHINE), TOKEN).unwrap();
-        assert!(valid_id(&registered.hub_id));
-        assert_eq!(registered.machine_id, MACHINE);
-        assert_eq!(
-            data.node_machines[0].credential_sha256,
-            credential_hash(TOKEN)
-        );
-        assert!(!serde_json::to_string(&data).unwrap().contains(TOKEN));
-        assert!(!serde_json::to_string(&registered)
-            .unwrap()
-            .contains("credential"));
-        assert!(!format!("{:?}", data.node_machines[0]).contains(&credential_hash(TOKEN)));
-        assert!(!format!("{:?}", config("https://example.invalid")).contains(TOKEN));
-        validate_registry(&data).unwrap();
-    }
-
-    #[test]
-    fn duplicate_registration_does_not_change_the_existing_identity_or_projects() {
-        let mut data = AppData::default();
-        register_in(&mut data, "first", Some(MACHINE), TOKEN).unwrap();
-        data.node_machines[0].projects.push(NodeProject {
-            id: PROJECT.into(),
-            name: "api".into(),
-            tool_profile: "read-only".into(),
-        });
-        let before = serde_json::to_value(&data).unwrap();
-        for (name, id, credential) in [
-            ("second", MACHINE, OTHER_TOKEN),
-            ("FIRST", HUB, OTHER_TOKEN),
-            ("second", HUB, TOKEN),
-        ] {
-            assert!(register_in(&mut data, name, Some(id), credential).is_err());
-            assert_eq!(serde_json::to_value(&data).unwrap(), before);
-        }
-    }
-
-    #[test]
-    fn node_credentials_are_distinct_from_existing_service_credentials() {
-        let mut data = AppData::default();
-        data.shared_secrets
-            .insert("bearer_token".into(), TOKEN.into());
-        assert!(register_in(&mut data, "node", Some(MACHINE), TOKEN).is_err());
-        assert!(data.node_hub_id.is_empty());
-        assert!(data.node_machines.is_empty());
-        assert!(register_in(&mut data, "node", Some(MACHINE), OTHER_TOKEN).is_ok());
-    }
-
-    #[test]
-    fn node_urls_preserve_prefixes_and_refuse_credential_or_insecure_remote_urls() {
-        assert_eq!(
-            config("https://example.invalid/hub")
-                .websocket_url()
-                .unwrap(),
-            format!("wss://example.invalid/hub/nodes/v1/connect/{MACHINE}")
-        );
-        assert_eq!(
-            config("wss://example.invalid/prefix/")
-                .websocket_url()
-                .unwrap(),
-            format!("wss://example.invalid/prefix/nodes/v1/connect/{MACHINE}")
-        );
-        for url in ["http://127.0.0.1:1234/hub", "ws://[::1]:1234"] {
-            config(url).validate().unwrap();
-        }
-        for url in [
-            "http://example.invalid",
-            "ws://localhost:1234",
-            "ftp://example.invalid",
-            "https://user:secret@example.invalid",
-            "https://example.invalid?token=secret",
-            "https://example.invalid/#secret",
-        ] {
-            assert!(config(url).validate().is_err(), "{url}");
-        }
-    }
-
-    #[test]
-    fn node_configuration_requires_explicit_unique_full_project_ids() {
-        let mut value = config("https://example.invalid");
-        value.workspaces.clear();
-        assert!(value.validate().is_err());
-        value.workspaces = vec![PROJECT.into(), PROJECT.into()];
-        assert!(value.validate().is_err());
-        value.workspaces = vec!["api".into()];
-        assert!(value.validate().is_err());
-        value.workspaces = vec![PROJECT.into()];
-        value.credential = "short".into();
-        assert!(value.validate().is_err());
-        value.credential = TOKEN.into();
-        value.machine_id = "m".repeat(32);
-        assert!(value.validate().is_err());
-    }
-
-    #[test]
-    fn configuration_file_has_bounded_redacted_reads_and_relative_ca_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("node.json");
-        let mut value = config("https://example.invalid");
-        value.ca_certificate = Some(PathBuf::from("ca.der"));
-        let file = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
-        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
-        file.persist(&path).unwrap();
-        let loaded = NodeConfig::load(&path).unwrap();
-        assert_eq!(loaded.ca_certificate, Some(dir.path().join("ca.der")));
-        std::fs::write(&path, format!("{{\"credential\":\"{TOKEN}\"")).unwrap();
-        let error = NodeConfig::load(&path).unwrap_err();
-        assert!(!error.contains(TOKEN));
-        std::fs::write(&path, vec![b' '; MAX_CONFIG_BYTES as usize + 1]).unwrap();
-        assert!(NodeConfig::load(&path).unwrap_err().contains("64 KiB"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn configuration_file_refuses_shared_permissions_and_symlinks() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("node.json");
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&config("https://example.invalid")).unwrap(),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(NodeConfig::load(&path).is_err());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        NodeConfig::load(&path).unwrap();
-        let alias = dir.path().join("alias.json");
-        symlink(&path, &alias).unwrap();
-        assert!(NodeConfig::load(&alias).is_err());
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeProject {
@@ -187,6 +33,11 @@ pub struct MachineRecord {
     pub id: String,
     pub name: String,
     pub credential_sha256: String,
+    /// 防止凭据 A → B → A 后，A 的旧握手快照重新生效。
+    #[serde(default)]
+    pub credential_generation: u64,
+    #[serde(default)]
+    pub revoked: bool,
     #[serde(default)]
     pub projects: Vec<NodeProject>,
 }
@@ -196,6 +47,8 @@ impl fmt::Debug for MachineRecord {
         f.debug_struct("MachineRecord")
             .field("id", &self.id)
             .field("name", &self.name)
+            .field("credential_generation", &self.credential_generation)
+            .field("revoked", &self.revoked)
             .field("projects", &self.projects)
             .finish_non_exhaustive()
     }
@@ -206,6 +59,7 @@ pub struct RegisteredMachine {
     pub hub_id: String,
     pub machine_id: String,
     pub name: String,
+    pub revoked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -477,7 +331,6 @@ fn register_in(
     credential: &str,
 ) -> Result<RegisteredMachine, String> {
     validate_registry(data)?;
-    validate_credential(credential)?;
     let name = name.trim();
     if !valid_name(name) || name.contains(['/', '\\']) {
         return Err(
@@ -490,13 +343,47 @@ fn register_in(
     if !valid_id(&id) {
         return Err("Node machine_id must be 32 lowercase hexadecimal characters".into());
     }
+    if data
+        .node_machines
+        .iter()
+        .any(|m| m.id == id || m.name.eq_ignore_ascii_case(name))
+    {
+        return Err(
+            "Node ID or name is already registered; existing registration was not changed".into(),
+        );
+    }
+    let hash = unused_credential_hash(data, credential)?;
+    if data.node_hub_id.is_empty() {
+        data.node_hub_id = uuid::Uuid::new_v4().simple().to_string();
+    }
+    data.node_machines.push(MachineRecord {
+        id: id.clone(),
+        name: name.into(),
+        credential_sha256: hash,
+        credential_generation: 0,
+        revoked: false,
+        projects: Vec::new(),
+    });
+    Ok(RegisteredMachine {
+        hub_id: data.node_hub_id.clone(),
+        machine_id: id,
+        name: name.into(),
+        revoked: false,
+    })
+}
+
+/// 注册和轮换共用检查；已撤销记录的原凭据也不能分配给别的节点。
+fn unused_credential_hash(data: &AppData, credential: &str) -> Result<String, String> {
+    validate_credential(credential)?;
     let hash = credential_hash(credential);
-    if data.node_machines.iter().any(|m| {
-        m.id == id
-            || m.name.eq_ignore_ascii_case(name)
-            || digest_matches(&m.credential_sha256, &hash)
-    }) {
-        return Err("Node ID, name or credential is already registered; existing registration was not changed".into());
+    if data
+        .node_machines
+        .iter()
+        .any(|m| digest_matches(&m.credential_sha256, &hash))
+    {
+        return Err(
+            "Node credential is already registered; existing registration was not changed".into(),
+        );
     }
     let shared = data
         .shared_secrets
@@ -516,20 +403,75 @@ fn register_in(
             "Node credential must be separate from existing service and grant credentials".into(),
         );
     }
-    if data.node_hub_id.is_empty() {
-        data.node_hub_id = uuid::Uuid::new_v4().simple().to_string();
+    Ok(hash)
+}
+
+/// 先使凭据持久失效；调用方随后关闭正在使用旧认证的连接。
+pub fn revoke_machine(machine_id: &str) -> Result<RegisteredMachine, String> {
+    DataStore::update_file(|data| revoke_in(data, machine_id).map_err(AppError::Message))
+        .map_err(|error| error.to_string())
+}
+
+fn revoke_in(data: &mut AppData, machine_id: &str) -> Result<RegisteredMachine, String> {
+    validate_registry(data)?;
+    let index = machine_index(data, machine_id)?;
+    let machine = &mut data.node_machines[index];
+    if !machine.revoked {
+        machine.credential_generation = next_generation(machine)?;
+        machine.revoked = true;
     }
-    data.node_machines.push(MachineRecord {
-        id: id.clone(),
-        name: name.into(),
-        credential_sha256: hash,
-        projects: Vec::new(),
-    });
     Ok(RegisteredMachine {
         hub_id: data.node_hub_id.clone(),
-        machine_id: id,
-        name: name.into(),
+        machine_id: machine.id.clone(),
+        name: machine.name.clone(),
+        revoked: true,
     })
+}
+
+/// 原子更换专用凭据并恢复接入；稳定身份和项目目录保持不变。
+pub fn rotate_credential(machine_id: &str, credential: &str) -> Result<RegisteredMachine, String> {
+    DataStore::update_file(|data| {
+        rotate_in(data, machine_id, credential).map_err(AppError::Message)
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn rotate_in(
+    data: &mut AppData,
+    machine_id: &str,
+    credential: &str,
+) -> Result<RegisteredMachine, String> {
+    validate_registry(data)?;
+    let index = machine_index(data, machine_id)?;
+    let hash = unused_credential_hash(data, credential)?;
+    let machine = &mut data.node_machines[index];
+    let generation = next_generation(machine)?;
+    machine.credential_sha256 = hash;
+    machine.credential_generation = generation;
+    machine.revoked = false;
+    Ok(RegisteredMachine {
+        hub_id: data.node_hub_id.clone(),
+        machine_id: machine.id.clone(),
+        name: machine.name.clone(),
+        revoked: false,
+    })
+}
+
+fn machine_index(data: &AppData, machine_id: &str) -> Result<usize, String> {
+    if !valid_id(machine_id) {
+        return Err("Node machine_id must be 32 lowercase hexadecimal characters".into());
+    }
+    data.node_machines
+        .iter()
+        .position(|machine| machine.id == machine_id)
+        .ok_or_else(|| "Node registration does not exist".into())
+}
+
+fn next_generation(machine: &MachineRecord) -> Result<u64, String> {
+    machine
+        .credential_generation
+        .checked_add(1)
+        .ok_or_else(|| "Node credential generation is exhausted".into())
 }
 
 pub fn snapshot() -> Result<(String, Vec<MachineRecord>), String> {
@@ -541,32 +483,80 @@ pub fn snapshot() -> Result<(String, Vec<MachineRecord>), String> {
 }
 
 pub fn authenticate(machine_id: &str, credential: &str) -> Result<AuthenticatedMachine, String> {
+    DataStore::read_file(|data| {
+        authenticate_in(data, machine_id, credential).map_err(AppError::Message)
+    })
+    .map_err(|_| AUTH_FAILED.into())
+}
+
+fn authenticate_in(
+    data: &AppData,
+    machine_id: &str,
+    credential: &str,
+) -> Result<AuthenticatedMachine, String> {
     if !valid_id(machine_id) || validate_credential(credential).is_err() {
         return Err(AUTH_FAILED.into());
     }
-    let (hub_id, machines) = snapshot().map_err(|_| AUTH_FAILED)?;
-    if !valid_id(&hub_id) {
+    validate_registry(data).map_err(|_| AUTH_FAILED)?;
+    if !valid_id(&data.node_hub_id) {
         return Err(AUTH_FAILED.into());
     }
     let hash = credential_hash(credential);
-    let machine = machines
-        .into_iter()
-        .find(|m| m.id == machine_id && digest_matches(&m.credential_sha256, &hash))
+    let machine = data
+        .node_machines
+        .iter()
+        .find(|m| m.id == machine_id && !m.revoked && digest_matches(&m.credential_sha256, &hash))
         .ok_or(AUTH_FAILED)?;
-    Ok(AuthenticatedMachine { hub_id, machine })
+    Ok(AuthenticatedMachine {
+        hub_id: data.node_hub_id.clone(),
+        machine: machine.clone(),
+    })
 }
 
-pub fn update_projects(machine_id: &str, projects: &[NodeProject]) -> Result<(), String> {
-    validate_projects(projects)?;
-    DataStore::update_file(|data| {
+/// Upgrade 名额登记和关闭旧连接时复核，不能把握手前拍下的认证永久当有效。
+pub fn is_current(authenticated: &AuthenticatedMachine) -> Result<bool, String> {
+    DataStore::read_file(|data| {
         validate_registry(data).map_err(AppError::Message)?;
-        let machine = data
-            .node_machines
-            .iter_mut()
-            .find(|m| m.id == machine_id)
-            .ok_or_else(|| AppError::Message("Node registration no longer exists".into()))?;
-        machine.projects = projects.to_vec();
-        Ok(())
+        Ok(is_current_in(data, authenticated))
+    })
+    .map_err(|_| "Node registry is unavailable".into())
+}
+
+fn is_current_in(data: &AppData, authenticated: &AuthenticatedMachine) -> bool {
+    data.node_hub_id == authenticated.hub_id
+        && data.node_machines.iter().any(|machine| {
+            machine.id == authenticated.machine.id
+                && !machine.revoked
+                && machine.credential_generation == authenticated.machine.credential_generation
+                && digest_matches(
+                    &machine.credential_sha256,
+                    &authenticated.machine.credential_sha256,
+                )
+        })
+}
+
+pub fn update_projects(
+    authenticated: &AuthenticatedMachine,
+    projects: &[NodeProject],
+) -> Result<(), String> {
+    DataStore::update_file(|data| {
+        update_projects_in(data, authenticated, projects).map_err(AppError::Message)
     })
     .map_err(|_| "Cannot save node project catalog".into())
+}
+
+fn update_projects_in(
+    data: &mut AppData,
+    authenticated: &AuthenticatedMachine,
+    projects: &[NodeProject],
+) -> Result<(), String> {
+    validate_registry(data)?;
+    validate_projects(projects)?;
+    // 与目录落盘持同一把数据锁；旧握手不能覆盖撤销或轮换之后的新目录。
+    if !is_current_in(data, authenticated) {
+        return Err("Node credentials changed before discovery completed".into());
+    }
+    let index = machine_index(data, &authenticated.machine.id)?;
+    data.node_machines[index].projects = projects.to_vec();
+    Ok(())
 }

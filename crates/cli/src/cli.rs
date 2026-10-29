@@ -365,6 +365,19 @@ pub enum NodeCmd {
         #[arg(long, required = true)]
         credential_stdin: bool,
     },
+    /// 撤销节点凭据并关闭其连接；保留机器身份和项目目录
+    Revoke {
+        /// 登记返回的完整机器 ID
+        machine_id: String,
+    },
+    /// 更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
+    RotateCredential {
+        /// 登记返回的完整机器 ID
+        machine_id: String,
+        /// 从 stdin 接收新的独立随机凭据
+        #[arg(long, required = true)]
+        credential_stdin: bool,
+    },
     /// 在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
     Run {
         /// 仅本账号可读的节点 JSON 配置；格式见 docs/concepts.md

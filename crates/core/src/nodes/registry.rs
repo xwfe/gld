@@ -28,6 +28,7 @@ pub struct NativeMember {
     pub machine_id: String,
     pub remote_workspace_id: String,
     pub online: bool,
+    pub revoked: bool,
     pub tool_profile: String,
 }
 
@@ -35,7 +36,7 @@ impl NativeMember {
     pub fn listed(&self) -> Value {
         json!({
             "id": self.id, "name": self.name, "kind": "node",
-            "machine_id": self.machine_id, "online": self.online,
+            "machine_id": self.machine_id, "online": self.online, "revoked": self.revoked,
             "tool_profile": self.tool_profile
         })
     }
@@ -46,6 +47,7 @@ struct Entry {
     authenticated: AuthenticatedMachine,
     connection: Option<Arc<Connection>>,
     offered: Option<Offered>,
+    retired: bool,
 }
 
 #[derive(Default)]
@@ -75,8 +77,14 @@ impl Nodes {
         if self.stopped.load(Ordering::Acquire) {
             return Err("HUB_STOPPING");
         }
+        // 鉴权到占名额之间可能发生轮换；在同一登记锁下重新检查当前代次。
+        if !config::is_current(&authenticated).unwrap_or(false) {
+            return Err("INVALID_NODE_CREDENTIALS");
+        }
         if let Some(entry) = entries.get(&id) {
-            if !entry.connection.as_ref().is_some_and(|c| c.is_closed()) {
+            if !(entry.retired && entry.connection.is_none())
+                && !entry.connection.as_ref().is_some_and(|c| c.is_closed())
+            {
                 return Err("MACHINE_ALREADY_CONNECTED");
             }
         }
@@ -88,6 +96,7 @@ impl Nodes {
                 authenticated,
                 connection: None,
                 offered: None,
+                retired: false,
             },
         );
         Ok(Reservation {
@@ -103,8 +112,12 @@ impl Nodes {
         let mut members = Vec::new();
         for machine in machines {
             let online = entries.get(&machine.id).is_some_and(|entry| {
-                entry.authenticated.hub_id == hub_id
+                !machine.revoked
+                    && !entry.retired
+                    && entry.authenticated.hub_id == hub_id
                     && entry.authenticated.machine.credential_sha256 == machine.credential_sha256
+                    && entry.authenticated.machine.credential_generation
+                        == machine.credential_generation
                     && entry.offered.is_some()
                     && entry.connection.as_ref().is_some_and(|c| !c.is_closed())
             });
@@ -115,6 +128,7 @@ impl Nodes {
                     machine_id: machine.id.clone(),
                     remote_workspace_id: project.id.clone(),
                     online,
+                    revoked: machine.revoked,
                     tool_profile: "read-only".into(),
                 });
             }
@@ -146,17 +160,30 @@ impl Nodes {
                 )
             }
         };
+        if machines
+            .iter()
+            .any(|m| m.id == member.machine_id && m.revoked)
+        {
+            return failure(
+                "MACHINE_REVOKED",
+                "This machine credential was revoked; nothing was sent.",
+                false,
+            );
+        }
         let live = {
             let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
             entries.get(&member.machine_id).and_then(|entry| {
                 let registered = machines.iter().any(|m| {
                     m.id == member.machine_id
+                        && !m.revoked
                         && m.credential_sha256 == entry.authenticated.machine.credential_sha256
+                        && m.credential_generation
+                            == entry.authenticated.machine.credential_generation
                         && m.projects
                             .iter()
                             .any(|p| p.id == member.remote_workspace_id)
                 });
-                if entry.authenticated.hub_id != hub_id || !registered {
+                if entry.retired || entry.authenticated.hub_id != hub_id || !registered {
                     return None;
                 }
                 Some((entry.connection.clone()?, entry.offered.clone()?))
@@ -213,6 +240,26 @@ impl Nodes {
         }
     }
 
+    /// 持久凭据变更后收回失效连接。锁内读当前代次，避免较早的清理误关新连接。
+    pub fn close_stale(&self, machine_id: &str) -> Result<(), String> {
+        let connection = {
+            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(entry) = entries.get_mut(machine_id) else {
+                return Ok(());
+            };
+            if config::is_current(&entry.authenticated)? {
+                return Ok(());
+            }
+            entry.retired = true;
+            entry.connection.clone()
+        };
+        // 实际 socket 关闭后才可复用名额；不让该机器的有界调用占登记表锁。
+        if let Some(connection) = connection {
+            connection.close();
+        }
+        Ok(())
+    }
+
     pub fn close_all(&self) {
         self.stopped.store(true, Ordering::Release);
         let connections: Vec<_> = self
@@ -238,7 +285,9 @@ impl Reservation {
         let attached = {
             let mut entries = nodes.entries.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = entries.get_mut(&self.machine_id).filter(|entry| {
-                entry.generation == self.generation && !nodes.stopped.load(Ordering::Acquire)
+                entry.generation == self.generation
+                    && !entry.retired
+                    && !nodes.stopped.load(Ordering::Acquire)
             }) {
                 entry.connection = Some(connection.clone());
                 true
@@ -276,18 +325,17 @@ impl Nodes {
         generation: &str,
         connection: &Arc<Connection>,
     ) -> Result<(), String> {
-        let hub_id = {
+        let authenticated = {
             let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
             entries
                 .get(machine_id)
-                .filter(|e| e.generation == generation)
+                .filter(|e| e.generation == generation && !e.retired)
                 .ok_or("node connection replaced")?
                 .authenticated
-                .hub_id
                 .clone()
         };
         let discovery = AuthContext::new(Principal::SharedSecret, "node-inventory");
-        let meta = forwarded_meta(&discovery, &hub_id)?;
+        let meta = forwarded_meta(&discovery, &authenticated.hub_id)?;
         let (offered, projects) = connection
             .try_with_peer(|peer| {
                 peer.initialize("gld-hub", HANDSHAKE)?;
@@ -300,11 +348,11 @@ impl Nodes {
                 Ok((offered, projects))
             })
             .map_err(|_| "node initialization failed".to_string())?;
-        config::update_projects(machine_id, &projects)?;
+        config::update_projects(&authenticated, &projects)?;
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let entry = entries
             .get_mut(machine_id)
-            .filter(|e| e.generation == generation)
+            .filter(|e| e.generation == generation && !e.retired)
             .ok_or("node connection replaced")?;
         entry.offered = Some(offered);
         Ok(())
@@ -465,6 +513,7 @@ mod tests {
             machine_id: "machine".into(),
             remote_workspace_id: "target".into(),
             online: true,
+            revoked: false,
             tool_profile: "read-only".into(),
         };
         let structured =

@@ -26,16 +26,22 @@ pub async fn upgrade(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let authenticated =
-        tokio::task::spawn_blocking(move || super::config::authenticate(&machine_id, &credential))
-            .await;
-    let Ok(Ok(authenticated)) = authenticated else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let hub_id = authenticated.hub_id.clone();
-    let reservation = match nodes.reserve(authenticated) {
-        Ok(reservation) => reservation,
-        Err(code) => return (StatusCode::CONFLICT, Json(json!({"error":code}))).into_response(),
+    let admitted = tokio::task::spawn_blocking(move || {
+        let authenticated = super::config::authenticate(&machine_id, &credential)
+            .map_err(|_| "INVALID_NODE_CREDENTIALS")?;
+        let hub_id = authenticated.hub_id.clone();
+        nodes
+            .reserve(authenticated)
+            .map(|reservation| (hub_id, reservation))
+    })
+    .await;
+    let (hub_id, reservation) = match admitted {
+        Ok(Ok(admitted)) => admitted,
+        Ok(Err("INVALID_NODE_CREDENTIALS")) => return StatusCode::UNAUTHORIZED.into_response(),
+        Ok(Err(code)) => {
+            return (StatusCode::CONFLICT, Json(json!({"error":code}))).into_response()
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let mut response = ws
         .max_message_size(super::transport::MAX_MESSAGE_BYTES)

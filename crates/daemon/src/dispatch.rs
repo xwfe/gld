@@ -37,6 +37,11 @@ pub async fn dispatch(
                     .map_err(RpcError::app)?;
             ok(&registered)
         }
+        R::NodeRevoke { machine_id } => change_node_credential(machine_id, None).await,
+        R::NodeRotateCredential {
+            machine_id,
+            credential,
+        } => change_node_credential(machine_id, Some(credential)).await,
         R::DaemonInfo => match daemon {
             Some(context) => ok(&(context.info)()),
             None => Err(RpcError::protocol("当前不是守护进程，没有 daemon_info")),
@@ -400,6 +405,27 @@ pub async fn dispatch(
         R::GlobalAgentContext => ok(&app.global_agent_context()),
         // ---- 软件 ----
     }
+}
+
+async fn change_node_credential(
+    machine_id: String,
+    credential: Option<String>,
+) -> Result<Value, RpcError> {
+    let changed = tokio::task::spawn_blocking(move || match credential {
+        Some(credential) => gld_core::nodes::config::rotate_credential(&machine_id, &credential),
+        None => gld_core::nodes::config::revoke_machine(&machine_id),
+    })
+    .await
+    .map_err(|_| RpcError::internal("节点凭据更新任务失败"))?
+    .map_err(RpcError::app)?;
+    if let Some(nodes) = gld_core::hub::runtime::nodes().await {
+        let machine_id = changed.machine_id.clone();
+        tokio::task::spawn_blocking(move || nodes.close_stale(&machine_id))
+            .await
+            .map_err(|_| RpcError::internal("节点凭据已更新，但旧连接收回任务失败"))?
+            .map_err(|error| RpcError::app(format!("节点凭据已更新，但旧连接收回失败：{error}")))?;
+    }
+    ok(&changed)
 }
 
 fn resolve(app: &App, target: &WorkspaceTarget) -> Result<WorkspaceProfile, RpcError> {

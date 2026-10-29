@@ -46,7 +46,8 @@ use serde_json::Value;
 /// 11：服务配置增加 workSessions 开关；旧守护进程会忽略它，不能把开关已生效报给用户。
 /// 12：workSessionLimits 加入服务配置，旧守护进程不能静默忽略容量约束。
 /// 13：新增 node_register 节点凭据登记，旧守护进程需要升级后才能处理。
-pub const PROTOCOL_VERSION: u32 = 13;
+/// 14：新增节点凭据撤销/轮换，成功返回前收回失效连接。
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +74,13 @@ pub enum Request {
     NodeRegister {
         name: String,
         id: Option<String>,
+        credential: String,
+    },
+    NodeRevoke {
+        machine_id: String,
+    },
+    NodeRotateCredential {
+        machine_id: String,
         credential: String,
     },
 
@@ -462,6 +470,9 @@ impl Request {
                 | Request::TestMcpServer { .. }
                 // 要停它起的命令，每条最多等 1.5 秒收尾。
                 | Request::RemoveGrant { .. }
+                // 持久变更后等该节点已有的有界 RPC 收尾，再关闭实际连接。
+                | Request::NodeRevoke { .. }
+                | Request::NodeRotateCredential { .. }
                 // 要算目录大小、删整棵目录，日志攒久了有几百 MB。
                 | Request::Prune { .. }
         )
@@ -581,5 +592,24 @@ mod tests {
         let error = parsed.into_result().unwrap_err();
         assert_eq!(error.code, ErrorCode::App);
         assert_eq!(error.message, "nope");
+    }
+
+    #[test]
+    fn node_credential_changes_allow_time_for_in_flight_calls_to_finish() {
+        assert!(Request::NodeRevoke {
+            machine_id: "a".repeat(32)
+        }
+        .is_slow());
+        assert!(Request::NodeRotateCredential {
+            machine_id: "a".repeat(32),
+            credential: "synthetic-node-credential".into()
+        }
+        .is_slow());
+        assert!(!Request::NodeRegister {
+            name: "node".into(),
+            id: None,
+            credential: "synthetic-node-credential".into()
+        }
+        .is_slow());
     }
 }

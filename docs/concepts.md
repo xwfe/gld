@@ -248,7 +248,7 @@ Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并�
 结束或失败后关闭本次 stdio 进程，清理本次目录；清理失败会返回保留位置，不扫描其他缓存或接管常驻 App。
 本机进程退出不等于桌面输入停止已通过验收，公开 `computer_manage/observe/act` 仍未提供。
 
-### 原生 gld 节点：M0 项目读取
+### 原生 gld 节点：项目读取与凭据管理
 
 目标机可以主动连回同一个 Hub，Hub 再用已有的项目工具读目标机文件。本阶段提供
 `gld node register` 和 `gld node run`，使用操作员预置的独立凭据及私有配置文件。
@@ -263,9 +263,27 @@ gld --json node register build-machine --credential-stdin < node-credential.txt
 ```
 
 凭据文件由操作员事先准备，至少32个字符，仅含英文字母、数字、`_`、`-`；
-应使用至少256位的安全随机值。命令从 stdin 读取，只返回 `hub_id`、`machine_id` 和展示名称。
+应使用至少256位的安全随机值。命令从 stdin 读取，只返回 `hub_id`、`machine_id`、展示名称和 `revoked` 状态。
 Hub 只保存节点凭据的 SHA-256 摘要，不接受现有服务、项目或 grant 的钥匙复用为节点凭据。
 登记复用现有 CLI/守护进程的配置写入口；正在运行的守护进程协议过旧时会要求先升级。
+
+要停止某台机器的访问，在 Hub 使用登记返回的完整机器 ID：
+
+```bash
+gld --json node revoke <machine_id>
+```
+
+撤销会先保存失效状态，再关闭旧连接；成功返回时旧连接已收回，其他节点照常服务。
+已有调用可在原期限内完成，撤销不会回滚已经执行的动作；后续调用返回 `MACHINE_REVOKED`。
+机器身份和项目目录保留，重复撤销返回相同状态。要更换凭据或恢复已撤销的机器：
+
+```bash
+gld --json node rotate-credential <machine_id> --credential-stdin < new-node-credential.txt
+```
+
+新凭据须独立生成，不能与任一节点当前凭据或服务/grant 钥匙相同；校验失败不会关闭健康连接。
+成功后旧凭据失效、旧连接关闭，`revoked` 变为 `false`。在目标机的私有配置中替换 `credential`
+并重新运行节点，Hub ID、机器 ID 和项目句柄保持不变。这里管理的是节点专用凭据，现有 MCP/OAuth 授权保持不变。
 
 在目标机准备仅执行账号可读的 JSON 文件，例如 `node.json`：
 
@@ -300,7 +318,7 @@ gld node run --config node.json
 
 AI 仍调用原来的 `list_workspaces`、`workspace_context`、`read_file` 等工具。
 原生节点成员的 `kind` 是 `node`，名称为 `机器名/项目名`，并返回
-`machine_id`、`online`、`tool_profile`。其 `id` 是绑定机器与目标项目的 Hub 不透明句柄，
+`machine_id`、`online`、`revoked`、`tool_profile`。其 `id` 是绑定机器与目标项目的 Hub 不透明句柄，
 每次调用传这一句柄；不同机器的同名项目不会混用。列表不把远端目录冒充成本机路径。
 成员目录在 Hub 持久保存，离线仍能识别原句柄，重连不会变成另一个项目。
 
@@ -322,6 +340,7 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 | --- | --- |
 | `MACHINE_ALREADY_CONNECTED`（HTTP 409） | 这台机器已有连接，先关闭原节点；不会把原连接挤掉 |
 | `MACHINE_OFFLINE` | 没有可用连接，本次未发送；不会改用 Hub 本机或另一个同名项目 |
+| `MACHINE_REVOKED` | 该机器的专用凭据已撤销，本次未发送；须由操作员轮换为新凭据后恢复 |
 | `MACHINE_BUSY` | 这台机器的连接正忙，本次未发送；稍后显式再调 |
 | `NODE_TOOL_UNSUPPORTED` | 节点当前工具表没有该工具，本次未发送；M0 的写入/命令执行会被拒绝 |
 | `NODE_ARGUMENT_UNSUPPORTED` | 节点不接受某个参数，本次未发送；核对参数后再调 |
@@ -330,7 +349,7 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 
 初始化、读写、消息大小与单次工具等待均有上限；空闲期处理标准 WebSocket Ping/Pong 和关闭，
 旧连接确认关闭后才释放名额。一个机器的等待不占全局连接表锁，其他机器可独立处理请求。
-本阶段未提供远端写入、命令启动、撤销管理、邀请或桌面能力；已有 ccnm 的 `remote_*` 契约继续独立使用。
+本阶段未提供远端写入、命令启动、邀请或桌面能力；已有 ccnm 的 `remote_*` 契约继续独立使用。
 
 ### 成员还可以在别的机器上
 

@@ -26,6 +26,8 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld remote remove](#gld-remote-remove)
 - [gld node](#gld-node)
 - [gld node register](#gld-node-register)
+- [gld node revoke](#gld-node-revoke)
+- [gld node rotate-credential](#gld-node-rotate-credential)
 - [gld node run](#gld-node-run)
 - [gld mcp](#gld-mcp)
 - [gld mcp list](#gld-mcp-list)
@@ -916,8 +918,10 @@ Options:
 Usage: gld node [OPTIONS] <COMMAND>
 
 Commands:
-  register  在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
-  run       在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
+  register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
+  revoke             撤销节点凭据并关闭其连接；保留机器身份和项目目录
+  rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
+  run                在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
@@ -944,6 +948,49 @@ Options:
       --id <ID>           可选的机器 ID，32 位小写十六进制；省略时随机生成
   -w, --workspace <WS>    目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --credential-stdin  从 stdin 接收独立随机凭据；不要把凭据写在命令行参数中
+      --json              以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart      守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>    等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>        数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color          关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help              Print help
+  -V, --version           Print version
+```
+
+## gld node revoke
+
+```text
+撤销节点凭据并关闭其连接；保留机器身份和项目目录
+
+Usage: gld node revoke [OPTIONS] <MACHINE_ID>
+
+Arguments:
+  <MACHINE_ID>  登记返回的完整机器 ID
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld node rotate-credential
+
+```text
+更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
+
+Usage: gld node rotate-credential [OPTIONS] --credential-stdin <MACHINE_ID>
+
+Arguments:
+  <MACHINE_ID>  登记返回的完整机器 ID
+
+Options:
+      --credential-stdin  从 stdin 接收新的独立随机凭据
+  -w, --workspace <WS>    目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json              以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart      守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>    等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）

@@ -97,6 +97,7 @@ mod tests {
             machine_id: "machine".into(),
             remote_workspace_id: "project".into(),
             online: false,
+            revoked: false,
             tool_profile: "read-only".into(),
         })
     }

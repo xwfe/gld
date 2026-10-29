@@ -170,6 +170,17 @@ impl NodeProcess {
             std::thread::sleep(Duration::from_millis(25));
         }
     }
+
+    fn wait_stopped(&mut self) {
+        let deadline = Instant::now() + WAIT;
+        while self.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "revoked node socket did not close"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
 }
 
 impl Drop for NodeProcess {
@@ -179,8 +190,16 @@ impl Drop for NodeProcess {
 }
 
 fn register_output(env: &Env, name: &str, token: &str) -> Output {
+    credential_output(
+        env,
+        &["--json", "node", "register", name, "--credential-stdin"],
+        token,
+    )
+}
+
+fn credential_output(env: &Env, args: &[&str], token: &str) -> Output {
     let mut child = command(env)
-        .args(["--json", "node", "register", name, "--credential-stdin"])
+        .args(args)
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
@@ -456,4 +475,98 @@ fn node_registration_does_not_truncate_an_overlong_credential() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("过长"), "{error}");
     assert!(!error.contains(&token));
+}
+
+#[test]
+fn node_credentials_revoke_and_rotate_active_connections_without_changing_routes() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine_a = Env::new();
+    let machine_b = Env::new();
+    let ids_a = projects(&machine_a, "machine-a");
+    let ids_b = projects(&machine_b, "machine-b");
+    let registration_a = register(&hub, "machine-a", TOKEN_A);
+    let registration_b = register(&hub, "machine-b", TOKEN_B);
+    let machine_id = registration_a["machine_id"].as_str().unwrap();
+    let mut value_a = config(&machine_a, &relay, &registration_a, TOKEN_A, &ids_a);
+    let mut value_b = config(&machine_b, &relay, &registration_b, TOKEN_B, &ids_b);
+    // 同一正式接入分发同时覆盖 Hub 直接入口和另一条测试里的 /hub 网关入口。
+    value_a["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    value_b["hub_url"] = value_a["hub_url"].clone();
+    let config_a = write_config(&machine_a, "node-a.json", &value_a);
+    let config_b = write_config(&machine_b, "node-b.json", &value_b);
+    let mut node_a = NodeProcess::start(&machine_a, &config_a);
+    let _node_b = NodeProcess::start(&machine_b, &config_b);
+    let before = wait_inventory(&service, 4, 4);
+    let a_api = find(&before, "machine-a/api");
+    let b_api = find(&before, "machine-b/api");
+
+    let rotate_args = [
+        "--json",
+        "node",
+        "rotate-credential",
+        machine_id,
+        "--credential-stdin",
+    ];
+    let failed = credential_output(&hub, &rotate_args, TOKEN_B);
+    assert!(!failed.status.success());
+    assert_eq!(read(&service, &a_api)["content"], "machine-a/api\n");
+    assert_eq!(read(&service, &b_api)["content"], "machine-b/api\n");
+
+    let revoked = hub.json(&["--json", "node", "revoke", machine_id]);
+    assert_eq!(revoked["revoked"], true);
+    assert_eq!(revoked["machine_id"], machine_id);
+    assert_eq!(revoked["hub_id"], registration_a["hub_id"]);
+    assert_eq!(hub.json(&["--json", "node", "revoke", machine_id]), revoked);
+    node_a.wait_stopped();
+    let offline = wait_inventory(&service, 2, 4);
+    let a = offline.iter().find(|item| item["id"] == a_api).unwrap();
+    assert_eq!(a["revoked"], true);
+    assert_eq!(read(&service, &a_api)["error"]["code"], "MACHINE_REVOKED");
+    assert_eq!(read(&service, &b_api)["content"], "machine-b/api\n");
+    assert!(NodeProcess::start(&machine_a, &config_a)
+        .rejected()
+        .contains("401"));
+
+    for token in [TOKEN_A, TOKEN_B, service.token.as_str()] {
+        let output = credential_output(&hub, &rotate_args, token);
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+        assert_eq!(read(&service, &a_api)["error"]["code"], "MACHINE_REVOKED");
+    }
+
+    // 先恢复撤销记录，再在线轮换一次；两次都保持相同的机器和项目句柄。
+    for token in [
+        "native-node-new-credential-isolated-test-00000001",
+        "native-node-new-credential-isolated-test-00000002",
+    ] {
+        let output = credential_output(&hub, &rotate_args, token);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rotated: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rotated["revoked"], false);
+        assert_eq!(rotated["machine_id"], machine_id);
+        assert_eq!(rotated["hub_id"], registration_a["hub_id"]);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+        assert!(rotated.get("credential_sha256").is_none());
+        node_a.wait_stopped();
+        wait_inventory(&service, 2, 4);
+        assert_eq!(read(&service, &a_api)["error"]["code"], "MACHINE_OFFLINE");
+        assert!(NodeProcess::start(&machine_a, &config_a)
+            .rejected()
+            .contains("401"));
+        value_a["credential"] = json!(token);
+        write_config(&machine_a, "node-a.json", &value_a);
+        node_a = NodeProcess::start(&machine_a, &config_a);
+        let online = wait_inventory(&service, 4, 4);
+        assert_eq!(find(&online, "machine-a/api"), a_api);
+        assert_eq!(read(&service, &a_api)["content"], "machine-a/api\n");
+        assert_eq!(read(&service, &b_api)["content"], "machine-b/api\n");
+    }
+    assert_no_daemon(&machine_a);
+    assert_no_daemon(&machine_b);
 }
