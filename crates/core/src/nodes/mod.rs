@@ -6,5 +6,8 @@ pub mod config;
 pub mod connection;
 pub mod endpoint;
 pub mod identity;
+pub mod join;
+pub mod local_config;
+pub mod pairing;
 pub mod registry;
 pub mod transport;

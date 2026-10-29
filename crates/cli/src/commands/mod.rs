@@ -11,6 +11,7 @@ mod gateway;
 mod grant;
 mod hub;
 mod inspect;
+mod join;
 mod logs;
 mod mcp;
 mod node;
@@ -64,6 +65,9 @@ pub async fn run(cli: Cli) -> CliResult {
     if let Command::Node(crate::cli::NodeCmd::Run { config }) = &cli.command {
         return node::run_config(config).await;
     }
+    if let Command::Join(args) = &cli.command {
+        return join::run(args, out).await;
+    }
 
     let backend = Backend::connect(
         !cli.global.no_autostart,
@@ -80,7 +84,10 @@ pub async fn run(cli: Cli) -> CliResult {
     };
 
     let result = match cli.command {
-        Command::Daemon(_) | Command::Completions { .. } | Command::Computer(_) => {
+        Command::Daemon(_)
+        | Command::Completions { .. }
+        | Command::Computer(_)
+        | Command::Join(_) => {
             unreachable!("handled above")
         }
         Command::Start(args) => service::start(&mut ctx, args).await,

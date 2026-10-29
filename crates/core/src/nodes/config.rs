@@ -2,8 +2,6 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -13,8 +11,8 @@ use sha2::{Digest, Sha256};
 use crate::data::{AppData, DataStore};
 use crate::error::AppError;
 
-const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_PROJECTS: usize = 256;
+pub(super) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const AUTH_FAILED: &str = "Invalid node credentials";
 
 #[cfg(test)]
@@ -54,7 +52,7 @@ impl fmt::Debug for MachineRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisteredMachine {
     pub hub_id: String,
     pub machine_id: String,
@@ -93,34 +91,7 @@ impl fmt::Debug for NodeConfig {
 
 impl NodeConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        }
-        let file = options
-            .open(path)
-            .map_err(|_| "Cannot open node configuration")?;
-        check_private_file(&file)?;
-        let mut bytes = Vec::new();
-        file.take(MAX_CONFIG_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "Cannot read node configuration")?;
-        if bytes.len() as u64 > MAX_CONFIG_BYTES {
-            return Err("Node configuration exceeds 64 KiB".into());
-        }
-        // 不附 serde 的错误正文：非法字段可能正好包含凭据。
-        let mut config: Self =
-            serde_json::from_slice(&bytes).map_err(|_| "Invalid node configuration JSON")?;
-        if let Some(ca) = &mut config.ca_certificate {
-            if ca.is_relative() {
-                *ca = path.parent().unwrap_or_else(|| Path::new(".")).join(&*ca);
-            }
-        }
-        config.validate()?;
-        Ok(config)
+        super::local_config::read_config(path)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -193,24 +164,6 @@ impl NodeConfig {
     }
 }
 
-fn check_private_file(file: &File) -> Result<(), String> {
-    let metadata = file
-        .metadata()
-        .map_err(|_| "Cannot inspect node configuration")?;
-    if !metadata.is_file() {
-        return Err("Node configuration must be a regular file".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // 只检查已打开的文件，避免在 stat 与 open 之间被替换。
-        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
-            return Err("Node configuration must be owned by this account and readable only by it (chmod 600)".into());
-        }
-    }
-    Ok(())
-}
-
 pub fn valid_id(id: &str) -> bool {
     id.len() == 32
         && id
@@ -243,11 +196,11 @@ pub fn validate_credential(credential: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn credential_hash(credential: &str) -> String {
+pub(super) fn credential_hash(credential: &str) -> String {
     format!("{:x}", Sha256::digest(credential.as_bytes()))
 }
 
-fn digest_matches(expected: &str, actual: &str) -> bool {
+pub(super) fn digest_matches(expected: &str, actual: &str) -> bool {
     expected.len() == 64
         && actual.len() == 64
         && expected
@@ -257,7 +210,7 @@ fn digest_matches(expected: &str, actual: &str) -> bool {
             == 0
 }
 
-fn valid_name(name: &str) -> bool {
+pub(super) fn valid_name(name: &str) -> bool {
     !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
 }
 
@@ -281,7 +234,7 @@ fn validate_projects(projects: &[NodeProject]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_registry(data: &AppData) -> Result<(), String> {
+pub(super) fn validate_registry(data: &AppData) -> Result<(), String> {
     // 升级前的配置既无节点也无Hub ID，不能因此破坏本地工具链。
     if data.node_hub_id.is_empty() && data.node_machines.is_empty() {
         return Ok(());
@@ -324,7 +277,7 @@ pub fn register_machine(
     .map_err(|error| error.to_string())
 }
 
-fn register_in(
+pub(super) fn register_in(
     data: &mut AppData,
     name: &str,
     id: Option<&str>,

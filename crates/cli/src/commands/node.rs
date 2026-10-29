@@ -1,4 +1,4 @@
-//! 预置节点及凭据管理入口；邀请配对与自启动由后续切片提供。
+//! 本机操作员的节点邀请及凭据管理入口。
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -12,6 +12,19 @@ use crate::error::{CliError, CliResult};
 
 pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
     let (request, note) = match command {
+        NodeCmd::Invite { name } => {
+            let result: Value = ctx.backend.call_typed(Request::NodeInvite { name }).await?;
+            if !ctx.out.json_or(&result) {
+                ctx.out.line(format!(
+                    "Hub ID：{}\n机器名称：{}\n邀请：{}\n有效期：十分钟",
+                    result["hub_id"].as_str().unwrap_or(""),
+                    result["name"].as_str().unwrap_or(""),
+                    result["invitation"].as_str().unwrap_or(""),
+                ));
+                ctx.out.note("在目标机用 gld join --invite-stdin 接收邀请；通过终端确认共享项目。相同名称的新邀请会使旧邀请失效。");
+            }
+            return Ok(());
+        }
         NodeCmd::Register {
             name,
             id,

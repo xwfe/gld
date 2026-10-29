@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::GrantRecord;
 use crate::bridge::member::CcnmMember;
 use crate::nodes::config::MachineRecord;
+use crate::nodes::pairing::InvitationRecord;
 use crate::settings::{FrpProfile, GlobalGatewayConfig, HubConfig, ProxyConfig};
 use crate::workspace::WorkspaceProfile;
 
@@ -63,6 +64,9 @@ pub struct AppData {
     pub node_hub_id: String,
     #[serde(default)]
     pub node_machines: Vec<MachineRecord>,
+    /// 未消费的一次性节点邀请；仅保存摘要，过期记录在下次创建邀请时清理。
+    #[serde(default)]
+    pub node_invitations: Vec<InvitationRecord>,
     /// 只开部分项目的凭据（RFC-0007），连同它们自己的钥匙。
     #[serde(default)]
     pub grants: Vec<GrantRecord>,

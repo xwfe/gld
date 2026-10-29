@@ -47,7 +47,8 @@ use serde_json::Value;
 /// 12：workSessionLimits 加入服务配置，旧守护进程不能静默忽略容量约束。
 /// 13：新增 node_register 节点凭据登记，旧守护进程需要升级后才能处理。
 /// 14：新增节点凭据撤销/轮换，成功返回前收回失效连接。
-pub const PROTOCOL_VERSION: u32 = 14;
+/// 15：新增 node_invite，一次性邀请由本机操作员经配置写入口生成。
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +72,9 @@ pub enum Request {
     DaemonInfo,
     Shutdown,
 
+    NodeInvite {
+        name: String,
+    },
     NodeRegister {
         name: String,
         id: Option<String>,

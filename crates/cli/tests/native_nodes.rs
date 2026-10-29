@@ -3,6 +3,9 @@
 
 mod common;
 
+#[path = "native_nodes/pairing.rs"]
+mod pairing_tests;
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -295,11 +298,14 @@ fn config(env: &Env, relay: &TlsRelay, registration: &Value, token: &str, ids: &
 
 fn write_config(env: &Env, name: &str, value: &Value) -> PathBuf {
     let path = env.home.path().join(name);
-    std::fs::write(&path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let config: gld_core::nodes::config::NodeConfig =
+        serde_json::from_value(value.clone()).unwrap();
+    let file = gld_core::nodes::local_config::LocalConfig::lock(&path).unwrap();
+    if file.exists().unwrap() {
+        file.replace(&config).unwrap();
+    } else {
+        file.save_pending(&config).unwrap();
+        file.finish(&config).unwrap();
     }
     path
 }

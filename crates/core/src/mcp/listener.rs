@@ -314,6 +314,7 @@ async fn serve(
     let app = Router::new()
         .route("/mcp", get(mcp_discovery).post(mcp_post))
         .route("/nodes/v1/connect/{machine_id}", get(node_connect))
+        .route("/nodes/v1/pair", post(node_pair))
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_authorization_server_metadata),
@@ -394,6 +395,16 @@ async fn node_connect(
         return StatusCode::NOT_FOUND.into_response();
     };
     crate::nodes::endpoint::upgrade(hub.nodes(), machine_id, headers, ws).await
+}
+
+async fn node_pair(
+    State(state): State<ListenerState>,
+    request: axum::extract::Request,
+) -> Response {
+    if !matches!(state.endpoint, Endpoint::Hub(_)) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    crate::nodes::endpoint::pair(request).await
 }
 
 fn mcp_discovery_payload(state: &ListenerState) -> Value {

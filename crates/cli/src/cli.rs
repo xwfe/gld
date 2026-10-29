@@ -232,6 +232,9 @@ pub enum Command {
     #[command(subcommand)]
     Node(NodeCmd),
 
+    /// 用一次性邀请配对，生成目标机的私有节点配置
+    Join(JoinArgs),
+
     /// 只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
     ///
     ///   gld grant add alice api web           只开 api、web，只读：能看能搜，改不了文件、跑不了命令
@@ -354,6 +357,11 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeCmd {
+    /// 生成十分钟有效的一次性邀请；替换同名未使用邀请，只在本机输出
+    Invite {
+        /// 配对成功后使用的机器展示名称
+        name: String,
+    },
     /// 在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
     Register {
         /// 机器展示名称，不能含路径分隔符
@@ -387,6 +395,28 @@ pub enum NodeCmd {
 }
 
 // ---------------------------------------------------------------- daemon
+
+#[derive(Debug, Args)]
+pub struct JoinArgs {
+    /// Hub 的 HTTPS 基地址，保留 /hub 等路径前缀
+    #[arg(long)]
+    pub hub: String,
+    /// 要创建的私有节点配置；已有文件不会被覆盖
+    #[arg(long)]
+    pub config: PathBuf,
+    /// 明确共享的已登记本机项目名称或完整 ID；可重复指定
+    #[arg(long, required = true)]
+    pub share: Vec<String>,
+    /// 从管道或文件接收一次性邀请，不将其放入 argv
+    #[arg(long, required = true)]
+    pub invite_stdin: bool,
+    /// 显式信任的 DER CA 证书；仍核验 TLS 主机名
+    #[arg(long)]
+    pub ca_certificate: Option<PathBuf>,
+    /// 确认所显示的 Hub、执行账号和共享项目，供非交互调用使用
+    #[arg(long)]
+    pub yes: bool,
+}
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonCmd {

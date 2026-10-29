@@ -121,9 +121,9 @@ fn configuration_file_has_bounded_redacted_reads_and_relative_ca_resolution() {
     let path = dir.path().join("node.json");
     let mut value = config("https://example.invalid");
     value.ca_certificate = Some(PathBuf::from("ca.der"));
-    let file = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
-    std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
-    file.persist(&path).unwrap();
+    let mut file = super::super::local_config::create_private_file(&path).unwrap();
+    std::io::Write::write_all(&mut file, &serde_json::to_vec(&value).unwrap()).unwrap();
+    drop(file);
     let loaded = NodeConfig::load(&path).unwrap();
     assert_eq!(loaded.ca_certificate, Some(dir.path().join("ca.der")));
     std::fs::write(&path, format!("{{\"credential\":\"{TOKEN}\"")).unwrap();
@@ -151,6 +151,11 @@ fn configuration_file_refuses_shared_permissions_and_symlinks() {
     let alias = dir.path().join("alias.json");
     symlink(&path, &alias).unwrap();
     assert!(NodeConfig::load(&alias).is_err());
+    let fifo = dir.path().join("config.fifo");
+    use std::os::unix::ffi::OsStrExt;
+    let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+    assert!(NodeConfig::load(&fifo).is_err());
 }
 
 fn registered_data() -> AppData {

@@ -118,6 +118,7 @@ Commands:
   upgrade      改服务配置（端口 / 认证 / 工具集 / 公网入口），改完自动重启；也能改项目的目录和名称
   remote       远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
   node         原生节点：登记机器，用一条出站连接共享指定项目（当前只读）
+  join         用一次性邀请配对，生成目标机的私有节点配置
   grant        只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
   agent        委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
   mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
@@ -918,6 +919,7 @@ Options:
 Usage: gld node [OPTIONS] <COMMAND>
 
 Commands:
+  invite             生成十分钟有效的一次性邀请；替换同名未使用邀请，只在本机输出
   register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
   revoke             撤销节点凭据并关闭其连接；保留机器身份和项目目录
   rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄

@@ -27,6 +27,10 @@ pub async fn dispatch(
     match request {
         // ---- 守护进程 ----
         R::Ping => ok(&"pong"),
+        R::NodeInvite { name } => {
+            let invitation = gld_core::nodes::pairing::invite(&name).map_err(RpcError::app)?;
+            ok(&invitation)
+        }
         R::NodeRegister {
             name,
             id,
