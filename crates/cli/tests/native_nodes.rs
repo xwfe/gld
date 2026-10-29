@@ -5,6 +5,8 @@ mod common;
 
 #[path = "native_nodes/pairing.rs"]
 mod pairing_tests;
+#[path = "native_nodes/sharing.rs"]
+mod sharing_tests;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -460,7 +462,9 @@ fn native_nodes_route_real_projects_through_authenticated_wss_and_global_gateway
         before + 2,
         "reading another project must reuse its machine connection"
     );
-    let duplicate = NodeProcess::start(&machine_a, &config_a).rejected();
+    // 用独立文件验证 Hub 的重复身份拒绝，避免先被本机配置运行锁拦下。
+    let duplicate_config = write_config(&machine_a, "duplicate.json", &value_a);
+    let duplicate = NodeProcess::start(&machine_a, &duplicate_config).rejected();
     assert!(
         duplicate.contains("409") || duplicate.contains("MACHINE_ALREADY_CONNECTED"),
         "{duplicate}"

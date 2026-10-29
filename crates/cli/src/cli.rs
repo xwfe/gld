@@ -386,6 +386,15 @@ pub enum NodeCmd {
         #[arg(long, required = true)]
         credential_stdin: bool,
     },
+    /// 查看目标机共享名单；传入 --share 完整替换，修改前须停止该配置的节点进程
+    Shares {
+        /// 仅本账号可读的节点 JSON 配置；运行中也可查看
+        #[arg(long)]
+        config: PathBuf,
+        /// 新的完整共享名单，接受项目完整 ID 或唯一名称；可重复，至少保留一个项目；省略则只查看
+        #[arg(long = "share")]
+        workspaces: Vec<String>,
+    },
     /// 在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
     Run {
         /// 仅本账号可读的节点 JSON 配置；格式见 docs/concepts.md

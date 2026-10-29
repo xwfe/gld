@@ -24,10 +24,13 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld remote](#gld-remote)
 - [gld remote add](#gld-remote-add)
 - [gld remote remove](#gld-remote-remove)
+- [gld join](#gld-join)
 - [gld node](#gld-node)
+- [gld node invite](#gld-node-invite)
 - [gld node register](#gld-node-register)
 - [gld node revoke](#gld-node-revoke)
 - [gld node rotate-credential](#gld-node-rotate-credential)
+- [gld node shares](#gld-node-shares)
 - [gld node run](#gld-node-run)
 - [gld mcp](#gld-mcp)
 - [gld mcp list](#gld-mcp-list)
@@ -911,6 +914,30 @@ Options:
   -V, --version         Print version
 ```
 
+## gld join
+
+```text
+用一次性邀请配对，生成目标机的私有节点配置
+
+Usage: gld join [OPTIONS] --hub <HUB> --config <CONFIG> --share <SHARE> --invite-stdin
+
+Options:
+      --hub <HUB>                        Hub 的 HTTPS 基地址，保留 /hub 等路径前缀
+  -w, --workspace <WS>                   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --config <CONFIG>                  要创建的私有节点配置；已有文件不会被覆盖
+      --json                             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart                     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --share <SHARE>                    明确共享的已登记本机项目名称或完整 ID；可重复指定
+      --invite-stdin                     从管道或文件接收一次性邀请，不将其放入 argv
+      --timeout <SECS>                   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --ca-certificate <CA_CERTIFICATE>  显式信任的 DER CA 证书；仍核验 TLS 主机名
+      --home <DIR>                       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color                         关闭彩色输出（也可设置环境变量 NO_COLOR）
+      --yes                              确认所显示的 Hub、执行账号和共享项目，供非交互调用使用
+  -h, --help                             Print help
+  -V, --version                          Print version
+```
+
 ## gld node
 
 ```text
@@ -923,7 +950,29 @@ Commands:
   register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
   revoke             撤销节点凭据并关闭其连接；保留机器身份和项目目录
   rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
+  shares             查看目标机共享名单；传入 --share 完整替换，修改前须停止该配置的节点进程
   run                在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld node invite
+
+```text
+生成十分钟有效的一次性邀请；替换同名未使用邀请，只在本机输出
+
+Usage: gld node invite [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  配对成功后使用的机器展示名称
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
@@ -1000,6 +1049,26 @@ Options:
       --no-color          关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help              Print help
   -V, --version           Print version
+```
+
+## gld node shares
+
+```text
+查看目标机共享名单；传入 --share 完整替换，修改前须停止该配置的节点进程
+
+Usage: gld node shares [OPTIONS] --config <CONFIG>
+
+Options:
+      --config <CONFIG>     仅本账号可读的节点 JSON 配置；运行中也可查看
+  -w, --workspace <WS>      目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json                以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --share <WORKSPACES>  新的完整共享名单，接受项目完整 ID 或唯一名称；可重复，至少保留一个项目；省略则只查看
+      --no-autostart        守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>      等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color            关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help                Print help
+  -V, --version             Print version
 ```
 
 ## gld node run

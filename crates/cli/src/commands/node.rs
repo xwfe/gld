@@ -9,6 +9,7 @@ use serde_json::Value;
 use super::Ctx;
 use crate::cli::NodeCmd;
 use crate::error::{CliError, CliResult};
+use crate::output::Output;
 
 pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
     let (request, note) = match command {
@@ -51,7 +52,9 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
             },
             "新凭据已生效，旧连接已关闭。更新目标机的私有配置后重新运行节点；机器与项目句柄保持。",
         ),
-        NodeCmd::Run { .. } => unreachable!("node run is handled before Backend"),
+        NodeCmd::Run { .. } | NodeCmd::Shares { .. } => {
+            unreachable!("local node commands are handled before Backend")
+        }
     };
     let result: Value = ctx.backend.call_typed(request).await?;
     if !ctx.out.json_or(&result) {
@@ -87,9 +90,53 @@ fn read_credential(enabled: bool) -> Result<String, CliError> {
 }
 
 pub async fn run_config(path: &Path) -> CliResult {
-    let config = gld_core::nodes::config::NodeConfig::load(path).map_err(CliError::new)?;
-    tokio::task::spawn_blocking(move || gld_core::nodes::client::run(config))
-        .await
-        .map_err(|_| CliError::new("节点进程异常结束。"))?
-        .map_err(CliError::new)
+    let storage = gld_core::nodes::local_config::LocalConfig::lock(path).map_err(CliError::new)?;
+    let config = storage.load().map_err(CliError::new)?;
+    tokio::task::spawn_blocking(move || {
+        let _configuration_lock = storage;
+        gld_core::nodes::client::run(config)
+    })
+    .await
+    .map_err(|_| CliError::new("节点进程异常结束。"))?
+    .map_err(CliError::new)
+}
+
+pub fn shares(path: &Path, workspaces: &[String], out: Output) -> CliResult {
+    let changed = !workspaces.is_empty();
+    let view = if changed {
+        gld_core::nodes::sharing::replace(path, workspaces)
+    } else {
+        gld_core::nodes::sharing::show(path)
+    }
+    .map_err(CliError::new)?;
+    if !out.json_or(&view) {
+        out.kv(&[
+            ("Hub", view.hub_url),
+            ("Hub ID", view.hub_id),
+            ("机器 ID", view.machine_id),
+            ("配置", view.config_path.display().to_string()),
+        ]);
+        let rows: Vec<_> = view
+            .workspaces
+            .into_iter()
+            .map(|workspace| {
+                vec![
+                    workspace.id,
+                    workspace.name.unwrap_or_else(|| "—".into()),
+                    workspace.path.unwrap_or_else(|| "—".into()),
+                    if workspace.available {
+                        "可共享".into()
+                    } else {
+                        "缺失或未限制读取".into()
+                    },
+                    "只读".into(),
+                ]
+            })
+            .collect();
+        out.table(&["项目 ID", "名称", "路径", "本机登记", "权限"], &rows);
+        if changed {
+            out.note("已替换共享名单。重新运行节点并连接 Hub 后生效。");
+        }
+    }
+    Ok(())
 }

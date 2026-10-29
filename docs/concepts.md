@@ -295,6 +295,33 @@ gld join --hub https://hub.example.com/hub --config node.json --share api --invi
 读取时核对同一文件句柄，无法确认 ACL 的卷拒绝保存。配置操作以稳定文件锁互斥，
 文件在私有写入后无覆盖发布；配置文件应保留在执行账号管理的目录中。
 
+#### 查看和修改目标机共享项目
+
+在目标机查看这份配置的共享名单；节点正在运行时也可以查看：
+
+```bash
+gld node shares --config node.json
+```
+
+要修改名单，先在节点前台进程按 Ctrl-C 结束，再列出要保留的全部项目。例如只保留 `web`：
+
+```bash
+gld node shares --config node.json --share web
+gld node run --config node.json
+```
+
+不传 `--share` 是查看；传入一个或多个 `--share` 会完整替换名单，接受完整项目 ID 或唯一名称。
+名单须保留1～256个明确项目。重复、未知、名称歧义或未开启 `confine-reads` 时拒绝修改，原文件保留。
+节点进程在在线、断线等待和重连期间都持有这份配置的锁；须结束进程后再改。
+修改只更新目标机文件，重新运行节点并完成项目发现后 Hub 才更新目录；剩余项目句柄保持不变，
+被移除的项目不再接受调用。修改保留 Hub 地址和身份、机器 ID、节点凭据及 CA 信任设置。
+
+`--json` 输出 `hub_url`、`hub_id`、`machine_id`、`config_path` 和 `workspaces`，不输出凭据或 CA 路径。
+每个项目有 `id`、仍可取得的 `name` / `path`、`available` 和当前固定为 `true` 的 `read_only`。
+`available` 只表示本机仍有项目登记且开启了 `confine-reads`；在线状态或目录是否可访问须另行判断。
+失去登记的项目仍保留 ID，`available=false`，缺失的名称和路径省略，方便操作员修正名单。
+查看和修改都在目标机本地执行，不会启动 daemon。
+
 #### 使用预置凭据或管理已登记节点
 
 先在目标机用已有 `gld add` 登记要共享的目录，再从 `gld --json ls` 取得确切项目 ID。

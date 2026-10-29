@@ -1,4 +1,4 @@
-//! 原生节点的鉴权、单连接登记与项目读取路由；邀请配对由后续切片接入。
+//! 原生节点的邀请配对、鉴权、单连接登记与项目共享路由。
 //! 复用 bridge::peer 与现有 handle_request，不维护第二套 JSON-RPC 或消息恢复协议。
 
 pub mod client;
@@ -10,4 +10,5 @@ pub mod join;
 pub mod local_config;
 pub mod pairing;
 pub mod registry;
+pub mod sharing;
 pub mod transport;
