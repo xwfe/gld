@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::GrantRecord;
 use crate::bridge::member::CcnmMember;
+use crate::nodes::config::MachineRecord;
 use crate::settings::{FrpProfile, GlobalGatewayConfig, HubConfig, ProxyConfig};
 use crate::workspace::WorkspaceProfile;
 
@@ -57,6 +58,11 @@ pub struct AppData {
     /// 旧数据文件里没有这个键，`default` 让它读出来是空的。
     #[serde(default)]
     pub ccnm_members: Vec<CcnmMember>,
+    /// 原生节点的稳定 Hub 身份和显式登记；旧配置默认不开节点。
+    #[serde(default)]
+    pub node_hub_id: String,
+    #[serde(default)]
+    pub node_machines: Vec<MachineRecord>,
     /// 只开部分项目的凭据（RFC-0007），连同它们自己的钥匙。
     #[serde(default)]
     pub grants: Vec<GrantRecord>,

@@ -35,3 +35,5 @@ tempfile = { workspace = true }
 # 不会给 Cargo.lock 添新条目。
 base64 = "0.22"
 sha2 = "0.10"
+# 原生节点集成测试的隔离 TLS 入口，版本沿用 core 的锁定依赖。
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

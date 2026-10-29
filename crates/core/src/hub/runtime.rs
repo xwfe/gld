@@ -143,6 +143,15 @@ pub async fn served_tools() -> Option<Vec<serde_json::Value>> {
         .ok()
 }
 
+/// 旧 /hub 入口直接把节点 socket 交给同一个 Hub，不再建立代理连接。
+pub async fn nodes() -> Option<Arc<crate::nodes::registry::Nodes>> {
+    let runtime = RUNTIME.lock().await;
+    let active = runtime
+        .as_ref()
+        .filter(|runtime| !runtime.handle.is_finished())?;
+    Some(active.hub.nodes())
+}
+
 /// 跑着的服务实际用的公网基地址和隧道报错；没在跑是 `None`。
 pub async fn public_base() -> Option<(String, String)> {
     RUNTIME

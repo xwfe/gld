@@ -28,18 +28,21 @@
 //! 不给枚举机会；成员的说明文件 / Skill / 历史摘要不在 initialize 里混着注入，
 //! 由 `workspace_context` 按工作区单独取，免得 A 的 AGENTS.md 被拿去指导 B。
 //!
-//! ## 成员有两种
+//! ## 成员有三种
 //!
 //! [`Member::Local`] 是本机的一个工作区目录，[`Member::Remote`] 是另一台机器上
 //! 由 ccnm 管着的 workspace。两者**不共用类型、不互相伪装**（RFC-0002 5.1）：
 //! 远端成员没有本机根目录、没有 [`ToolContext`]、不建 Planning 文件，gld 这边
 //! 连它在对面是哪个目录都不知道。
+//! 原生 gld 节点是独立的 Native 成员，记录机器和目标项目 ID，复用本机工具名。
+//! 它没有 Hub 本机根目录；工具在节点的受限项目上下文里执行。
 //!
 //! 工具也是两套，名字不重叠：远端的一律带 `remote_` 前缀，见
 //! [`crate::bridge::tools`]。用错了直接报错，**绝不落到另一边执行**——
 //! gld 本机也有 `search_text` 和 `list_files`，跟 ccnm 的同名工具根本不是
 //! 一个契约（分页、参数、错误码都不同）。
 
+mod native;
 #[cfg(test)]
 mod node_transport_tests;
 pub mod runtime;
@@ -61,6 +64,7 @@ use crate::bridge::session::{CodingError, Connections};
 use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
 use crate::machine_mcp::{self, installed::Installed, relay::Relay};
+use crate::nodes::registry::{NativeMember, Nodes};
 use crate::planning::PlanningService;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{
@@ -160,12 +164,14 @@ pub const WORKSPACE_CONTEXT: &str = "workspace_context";
 /// 经 hub 不暴露的工具：它们改的是所有对话共享的服务端状态，见模块说明第 1 条。
 const HIDDEN_TOOLS: &[&str] = &["set_default_cwd", "get_default_cwd"];
 
-const INSTRUCTIONS: &str = "This server is a gld hub: one connection to several workspaces. Every workspace tool call must include `workspace` (a project id or name returned by list_workspaces, or the exact managed ID returned by work_session). Listing projects, work_session start/list and machine MCP relay calls do not need a workspace. The server keeps no current workspace, so pass it again on every workspace call and never rely on the workspace of an earlier call. Workspaces are isolated from each other: paths are relative to the selected workspace root, command sessions and output_ref values only exist in the workspace that created them, and planning mode, permissions and tool sets are enforced per workspace. Before working in a workspace for the first time in a conversation, call workspace_context for it and follow only that workspace's instructions; never apply one workspace's instructions or skills to another. Planning mode is controlled exclusively by the gld CLI, and only the human operator can accept Goal or Plan reviews. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, retry the same tool with confirm=true only when the user's request already clearly authorizes it; otherwise ask the user. A workspace listed with kind=remote lives on another machine and is reached only through the tools named remote_*, which it lists; the hub's own tools do not work on it and the remote_* tools do not work on a local workspace. The two sets are different contracts even where the names look alike, so never substitute one for the other, and read a remote workspace only through its own tools rather than assuming anything about it from a local one.";
+const INSTRUCTIONS: &str = "This server is a gld hub: one connection to several workspaces. Every workspace tool call must include `workspace` (a project id or name returned by list_workspaces, or the exact managed ID returned by work_session). Listing projects, work_session start/list and machine MCP relay calls do not need a workspace. The server keeps no current workspace, so pass it again on every workspace call and never rely on the workspace of an earlier call. Workspaces are isolated from each other: paths are relative to the selected workspace root, command sessions and output_ref values only exist in the workspace that created them, and planning mode, permissions and tool sets are enforced per workspace. Before working in a workspace for the first time in a conversation, call workspace_context for it and follow only that workspace's instructions; never apply one workspace's instructions or skills to another. Planning mode is controlled exclusively by the gld CLI, and only the human operator can accept Goal or Plan reviews. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, retry the same tool with confirm=true only when the user's request already clearly authorizes it; otherwise ask the user. A workspace listed with kind=node is on a native gld machine: use its exact hub workspace id with the normal tools; offline nodes never fall back to this machine. A workspace listed with kind=remote is managed by ccnm and is reached only through the tools named remote_*, which it lists; the hub's own tools do not work on it and the remote_* tools do not work on a local workspace. The two sets are different contracts even where the names look alike, so never substitute one for the other, and read a remote workspace only through its own tools rather than assuming anything about it from a local one.";
 
 /// 成员名单从哪儿来。
 enum Members {
     /// 每次请求从数据文件读：增删成员、成员改配置立刻生效，不用重启 hub。
     DataFile,
+    /// 节点只共享明确选中的本机项目；不启动监听器或继承 Hub 成员。
+    Node(Vec<String>),
     /// 固定的一份，给单元测试用；套 Mutex 是为了测"改完配置下一次调用就生效"。
     #[cfg(test)]
     Fixed(Box<Mutex<Fixed>>),
@@ -185,13 +191,12 @@ struct Fixed {
 /// **不拿假路径把远端塞进本地那套**（RFC-0002 5.1）：`Local` 有本机根目录、
 /// 工具上下文、Planning 和 Harness，`Remote` 一样都没有，它只有「哪台机器上的
 /// 哪个 workspace」和一个访问上限。
-/// 两个变体差了 776 字节（本地的 900+，远端的 128）。不 Box：成员名单每次
-/// 请求都要重建，一个 hub 也就十来个成员，多这点内存远比多十来次堆分配和
-/// 一层解引用划算——何况本地那份 `WorkspaceProfile` 本来就是整份克隆出来的。
+/// 本地 profile 比远端标识大；沿用整份配置快照，不为成员列表额外装箱。
 #[allow(clippy::large_enum_variant)]
 enum Member {
     Local(WorkspaceProfile),
     Remote(CcnmMember),
+    Native(NativeMember),
 }
 
 impl Member {
@@ -199,6 +204,7 @@ impl Member {
         match self {
             Member::Local(profile) => &profile.id,
             Member::Remote(remote) => &remote.id,
+            Member::Native(native) => &native.id,
         }
     }
 
@@ -206,6 +212,7 @@ impl Member {
         match self {
             Member::Local(profile) => &profile.name,
             Member::Remote(remote) => &remote.name,
+            Member::Native(native) => &native.name,
         }
     }
 }
@@ -231,6 +238,7 @@ pub struct Hub {
     contexts: Mutex<HashMap<String, CachedContext>>,
     /// 远端成员的 bridge 连接。本地成员一条都用不到。
     connections: Connections,
+    nodes: Arc<Nodes>,
     /// 转发本机装好的 MCP server（`gld mcp on` 开了才有东西）。
     relay: Relay,
     /// 测试用：不读这台机器的 `~/.claude.json`，用给定的一份；也不真起进程。
@@ -277,6 +285,7 @@ impl Hub {
             usage: Arc::new(ServiceUsage::default()),
             contexts: Mutex::new(HashMap::new()),
             connections,
+            nodes: Arc::new(Nodes::new()),
             relay: Relay::new(),
             #[cfg(test)]
             installed: None,
@@ -382,6 +391,7 @@ impl Hub {
         // 远端 bridge 必须走正常关闭：直接留着进程不管，远端 Runtime 的写锁
         // 会留下 held 标记要人工恢复。
         self.connections.close_all();
+        self.nodes.close_all();
         self.relay.close_all();
     }
 
@@ -400,7 +410,7 @@ impl Hub {
 
         let mut routed = None;
         let result = match method {
-            "initialize" => Ok(self.initialize_result(auth.grant())),
+            "initialize" => Ok(self.initialize_result(auth)),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": self.list_tools_for(auth.grant()) })),
             "tools/call" => self.call(auth, &params, &mut routed),
@@ -416,10 +426,11 @@ impl Hub {
         (response, routed)
     }
 
-    fn initialize_result(&self, grant: Option<&Grant>) -> Value {
+    fn initialize_result(&self, auth: &AuthContext) -> Value {
+        let grant = auth.grant();
         let catalog = match self
             .snapshot()
-            .map(|(members, settings)| (visible(members, grant), settings))
+            .map(|(members, settings)| (visible_for(members, auth), settings))
         {
             Ok((members, settings)) if members.is_empty() => {
                 if self.work_sessions_offered(&settings, grant) {
@@ -440,6 +451,7 @@ impl Hub {
                             member.id()
                         ),
                         Member::Local(_) => format!("- {} (id {})", member.name(), member.id()),
+                        Member::Native(native) => format!("- {} (id {}, native node, online={}; use this hub's workspace tools)", native.name, native.id, native.online),
                         Member::Remote(_) => format!(
                             "- {} (id {}, remote: use the remote_* tools)",
                             member.name(),
@@ -521,7 +533,7 @@ impl Hub {
                 .iter()
                 .filter_map(|m| match m {
                     Member::Remote(remote) => Some(remote),
-                    Member::Local(_) => None,
+                    Member::Local(_) | Member::Native(_) => None,
                 })
                 .collect();
             if !remotes.is_empty() {
@@ -600,7 +612,7 @@ impl Hub {
             return Ok(plain_result(tool_err(error)));
         }
         self.relay.retain(&settings.relayed_mcp_servers);
-        let members = visible(members, auth.grant());
+        let members = visible_for(members, auth);
         if canonical == LIST_WORKSPACES {
             let mut listed = list_workspaces(&members);
             if self.work_sessions_offered(&settings, auth.grant()) && auth.is_authenticated() {
@@ -656,11 +668,11 @@ impl Hub {
                     });
                     self.coding_session(auth, canonical, remote, &args)
                 }
-                Member::Local(local) => plain_result(tool_err(WorkspaceError::ToolDetails {
+                Member::Local(_) | Member::Native(_) => plain_result(tool_err(WorkspaceError::ToolDetails {
                     code: "TOOL_IS_FOR_REMOTE_WORKSPACES",
                     message: format!(
-                        "{canonical} only works on a remote ccnm workspace, and {} is a local one.",
-                        local.name
+                        "{canonical} only works on a remote ccnm workspace; {} uses the hub workspace tools.",
+                        member.name()
                     ),
                     category: "validation",
                     retryable: false,
@@ -669,9 +681,27 @@ impl Hub {
             });
         }
 
-        // 两套工具、两种成员，只有对角线上的两格能往下走。用错的那两格都
-        // 只报错，**绝不落到另一边执行**（RFC-0002 5.2）。
+        // 原生节点复用项目工具；ccnm 的 remote_* 保持独立，绝不跨类型兜底执行。
         match (remote_tools::find(canonical), member) {
+            (remote_tool, Member::Native(native)) => {
+                *routed = Some(Routed { workspace_id: native.id.clone(), context: None });
+                if remote_tool.is_some() {
+                    return Ok(plain_result(tool_err(WorkspaceError::Tool {
+                        code: "TOOL_IS_FOR_REMOTE_WORKSPACES",
+                        message: "Native nodes use the normal workspace tools, not remote_*.".into(),
+                        category: "validation", retryable: false,
+                    })));
+                }
+                let result = self.nodes.call(auth, native, canonical, args.clone());
+                if canonical == "server_info" && result["structuredContent"]["ok"] == true {
+                    // 工具在节点执行，但 connection 描述的是客户端当前连接的 Hub。
+                    let structured = self.with_connection_surface(result["structuredContent"].clone(), auth.grant());
+                    let mut wrapped = wrap_mcp_tool_result(canonical, &args, structured);
+                    wrapped["_meta"] = result["_meta"].clone();
+                    return Ok(wrapped);
+                }
+                Ok(result)
+            }
             (Some(tool), Member::Remote(remote)) => {
                 *routed = Some(Routed {
                     workspace_id: remote.id.clone(),
@@ -975,13 +1005,14 @@ impl Hub {
                 ))
             })
             .map_err(|error| error.to_string())?,
+            Members::Node(ids) => self.node_snapshot(ids)?,
             #[cfg(test)]
             Members::Fixed(fixed) => {
                 let fixed = fixed.lock().expect("fixed members").clone();
                 (fixed.profiles, fixed.remotes, fixed.settings)
             }
         };
-        let members = settings
+        let mut members: Vec<Member> = settings
             .hub
             .members
             .iter()
@@ -1000,6 +1031,9 @@ impl Hub {
                     })
             })
             .collect();
+        if matches!(self.members, Members::DataFile) {
+            members.extend(self.nodes.members()?.into_iter().map(Member::Native));
+        }
         Ok((members, settings))
     }
 
@@ -1022,14 +1056,21 @@ impl Hub {
                 return Ok(cached.context.clone());
             }
         }
-        let context = Arc::new(build_tool_context(
+        let mut context = build_tool_context(
             PathBuf::from(&member.path),
             &member.name,
             self.auth.clone(),
             &member.runtime,
             settings,
             self.usage.clone(),
-        )?);
+        )?;
+        if matches!(self.members, Members::Node(_)) {
+            // 节点不自动带出整机 Skill / 用户说明；项目根说明走受限文件读取。
+            context.agent_context = None;
+            context.ai_instructions = member.runtime.ai_instructions.clone();
+            context.skills.clear();
+        }
+        let context = Arc::new(context);
         contexts.insert(
             member.id.clone(),
             CachedContext {
@@ -1118,7 +1159,9 @@ impl Hub {
                 .state()
                 .ok()
                 .map(|state| state.mode),
-            "instructions": context.current_ai_instructions(),
+            "instructions": if matches!(self.members, Members::Node(_)) {
+                native::project_instructions(context)
+            } else { context.current_ai_instructions() },
             "skills": skills,
             "history_context": crate::tools::history::context_snapshot(context).ok().flatten(),
             "scope": "These instructions and skills apply to this workspace only."
@@ -1158,9 +1201,16 @@ fn visible(members: Vec<Member>, grant: Option<&Grant>) -> Vec<Member> {
         None => members,
         Some(grant) => members
             .into_iter()
-            .filter(|member| grant.allows(member.id()))
+            .filter(|member| !matches!(member, Member::Native(_)) && grant.allows(member.id()))
             .collect(),
     }
+}
+
+fn visible_for(members: Vec<Member>, auth: &AuthContext) -> Vec<Member> {
+    visible(members, auth.grant())
+        .into_iter()
+        .filter(|member| auth.is_authenticated() || !matches!(member, Member::Native(_)))
+        .collect()
 }
 
 /// 只读 grant 能调的本地工具：就是 read-only 工具集那一份，和服务、项目自己的工具集
@@ -1244,6 +1294,7 @@ fn list_workspaces(members: &[Member]) -> Value {
         "workspaces": members
             .iter()
             .map(|member| match member {
+                Member::Native(native) => native.listed(),
                 Member::Local(local) => {
                     let mut entry = json!({
                         "id": local.id,
@@ -1270,7 +1321,7 @@ fn list_workspaces(members: &[Member]) -> Value {
             })
             .collect::<Vec<_>>(),
         "count": members.len(),
-        "usage": "Pass one of these ids or names as `workspace` on every other tool call. A workspace with kind=remote lives on another machine: use only the tools it lists, not this hub's own ones."
+        "usage": "Pass one of these ids or names as `workspace` on every other tool call. A workspace with kind=node uses the normal workspace tools and its exact id, including when its machine is offline. A workspace with kind=remote uses only the remote_* tools it lists."
     }))
 }
 
@@ -2257,7 +2308,7 @@ mod tests {
         let (members, settings) = fixture.hub.snapshot().expect("snapshot");
         let local = |index: usize| match &members[index] {
             Member::Local(profile) => profile,
-            Member::Remote(_) => unreachable!("这个 fixture 里都是本地成员"),
+            Member::Remote(_) | Member::Native(_) => unreachable!("这个 fixture 里都是本地成员"),
         };
         let api = local(0);
         let web = local(1);

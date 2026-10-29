@@ -27,6 +27,16 @@ pub async fn dispatch(
     match request {
         // ---- 守护进程 ----
         R::Ping => ok(&"pong"),
+        R::NodeRegister {
+            name,
+            id,
+            credential,
+        } => {
+            let registered =
+                gld_core::nodes::config::register_machine(&name, id.as_deref(), &credential)
+                    .map_err(RpcError::app)?;
+            ok(&registered)
+        }
         R::DaemonInfo => match daemon {
             Some(context) => ok(&(context.info)()),
             None => Err(RpcError::protocol("当前不是守护进程，没有 daemon_info")),

@@ -45,7 +45,8 @@ use serde_json::Value;
 ///    同一版（还没换装过）里又加了 `prune`（`gld prune`），没再递增。
 /// 11：服务配置增加 workSessions 开关；旧守护进程会忽略它，不能把开关已生效报给用户。
 /// 12：workSessionLimits 加入服务配置，旧守护进程不能静默忽略容量约束。
-pub const PROTOCOL_VERSION: u32 = 12;
+/// 13：新增 node_register 节点凭据登记，旧守护进程需要升级后才能处理。
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +69,12 @@ pub enum Request {
     Ping,
     DaemonInfo,
     Shutdown,
+
+    NodeRegister {
+        name: String,
+        id: Option<String>,
+        credential: String,
+    },
 
     // ---- 工作区 ----
     ListWorkspaces,

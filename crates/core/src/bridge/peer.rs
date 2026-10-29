@@ -239,6 +239,11 @@ impl<T: Transport> Peer<T> {
         self.server_info.as_ref()
     }
 
+    /// 仅传输接入层用于空闲标准控制帧；请求 ID 与 JSON-RPC 仍归 Peer 管理。
+    pub(crate) fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// 远端有哪些工具。**不分页**：ccnm 的 bridge 一次全给，七个工具而已。
     pub fn list_tools(&mut self, timeout: Duration) -> Result<Vec<Value>, PeerError> {
         let result = self.request("tools/list", json!({}), timeout)?;
@@ -264,6 +269,20 @@ impl<T: Transport> Peer<T> {
         self.request(
             "tools/call",
             json!({ "name": name, "arguments": arguments }),
+            timeout,
+        )
+    }
+
+    pub fn call_tool_with_meta(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        meta: Value,
+        timeout: Duration,
+    ) -> Result<Value, PeerError> {
+        self.request(
+            "tools/call",
+            json!({ "name": name, "arguments": arguments, "_meta": meta }),
             timeout,
         )
     }

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{
     header::{
@@ -312,6 +313,7 @@ async fn serve(
     let profile_id = state.scope.clone();
     let app = Router::new()
         .route("/mcp", get(mcp_discovery).post(mcp_post))
+        .route("/nodes/v1/connect/{machine_id}", get(node_connect))
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_authorization_server_metadata),
@@ -379,6 +381,19 @@ async fn mcp_discovery(State(state): State<ListenerState>) -> Response {
         Json(mcp_discovery_payload(&state)),
     )
         .into_response()
+}
+
+/// 节点与 MCP 分开鉴权；不接受 OAuth、grant 或隧道服务凭据代替节点凭据。
+async fn node_connect(
+    State(state): State<ListenerState>,
+    Path(machine_id): Path<String>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let Endpoint::Hub(hub) = state.endpoint else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    crate::nodes::endpoint::upgrade(hub.nodes(), machine_id, headers, ws).await
 }
 
 fn mcp_discovery_payload(state: &ListenerState) -> Value {

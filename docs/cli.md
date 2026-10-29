@@ -24,6 +24,9 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld remote](#gld-remote)
 - [gld remote add](#gld-remote-add)
 - [gld remote remove](#gld-remote-remove)
+- [gld node](#gld-node)
+- [gld node register](#gld-node-register)
+- [gld node run](#gld-node-run)
 - [gld mcp](#gld-mcp)
 - [gld mcp list](#gld-mcp-list)
 - [gld mcp on](#gld-mcp-on)
@@ -112,6 +115,7 @@ Commands:
   share        给服务拿一个公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
   upgrade      改服务配置（端口 / 认证 / 工具集 / 公网入口），改完自动重启；也能改项目的目录和名称
   remote       远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
+  node         原生节点：登记机器，用一条出站连接共享指定项目（当前只读）
   grant        只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
   agent        委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
   mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
@@ -902,6 +906,70 @@ Options:
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
   -h, --help            Print help
   -V, --version         Print version
+```
+
+## gld node
+
+```text
+原生节点：登记机器，用一条出站连接共享指定项目（当前只读）
+
+Usage: gld node [OPTIONS] <COMMAND>
+
+Commands:
+  register  在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
+  run       在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld node register
+
+```text
+在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
+
+Usage: gld node register [OPTIONS] --credential-stdin <NAME>
+
+Arguments:
+  <NAME>  机器展示名称，不能含路径分隔符
+
+Options:
+      --id <ID>           可选的机器 ID，32 位小写十六进制；省略时随机生成
+  -w, --workspace <WS>    目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --credential-stdin  从 stdin 接收独立随机凭据；不要把凭据写在命令行参数中
+      --json              以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart      守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>    等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>        数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color          关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help              Print help
+  -V, --version           Print version
+```
+
+## gld node run
+
+```text
+在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
+
+Usage: gld node run [OPTIONS] --config <CONFIG>
+
+Options:
+      --config <CONFIG>  仅本账号可读的节点 JSON 配置；格式见 docs/concepts.md
+  -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 
 ## gld mcp

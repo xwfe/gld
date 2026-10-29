@@ -228,6 +228,10 @@ pub enum Command {
     #[command(subcommand)]
     Remote(RemoteCmd),
 
+    /// 原生节点：登记机器，用一条出站连接共享指定项目（当前只读）
+    #[command(subcommand)]
+    Node(NodeCmd),
+
     /// 只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
     ///
     ///   gld grant add alice api web           只开 api、web，只读：能看能搜，改不了文件、跑不了命令
@@ -346,6 +350,27 @@ pub enum Command {
     /// 全局共享公网入口（旧：多个单项目服务共用一个域名）
     #[command(subcommand, alias = "gw", hide = true)]
     Gateway(GatewayCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NodeCmd {
+    /// 在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
+    Register {
+        /// 机器展示名称，不能含路径分隔符
+        name: String,
+        /// 可选的机器 ID，32 位小写十六进制；省略时随机生成
+        #[arg(long)]
+        id: Option<String>,
+        /// 从 stdin 接收独立随机凭据；不要把凭据写在命令行参数中
+        #[arg(long, required = true)]
+        credential_stdin: bool,
+    },
+    /// 在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
+    Run {
+        /// 仅本账号可读的节点 JSON 配置；格式见 docs/concepts.md
+        #[arg(long)]
+        config: PathBuf,
+    },
 }
 
 // ---------------------------------------------------------------- daemon

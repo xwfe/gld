@@ -13,6 +13,7 @@ mod hub;
 mod inspect;
 mod logs;
 mod mcp;
+mod node;
 mod planning;
 mod prune;
 mod secret;
@@ -59,6 +60,10 @@ pub async fn run(cli: Cli) -> CliResult {
     if let Command::Computer(command) = &cli.command {
         return computer::run(command, out).await;
     }
+    // 节点只出站，不连接/自动拉起本机守护进程；登记凭据仍走 Backend 单写入口。
+    if let Command::Node(crate::cli::NodeCmd::Run { config }) = &cli.command {
+        return node::run_config(config).await;
+    }
 
     let backend = Backend::connect(
         !cli.global.no_autostart,
@@ -91,6 +96,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Share(args) => share::run(&mut ctx, args).await,
         Command::Upgrade(args) => upgrade::run(&mut ctx, args).await,
         Command::Remote(command) => hub::remote(&mut ctx, command).await,
+        Command::Node(command) => node::run(&mut ctx, command).await,
         Command::Grant(command) => grant::run(&mut ctx, command).await,
         Command::Agent(command) => agent::run(&mut ctx, command).await,
         Command::Mcp(command) => mcp::run(&mut ctx, command).await,

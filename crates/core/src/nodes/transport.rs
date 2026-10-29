@@ -3,15 +3,19 @@
 
 use std::io;
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::async_rt;
 use crate::bridge::peer::Transport;
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;
 
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,10 +27,14 @@ pub fn socket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_MESSAGE_BYTES))
 }
 
-pub struct WebSocketTransport<S> {
-    socket: Option<WebSocketStream<S>>,
+pub struct SocketTransport<S> {
+    socket: Option<S>,
     last_error: String,
+    last_ping: Instant,
+    waiting_pong: Option<Instant>,
 }
+
+pub type WebSocketTransport<S> = SocketTransport<WebSocketStream<S>>;
 
 impl<S: AsyncRead + AsyncWrite + Unpin> WebSocketTransport<S> {
     /// 接受普通 WS 或 TLS stream；网络鉴权、TLS 校验和单机唯一连接由接入层负责。
@@ -43,10 +51,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocketTransport<S> {
                 "node socket must use bounded message and frame sizes",
             ));
         }
-        Ok(Self {
+        Ok(Self::bounded(socket))
+    }
+}
+
+impl<S> SocketTransport<S> {
+    pub(crate) fn bounded(socket: S) -> Self {
+        Self {
             socket: Some(socket),
             last_error: String::new(),
-        })
+            last_ping: Instant::now(),
+            waiting_pong: None,
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.socket.is_some()
     }
 
     fn disconnect(&mut self, reason: &str) {
@@ -55,7 +75,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocketTransport<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for WebSocketTransport<S> {
+impl<S, E> Transport for SocketTransport<S>
+where
+    S: Stream<Item = Result<Message, E>> + Sink<Message, Error = E> + Unpin + Send,
+{
     fn send_line(&mut self, line: &str) -> io::Result<()> {
         if line.len() > MAX_MESSAGE_BYTES {
             return Err(io::Error::new(
@@ -93,17 +116,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for WebSocketTransport<
         let Some(socket) = self.socket.as_mut() else {
             return Ok(None);
         };
+        let mut saw_pong = false;
         let outcome = async_rt::block_on(async {
             tokio::time::timeout(timeout, async {
                 loop {
                     match socket.next().await {
                         Some(Ok(Message::Text(text))) => return Ok(Some(text.to_string())),
                         // tungstenite 自动准备 Pong；flush 发送标准响应，不引入业务心跳协议。
-                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
+                        Some(Ok(Message::Ping(_))) => {
                             socket
                                 .flush()
                                 .await
                                 .map_err(|_| "WebSocket control write failed")?;
+                        }
+                        Some(Ok(Message::Pong(payload))) => {
+                            saw_pong |= payload.as_ref() == b"gld-node";
                         }
                         Some(Ok(Message::Close(_))) => {
                             let _ = socket.flush().await;
@@ -119,6 +146,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for WebSocketTransport<
             })
             .await
         });
+        if saw_pong {
+            self.waiting_pong = None;
+        }
         match outcome {
             Ok(Ok(Some(text))) => Ok(Some(text)),
             Ok(Ok(None)) => {
@@ -145,8 +175,72 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for WebSocketTransport<
     fn shutdown(&mut self, grace: Duration) {
         if let Some(mut socket) = self.socket.take() {
             async_rt::block_on(async {
-                let _ = tokio::time::timeout(grace, socket.close(None)).await;
+                let _ = tokio::time::timeout(grace, socket.close()).await;
             });
+        }
+    }
+}
+
+impl<S, E> SocketTransport<S>
+where
+    S: Stream<Item = Result<Message, E>> + Sink<Message, Error = E> + Unpin + Send,
+{
+    /// 空闲短等不是 RPC 超时；Close、EOF 或标准 Pong 超时才释放机器名额。
+    pub fn poll_idle(&mut self, wait: Duration) {
+        if self
+            .waiting_pong
+            .is_some_and(|sent| sent.elapsed() >= Duration::from_secs(20))
+        {
+            self.disconnect("node WebSocket Pong timed out");
+            return;
+        }
+        if self.waiting_pong.is_none() && self.last_ping.elapsed() >= Duration::from_secs(20) {
+            let Some(socket) = self.socket.as_mut() else {
+                return;
+            };
+            let sent = async_rt::block_on(async {
+                tokio::time::timeout(
+                    WRITE_TIMEOUT,
+                    socket.send(Message::Ping(b"gld-node".to_vec().into())),
+                )
+                .await
+            });
+            if !matches!(sent, Ok(Ok(()))) {
+                self.disconnect("node WebSocket Ping write failed");
+                return;
+            }
+            let now = Instant::now();
+            self.last_ping = now;
+            self.waiting_pong = Some(now);
+        }
+        let Some(socket) = self.socket.as_mut() else {
+            return;
+        };
+        let outcome = async_rt::block_on(async {
+            tokio::time::timeout(wait, async {
+                let message = socket.next().await;
+                if matches!(&message, Some(Ok(Message::Ping(_) | Message::Close(_)))) {
+                    socket.flush().await.map_err(|_| ())?;
+                }
+                Ok::<_, ()>(message)
+            })
+            .await
+        });
+        match outcome {
+            Err(_) => {}
+            Ok(Ok(Some(Ok(Message::Ping(_))))) => {}
+            Ok(Ok(Some(Ok(Message::Pong(payload))))) => {
+                if payload.as_ref() == b"gld-node" {
+                    self.waiting_pong = None;
+                }
+            }
+            Ok(Ok(Some(Ok(Message::Close(_)))) | Ok(None)) => {
+                self.disconnect("node connection closed")
+            }
+            Ok(Ok(Some(Ok(_)))) => self.disconnect("unsolicited node RPC message"),
+            Ok(Err(_) | Ok(Some(Err(_)))) => {
+                self.disconnect("WebSocket read failed or message exceeded its limit")
+            }
         }
     }
 }

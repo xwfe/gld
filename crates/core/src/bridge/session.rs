@@ -254,7 +254,7 @@ impl Offered {
     }
 
     /// 这次调用能不能发出去。
-    fn check(&self, tool: &str, arguments: &Value) -> Result<(), PeerError> {
+    pub(crate) fn check(&self, tool: &str, arguments: &Value) -> Result<(), PeerError> {
         let Some(accepted) = self.tools.get(tool) else {
             return Err(PeerError::Unsupported {
                 tool: tool.to_string(),

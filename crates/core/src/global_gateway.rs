@@ -394,6 +394,7 @@ async fn serve(
             get(proxy_hub_authorization_server_metadata),
         )
         .route("/hub", any(proxy_hub_root))
+        .route("/hub/nodes/v1/connect/{machine_id}", get(hub_node_connect))
         .route("/hub/{*path}", any(proxy_hub_path))
         .with_state(ProxyState { client });
     axum::serve(listener, app)
@@ -497,6 +498,21 @@ async fn proxy_hub_root(
     body: Bytes,
 ) -> Response {
     proxy_hub(state, String::new(), method, uri, headers, body).await
+}
+
+async fn hub_node_connect(
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let enabled = DataStore::read_file(|data| Ok(data.hub.use_global_gateway));
+    if !matches!(enabled, Ok(true)) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(nodes) = crate::hub::runtime::nodes().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    crate::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
 }
 
 async fn proxy_hub_path(

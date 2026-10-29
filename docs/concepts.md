@@ -211,7 +211,7 @@ gld upgrade --work-max-active 128 --work-max-records 4096 --work-max-bytes 53687
 ### 桌面执行器预检：computer probe
 
 这是已经提供的 **Cua 专用研究预检**，不是使用 gld 基础功能的必经步骤。
-新的轻量桌面与原生多机方向见 [RFC-0013](rfc/0013-native-machines-and-desktop.md)，尚未实现；
+轻量桌面仍按 [RFC-0013](rfc/0013-native-machines-and-desktop.md) 后续实施；原生节点项目读取见下节。
 它不要求 Cua 或 ccnm。本节保留已有命令用法，只有明确选择研究 Cua 时才在执行器所在机器运行：
 
 ```bash
@@ -248,11 +248,93 @@ Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并�
 结束或失败后关闭本次 stdio 进程，清理本次目录；清理失败会返回保留位置，不扫描其他缓存或接管常驻 App。
 本机进程退出不等于桌面输入停止已通过验收，公开 `computer_manage/observe/act` 仍未提供。
 
+### 原生 gld 节点：M0 项目读取
+
+目标机可以主动连回同一个 Hub，Hub 再用已有的项目工具读目标机文件。本阶段提供
+`gld node register` 和 `gld node run`，使用操作员预置的独立凭据及私有配置文件。
+邀请配对、自动安装、后台自启动、普通退避重连和远端写入/执行按
+[RFC-0013](rfc/0013-native-machines-and-desktop.md) 的 M1/M2 继续实现；这里的预置配置不是一键加入。
+
+先在目标机用已有 `gld add` 登记要共享的目录，再从 `gld --json ls` 取得确切项目 ID。
+目标机不必启动 MCP 服务；项目必须开启 `confine-reads`。在 Hub 用一个独立随机凭据登记机器：
+
+```bash
+gld --json node register build-machine --credential-stdin < node-credential.txt
+```
+
+凭据文件由操作员事先准备，至少32个字符，仅含英文字母、数字、`_`、`-`；
+应使用至少256位的安全随机值。命令从 stdin 读取，只返回 `hub_id`、`machine_id` 和展示名称。
+Hub 只保存节点凭据的 SHA-256 摘要，不接受现有服务、项目或 grant 的钥匙复用为节点凭据。
+登记复用现有 CLI/守护进程的配置写入口；正在运行的守护进程协议过旧时会要求先升级。
+
+在目标机准备仅执行账号可读的 JSON 文件，例如 `node.json`：
+
+```json
+{
+  "hub_url": "https://hub.example.com/hub",
+  "hub_id": "<登记返回的32位Hub ID>",
+  "machine_id": "<登记返回的32位机器ID>",
+  "credential": "<与登记时相同的专用随机凭据>",
+  "workspaces": ["<明确共享的本机项目ID>"]
+}
+```
+
+`hub_url` 是基地址，保留已有 `/hub` 等前缀，不填 `/mcp`。
+节点连接的是基地址下 `/nodes/v1/connect/<machine_id>`；同一入口的反向代理须转发这条
+WebSocket 路由。节点验证 TLS 证书、主机名及 Hub ID，失败直接退出。
+旧全局网关的 `/hub` 节点路由也连接同一登记表，并继续受 `use_global_gateway` 开关约束。
+使用私有 CA 时可在配置增加 `ca_certificate`，指向不超过64 KiB的 DER CA证书；
+这是显式信任该 CA，仍验证主机名。HTTP/WS 只允许显式的回环 IP，用于本机隔离测试，
+不用于跨机器连接，TLS 失败也不会退回明文。
+
+Unix 上配置文件须设为仅当前账号可读写（例如 `chmod 600 node.json`），然后运行：
+
+```bash
+gld node run --config node.json
+```
+
+此进程只建立出站连接，前台保持运行；不启动本机入站 MCP、OAuth、隧道或 ccnm。
+每台机器到该 Hub 只有一条连接，所有共享项目和已认证调用方共用；
+重复连接被拒绝，原连接继续服务。正常断开或超时后退出，操作员可重新运行；
+重新连接会重新鉴权、初始化、列项目，不重放任何旧请求。
+
+AI 仍调用原来的 `list_workspaces`、`workspace_context`、`read_file` 等工具。
+原生节点成员的 `kind` 是 `node`，名称为 `机器名/项目名`，并返回
+`machine_id`、`online`、`tool_profile`。其 `id` 是绑定机器与目标项目的 Hub 不透明句柄，
+每次调用传这一句柄；不同机器的同名项目不会混用。列表不把远端目录冒充成本机路径。
+成员目录在 Hub 持久保存，离线仍能识别原句柄，重连不会变成另一个项目。
+
+本阶段有效工具集取 Hub、节点只读工具表和目标项目权限的交集。只有通过完整服务鉴权的调用方
+可发现/使用原生节点；noauth 和现有项目 grant 即使猜到 ID 也不可访问。
+Hub 根据已验证主体重建内部 `params._meta`，忽略客户端伪造的内部身份；
+节点核对绑定的 Hub，再将主体转换为独立调用方，并叠加目标机的共享项目只读范围。
+原始 OAuth、bearer 或 grant 令牌不随工具调用转发。共享 bearer 仍代表共享主体，
+不同 OAuth client_id 的调用方保持分开。
+
+节点 `workspace_context` 只带项目内联说明及受路径边界约束的根目录
+`AGENTS.override.md`（存在时优先于 `AGENTS.md`）、`CLAUDE.md`、`GEMINI.md`。
+每份最多16 KiB，截断会提示继续读取。不会自动带出该账号的全局说明、Skill、用户级 Prompt
+或本机 MCP 转发；项目文件可通过普通读取工具按需访问。
+回包保留目标机的正文、图片和错误状态，只将 `hub_workspace` 和其等值 JSON 文本副本改成
+Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路径仍是目标机上的路径。
+
+| 返回代码 | 含义与处理 |
+| --- | --- |
+| `MACHINE_ALREADY_CONNECTED`（HTTP 409） | 这台机器已有连接，先关闭原节点；不会把原连接挤掉 |
+| `MACHINE_OFFLINE` | 没有可用连接，本次未发送；不会改用 Hub 本机或另一个同名项目 |
+| `MACHINE_BUSY` | 这台机器的连接正忙，本次未发送；稍后显式再调 |
+| `NODE_TOOL_UNSUPPORTED` | 节点当前工具表没有该工具，本次未发送；M0 的写入/命令执行会被拒绝 |
+| `NODE_ARGUMENT_UNSUPPORTED` | 节点不接受某个参数，本次未发送；核对参数后再调 |
+| `NODE_REQUEST_TOO_LARGE` | 请求超出节点消息上限，在写入网络前拒绝 |
+| `NODE_OUTCOME_UNKNOWN` | 已进入发送/等待阶段，但未收到有效回复；不自动补发，不冒称未执行 |
+
+初始化、读写、消息大小与单次工具等待均有上限；空闲期处理标准 WebSocket Ping/Pong 和关闭，
+旧连接确认关闭后才释放名额。一个机器的等待不占全局连接表锁，其他机器可独立处理请求。
+本阶段未提供远端写入、命令启动、撤销管理、邀请或桌面能力；已有 ccnm 的 `remote_*` 契约继续独立使用。
+
 ### 成员还可以在别的机器上
 
-**当前可用的是下面的 ccnm 远端项目接法。**不依赖 ccnm、由目标机主动连接 Hub 的原生节点方案
-已写入 [RFC-0013](rfc/0013-native-machines-and-desktop.md)，但还没有提供安装加入或远端桌面接口。
-旧连接与 remote_* 工具保持不变，不需要为了新计划重配现有机器。
+下面是已有的 ccnm 远端项目接法，连接与 remote_* 工具保持不变，不需要为了原生节点重配。
 
 如果项目在另一台机器上、并且那台机器用 [ccnm](https://github.com/xwfe/ccnm) 管着，
 可以把它也加进服务：

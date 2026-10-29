@@ -128,96 +128,125 @@ fn node(label: &str) -> (Vec<tempfile::TempDir>, Hub, Vec<String>) {
     settings.hub.tool_profile = "read-only".into();
     settings.hub.members = ids.clone();
     let config = settings.hub.clone();
-    (
-        dirs,
-        Hub::fixed(
-            &config,
-            Fixed {
-                profiles,
-                remotes: Vec::new(),
-                settings,
-            },
-        ),
-        ids,
-    )
+    let state_dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::fixed(
+        &config,
+        Fixed {
+            profiles,
+            remotes: Vec::new(),
+            settings,
+        },
+    );
+    // 两台模拟机器各有自己的状态目录，不与其它测试竞争托管任务存储锁。
+    hub.managed_home = Some(state_dir.path().to_path_buf());
+    dirs.push(state_dir);
+    (dirs, hub, ids)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_wss_nodes_each_use_one_peer_for_multiple_real_workspaces() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (server_tls, _) = tls(true);
-    let connections = Arc::new(AtomicUsize::new(0));
-    let accepted = connections.clone();
-    let accepting = tokio::spawn(async move {
-        let mut sockets = Vec::new();
-        for expected in ["Bearer node-a", "Bearer node-b"] {
-            sockets.push(accept(&listener, &server_tls, expected).await.unwrap());
-            accepted.fetch_add(1, Ordering::SeqCst);
-        }
-        sockets
-    });
-    let mut nodes = Vec::new();
-    let mut project_ids = Vec::new();
-    for label in ["node-a", "node-b"] {
-        let socket = connect(address, label, tls(true).1).await.unwrap();
-        let (dirs, hub, ids) = node(label);
-        project_ids.push(ids);
-        nodes.push(tokio::task::spawn_blocking(move || {
-            let _dirs = dirs;
-            // 测试中由已通过握手的连接绑定主体；不把网络请求降成 Caller::local。
-            let auth = AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE);
-            let mut wire = WebSocketTransport::new(socket).unwrap();
-            while let Some(line) = wire.recv_line(WAIT).unwrap() {
-                let request: Value = serde_json::from_str(&line).unwrap();
-                let (response, _) = hub.handle_request(&auth, &request);
-                if !response.is_null() {
-                    wire.send_line(&response.to_string()).unwrap();
-                }
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (server_tls, _) = tls(true);
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = connections.clone();
+        let accepting = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            for expected in ["Bearer node-a", "Bearer node-b"] {
+                sockets.push(accept(&listener, &server_tls, expected).await.unwrap());
+                accepted.fetch_add(1, Ordering::SeqCst);
             }
-            hub.shutdown();
-        }));
-    }
-    let sockets = accepting.await.unwrap();
-    tokio::task::spawn_blocking(move || {
-        let mut peers = sockets
-            .into_iter()
-            .map(|socket| Peer::new(WebSocketTransport::new(socket).unwrap()))
-            .collect::<Vec<_>>();
-        for (index, peer) in peers.iter_mut().enumerate() {
-            peer.initialize("gld-hub", WAIT).unwrap();
-            let tools = peer.list_tools(WAIT).unwrap();
-            assert!(tools.iter().any(|tool| tool["name"] == "read_file"));
-            let projects = peer.call_tool("list_workspaces", json!({}), WAIT).unwrap();
-            assert_eq!(projects["structuredContent"]["count"], 2);
-            for name in ["api", "web", "api"] {
-                let read = peer
-                    .call_tool("read_file", json!({"workspace":name,"path":"README.md"}), WAIT)
+            sockets
+        });
+        let mut nodes = Vec::new();
+        let mut project_ids = Vec::new();
+        for label in ["node-a", "node-b"] {
+            let mut socket = connect(address, label, tls(true).1).await.unwrap();
+            let (dirs, hub, ids) = node(label);
+            project_ids.push(ids);
+            nodes.push(tokio::spawn(async move {
+                let _dirs = dirs;
+                let hub = Arc::new(hub);
+                // 测试中由已通过握手的连接绑定主体；不把网络请求降成 Caller::local。
+                let auth = AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE);
+                loop {
+                    // 等下一条请求是正常空闲，不使用“在途 RPC 超时就断线”的 recv_line。
+                    let text = match socket.next().await {
+                        Some(Ok(Message::Text(text))) => text,
+                        Some(Ok(Message::Ping(_))) => {
+                            socket.flush().await.unwrap();
+                            continue;
+                        }
+                        Some(Ok(Message::Pong(_))) => continue,
+                        Some(Ok(Message::Close(_))) => {
+                            let _ = socket.flush().await;
+                            break;
+                        }
+                        None => break,
+                        Some(other) => panic!("unexpected node message: {other:?}"),
+                    };
+                    let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                    let handler = hub.clone();
+                    let caller = auth.clone();
+                    let response = tokio::task::spawn_blocking(move || {
+                        handler.handle_request(&caller, &request).0
+                    })
+                    .await
                     .unwrap();
-                let label = if index == 0 { "a" } else { "b" };
-                assert_eq!(read["structuredContent"]["content"], format!("node-{label}/{name}"));
-            }
-            let wrong_machine = peer.call_tool(
-                "read_file", json!({"workspace":project_ids[1-index][0],"path":"README.md"}), WAIT,
-            ).unwrap();
-            assert_eq!(wrong_machine["isError"], true);
-            let escaped = peer.call_tool(
-                "read_file", json!({"workspace":"api","path":"../outside.txt"}), WAIT,
-            ).unwrap();
-            assert_eq!(escaped["isError"], true);
-            let write = peer.call_tool(
-                "apply_patch",
-                json!({"workspace":"api","patch":"*** Begin Patch\n*** Add File: x\n+x\n*** End Patch"}),
-                WAIT,
-            );
-            assert!(matches!(write, Err(PeerError::Remote { code: -32602, .. })));
-            peer.shutdown(WAIT);
+                    if !response.is_null() {
+                        socket.send(Message::Text(response.to_string().into())).await.unwrap();
+                    }
+                }
+                tokio::task::spawn_blocking(move || hub.shutdown()).await.unwrap();
+            }));
         }
-    }).await.unwrap();
-    for node in nodes {
-        node.await.unwrap();
-    }
-    assert_eq!(connections.load(Ordering::SeqCst), 2);
+        let sockets = accepting.await.unwrap();
+        let mut calls = Vec::new();
+        // 每台机器仍只有一个串行 Peer；不同机器独立运行，不互相消耗空闲期限。
+        for (index, socket) in sockets.into_iter().enumerate() {
+            let wrong_project = project_ids[1 - index][0].clone();
+            calls.push(tokio::task::spawn_blocking(move || {
+                let mut peer = Peer::new(WebSocketTransport::new(socket).unwrap());
+                peer.initialize("gld-hub", WAIT).unwrap();
+                let tools = peer.list_tools(WAIT).unwrap();
+                assert!(tools.iter().any(|tool| tool["name"] == "read_file"));
+                let projects = peer.call_tool("list_workspaces", json!({}), WAIT).unwrap();
+                assert_eq!(projects["structuredContent"]["count"], 2);
+                for name in ["api", "web", "api"] {
+                    let read = peer
+                        .call_tool("read_file", json!({"workspace":name,"path":"README.md"}), WAIT)
+                        .unwrap();
+                    let label = if index == 0 { "a" } else { "b" };
+                    assert_eq!(read["structuredContent"]["content"], format!("node-{label}/{name}"));
+                }
+                let wrong_machine = peer.call_tool(
+                    "read_file", json!({"workspace":wrong_project,"path":"README.md"}), WAIT,
+                ).unwrap();
+                assert_eq!(wrong_machine["isError"], true);
+                let escaped = peer.call_tool(
+                    "read_file", json!({"workspace":"api","path":"../outside.txt"}), WAIT,
+                ).unwrap();
+                assert_eq!(escaped["isError"], true);
+                let write = peer.call_tool(
+                    "apply_patch",
+                    json!({"workspace":"api","patch":"*** Begin Patch\n*** Add File: x\n+x\n*** End Patch"}),
+                    WAIT,
+                );
+                assert!(matches!(write, Err(PeerError::Remote { code: -32602, .. })));
+                peer.shutdown(WAIT);
+            }));
+        }
+        for call in calls {
+            call.await.unwrap();
+        }
+        for node in nodes {
+            node.await.unwrap();
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    })
+    .await
+    .expect("two-node transport fixture did not finish within 60 seconds");
 }
 
 #[tokio::test(flavor = "multi_thread")]
