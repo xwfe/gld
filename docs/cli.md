@@ -921,7 +921,7 @@ Commands:
   register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
   revoke             撤销节点凭据并关闭其连接；保留机器身份和项目目录
   rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
-  run                在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
+  run                在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
@@ -1003,7 +1003,7 @@ Options:
 ## gld node run
 
 ```text
-在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
+在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
 
 Usage: gld node run [OPTIONS] --config <CONFIG>
 

@@ -16,7 +16,7 @@ use common::http::post_json;
 use common::service::Service;
 use serde_json::{json, Value};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_rustls::rustls::{self, pki_types::CertificateDer, pki_types::PrivatePkcs8KeyDer};
 use tokio_rustls::TlsAcceptor;
 
@@ -38,8 +38,19 @@ fn decode(text: &str) -> Vec<u8> {
 struct TlsRelay {
     port: u16,
     accepted: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    available: watch::Sender<bool>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct ActiveRelay(Arc<AtomicUsize>);
+
+impl Drop for ActiveRelay {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl TlsRelay {
@@ -61,6 +72,11 @@ impl TlsRelay {
         let tls = TlsAcceptor::from(Arc::new(server));
         let accepted = Arc::new(AtomicUsize::new(0));
         let count = accepted.clone();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let active_count = active.clone();
+        let peak_count = peak.clone();
+        let (available, availability) = watch::channel(true);
         let (stop, mut stopping) = oneshot::channel();
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -76,11 +92,24 @@ impl TlsRelay {
                         accepted = listener.accept() => {
                             let Ok((tcp, _)) = accepted else { break };
                             count.fetch_add(1, Ordering::SeqCst);
+                            let mut availability = availability.clone();
+                            if !*availability.borrow_and_update() { continue; }
                             let tls = tls.clone();
+                            let active = active_count.clone();
+                            let peak = peak_count.clone();
                             tokio::spawn(async move {
-                                let Ok(mut client) = tls.accept(tcp).await else { return };
-                                let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)).await else { return };
-                                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                                tokio::select! {
+                                    biased;
+                                    _ = availability.changed() => {}
+                                    _ = async move {
+                                        let Ok(mut client) = tls.accept(tcp).await else { return };
+                                        let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)).await else { return };
+                                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                                        peak.fetch_max(current, Ordering::SeqCst);
+                                        let _connection = ActiveRelay(active);
+                                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                                    } => {}
+                                }
                             });
                         }
                     }
@@ -90,6 +119,9 @@ impl TlsRelay {
         Self {
             port,
             accepted,
+            active,
+            peak,
+            available,
             stop: Some(stop),
             thread: Some(thread),
         }
@@ -97,6 +129,10 @@ impl TlsRelay {
 
     fn connections(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
+    }
+
+    fn set_available(&self, available: bool) {
+        self.available.send_replace(available);
     }
 }
 
@@ -174,12 +210,17 @@ impl NodeProcess {
     fn wait_stopped(&mut self) {
         let deadline = Instant::now() + WAIT;
         while self.0.as_mut().unwrap().try_wait().unwrap().is_none() {
-            assert!(
-                Instant::now() < deadline,
-                "revoked node socket did not close"
-            );
+            assert!(Instant::now() < deadline, "node process did not stop");
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+}
+
+fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + WAIT;
+    while !ready() {
+        assert!(Instant::now() < deadline, "{label}");
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -464,6 +505,74 @@ fn native_nodes_route_real_projects_through_authenticated_wss_and_global_gateway
     assert_eq!(read(&service, &a_api)["content"], "machine-a/api\n");
     assert_no_daemon(&machine_a);
     assert_no_daemon(&machine_b);
+}
+
+#[test]
+fn node_process_recovers_initial_and_live_network_outages_without_parallel_connections() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "recovering");
+    let registration = register(&hub, "recovering", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let path = write_config(&machine, "recovering.json", &value);
+
+    relay.set_available(false);
+    let mut node = NodeProcess::start(&machine, &path);
+    let pid = node.0.as_ref().unwrap().id();
+    wait_until("initial connection was never attempted", || {
+        relay.connections() > 0
+    });
+    assert!(node.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    relay.set_available(true);
+    let initial = wait_inventory(&service, 2, 2);
+    let api = find(&initial, "recovering/api");
+    assert_eq!(read(&service, &api)["content"], "recovering/api\n");
+
+    let attempts = relay.connections();
+    relay.set_available(false);
+    wait_inventory(&service, 0, 2);
+    assert_eq!(read(&service, &api)["error"]["code"], "MACHINE_OFFLINE");
+    wait_until("disconnected node did not retry", || {
+        relay.connections() > attempts
+    });
+    assert!(node.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    machine.write("api/README.md", "after reconnect\n");
+    relay.set_available(true);
+    let restored = wait_inventory(&service, 2, 2);
+    assert_eq!(
+        node.0.as_ref().unwrap().id(),
+        pid,
+        "same node process must recover"
+    );
+    assert_eq!(find(&restored, "recovering/api"), api);
+    assert_eq!(read(&service, &api)["content"], "after reconnect\n");
+    assert_eq!(relay.active.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        relay.peak.load(Ordering::SeqCst),
+        1,
+        "reconnect must not overlap old connections"
+    );
+    assert_no_daemon(&machine);
+
+    #[cfg(unix)]
+    {
+        relay.set_available(false);
+        wait_inventory(&service, 0, 2);
+        // 此时在退避/重接阶段；SIGINT 应使真实 CLI 退出，不等下一次重试。
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) }, 0);
+        node.wait_stopped();
+        assert!(node
+            .0
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .unwrap()
+            .success());
+    }
 }
 
 #[test]

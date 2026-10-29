@@ -38,6 +38,7 @@ pub async fn upgrade(
     let (hub_id, reservation) = match admitted {
         Ok(Ok(admitted)) => admitted,
         Ok(Err("INVALID_NODE_CREDENTIALS")) => return StatusCode::UNAUTHORIZED.into_response(),
+        Ok(Err("HUB_STOPPING")) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Ok(Err(code)) => {
             return (StatusCode::CONFLICT, Json(json!({"error":code}))).into_response()
         }

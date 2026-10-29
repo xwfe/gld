@@ -378,7 +378,7 @@ pub enum NodeCmd {
         #[arg(long, required = true)]
         credential_stdin: bool,
     },
-    /// 在目标机前台运行节点；配置文件限定共享项目，断开后退出，不启动入站服务
+    /// 在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
     Run {
         /// 仅本账号可读的节点 JSON 配置；格式见 docs/concepts.md
         #[arg(long)]
