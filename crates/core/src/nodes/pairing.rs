@@ -100,29 +100,35 @@ impl std::error::Error for PairError {}
 struct Token<'a> {
     hub_id: &'a str,
     invitation_id: &'a str,
+    hub_public_key: &'a str,
 }
 
+/// `hub_id.邀请ID.秘密.Hub公钥`。公钥随邀请走带外渠道，配对和之后每次连接都不再只凭 TLS 认 Hub。
 fn parse_token(token: &str) -> Result<Token<'_>, PairError> {
     let mut parts = token.split('.');
     let hub_id = parts.next().ok_or(PairError::InvalidInvitation)?;
     let invitation_id = parts.next().ok_or(PairError::InvalidInvitation)?;
     let secret = parts.next().ok_or(PairError::InvalidInvitation)?;
+    let hub_public_key = parts.next().ok_or(PairError::InvalidInvitation)?;
     if parts.next().is_some()
         || !config::valid_id(hub_id)
         || !config::valid_id(invitation_id)
         || !lower_hex(secret, 64)
+        || !super::hub_key::valid_public_key(hub_public_key)
     {
         return Err(PairError::InvalidInvitation);
     }
     Ok(Token {
         hub_id,
         invitation_id,
+        hub_public_key,
     })
 }
 
-pub fn invitation_hub_id(token: &str) -> Result<String, String> {
+/// 返回邀请里的 (hub_id, hub_public_key)。
+pub fn invitation_identity(token: &str) -> Result<(String, String), String> {
     parse_token(token)
-        .map(|token| token.hub_id.to_owned())
+        .map(|token| (token.hub_id.to_owned(), token.hub_public_key.to_owned()))
         .map_err(|error| error.to_string())
 }
 
@@ -196,16 +202,15 @@ fn invite_in(data: &mut AppData, name: &str, now: u64) -> Result<Invitation, Str
     if data.node_invitations.len() >= MAX_INVITATIONS {
         return Err("Too many active node invitations; wait for one to expire".into());
     }
-    if data.node_hub_id.is_empty() {
-        data.node_hub_id = uuid::Uuid::new_v4().simple().to_string();
-    }
+    let hub_public_key = config::ensure_hub_identity(data)?;
     let id = uuid::Uuid::new_v4().simple().to_string();
     let invitation = format!(
-        "{}.{}.{}{}",
+        "{}.{}.{}{}.{}",
         data.node_hub_id,
         id,
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple(),
+        hub_public_key,
     );
     data.node_invitations.push(InvitationRecord {
         id,
@@ -260,7 +265,8 @@ fn pair_in(
     let parsed = parse_token(token)?;
     config::validate_registry(data).map_err(|_| PairError::Unavailable)?;
     validate_invitations(data).map_err(|_| PairError::Unavailable)?;
-    if parsed.hub_id != data.node_hub_id {
+    let hub_public_key = config::hub_public_key(data).map_err(|_| PairError::Unavailable)?;
+    if parsed.hub_id != data.node_hub_id || parsed.hub_public_key != hub_public_key {
         return Err(PairError::InvalidInvitation);
     }
     let credential_hash = config::credential_hash(&request.credential);
@@ -277,6 +283,7 @@ fn pair_in(
         }
         return Ok(RegisteredMachine {
             hub_id: data.node_hub_id.clone(),
+            hub_public_key,
             machine_id: machine.id.clone(),
             name: machine.name.clone(),
             revoked: false,

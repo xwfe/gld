@@ -62,6 +62,10 @@ pub struct AppData {
     /// 原生节点的稳定 Hub 身份和显式登记；旧配置默认不开节点。
     #[serde(default)]
     pub node_hub_id: String,
+    /// Hub 向节点证明身份的 Ed25519 私钥（PKCS#8 十六进制），与 hub_id 一起生成。
+    /// 节点配对时钉住它的公钥；换掉或丢失，所有节点都要重新配对。
+    #[serde(default)]
+    pub node_hub_key: String,
     #[serde(default)]
     pub node_machines: Vec<MachineRecord>,
     /// 未消费的一次性节点邀请；仅保存摘要，过期记录在下次创建邀请时清理。

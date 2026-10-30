@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod connection;
 pub mod endpoint;
+pub mod hub_key;
 pub mod identity;
 pub mod join;
 pub mod local_config;

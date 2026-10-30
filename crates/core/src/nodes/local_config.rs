@@ -125,6 +125,7 @@ impl LocalConfig {
 fn same_config(a: &NodeConfig, b: &NodeConfig) -> bool {
     a.hub_url == b.hub_url
         && a.hub_id == b.hub_id
+        && a.hub_public_key == b.hub_public_key
         && a.machine_id == b.machine_id
         && a.credential == b.credential
         && a.workspaces == b.workspaces

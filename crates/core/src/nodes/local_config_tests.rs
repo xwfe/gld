@@ -4,6 +4,7 @@ fn config() -> NodeConfig {
     NodeConfig {
         hub_url: "https://example.invalid/hub".into(),
         hub_id: "a".repeat(32),
+        hub_public_key: "e".repeat(64),
         machine_id: "b".repeat(32),
         credential: "c".repeat(64),
         workspaces: vec!["d".repeat(32)],

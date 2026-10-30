@@ -10,8 +10,16 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::json;
 
+/// 第四段是邀请里的 Hub 公钥，配对回包必须给出同一把。
+const HUB_KEY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
 fn token() -> String {
-    format!("{}.{}.{}", "a".repeat(32), "b".repeat(32), "c".repeat(64))
+    format!(
+        "{}.{}.{}.{HUB_KEY}",
+        "a".repeat(32),
+        "b".repeat(32),
+        "c".repeat(64)
+    )
 }
 
 fn projects(root: &std::path::Path) -> Vec<SharedProject> {
@@ -267,7 +275,7 @@ async fn failed_response_keeps_the_same_request_and_credential_for_retry() {
         if saved.len() == 1 {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
-        Json(json!({"hub_id":"a".repeat(32),"machine_id":request.request_id,"name":"build-machine","revoked":false})).into_response()
+        Json(json!({"hub_id":"a".repeat(32),"hub_public_key":HUB_KEY,"machine_id":request.request_id,"name":"build-machine","revoked":false})).into_response()
     }
     let requests: Requests = Arc::new(Mutex::new(Vec::new()));
     let (base, task) = server(
@@ -302,6 +310,32 @@ async fn failed_response_keeps_the_same_request_and_credential_for_retry() {
         .contains(&saved[0].1));
     assert!(root.path().join("node.json").is_file());
     assert!(!root.path().join("node.json.pending").exists());
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_pairing_response_with_another_hub_key_is_not_accepted() {
+    async fn pair(Json(request): Json<PairRequest>) -> axum::response::Response {
+        // 冒充者能拿到域名证书、也能照抄 hub_id，但拿不出邀请里那把公钥对应的 Hub。
+        Json(
+            json!({"hub_id":"a".repeat(32),"hub_public_key":"e".repeat(64),
+            "machine_id":request.request_id,"name":"build-machine","revoked":false}),
+        )
+        .into_response()
+    }
+    let (base, task) = server(Router::new().route("/nodes/v1/pair", post(pair))).await;
+    let root = tempfile::tempdir().unwrap();
+    let prepared = PreparedJoin::prepare_with_projects(
+        options(root.path(), base),
+        token(),
+        projects(root.path()),
+    )
+    .unwrap();
+    assert_eq!(prepared.config.hub_public_key, HUB_KEY);
+    let error = prepared.execute().await.unwrap_err();
+    assert!(error.contains("did not match"), "{error}");
+    assert!(!root.path().join("node.json").exists());
+    assert!(root.path().join("node.json.pending").is_file());
     task.abort();
 }
 
@@ -352,7 +386,7 @@ async fn redirects_are_rejected_without_forwarding_credentials() {
 #[tokio::test]
 async fn wrong_identity_malformed_and_oversized_responses_keep_pending_state() {
     let cases = [
-        json!({"hub_id":"e".repeat(32),"machine_id":"f".repeat(32),"name":"machine","revoked":false}).to_string(),
+        json!({"hub_id":"e".repeat(32),"hub_public_key":HUB_KEY,"machine_id":"f".repeat(32),"name":"machine","revoked":false}).to_string(),
         "malformed-response-secret".into(),
         "x".repeat(MAX_RESPONSE_BYTES + 1),
     ];

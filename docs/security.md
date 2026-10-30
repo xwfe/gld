@@ -72,6 +72,23 @@ ChatGPT 工作区里、能选到它建连接器的人（OpenAI 那边按 Tunnels
 Runtime Key 只能用来跑这条隧道，拿到它的人能顶替你的 tunnel-client 接 ChatGPT 的请求，但进不了 gld；
 `openai_tunnel_key` 才是进 gld 的那把，它只在本机，`gld secret regen openai_tunnel_key` 随时换。
 
+### 原生节点：目标机认 Hub 靠钉住的公钥，不只靠证书
+
+目标机执行的是 Hub 发来的调用，所以“谁是 Hub”和“调用有没有被改过”都要它自己核对。
+Hub 有一把节点专用的 Ed25519 私钥；公钥写在邀请令牌最后一段（预置登记的输出里也有），配对时存进目标机配置的 `hub_public_key`。
+之后每次连接，目标机先发一个随机数，Hub 要用私钥签名回来；连上以后，Hub 发来的每条消息还带着按顺序编号的签名。
+任何一项对不上，目标机断开并退出，不执行那条消息。
+
+这挡的是：劫持 DNS 后签出域名证书的人、拿到 Cloudflare 账号的人、目标机信任的私有 CA 被冒用，
+以及在中间转发流量的反代或中间人。他们冒充不了 Hub，也插不进、改不了、重放不了调用。
+
+挡不住的，明说：
+- **看得到内容。** TLS 在 Cloudflare 或反代上终止时，它们能读到调用和返回，也能丢弃或拖慢。签名只防改、不防看。
+- **Hub 自己被攻破。** 私钥在 Hub 的 `profiles.json` 里，拿到它就能对所有节点发合法调用。
+- **节点凭据会先发出去。** 升级请求里的节点凭据在 Hub 证明身份之前就已经送出，冒充者能收走它，拿去冒充这台机器连真 Hub。
+  它进不了这台机器，但怀疑被截过就 `gld node rotate-credential` 换掉。
+- **返回结果没签。** 中间人可以改目标机发回 Hub 的结果，比如伪造文件内容，但不能借此让目标机多执行任何东西。
+
 ### 读文件的范围：0.3.0 改了默认值
 
 桌面版和 0.3.0 之前的 gld，`read_file` / `list_dir` / `list_files` /
@@ -382,7 +399,8 @@ gld secret regen oauth_token_secret
 每个项目 7 把（GPT Actions 用的，以前单项目服务也用它们）+ 一个共享池。
 
 这些值是随机生成的，**没有第二份副本**。文件丢了 = 每个 ChatGPT 连接器、
-每个自定义 GPT 都要重新配一遍。
+每个自定义 GPT 都要重新配一遍。用了原生节点还多一把 `node_hub_key`（Hub 向目标机证明身份的私钥），
+丢了或换了，每台目标机都要重新 `gld join`。
 
 旁边还有一个 `data/oauth-clients/hub.json`，记的是各个客户端动态注册时
 领走的 client_id 和回调地址（confidential 客户端还有 client_secret，同样 600 权限）。ChatGPT 连接器

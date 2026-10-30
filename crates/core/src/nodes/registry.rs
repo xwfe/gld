@@ -16,6 +16,7 @@ use crate::tools::workspace::{tool_err, WorkspaceError};
 
 use super::config::{self, AuthenticatedMachine, NodeProject};
 use super::connection::{Connection, ConnectionError};
+use super::hub_key::MessageSigner;
 use super::identity::forwarded_meta;
 
 const HANDSHAKE: Duration = Duration::from_secs(10);
@@ -276,8 +277,8 @@ impl Nodes {
 }
 
 impl Reservation {
-    pub async fn accept(self, socket: axum::extract::ws::WebSocket) {
-        let connection = Connection::new(socket);
+    pub async fn accept(self, socket: axum::extract::ws::WebSocket, signer: MessageSigner) {
+        let connection = Connection::new(socket, signer);
         let Some(nodes) = self.nodes.upgrade() else {
             let _ = tokio::task::spawn_blocking(move || connection.close()).await;
             return;

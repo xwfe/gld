@@ -12,7 +12,7 @@ use crate::tools::registry::exposed_tool_names;
 
 use super::config::{validate_workspace_ids, NodeConfig, RegisteredMachine};
 use super::local_config::{validate_config_location, LocalConfig};
-use super::pairing::{invitation_hub_id, PairRequest};
+use super::pairing::{invitation_identity, PairRequest};
 
 #[cfg(test)]
 #[path = "join_tests.rs"]
@@ -77,7 +77,7 @@ impl PreparedJoin {
         invitation: String,
         mut projects: Vec<SharedProject>,
     ) -> Result<Self, String> {
-        let hub_id = invitation_hub_id(&invitation)?;
+        let (hub_id, hub_public_key) = invitation_identity(&invitation)?;
         let workspaces: Vec<String> = projects.iter().map(|project| project.id.clone()).collect();
         validate_workspace_ids(&workspaces)?;
         let writable_workspaces =
@@ -99,6 +99,7 @@ impl PreparedJoin {
         let mut config = NodeConfig {
             hub_url: options.hub_url,
             hub_id,
+            hub_public_key,
             machine_id: uuid::Uuid::new_v4().simple().to_string(),
             credential: format!(
                 "{}{}",
@@ -128,6 +129,7 @@ impl PreparedJoin {
         if let Some(pending) = pending {
             if pending.hub_url != config.hub_url
                 || pending.hub_id != config.hub_id
+                || pending.hub_public_key != config.hub_public_key
                 || pending.workspaces != config.workspaces
                 || pending.writable_workspaces != config.writable_workspaces
                 || pending.ca_certificate != config.ca_certificate
@@ -386,6 +388,7 @@ async fn request_pairing(
     let machine: RegisteredMachine = serde_json::from_slice(&bytes)
         .map_err(|_| "Invalid node pairing response; pending state was kept")?;
     if machine.hub_id != config.hub_id
+        || machine.hub_public_key != config.hub_public_key
         || machine.machine_id != config.machine_id
         || machine.revoked
         || machine.name.trim().is_empty()

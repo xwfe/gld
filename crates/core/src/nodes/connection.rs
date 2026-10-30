@@ -11,6 +11,7 @@ use axum::extract::ws::{self, WebSocket};
 use futures_util::{Sink, Stream};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 
+use super::hub_key::MessageSigner;
 use super::transport::SocketTransport;
 use crate::bridge::peer::{Peer, PeerError};
 
@@ -121,9 +122,12 @@ impl Drop for InFlight<'_> {
 
 impl Connection {
     /// 监听器必须在 Upgrade 前限制 message/frame 大小；Axum 升级后不暴露该配置。
-    pub fn new(socket: WebSocket) -> Arc<Self> {
+    /// 签名器绑定本次握手的 nonce；Hub 发出的每条消息都签，节点验不过就断开。
+    pub fn new(socket: WebSocket, signer: MessageSigner) -> Arc<Self> {
         Arc::new(Self {
-            peer: Mutex::new(Peer::new(SocketTransport::bounded(AxumSocket(socket)))),
+            peer: Mutex::new(Peer::new(
+                SocketTransport::bounded(AxumSocket(socket)).signed(signer),
+            )),
             in_flight: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),

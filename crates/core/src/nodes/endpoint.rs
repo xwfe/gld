@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+use super::hub_key::{Binding, MessageSigner, NONCE_HEADER, PROOF_HEADER};
 use super::registry::Nodes;
 
 /// 邀请只用于这条独立的登记入口。正文有界，解析失败不回显秘密字段。
@@ -76,19 +77,40 @@ pub async fn upgrade(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    let mut nonces = headers.get_all(NONCE_HEADER).iter();
+    let nonce = match (nonces.next(), nonces.next()) {
+        (Some(value), None) => value.to_str().ok().map(str::to_owned),
+        _ => None,
+    };
     let admitted = tokio::task::spawn_blocking(move || {
         let authenticated = super::config::authenticate(&machine_id, &credential)
             .map_err(|_| "INVALID_NODE_CREDENTIALS")?;
+        // 先认凭据再看 nonce：没凭据的请求一律 401，不透露节点协议细节。
+        let binding = nonce
+            .and_then(|nonce| Binding::new(&authenticated.hub_id, &machine_id, &nonce).ok())
+            .ok_or("NODE_NONCE_REQUIRED")?;
+        let key = super::config::signing_key().map_err(|_| "NODE_HUB_KEY_UNAVAILABLE")?;
         let hub_id = authenticated.hub_id.clone();
-        nodes
-            .reserve(authenticated)
-            .map(|reservation| (hub_id, reservation))
+        let reservation = nodes.reserve(authenticated)?;
+        let proof = key.handshake_proof(&binding);
+        Ok((
+            hub_id,
+            proof,
+            MessageSigner::new(Arc::new(key), binding),
+            reservation,
+        ))
     })
     .await;
-    let (hub_id, reservation) = match admitted {
+    let (hub_id, proof, signer, reservation) = match admitted {
         Ok(Ok(admitted)) => admitted,
         Ok(Err("INVALID_NODE_CREDENTIALS")) => return StatusCode::UNAUTHORIZED.into_response(),
         Ok(Err("HUB_STOPPING")) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Ok(Err(code @ "NODE_NONCE_REQUIRED")) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":code}))).into_response()
+        }
+        Ok(Err(code @ "NODE_HUB_KEY_UNAVAILABLE")) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":code}))).into_response()
+        }
         Ok(Err(code)) => {
             return (StatusCode::CONFLICT, Json(json!({"error":code}))).into_response()
         }
@@ -97,10 +119,13 @@ pub async fn upgrade(
     let mut response = ws
         .max_message_size(super::transport::MAX_MESSAGE_BYTES)
         .max_frame_size(super::transport::MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| reservation.accept(socket));
+        .on_upgrade(move |socket| reservation.accept(socket, signer));
     response.headers_mut().insert(
         "x-gld-hub-id",
         hub_id.parse().expect("validated hub identity"),
     );
+    response
+        .headers_mut()
+        .insert(PROOF_HEADER, proof.parse().expect("hexadecimal signature"));
     response
 }

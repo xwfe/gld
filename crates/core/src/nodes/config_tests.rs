@@ -11,6 +11,7 @@ fn config(url: &str) -> NodeConfig {
     NodeConfig {
         hub_url: url.into(),
         hub_id: HUB.into(),
+        hub_public_key: "e".repeat(64),
         machine_id: MACHINE.into(),
         credential: TOKEN.into(),
         workspaces: vec![PROJECT.into()],
@@ -25,6 +26,10 @@ fn registration_preserves_old_data_and_never_serializes_the_credential() {
     validate_registry(&data).unwrap();
     let registered = register_in(&mut data, "test-machine", Some(MACHINE), TOKEN).unwrap();
     assert!(valid_id(&registered.hub_id));
+    assert_eq!(registered.hub_public_key, hub_public_key(&data).unwrap());
+    assert!(!serde_json::to_string(&registered)
+        .unwrap()
+        .contains(&data.node_hub_key));
     assert_eq!(registered.machine_id, MACHINE);
     assert_eq!(
         data.node_machines[0].credential_sha256,
@@ -66,6 +71,7 @@ fn node_credentials_are_distinct_from_existing_service_credentials() {
         .insert("bearer_token".into(), TOKEN.into());
     assert!(register_in(&mut data, "node", Some(MACHINE), TOKEN).is_err());
     assert!(data.node_hub_id.is_empty());
+    assert!(data.node_hub_key.is_empty());
     assert!(data.node_machines.is_empty());
     assert!(register_in(&mut data, "node", Some(MACHINE), OTHER_TOKEN).is_ok());
 }
@@ -121,6 +127,7 @@ fn old_configuration_defaults_to_read_only_and_omits_empty_write_permissions() {
     let old = json!({
         "hub_url": "https://example.invalid",
         "hub_id": HUB,
+        "hub_public_key": "e".repeat(64),
         "machine_id": MACHINE,
         "credential": TOKEN,
         "workspaces": [PROJECT],
@@ -137,6 +144,43 @@ fn old_configuration_defaults_to_read_only_and_omits_empty_write_permissions() {
     let restored: NodeConfig = serde_json::from_value(saved).unwrap();
     restored.validate().unwrap();
     assert_eq!(restored.writable_workspaces, vec![PROJECT]);
+}
+
+#[test]
+fn configuration_without_a_pinned_hub_key_must_join_again() {
+    let mut value = serde_json::to_value(config("https://example.invalid")).unwrap();
+    value.as_object_mut().unwrap().remove("hub_public_key");
+    assert!(serde_json::from_value::<NodeConfig>(value).is_err());
+    for bad in ["", "e", &"E".repeat(64), &"g".repeat(64), &"e".repeat(66)] {
+        let mut config = config("https://example.invalid");
+        config.hub_public_key = bad.into();
+        assert!(config.validate().is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn hub_key_is_created_once_backfilled_for_old_registries_and_corruption_fails_closed() {
+    let mut data = AppData::default();
+    let first = register_in(&mut data, "first", Some(MACHINE), TOKEN).unwrap();
+    let stored = data.node_hub_key.clone();
+    let second = register_in(&mut data, "second", Some(PROJECT), OTHER_TOKEN).unwrap();
+    assert_eq!(first.hub_public_key, second.hub_public_key);
+    assert_eq!(data.node_hub_key, stored);
+
+    // 早期开发数据只有 hub_id：可以读，节点连不上，下一次撤销/轮换时补上私钥。
+    data.node_hub_key.clear();
+    validate_registry(&data).unwrap();
+    assert!(hub_public_key(&data).is_err());
+    let revoked = revoke_in(&mut data, MACHINE).unwrap();
+    assert!(super::super::hub_key::valid_public_key(
+        &revoked.hub_public_key
+    ));
+    assert_ne!(revoked.hub_public_key, first.hub_public_key);
+    let rotated = rotate_in(&mut data, MACHINE, "rotated-node-credential-00000000000001").unwrap();
+    assert_eq!(rotated.hub_public_key, revoked.hub_public_key);
+
+    data.node_hub_key = "00".repeat(40);
+    assert!(validate_registry(&data).is_err());
 }
 
 #[test]

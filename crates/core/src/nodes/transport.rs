@@ -10,6 +10,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 
+use super::hub_key::MessageSigner;
 use crate::async_rt;
 use crate::bridge::peer::Transport;
 
@@ -29,6 +30,7 @@ pub fn socket_config() -> WebSocketConfig {
 
 pub struct SocketTransport<S> {
     socket: Option<S>,
+    signer: Option<MessageSigner>,
     last_error: String,
     last_ping: Instant,
     waiting_pong: Option<Instant>,
@@ -59,10 +61,17 @@ impl<S> SocketTransport<S> {
     pub(crate) fn bounded(socket: S) -> Self {
         Self {
             socket: Some(socket),
+            signer: None,
             last_error: String::new(),
             last_ping: Instant::now(),
             waiting_pong: None,
         }
+    }
+
+    /// Hub 的生产连接都要签名；不签的只剩只测传输层的用例。
+    pub(crate) fn signed(mut self, signer: MessageSigner) -> Self {
+        self.signer = Some(signer);
+        self
     }
 
     pub fn is_open(&self) -> bool {
@@ -80,6 +89,16 @@ where
     S: Stream<Item = Result<Message, E>> + Sink<Message, Error = E> + Unpin + Send,
 {
     fn send_line(&mut self, line: &str) -> io::Result<()> {
+        let signed;
+        let line = match self.signer.as_mut() {
+            Some(signer) => {
+                signed = signer
+                    .sign(line, MAX_MESSAGE_BYTES)
+                    .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
+                signed.as_str()
+            }
+            None => line,
+        };
         if line.len() > MAX_MESSAGE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

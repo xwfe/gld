@@ -362,7 +362,7 @@ pub enum NodeCmd {
         /// 配对成功后使用的机器展示名称
         name: String,
     },
-    /// 在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
+    /// 在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、Hub 公钥、机器 ID 和名称
     Register {
         /// 机器展示名称，不能含路径分隔符
         name: String,

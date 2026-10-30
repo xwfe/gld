@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 use crate::data::{AppData, DataStore};
 use crate::error::AppError;
 
+use super::hub_key::HubKey;
+
 const MAX_PROJECTS: usize = 256;
 pub(super) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const AUTH_FAILED: &str = "Invalid node credentials";
@@ -55,6 +57,8 @@ impl fmt::Debug for MachineRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisteredMachine {
     pub hub_id: String,
+    /// 节点配置的 hub_public_key；目标机用它核验每次握手和 Hub 发来的每条消息。
+    pub hub_public_key: String,
     pub machine_id: String,
     pub name: String,
     pub revoked: bool,
@@ -71,6 +75,8 @@ pub struct AuthenticatedMachine {
 pub struct NodeConfig {
     pub hub_url: String,
     pub hub_id: String,
+    /// 配对时钉住的 Hub 公钥。只认 TLS 证书时，能为该域名签出证书的人就能冒充 Hub（RFC-0013 §7.3）。
+    pub hub_public_key: String,
     pub machine_id: String,
     pub credential: String,
     pub workspaces: Vec<String>,
@@ -103,6 +109,9 @@ impl NodeConfig {
             return Err(
                 "Node hub_id and machine_id must be 32 lowercase hexadecimal characters".into(),
             );
+        }
+        if !super::hub_key::valid_public_key(&self.hub_public_key) {
+            return Err("Node hub_public_key must be the 64-character lowercase hexadecimal key from the invitation or Hub registration".into());
         }
         validate_credential(&self.credential)?;
         validate_workspace_ids(&self.workspaces)?;
@@ -256,6 +265,10 @@ pub(super) fn validate_registry(data: &AppData) -> Result<(), String> {
     if !valid_id(&data.node_hub_id) {
         return Err("Invalid stored node Hub identity".into());
     }
+    // 空私钥只出现在早期开发数据里；下次登记、邀请、撤销或轮换时补上，补上前节点连不上。
+    if !data.node_hub_key.is_empty() {
+        HubKey::from_stored(&data.node_hub_key)?;
+    }
     let mut ids = HashSet::new();
     let mut names = HashSet::new();
     let mut credentials = HashSet::new();
@@ -320,9 +333,7 @@ pub(super) fn register_in(
         );
     }
     let hash = unused_credential_hash(data, credential)?;
-    if data.node_hub_id.is_empty() {
-        data.node_hub_id = uuid::Uuid::new_v4().simple().to_string();
-    }
+    let hub_public_key = ensure_hub_identity(data)?;
     data.node_machines.push(MachineRecord {
         id: id.clone(),
         name: name.into(),
@@ -333,10 +344,35 @@ pub(super) fn register_in(
     });
     Ok(RegisteredMachine {
         hub_id: data.node_hub_id.clone(),
+        hub_public_key,
         machine_id: id,
         name: name.into(),
         revoked: false,
     })
+}
+
+/// Hub ID 与签名私钥一起生成；返回节点要钉住的公钥。
+pub(super) fn ensure_hub_identity(data: &mut AppData) -> Result<String, String> {
+    if data.node_hub_id.is_empty() {
+        data.node_hub_id = uuid::Uuid::new_v4().simple().to_string();
+    }
+    if data.node_hub_key.is_empty() {
+        data.node_hub_key = super::hub_key::generate_private_key()?;
+    }
+    hub_public_key(data)
+}
+
+pub(super) fn hub_public_key(data: &AppData) -> Result<String, String> {
+    HubKey::from_stored(&data.node_hub_key).map(|key| key.public_key())
+}
+
+/// 握手时取一次；私钥只在 Hub 进程内存里，不进日志、响应或节点配置。
+pub fn signing_key() -> Result<HubKey, String> {
+    DataStore::read_file(|data| {
+        validate_registry(data).map_err(AppError::Message)?;
+        HubKey::from_stored(&data.node_hub_key).map_err(AppError::Message)
+    })
+    .map_err(|_| "Node Hub key is unavailable".into())
 }
 
 /// 注册和轮换共用检查；已撤销记录的原凭据也不能分配给别的节点。
@@ -382,6 +418,7 @@ pub fn revoke_machine(machine_id: &str) -> Result<RegisteredMachine, String> {
 fn revoke_in(data: &mut AppData, machine_id: &str) -> Result<RegisteredMachine, String> {
     validate_registry(data)?;
     let index = machine_index(data, machine_id)?;
+    let hub_public_key = ensure_hub_identity(data)?;
     let machine = &mut data.node_machines[index];
     if !machine.revoked {
         machine.credential_generation = next_generation(machine)?;
@@ -389,6 +426,7 @@ fn revoke_in(data: &mut AppData, machine_id: &str) -> Result<RegisteredMachine, 
     }
     Ok(RegisteredMachine {
         hub_id: data.node_hub_id.clone(),
+        hub_public_key,
         machine_id: machine.id.clone(),
         name: machine.name.clone(),
         revoked: true,
@@ -411,6 +449,7 @@ fn rotate_in(
     validate_registry(data)?;
     let index = machine_index(data, machine_id)?;
     let hash = unused_credential_hash(data, credential)?;
+    let hub_public_key = ensure_hub_identity(data)?;
     let machine = &mut data.node_machines[index];
     let generation = next_generation(machine)?;
     machine.credential_sha256 = hash;
@@ -418,6 +457,7 @@ fn rotate_in(
     machine.revoked = false;
     Ok(RegisteredMachine {
         hub_id: data.node_hub_id.clone(),
+        hub_public_key,
         machine_id: machine.id.clone(),
         name: machine.name.clone(),
         revoked: false,

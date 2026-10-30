@@ -195,6 +195,78 @@ async fn control_frames_continue_but_a_second_rpc_closes_and_drains_the_first() 
     assert_eq!(handler.completed.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_cannot_alter_a_hub_message_even_when_it_keeps_the_signature_tag() {
+    use super::super::hub_key::{generate_private_key, HubKey, MessageSigner};
+    let project = "d".repeat(32);
+    let key = Arc::new(HubKey::from_stored(&generate_private_key().unwrap()).unwrap());
+    let config = NodeConfig {
+        hub_url: "https://example.invalid/hub".into(),
+        hub_id: "a".repeat(32),
+        hub_public_key: key.public_key(),
+        machine_id: "b".repeat(32),
+        credential: "c".repeat(64),
+        workspaces: vec![project.clone()],
+        writable_workspaces: Vec::new(),
+        ca_certificate: None,
+    };
+    let binding = Binding::new(&config.hub_id, &config.machine_id, &new_nonce().unwrap()).unwrap();
+    let verifier = MessageVerifier::new(&config.hub_public_key, binding.clone());
+    let hub = Arc::new(Hub::for_node_tests(vec![project]));
+    let (node, mut relay) = sockets().await;
+    let serving = tokio::spawn(async move {
+        serve_until(
+            node,
+            hub,
+            &config,
+            verifier,
+            &mut std::future::pending(),
+            &mut Stability::new(),
+        )
+        .await
+    });
+    let mut signer = MessageSigner::new(key, binding);
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"protocolVersion":PROTOCOL_VERSION}})
+    .to_string();
+    relay
+        .send(Message::Text(
+            signer.sign(&initialize, MAX_MESSAGE_BYTES).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let answered = tokio::time::timeout(Duration::from_secs(5), relay.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(&answered, Some(Ok(Message::Text(text))) if text.contains("\"result\"")),
+        "a signed message is handled normally: {answered:?}"
+    );
+
+    // 中间人保留签名段、只改调用内容：节点不解析、不执行、不回复，按不可重试的失败退出。
+    let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"list_workspaces","arguments":{}}})
+    .to_string();
+    let altered = signer
+        .sign(&call, MAX_MESSAGE_BYTES)
+        .unwrap()
+        .replace("list_workspaces", "workspace_context");
+    relay.send(Message::Text(altered.into())).await.unwrap();
+    let failure = tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(failure.retry, reconnect::Retry::Never);
+    assert!(failure.message.contains("signature"), "{}", failure.message);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), relay.next())
+            .await
+            .unwrap(),
+        None | Some(Err(_))
+    ));
+}
+
 #[tokio::test]
 async fn oversized_response_is_terminal_before_any_write() {
     let (mut node, mut hub) = sockets().await;

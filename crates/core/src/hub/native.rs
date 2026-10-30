@@ -39,6 +39,22 @@ impl Hub {
         Ok(hub)
     }
 
+    /// 只给节点接收层的测试用：跳过本机项目登记检查，不读数据目录。
+    #[cfg(test)]
+    pub(crate) fn for_node_tests(shared_ids: Vec<String>) -> Self {
+        Self::with_members(
+            &HubConfig {
+                tool_profile: "advanced".into(),
+                ..HubConfig::default()
+            },
+            Members::Node {
+                shared: shared_ids,
+                writable: Vec::new(),
+            },
+            Connections::new(),
+        )
+    }
+
     pub fn nodes(&self) -> Arc<Nodes> {
         self.nodes.clone()
     }

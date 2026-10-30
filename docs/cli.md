@@ -948,7 +948,7 @@ Usage: gld node [OPTIONS] <COMMAND>
 
 Commands:
   invite             生成十分钟有效的一次性邀请；替换同名未使用邀请，只在本机输出
-  register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
+  register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、Hub 公钥、机器 ID 和名称
   revoke             撤销节点凭据并关闭其连接；保留机器身份和项目目录
   rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
   shares             查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
@@ -989,7 +989,7 @@ Options:
 ## gld node register
 
 ```text
-在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
+在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、Hub 公钥、机器 ID 和名称
 
 Usage: gld node register [OPTIONS] --credential-stdin <NAME>
 

@@ -31,6 +31,8 @@ tokio-tungstenite = { version = "=0.29.0", default-features = false, features = 
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 # 节点可显式信任内网 DER CA；默认仍使用 WebPKI，版本沿用锁文件。
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# Hub 对节点的 Ed25519 身份证明与逐条签名（RFC-0013 §7.3）；rustls 已带进同一版本，不新增下载。
+ring = { version = "0.17", default-features = false }
 walkdir = "2"
 regex = "1"
 glob = "0.3"

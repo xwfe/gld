@@ -17,6 +17,9 @@ use crate::bridge::peer::PROTOCOL_VERSION;
 use crate::hub::Hub;
 
 use super::config::NodeConfig;
+use super::hub_key::{
+    new_nonce, verify_handshake, Binding, MessageVerifier, NONCE_HEADER, PROOF_HEADER,
+};
 use super::identity::auth_from_meta;
 use super::transport::{socket_config, MAX_MESSAGE_BYTES};
 
@@ -68,31 +71,56 @@ where
     loop {
         let connect_timeout =
             backoff.connection_timeout(std::time::Instant::now(), CONNECT_TIMEOUT)?;
+        // 每次连接换一个 nonce，旧连接里的握手证明和消息签名都不能拿来重放。
+        let binding = Binding::new(&config.hub_id, &config.machine_id, &new_nonce()?)?;
+        let mut attempt = request.clone();
+        attempt.headers_mut().insert(
+            NONCE_HEADER,
+            binding
+                .nonce()
+                .parse()
+                .map_err(|_| "invalid node nonce header".to_string())?,
+        );
         let connected = tokio::select! {
             biased;
             _ = &mut *shutdown => return Ok(()),
             result = tokio::time::timeout(connect_timeout,
                 tokio_tungstenite::connect_async_tls_with_config(
-                    request.clone(), Some(socket_config()), false, connector.clone())) =>
+                    attempt, Some(socket_config()), false, connector.clone())) =>
                 result.map_err(|_| Failure::transient("node TLS/WebSocket connection timed out"))
                     .and_then(|result| result.map_err(Failure::websocket)),
         };
         let failure = match connected {
             Err(failure) => failure,
             Ok((mut socket, response)) => {
-                if response
-                    .headers()
-                    .get("x-gld-hub-id")
-                    .and_then(|value| value.to_str().ok())
-                    != Some(config.hub_id.as_str())
-                {
+                let header = |name: &str| {
+                    response
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                };
+                if header("x-gld-hub-id") != Some(config.hub_id.as_str()) {
                     let _ = tokio::time::timeout(WRITE_TIMEOUT, SinkExt::close(&mut socket)).await;
                     return Err("node endpoint returned a different Hub identity".into());
                 }
+                if !header(PROOF_HEADER)
+                    .is_some_and(|proof| verify_handshake(&config.hub_public_key, &binding, proof))
+                {
+                    let _ = tokio::time::timeout(WRITE_TIMEOUT, SinkExt::close(&mut socket)).await;
+                    return Err("node endpoint could not prove the pinned Hub key; it is not the paired Hub, or the Hub key changed and this machine must join again".into());
+                }
                 backoff.connected();
                 let mut stability = Stability::new();
-                let result =
-                    serve_until(socket, hub.clone(), &config, shutdown, &mut stability).await;
+                let verifier = MessageVerifier::new(&config.hub_public_key, binding);
+                let result = serve_until(
+                    socket,
+                    hub.clone(),
+                    &config,
+                    verifier,
+                    shutdown,
+                    &mut stability,
+                )
+                .await;
                 backoff.session_ended(stability.stable);
                 match result {
                     Ok(SessionEnd::Stopped) => return Ok(()),
@@ -267,6 +295,7 @@ async fn serve_until<S, F>(
     mut socket: WebSocketStream<S>,
     hub: Arc<Hub>,
     config: &NodeConfig,
+    mut verifier: MessageVerifier,
     shutdown: &mut F,
     stability: &mut Stability,
 ) -> Result<SessionEnd, Failure>
@@ -286,9 +315,14 @@ where
                 message.map_err(|_| Failure::transient("node Hub heartbeat timed out"))?,
         };
         let text = match message {
+            // 验签在解析之前：被插入、改写或重放的消息连 JSON 都不解析，更不会执行。
             Some(Ok(Message::Text(text))) => {
                 stability.received();
-                text
+                verifier.verify(text.as_str()).map_err(|reason| {
+                    Failure::permanent(format!(
+                        "{reason}; the connection may pass through an untrusted relay"
+                    ))
+                })?
             }
             Some(Ok(Message::Ping(_))) => {
                 stability.received();

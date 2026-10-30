@@ -36,7 +36,7 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
                 id,
                 credential: read_credential(credential_stdin)?,
             },
-            "已登记专用凭据。目标机用私有配置文件运行 gld node run --config；项目默认只读，文件写入须在目标机显式授权。",
+            "已登记专用凭据。把 Hub 公钥原样填进目标机私有配置的 hub_public_key，再运行 gld node run --config；项目默认只读，文件写入须在目标机显式授权。",
         ),
         NodeCmd::Revoke { machine_id } => (
             Request::NodeRevoke { machine_id },
@@ -59,8 +59,9 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
     let result: Value = ctx.backend.call_typed(request).await?;
     if !ctx.out.json_or(&result) {
         ctx.out.line(format!(
-            "Hub ID：{}\n机器 ID：{}\n名称：{}",
+            "Hub ID：{}\nHub 公钥：{}\n机器 ID：{}\n名称：{}",
             result["hub_id"].as_str().unwrap_or(""),
+            result["hub_public_key"].as_str().unwrap_or(""),
             result["machine_id"].as_str().unwrap_or(""),
             result["name"].as_str().unwrap_or("")
         ));

@@ -265,7 +265,8 @@ Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并�
 gld node invite build-machine
 ```
 
-命令显示 Hub ID、机器名称和邀请。邀请默认十分钟有效，只能建立一个节点；相同名称的新邀请
+命令显示 Hub ID、机器名称和邀请。邀请最后一段是 Hub 公钥，目标机配对时存进配置，之后每次连接和 Hub 发来的
+每条消息都用它核验，原理见 [security.md](security.md#原生节点目标机认-hub-靠钉住的公钥不只靠证书)。邀请默认十分钟有效，只能建立一个节点；相同名称的新邀请
 替换尚未使用的旧邀请，已经登记的机器应使用原配置或轮换凭据。Hub 只存邀请摘要，
 最多保留64个待配对邀请，每个邀请在八次错误秘密尝试后失效；重新生成可恢复配对。
 邀请只能交给要加入的目标机，不作为 MCP、OAuth 或节点长连接的凭据。
@@ -350,7 +351,7 @@ gld --json node register build-machine --credential-stdin < node-credential.txt
 ```
 
 凭据文件由操作员事先准备，至少32个字符，仅含英文字母、数字、`_`、`-`；
-应使用至少256位的安全随机值。命令从 stdin 读取，只返回 `hub_id`、`machine_id`、展示名称和 `revoked` 状态。
+应使用至少256位的安全随机值。命令从 stdin 读取，只返回 `hub_id`、`hub_public_key`、`machine_id`、展示名称和 `revoked` 状态。
 Hub 只保存节点凭据的 SHA-256 摘要，不接受现有服务、项目或 grant 的钥匙复用为节点凭据。
 登记复用现有 CLI/守护进程的配置写入口；正在运行的守护进程协议过旧时会要求先升级。
 
@@ -379,6 +380,7 @@ gld --json node rotate-credential <machine_id> --credential-stdin < new-node-cre
 {
   "hub_url": "https://hub.example.com/hub",
   "hub_id": "<登记返回的32位Hub ID>",
+  "hub_public_key": "<登记返回的64位Hub公钥>",
   "machine_id": "<登记返回的32位机器ID>",
   "credential": "<与登记时相同的专用随机凭据>",
   "workspaces": ["<允许文件写入的本机项目ID>", "<只读共享的本机项目ID>"],
@@ -399,7 +401,11 @@ gld --json node rotate-credential <machine_id> --credential-stdin < new-node-cre
 
 `hub_url` 是基地址，保留已有 `/hub` 等前缀，不填 `/mcp`。
 节点连接的是基地址下 `/nodes/v1/connect/<machine_id>`；同一入口的反向代理须转发这条
-WebSocket 路由。节点验证 TLS 证书、主机名及 Hub ID，证书或身份不符直接退出。
+WebSocket 路由。节点验证 TLS 证书、主机名、Hub ID，以及 Hub 用私钥对本次连接随机数的签名；
+连上后 Hub 发来的每条消息也要带对得上顺序的签名。任何一项不符，节点直接退出，不执行那条消息，
+报错写的是 `could not prove the pinned Hub key` 或 `Hub message signature or order is invalid`。
+前者多半是 `hub_url` 指向了别的 Hub、`hub_public_key` 填错，或 Hub 的节点私钥换过（这时要重新配对）；
+后者说明链路上有东西改过消息。没有 `hub_public_key` 的旧配置读不出来，要重新 `gld join` 或按登记输出补上。
 旧全局网关的 `/hub` 节点路由也连接同一登记表，并继续受 `use_global_gateway` 开关约束。
 使用私有 CA 时可在配置增加 `ca_certificate`，指向不超过64 KiB的 DER CA证书；
 这是显式信任该 CA，仍验证主机名。HTTP/WS 只允许显式的回环 IP，用于本机隔离测试，

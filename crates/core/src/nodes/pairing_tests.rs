@@ -24,11 +24,44 @@ fn reload(data: &AppData) -> AppData {
     serde_json::from_slice(&serde_json::to_vec(data).unwrap()).unwrap()
 }
 
+/// 只改秘密段（第三段）；Hub 公钥是最后一段，改它测的是另一条拒绝路径。
 fn wrong_secret(token: &str) -> String {
-    let mut wrong = token.to_owned();
-    let last = wrong.pop().unwrap();
-    wrong.push(if last == 'a' { 'b' } else { 'a' });
-    wrong
+    let mut parts: Vec<String> = token.split('.').map(str::to_owned).collect();
+    let secret = &mut parts[2];
+    let last = secret.pop().unwrap();
+    secret.push(if last == 'a' { 'b' } else { 'a' });
+    parts.join(".")
+}
+
+#[test]
+fn invitation_pins_the_hub_key_and_a_substituted_key_is_rejected_without_using_it() {
+    let mut data = AppData::default();
+    let invitation = invite_in(&mut data, "keyed-node", NOW).unwrap();
+    let (_, pinned) = invitation_identity(&invitation.invitation).unwrap();
+    let stored = data.node_hub_key.clone();
+    assert!(!stored.is_empty() && !invitation.invitation.contains(&stored));
+
+    let impostor = super::super::hub_key::HubKey::from_stored(
+        &super::super::hub_key::generate_private_key().unwrap(),
+    )
+    .unwrap()
+    .public_key();
+    let (prefix, _) = invitation.invitation.rsplit_once('.').unwrap();
+    let substituted = format!("{prefix}.{impostor}");
+    assert_eq!(
+        pair_at(&mut data, &substituted, &request(), NOW).unwrap_err(),
+        PairError::InvalidInvitation
+    );
+    assert_eq!(data.node_invitations[0].failed_attempts, 0);
+
+    let paired = pair_at(&mut data, &invitation.invitation, &request(), NOW).unwrap();
+    assert_eq!(paired.hub_public_key, pinned);
+    assert_eq!(
+        data.node_hub_key, stored,
+        "pairing must not rotate the Hub key"
+    );
+    let second = invite_in(&mut data, "second-node", NOW).unwrap();
+    assert_eq!(invitation_identity(&second.invitation).unwrap().1, pinned);
 }
 
 #[test]
@@ -38,13 +71,16 @@ fn invitation_has_a_fixed_lifetime_and_only_its_digest_is_stored() {
     assert_eq!(invitation.expires_at, NOW + 600);
     assert_eq!(invitation.name, "build-node");
     assert_eq!(
-        invitation_hub_id(&invitation.invitation).unwrap(),
-        data.node_hub_id
+        invitation_identity(&invitation.invitation).unwrap(),
+        (
+            data.node_hub_id.clone(),
+            config::hub_public_key(&data).unwrap()
+        )
     );
     let parts: Vec<_> = invitation.invitation.split('.').collect();
     assert_eq!(
         parts.iter().map(|part| part.len()).collect::<Vec<_>>(),
-        [32, 32, 64]
+        [32, 32, 64, 64]
     );
     assert_eq!(data.node_invitations.len(), 1);
     assert_eq!(
@@ -298,8 +334,10 @@ fn malformed_requests_and_old_configuration_are_handled_without_secret_errors() 
         "".to_owned(),
         request().credential,
         format!("{}.extra", invitation.invitation),
+        // 旧格式没有 Hub 公钥，不能退回只凭 TLS 认 Hub。
+        invitation.invitation.rsplit_once('.').unwrap().0.to_owned(),
     ] {
-        assert!(invitation_hub_id(&token).is_err());
+        assert!(invitation_identity(&token).is_err());
     }
     assert!(serde_json::from_value::<PairRequest>(json!({
         "request_id": request().request_id, "credential": request().credential, "name": "untrusted"

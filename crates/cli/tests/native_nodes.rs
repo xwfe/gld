@@ -293,6 +293,7 @@ fn config(env: &Env, relay: &TlsRelay, registration: &Value, token: &str, ids: &
     json!({
         "hub_url":format!("https://localhost:{}/hub", relay.port),
         "hub_id":registration["hub_id"],
+        "hub_public_key":registration["hub_public_key"],
         "machine_id":registration["machine_id"],
         "credential":token,
         "workspaces":ids,
@@ -422,6 +423,19 @@ fn native_nodes_route_real_projects_through_authenticated_wss_and_global_gateway
         );
         assert!(!error.contains(token));
     }
+    // 有域名证书、照抄 hub_id 的冒充者给不出钉住公钥的握手证明（RFC-0013 §7.3）。
+    // 反过来模拟：节点钉的不是这个 Hub 的公钥，就得在任何调用之前拒绝并退出。
+    let mut other_key = value_a.clone();
+    other_key["hub_public_key"] = json!("e".repeat(64));
+    let other_key = write_config(&machine_a, "other-hub-key.json", &other_key);
+    let error = NodeProcess::start(&machine_a, &other_key).rejected();
+    assert!(error.contains("pinned Hub key"), "{error}");
+    assert!(
+        !inventory(&service)
+            .iter()
+            .any(|item| item["kind"] == "node"),
+        "an unproven Hub must not discover any node project"
+    );
     let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"list_workspaces","arguments":{}}})
     .to_string();
