@@ -4117,3 +4117,39 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 **CI：**用户让推，main 推到 `dabb233`。Linux、macOS 测试和 MSRV 都过，Windows job 红在 `computer/probe/state.rs` 的 unused-mut（`17ea95b` 留下的，Windows 开了 `-D warnings`，这是它第一次上 CI）。
 本机交叉检查走不通：`ring` 缺 Windows 头文件。`00406e5` 修完后 8 个 job 全过，这轮节点代码在 Windows 上编译通过；Windows 上只真跑了补丁落盘和写锁那组测试，节点和命令相关的没跑过。
 
+## 98. RFC-0008 稳定宿主基础：工具进子进程（2026-10-31）
+
+用户 2026-10-30 决定开始做。分支 `claude/continuous-upgrade-091095`，没推送、没换装、没重启任何在跑的服务；测试一律隔离 `GLD_HOME`。**不是零中断**，§6 逐条状态写在 RFC §5，这里不抄。
+
+**做了什么：**`gld daemon run` 变成宿主（端口、隧道、OAuth、节点 WSS、配置写入），工具和命令进子进程 `gld daemon generation`，走子进程的匿名管道（RFC §3.4）。新增 `gld daemon upgrade status / prepare / switch / abort`。协议 16。
+
+**用户能感觉到的行为变化，就这几条：**
+
+- 执行代被杀时服务不再整个没了，正在执行的调用收到 `generation_lost`，下一条接着用。
+- 只杀守护进程（`kill -9`）时，命令不再成孤儿：执行代读到管道关闭，收好再退，记录是 `interrupted`。原来的测试 `a_command_whose_daemon_was_killed_is_on_record_as_unknown` 改成连执行代一起杀，`unknown` 的语义还在。
+- `gld daemon restart` 查在跑的命令时多看 `daemon.json` 里的 `generation_pids`，提示和 `--force` 不变。
+- 多一个进程。`gld start`、连接器的 client_id 和授权都不动。
+
+**验证：**隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：61 个测试目标 1308 passed / 0 failed，清掉工作区三个包的缓存之后跑的；Clippy `-D warnings`、fmt --check 通过。都是 macOS，Linux 和 Windows 没跑（Windows 路径本机也编译不了）。其中 `crates/cli/tests/generation_boundary.rs` 21 条真进程测试（见 RFC §5 那张表）。手工实测：`~/.local/opt` 里真实的 0.8.3 守护进程配新命令行，隔离 `GLD_HOME`，`upgrade` 四条命令都报"协议 5"退出 1，守护进程日志只有 7 次 `daemon_info`，进程还活着。
+
+**独立审查（子代理，只读，没跑代码）发现的问题，都先复现再修：**
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| 高 | 嵌套 126–127 层的请求让调用永远挂着：帧多包两层，超过 `serde_json` 的 128 层上限，执行代拿不到 id，只打一行日志；在途计数不归零，Actions 一直占写锁；回包方向一条就杀掉整代 | 测试先红（请求超时）后绿。内容再编码成文本，读不懂就按 id 回错误 |
+| 中 | 工具跑完后回包超限或 panic，Actions 却报可重试，MCP 提示 Retry the request | 只有确定没发出去的才可重试 |
+| 中 | 崩溃替换覆盖已经完成的切换，`switch` 报成功、新项目却进旧版本 | 测试先红（`current` 被抢成 g3）后绿 |
+| 中 | 宿主和执行代各读一次配置，看法不一致时同一个目录两代写 | 执行代核对，回 `WORKSPACE_ROUTE_CHANGED`，单元测试 |
+| 中 | 项目移除后旧代收不到调用，命令没人收，旧代也退不了 | 有旧代时每 5 秒对一次成员名单，真进程测试 |
+| 低 | 编出来的 work_session id 能撑大路由表；信号和 EOF 同时来收尾被截断；退出中还接新调用；崩溃后计数减错；kill 可能打到已回收的 pid；工具核对漏了服务自己的工具 | 都修了 |
+
+没修的几条写在 RFC §5。子代理查过没发现问题的：身份在通道两端不变（含 browser 标记）、没有自动重放、`link.call` 都在 State 锁外、关停顺序、老守护进程拒绝。这是读代码的结论，不是实测。
+
+**撞到的事：**
+
+- 拆提交时写了一个多余的 `cp /dev/null /dev/null`，`set -e` 拦下，当时什么都没提交。
+- **`c8f184c` 单独编译不过：**按 hunk 暂存用了 `--unidiff-zero`，有的 hunk 落错了位置，当时的编译检查和提交串在同一条命令里，检查在提交之后才跑。下一个提交 `4cb3a72` 补齐；按规矩没 amend，二分时跳过它。
+- `pgrep -f` 写死字样时匹配到了跑测试的 shell 脚本本身（命令文本里带这段字），报了不存在的孤儿，现在用每次运行唯一的 sleep 时长。
+- 测试自己写错过两处：`cmd=true` 被命令行解析成布尔；`pwd` 跑完 `list_runs` 查不到（换成 `sleep 0.1` 就有，没再查原因）。
+- 拆提交后全量红了一条 `version_names_the_build_commit_when_it_is_known`：我把历史提交导出到临时目录、复用同一个 `target` 做编译检查，那份没有 `.git`，编出的 `gld-core` 不带提交号，cargo 算出的哈希又一样，留在了缓存里。`cargo clean -p gld-core -p gld-daemon -p gld` 后重跑就过了，代码没问题。以后这种检查别复用 `target`。
+- main 在这期间多了 `b7bc92e`、`5913f37`（节点 BUSY 短等、真机冒烟，审查 §97），这个分支是从 `a3b73c0` 拉的，合并时审查和任务表要手工接一下。`nodes/` 内部没动。

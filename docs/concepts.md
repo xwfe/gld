@@ -669,6 +669,8 @@ coding 会话采用前述 2 分钟 / 挂后台命令 10 分钟的规则。
 
 - **正在跑的那次调用**收到 JSON-RPC 错误，`error.data.reason` 是 `generation_lost`，`retryable` 是 `false`：调用可能已经产生了副作用，结果未知，gld 不替你重放。先用 `list_runs` 之类查清现状，再决定要不要重来。
 - **新代还没起来时进来的调用**最多等 10 秒，等不到就收到 `generation_unavailable`，`retryable` 是 `true`：这种确定没执行，直接重试就行。
+- **调用在子进程里出了别的错**（panic、回包太大），`reason` 是 `worker_failed`，`retryable` 同样是 `false`，工具可能已经跑完了，也先查再说。
+- **换代期间项目名单正好变了**，工具结果是 `WORKSPACE_ROUTE_CHANGED`：没执行，再调一次。
 - **它起的命令**不会跟着停，但也没人管了：`session_id` 查到的是 `unknown`，进程还在跑就要自己收。
 
 反过来，守护进程本身被 `kill -9` 时，子进程会把命令停掉（记成 `interrupted`）再退出，不留孤儿。
