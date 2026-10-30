@@ -415,8 +415,32 @@ pub async fn dispatch(
             ok(&app.agent_context(&profile.id)?)
         }
         R::GlobalAgentContext => ok(&app.global_agent_context()),
+
+        // ---- 升级 ----
+        R::UpgradeStatus => upgrade(|router| Ok(router.status())).await,
+        R::UpgradePrepare { exe, timeout_secs } => {
+            upgrade(move |router| {
+                router.prepare(&exe, std::time::Duration::from_secs(timeout_secs))
+            })
+            .await
+        }
+        R::UpgradeSwitch => upgrade(|router| router.switch()).await,
+        R::UpgradeAbort => upgrade(|router| router.abort()).await,
         // ---- 软件 ----
     }
+}
+
+/// 这些操作要等子进程应答，放阻塞线程。
+async fn upgrade(
+    run: impl FnOnce(&gld_core::generation::Router) -> Result<Value, String> + Send + 'static,
+) -> Result<Value, RpcError> {
+    let Some(router) = gld_core::generation::router() else {
+        return Err(RpcError::protocol("当前不是守护进程，没有执行代可操作"));
+    };
+    tokio::task::spawn_blocking(move || run(&router))
+        .await
+        .map_err(|error| RpcError::internal(format!("升级操作失败：{error}")))?
+        .map_err(RpcError::app)
 }
 
 async fn change_node_credential(

@@ -2457,6 +2457,7 @@ Commands:
   status   显示守护进程是否在运行、pid、运行时长、日志位置
   run      在前台运行守护进程（给 systemd / launchd 或排障用；Ctrl-C 优雅退出）
   logs     查看守护进程自身日志
+  upgrade  不重启守护进程换工具实现（还不是零中断，见 docs/rfc/0008-continuous-upgrades.md）
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]

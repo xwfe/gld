@@ -6,10 +6,11 @@ use gld_core::data::DataStore;
 use gld_core::tools::runs;
 use gld_daemon::lifecycle::{self, DaemonPaths, DaemonProbe, StopOutcome};
 use gld_daemon::server::{self, ServerOptions};
+use gld_daemon::{Client, Request, FIRST_PROTOCOL_WITH_GENERATIONS, PROTOCOL_VERSION};
 use serde_json::json;
 
 use crate::backend::{check_version, current_executable};
-use crate::cli::DaemonCmd;
+use crate::cli::{DaemonCmd, DaemonUpgradeCmd};
 use crate::error::{CliError, CliResult};
 use crate::output::{human_duration, Output};
 
@@ -37,6 +38,7 @@ pub async fn run(command: &DaemonCmd, out: Output) -> CliResult {
             .await
             .map_err(CliError::from)
         }
+        DaemonCmd::Upgrade(command) => upgrade(&paths, command, out).await,
         DaemonCmd::Generation => {
             keep_running_on_broken_pipe();
             tokio::task::spawn_blocking(gld_core::generation::child::serve)
@@ -64,6 +66,109 @@ fn keep_running_on_broken_pipe() {
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+async fn upgrade(paths: &DaemonPaths, command: &DaemonUpgradeCmd, out: Output) -> CliResult {
+    let DaemonProbe::Running(info) = lifecycle::probe(paths).await else {
+        return Err(CliError::daemon_not_running(
+            "守护进程没在跑，没有东西可以升级；`gld start` 直接就是新版本。",
+        ));
+    };
+    // 在发任何操作之前判断。老守护进程是单体，能力未知就当不支持：不发 Shutdown、不动端口。
+    if info.protocol < FIRST_PROTOCOL_WITH_GENERATIONS || info.protocol != PROTOCOL_VERSION {
+        return Err(CliError::new(format!(
+            "在跑的守护进程是协议 {}，这个命令行是协议 {PROTOCOL_VERSION}，它们之间不能不重启地换版本，这次什么都没动。\
+             换版本照 docs/install.md 的「升级」做：服务会断开片刻。",
+            info.protocol
+        )));
+    }
+    let request = match command {
+        DaemonUpgradeCmd::Status => Request::UpgradeStatus,
+        DaemonUpgradeCmd::Prepare { exe, timeout } => Request::UpgradePrepare {
+            exe: std::path::absolute(exe).unwrap_or_else(|_| exe.clone()),
+            timeout_secs: *timeout,
+        },
+        DaemonUpgradeCmd::Switch => Request::UpgradeSwitch,
+        DaemonUpgradeCmd::Abort => Request::UpgradeAbort,
+    };
+    let wait = match command {
+        DaemonUpgradeCmd::Prepare { timeout, .. } => Duration::from_secs(timeout + 30),
+        _ => Duration::from_secs(45),
+    };
+    let reply = Client::new(paths.clone())
+        .with_timeout(wait)
+        .call(&request)
+        .await
+        .map_err(|error| CliError::new(error.to_string()))?;
+    if out.json_or(&reply) {
+        return Ok(());
+    }
+    match command {
+        DaemonUpgradeCmd::Status => print_upgrade_status(&reply, out),
+        DaemonUpgradeCmd::Prepare { exe, .. } => {
+            out.line(format!(
+                "新版本已就绪（{}，版本 {}，提交 {}），在线服务没动。切过去：gld daemon upgrade switch；不要了：gld daemon upgrade abort",
+                exe.display(),
+                reply["version"].as_str().unwrap_or("?"),
+                reply["build_commit"].as_str().unwrap_or("未知"),
+            ));
+        }
+        DaemonUpgradeCmd::Switch => {
+            out.line(format!(
+                "已切到 {}。之后第一次用到的项目进新版本；已经用过的项目留在 {}，要等工作区交接做出来或者 gld daemon restart。",
+                reply["current"].as_str().unwrap_or("?"),
+                reply["previous"].as_str().unwrap_or("旧代"),
+            ));
+        }
+        DaemonUpgradeCmd::Abort => {
+            out.line(format!(
+                "已放弃 {}，在线服务没动。",
+                reply["aborted"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn print_upgrade_status(status: &serde_json::Value, out: Output) {
+    out.kv(&[
+        (
+            "当前代",
+            status["current"].as_str().unwrap_or("无").to_string(),
+        ),
+        (
+            "准备好的新代",
+            status["prepared"].as_str().unwrap_or("无").to_string(),
+        ),
+        ("意外重启次数", status["restarts"].to_string()),
+        ("零中断", "还没有：工作区交接和宿主更替没做".to_string()),
+    ]);
+    if let Some(failure) = status["last_failure"].as_str() {
+        out.line(out.yellow(&format!("上次失败：{failure}")));
+    }
+    for row in status["generations"].as_array().into_iter().flatten() {
+        out.line(format!(
+            "{}  {}  pid {}  版本 {}（{}）  在途 {}  命令 {}  Agent {}  项目 {}",
+            row["id"].as_str().unwrap_or("?"),
+            row["role"].as_str().unwrap_or("?"),
+            row["pid"],
+            row["version"].as_str().unwrap_or("?"),
+            row["build_commit"].as_str().unwrap_or("未知提交"),
+            row["in_flight"],
+            row["active_commands"],
+            row["active_agents"],
+            row["workspaces"].as_array().map_or(0, Vec::len),
+        ));
+        let blocked: Vec<&str> = row["blocked_by"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|reason| reason.as_str())
+            .collect();
+        if !blocked.is_empty() {
+            out.line(format!("  还不能退：{}", blocked.join("、")));
+        }
     }
 }
 

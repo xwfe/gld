@@ -48,7 +48,12 @@ use serde_json::Value;
 /// 13：新增 node_register 节点凭据登记，旧守护进程需要升级后才能处理。
 /// 14：新增节点凭据撤销/轮换，成功返回前收回失效连接。
 /// 15：新增 node_invite，一次性邀请由本机操作员经配置写入口生成。
-pub const PROTOCOL_VERSION: u32 = 15;
+/// 16：新增 upgrade_status、upgrade_prepare、upgrade_switch、upgrade_abort（`gld daemon upgrade`，RFC-0008）。
+///    旧守护进程没有执行代，不能接这几个，见 [`FIRST_PROTOCOL_WITH_GENERATIONS`]。
+pub const PROTOCOL_VERSION: u32 = 16;
+
+/// 从这个协议起守护进程才有执行代。更老的一律当作不支持：提前拒绝，不发任何会动在线状态的请求。
+pub const FIRST_PROTOCOL_WITH_GENERATIONS: u32 = 16;
 
 /// 守护进程自述，用于 `gld daemon status` 与版本核对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,6 +418,17 @@ pub enum Request {
         target: WorkspaceTarget,
     },
     GlobalAgentContext,
+
+    // ---- 升级（RFC-0008）----
+    /// 只读：有几代、谁是当前代、各自在途多少、旧代为什么还不能退。不含凭据和工具参数。
+    UpgradeStatus,
+    /// 起一个新代并验证，不动在线路由。失败时旧服务完全不受影响。
+    UpgradePrepare {
+        exe: PathBuf,
+        timeout_secs: u64,
+    },
+    UpgradeSwitch,
+    UpgradeAbort,
 }
 
 impl Request {
@@ -444,6 +460,10 @@ impl Request {
                 | Request::TestMcpServer { .. }
                 | Request::ApproveAgentTask { .. }
                 | Request::StopAgentTask { .. }
+                | Request::UpgradeStatus
+                | Request::UpgradePrepare { .. }
+                | Request::UpgradeSwitch
+                | Request::UpgradeAbort
         )
     }
 
@@ -479,6 +499,9 @@ impl Request {
                 | Request::NodeRotateCredential { .. }
                 // 要算目录大小、删整棵目录，日志攒久了有几百 MB。
                 | Request::Prune { .. }
+                // 新代就绪最多等 15 秒，放弃时还要等它收尾。
+                | Request::UpgradePrepare { .. }
+                | Request::UpgradeAbort
         )
     }
 
