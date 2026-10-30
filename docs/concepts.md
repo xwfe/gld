@@ -334,6 +334,20 @@ gld node shares --config node.json --share api --share web
 修改只更新目标机文件，重新运行节点并完成项目发现后 Hub 才更新目录；剩余项目句柄保持不变，
 被移除的项目不再接受调用。修改保留 Hub 地址和身份、机器 ID、节点凭据及 CA 信任设置。
 
+#### 让目标机退出 Hub
+
+先结束节点进程，再在目标机执行：
+
+```bash
+gld leave --config node.json
+```
+
+它删掉 `node.json` 和没配对完的 `node.json.pending`，凭据随之消失，这台机器之后连不上 Hub，要回来得重新邀请和配对。
+项目文件和运行记录不动，空的 `node.json.lock` 留着。节点还在跑时报 `Node configuration is in use`，什么都不删。
+
+Hub 上的登记不会跟着消失，显示离线：节点凭据只能用来连接，不能调 Hub 的管理操作。
+不再用这台机器就在 Hub 上执行 `gld node revoke <机器 ID>`，机器 ID 在 `gld leave` 的输出里。
+
 #### 让目标机跑命令
 
 默认不开。要开就在目标机点名项目，`gld join` 和 `gld node shares` 都用 `--run`：

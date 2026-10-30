@@ -122,6 +122,7 @@ Commands:
   remote       远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
   node         原生节点：登记机器，用一条出站连接共享指定项目（默认只读）
   join         用一次性邀请配对，生成目标机的私有节点配置
+  leave        让目标机退出 Hub：删除本机节点配置和凭据，不碰项目文件；Hub 上的登记由操作员撤销
   grant        只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
   agent        委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
   mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个

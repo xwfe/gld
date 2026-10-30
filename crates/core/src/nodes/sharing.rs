@@ -74,6 +74,25 @@ pub fn replace(
     ))
 }
 
+#[derive(Debug, Serialize)]
+pub struct LeftNode {
+    pub hub_id: String,
+    pub machine_id: String,
+    pub config_path: PathBuf,
+}
+
+/// 目标机单方面退出：删掉本机配置和凭据。节点要先停（同一把配置锁）。不碰项目文件和运行记录；
+/// Hub 上的登记要操作员撤销，节点凭据只能用来连 WSS，不能调 Hub 的管理操作。
+pub fn leave(path: &Path) -> Result<LeftNode, String> {
+    let storage = LocalConfig::lock(path)?;
+    let config = storage.remove()?;
+    Ok(LeftNode {
+        hub_id: config.hub_id,
+        machine_id: config.machine_id,
+        config_path: storage.path().to_path_buf(),
+    })
+}
+
 fn selected(project: SharedProject) -> SharedWorkspace {
     SharedWorkspace {
         id: project.id,

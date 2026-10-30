@@ -89,3 +89,84 @@ fn cli_sharing_changes_require_a_stopped_node_and_preserve_remaining_project_han
     assert_eq!(read(&service, &api_handle)["ok"], false);
     assert_no_daemon(&machine);
 }
+
+#[test]
+fn leaving_removes_only_the_local_node_state_and_hub_keeps_the_machine_until_revoked() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "leaving");
+    let registration = register(&hub, "leaving", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let path = write_config(&machine, "leaving.json", &value);
+    let readme = machine.project.path().join("api/README.md");
+    let leave = |extra: &[&str]| {
+        command(&machine)
+            .args(["--json", "leave", "--config"])
+            .arg(&path)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let mut node = NodeProcess::start(&machine, &path);
+    wait_inventory(&service, 2, 2);
+    assert!(path.exists());
+    let refused = leave(&[]);
+    assert!(!refused.status.success(), "needs confirmation");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
+    let running = leave(&["--yes"]);
+    assert!(!running.status.success(), "the node still holds the lock");
+    assert!(String::from_utf8_lossy(&running.stderr).contains("in use"));
+    assert!(path.exists());
+    node.stop();
+    wait_inventory(&service, 0, 2);
+
+    let left = leave(&["--yes"]);
+    assert!(
+        left.status.success(),
+        "{}",
+        String::from_utf8_lossy(&left.stderr)
+    );
+    let output: Value = serde_json::from_slice(&left.stdout).unwrap();
+    assert_eq!(output["machine_id"], registration["machine_id"]);
+    assert!(!String::from_utf8_lossy(&left.stdout).contains(TOKEN_A));
+    assert!(!path.exists());
+    assert_eq!(
+        std::fs::read_to_string(&readme).unwrap(),
+        "leaving/api\n",
+        "project files stay"
+    );
+    assert!(
+        !leave(&["--yes"]).status.success(),
+        "nothing left to remove"
+    );
+
+    // 登记还在，操作员撤销之前显示离线，不会悄悄消失。
+    let items = wait_inventory(&service, 0, 2);
+    assert_eq!(
+        items.iter().filter(|item| item["kind"] == "node").count(),
+        2
+    );
+    let machine_id = registration["machine_id"].as_str().unwrap();
+    assert_eq!(
+        hub.json(&["--json", "node", "revoke", machine_id])["revoked"],
+        true
+    );
+}
+
+#[test]
+fn leaving_refuses_a_file_that_is_not_a_node_configuration() {
+    let machine = Env::new();
+    let path = machine.home.path().join("not-a-node.json");
+    std::fs::write(&path, "{\"important\":true}\n").unwrap();
+    let output = command(&machine)
+        .args(["leave", "--yes", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(path.exists());
+}

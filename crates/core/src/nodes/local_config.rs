@@ -107,6 +107,24 @@ impl LocalConfig {
         sync_parent(&self.path)
     }
 
+    /// 删掉配置和没配对完的 pending，返回被删的配置。锁文件留着：删了锁，别的进程可能各持一把。
+    /// 先读出来校验，免得 `--config` 写错路径时把不相干的文件删了。
+    pub fn remove(&self) -> Result<NodeConfig, String> {
+        let config = if self.exists()? {
+            self.load()?
+        } else {
+            self.load_pending()?
+                .ok_or("No node configuration or pending pairing here")?
+        };
+        for path in [&self.path, &self.pending] {
+            if path_exists(path)? {
+                fs::remove_file(path).map_err(|_| "Cannot remove the node configuration")?;
+            }
+        }
+        sync_parent(&self.path)?;
+        Ok(config)
+    }
+
     /// 调用方持有同一把锁，校验配置后整份原子替换。
     pub fn replace(&self, config: &NodeConfig) -> Result<(), String> {
         self.load()?;

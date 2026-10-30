@@ -83,6 +83,9 @@ pub async fn run(cli: Cli) -> CliResult {
     if let Command::Join(args) = &cli.command {
         return join::run(args, out).await;
     }
+    if let Command::Leave(args) = &cli.command {
+        return join::leave(args, out);
+    }
 
     let backend = Backend::connect(
         !cli.global.no_autostart,
@@ -102,7 +105,8 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Daemon(_)
         | Command::Completions { .. }
         | Command::Computer(_)
-        | Command::Join(_) => {
+        | Command::Join(_)
+        | Command::Leave(_) => {
             unreachable!("handled above")
         }
         Command::Start(args) => service::start(&mut ctx, args).await,

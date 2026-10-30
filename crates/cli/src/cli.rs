@@ -234,6 +234,8 @@ pub enum Command {
 
     /// 用一次性邀请配对，生成目标机的私有节点配置
     Join(JoinArgs),
+    /// 让目标机退出 Hub：删除本机节点配置和凭据，不碰项目文件；Hub 上的登记由操作员撤销
+    Leave(LeaveArgs),
 
     /// 只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
     ///
@@ -410,6 +412,16 @@ pub enum NodeCmd {
 }
 
 // ---------------------------------------------------------------- daemon
+
+#[derive(Debug, Args)]
+pub struct LeaveArgs {
+    /// 要删除的节点配置；节点须已停止
+    #[arg(long)]
+    pub config: PathBuf,
+    /// 确认删除，供非交互调用使用
+    #[arg(long)]
+    pub yes: bool,
+}
 
 #[derive(Debug, Args)]
 pub struct JoinArgs {
