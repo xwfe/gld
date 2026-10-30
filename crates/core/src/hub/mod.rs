@@ -230,6 +230,9 @@ pub struct Routed {
     pub context: Option<SharedToolContext>,
 }
 
+/// 本机 MCP server 转发在路由表里的名字，见 [`Hub::execution_route`]。
+const MACHINE_MCP_ROUTE: &str = "machine-mcp";
+
 /// 执行代摸不到节点连接（归宿主，RFC-0008 §3.4），要用就经这个接口问。
 pub trait NodeBridge: Send + Sync {
     fn members(&self) -> Result<Vec<NativeMember>, String>;
@@ -369,7 +372,7 @@ impl Hub {
         let canonical = canonical_tool_name(name);
         // 本机 MCP server 的进程不分工作区，但有连接和会话，整个算一个“工作区”。
         if machine_mcp::is_tool(canonical) {
-            return ExecutionRoute::Owned("machine-mcp".into());
+            return ExecutionRoute::Owned(MACHINE_MCP_ROUTE.into());
         }
         let args = crate::mcp::tool_arguments(name, &params);
         let Some(selector) = args
@@ -401,6 +404,14 @@ impl Hub {
             Ok(member) => member_route(member),
             Err(_) => ExecutionRoute::Unbound,
         }
+    }
+
+    /// 按现在的成员名单收掉已经离开的成员。平时每次工具调用顺手做；切换后旧代可能再也收不到调用，
+    /// 宿主定期叫它做一次，不然被 `gld rm` 的项目在旧代里起的命令就没人收了。
+    pub fn reconcile(&self) -> Result<(), String> {
+        let (members, _) = self.snapshot()?;
+        self.forget_departed(&members)
+            .map_err(|error| error.message())
     }
 
     /// 执行代处理宿主路由过来的请求：宿主和这边看到的归属对不上就不执行。
@@ -1339,6 +1350,31 @@ pub(crate) fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSetti
         &settings.global_hidden_skills,
     ))
     .unwrap_or_default()
+}
+
+/// 现在还算数的工作区归属键。不在里面的说明项目已经删了、work_session 已经收尾，
+/// 不用再占着旧代。读不出来时报错，宁可多留也不能误判。
+pub fn known_owner_keys() -> Result<std::collections::HashSet<String>, String> {
+    let (mut keys, _) = DataStore::read_file(|data| {
+        let mut keys = std::collections::HashSet::new();
+        for profile in &data.profiles {
+            keys.insert(crate::generation::router::root_key(std::path::Path::new(
+                &profile.path,
+            )));
+        }
+        for remote in &data.ccnm_members {
+            keys.insert(remote.id.clone());
+        }
+        Ok((keys, ()))
+    })
+    .map_err(|error| error.to_string())?;
+    keys.insert(MACHINE_MCP_ROUTE.to_string());
+    let home = crate::home::data_home().map_err(|error| error.to_string())?;
+    let live = crate::managed_workspaces::Store::new(home)
+        .live()
+        .map_err(|error| error.message())?;
+    keys.extend(live.into_iter().map(|record| record.id));
+    Ok(keys)
 }
 
 /// 这个成员的工作区状态归谁管。节点上的状态在节点那台机器上，这边哪一代转发都一样。

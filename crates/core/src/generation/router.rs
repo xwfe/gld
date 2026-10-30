@@ -27,6 +27,8 @@ const ADMIT_WAIT: Duration = Duration::from_secs(10);
 /// Agent 收尾最多 15 秒，再留一点给命令。
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+/// 有旧代时，多久叫它们对一次成员名单。每次要读配置和跨进程问一轮，不用每条请求都做。
+const RECONCILE_EVERY: Duration = Duration::from_secs(5);
 const RESTART_BACKOFF: [Duration; 5] = [
     Duration::from_millis(200),
     Duration::from_secs(1),
@@ -95,6 +97,7 @@ struct State {
     restarts: u64,
     retired: u64,
     last_failure: Option<String>,
+    last_reconcile: Option<Instant>,
     shutting_down: bool,
 }
 
@@ -150,6 +153,7 @@ impl Router {
                 shutting_down: false,
             }),
             changed: Condvar::new(),
+                last_reconcile: None,
             handle: Handle::current(),
             me: me.clone(),
             on_generations_changed,
@@ -268,7 +272,9 @@ impl Router {
             body: body.clone(),
             route,
         };
-        mcp_reply(self.forward(key, discovery, &op)?)
+        let reply = self.forward(key, discovery, &op);
+        self.reconcile_draining();
+        mcp_reply(reply?)
     }
 
     /// 单项目监听器上的一次 MCP 请求。
@@ -399,6 +405,64 @@ impl Router {
     fn routable(&self) -> Vec<Arc<Link>> {
         let state = self.lock();
         state
+    /// 平时每次工具调用都会顺手收掉离开的成员，可切换之后旧代可能再也收不到调用。
+    /// 所以有旧代时由这边定期叫它做，收完把已经不存在的工作区从它名下摘掉，它才退得了。
+    fn reconcile_draining(&self) {
+        let draining: Vec<Arc<Link>> = {
+            let mut state = self.lock();
+            let recent = state
+                .last_reconcile
+                .is_some_and(|last| last.elapsed() < RECONCILE_EVERY);
+            if state.generations.len() < 2 || recent {
+                return;
+            }
+            state.last_reconcile = Some(Instant::now());
+            state
+                .generations
+                .iter()
+                .filter(|link| !state.is_current(link.id) && !state.is_prepared(link.id))
+                .cloned()
+                .collect()
+        };
+        if draining.is_empty() {
+            return;
+        }
+        let router = self.arc();
+        self.handle.spawn_blocking(move || {
+            for link in draining {
+                if let Err(error) = link.call(&Op::HubReconcile, Some(INTERRUPT_TIMEOUT)) {
+                    eprintln!("g{} 没能收掉离开的成员：{error}", link.id);
+                    continue;
+                }
+                router.release_stale_owners(&link);
+            }
+            router.retire_idle();
+        });
+    }
+
+    fn release_stale_owners(&self, link: &Link) {
+        let Ok(known) = crate::hub::known_owner_keys() else {
+            return;
+        };
+        let Ok(status) = link.call(&Op::Status, Some(CONTROL_TIMEOUT)) else {
+            return;
+        };
+        // 项目删了但命令还没停（比如 `gld tool call` 起的，不归 Hub 收）的不摘：
+        // 同一个目录再登记回来时，命令和写入还得在同一代。
+        let busy: HashSet<String> = status["commands_by_workspace"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["root"].as_str().map(str::to_string))
+            .collect();
+        self.lock().owners.retain(|key, owned| {
+            owned.generation != link.id
+                || owned.in_flight > 0
+                || known.contains(key)
+                || busy.contains(key)
+        });
+    }
+
             .generations
             .iter()
             .filter(|link| !state.is_prepared(link.id))
@@ -538,8 +602,9 @@ impl Router {
             }
             if state.generations.len() >= MAX_LIVE_GENERATIONS {
                 return Err(format!(
-                    "已经有 {} 代在跑（上限 {MAX_LIVE_GENERATIONS}），旧代还有工作区或命令。\
-                     不会为了腾位置杀掉它们：看 gld daemon upgrade status，等它们结束或者 gld daemon restart",
+                    "已经有 {} 代在跑（上限 {MAX_LIVE_GENERATIONS}），旧代还占着工作区或命令。\
+                     不会为了腾位置杀掉它们；工作区交接还没做，全换成新版本只能 gld daemon restart，\
+                     现状看 gld daemon upgrade status",
                     state.generations.len()
                 ));
             }

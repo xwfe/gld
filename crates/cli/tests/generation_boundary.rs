@@ -792,6 +792,38 @@ fn an_old_generation_with_nothing_to_finish_retires_after_the_switch() {
     fixture.wait_until_answering();
 }
 
+/// 切换之后旧代可能再也收不到调用，可 `gld rm` 的项目在里面起的命令还得有人收，
+/// 收完这一代也该退了。
+#[test]
+fn removing_a_project_reaches_the_old_generation_that_owns_it() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    let g1 = fixture.runner_of("api");
+    let sleeper = unique_sleep();
+    let started = fixture.tool(
+        "exec_command",
+        json!({ "workspace": "api", "cmd": sleeper, "yield_time_ms": 0, "timeout_ms": 120000 }),
+    );
+    assert_eq!(started["status"], "running", "{started}");
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    env.ok(&["daemon", "upgrade", "switch"]);
+    assert_ne!(fixture.runner_of("web"), g1);
+
+    env.ok(&["rm", "api", "--yes"]);
+    // 请求都进新代，旧代从此收不到调用。
+    wait_for("旧代退出", || {
+        fixture.tool("list_workspaces", json!({}));
+        !alive(g1)
+    });
+    let leftover = Command::new("pgrep")
+        .args(["-f", &sleeper])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("pgrep");
+    assert!(!leftover.success(), "被移除项目的命令没人收");
+    assert_eq!(fixture.status()["retired"], 1);
+}
+
 /// 代数到了上限就拒绝再准备，旧代一个不杀。
 #[test]
 fn the_generation_limit_refuses_new_ones_and_kills_nothing() {

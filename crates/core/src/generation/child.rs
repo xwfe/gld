@@ -249,6 +249,10 @@ impl Generation {
                 let hub = self.current_hub()?;
                 Ok(json!({
                     "build": tools::exec::server_snapshot(),
+            Op::HubReconcile => {
+                self.current_hub()?.reconcile()?;
+                Ok(json!({}))
+            }
                     "tools": hub.list_tools(),
                 }))
             }

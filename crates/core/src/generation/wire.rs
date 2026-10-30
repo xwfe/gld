@@ -69,6 +69,8 @@ pub enum Op {
         sweep: bool,
     },
     HubShutdown,
+    /// 收掉已经离开的成员，见 [`crate::hub::Hub::reconcile`]。
+    HubReconcile,
     ServedTools,
     HubMcp {
         auth: WireAuth,
