@@ -248,16 +248,17 @@ Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并�
 结束或失败后关闭本次 stdio 进程，清理本次目录；清理失败会返回保留位置，不扫描其他缓存或接管常驻 App。
 本机进程退出不等于桌面输入停止已通过验收，公开 `computer_manage/observe/act` 仍未提供。
 
-### 原生 gld 节点：项目读取与凭据管理
+### 原生 gld 节点：项目读写与凭据管理
 
-目标机可以主动连回同一个 Hub，Hub 再用已有的项目工具读目标机文件。
+目标机可以主动连回同一个 Hub，Hub 再用已有的项目工具读写目标机文件。
+共享项目默认只读；文件写入须由目标机本地操作员逐项目明确开启。
 操作员现在可用一次性邀请生成节点配置；已有预置凭据也可继续使用。
-自动安装、后台自启动和远端写入/执行继续按
-[RFC-0013](rfc/0013-native-machines-and-desktop.md) 的 M1/M2 实现。
+命令运行、查询和停止接续 M1，自动安装与后台自启动属于 M2，顺序见
+[RFC-0013](rfc/0013-native-machines-and-desktop.md)。
 
 #### 用一次性邀请配对
 
-先在目标机用 `gld add` 登记要共享的目录并明确命名，例如 `api`；项目须开启 `confine-reads`。
+先在目标机用 `gld add` 登记要共享的目录并明确命名，例如 `api`、`web`；项目须开启 `confine-reads`。
 在 Hub 的本机终端生成邀请：
 
 ```bash
@@ -269,21 +270,26 @@ gld node invite build-machine
 最多保留64个待配对邀请，每个邀请在八次错误秘密尝试后失效；重新生成可恢复配对。
 邀请只能交给要加入的目标机，不作为 MCP、OAuth 或节点长连接的凭据。
 
-把邀请经可信渠道传到目标机，放入仅当前账号可读的 `invitation.txt`（文件中只有邀请值），然后执行：
+把邀请经可信渠道传到目标机，在所有共享项目之外准备一个由执行账号管理的私有目录。
+以下命令在这个目录中执行，`node.json` 和仅当前账号可读的 `invitation.txt` 都放在这里；
+邀请文件中只有邀请值。下面共享 `api`、`web`，只允许修改 `api` 的文件：
 
 ```bash
-gld join --hub https://hub.example.com/hub --config node.json --share api --invite-stdin < invitation.txt
+gld join --hub https://hub.example.com/hub --config node.json --share api --share web --write api --invite-stdin < invitation.txt
 ```
 
-`--share` 可重复指定，接受已登记本机项目的完整 ID 或唯一名称。命令先显示 Hub ID、执行账号、
-共享目录和只读权限，再从终端取得一次确认；非交互使用显式 `--yes`。
+`--share`、`--write` 都可重复指定，接受已登记本机项目的完整 ID 或唯一名称；
+`--write` 选中的项目必须同时在完整 `--share` 名单中。省略 `--write` 时全部只读。
+本机项目的工具档须允许文件写入，否则 `--write` 会报错，不会代改项目配置。
+命令先显示 Hub ID、执行账号、共享目录和逐项目权限，`read_only=false` 表示允许文件写入，
+再从终端取得一次确认；非交互使用显式 `--yes`。文件写入授权不包含命令执行或配置管理权限。
 确认前不会发送邀请或创建含凭据的配对状态。配对只生成配置，随后用
 `gld node run --config node.json` 在前台连接；目标端不会为配对启动本机 daemon。
 私有 CA 使用 `--ca-certificate <DER文件>`，TLS 主机名仍需匹配。
 
 目标机在第一次请求前将随机机器 ID、独立节点凭据和共享设置保存到同目录的
 `node.json.pending`，成功后发布为 `node.json`。Hub 把登记和消费邀请一起保存；
-响应丢失时，用相同配置路径、Hub、共享设置和邀请重跑原命令，会恢复同一登记。
+响应丢失时，用相同配置路径、Hub、共享和文件写入设置及邀请重跑原命令，会恢复同一登记。
 已消费或过期邀请无法登记第二台机器；恢复还须原节点凭据有效、未撤销且未轮换。
 参数变化、已有正式配置或配对身份不符会报错并保留原文件；不自动覆盖另一绑定。
 若正式配置已经发布，只因清理 pending 失败而报错，配置仍可用于 `node run`。
@@ -293,31 +299,43 @@ gld join --hub https://hub.example.com/hub --config node.json --share api --invi
 仅用于本机测试的明文回环 IP 会绕过环境代理。失败保留 pending，命令不回显永久凭据。
 配置与 pending 在 Unix 使用属主检查及私有权限；Windows 创建时指定当前账号独占的受保护 DACL，
 读取时核对同一文件句柄，无法确认 ACL 的卷拒绝保存。配置操作以稳定文件锁互斥，
-文件在私有写入后无覆盖发布；配置文件应保留在执行账号管理的目录中。
+文件在私有写入后无覆盖发布。`node.json` 及同目录的 pending、锁文件须一直保留在共享项目之外。
 
 #### 查看和修改目标机共享项目
 
-在目标机查看这份配置的共享名单；节点正在运行时也可以查看：
+在目标机的上述私有目录查看这份配置的共享名单和文件写入权限；节点正在运行时也可以查看：
 
 ```bash
 gld node shares --config node.json
 ```
 
-要修改名单，先在节点前台进程按 Ctrl-C 结束，再列出要保留的全部项目。例如只保留 `web`：
+要修改权限，先在节点前台进程按 Ctrl-C 结束，再列出要保留的全部共享项目和全部可写项目。
+例如保留 `api`、`web`，只允许修改 `api`：
 
 ```bash
-gld node shares --config node.json --share web
+gld node shares --config node.json --share api --share web --write api
 gld node run --config node.json
 ```
 
-不传 `--share` 是查看；传入一个或多个 `--share` 会完整替换名单，接受完整项目 ID 或唯一名称。
-名单须保留1～256个明确项目。重复、未知、名称歧义或未开启 `confine-reads` 时拒绝修改，原文件保留。
+要把两项都恢复只读，结束节点后执行：
+
+```bash
+gld node shares --config node.json --share api --share web
+```
+
+不传 `--share` 是查看；传入一个或多个 `--share` 会完整替换共享和可写名单。
+替换时省略 `--write` 会撤回全部文件写入权限，新加入的共享项目也不会继承旧权限；
+`--write` 不能单独使用，且所选项目必须在本次 `--share` 名单中。
+名单须保留1～256个明确项目。重复、未知、名称歧义、未开启 `confine-reads`，
+或对本机只读工具档的项目请求写入时拒绝修改，原文件保留。
 节点进程在在线、断线等待和重连期间都持有这份配置的锁；须结束进程后再改。
 修改只更新目标机文件，重新运行节点并完成项目发现后 Hub 才更新目录；剩余项目句柄保持不变，
 被移除的项目不再接受调用。修改保留 Hub 地址和身份、机器 ID、节点凭据及 CA 信任设置。
 
 `--json` 输出 `hub_url`、`hub_id`、`machine_id`、`config_path` 和 `workspaces`，不输出凭据或 CA 路径。
-每个项目有 `id`、仍可取得的 `name` / `path`、`available` 和当前固定为 `true` 的 `read_only`。
+每个项目有 `id`、仍可取得的 `name` / `path`、`available` 和 `read_only`。
+只有配置明确允许文件写入、项目仍有登记且开启 `confine-reads`、本机工具档也允许文件写入时，
+`read_only` 才为 `false`；具体补丁仍须通过目标项目的其他检查。
 `available` 只表示本机仍有项目登记且开启了 `confine-reads`；在线状态或目录是否可访问须另行判断。
 失去登记的项目仍保留 ID，`available=false`，缺失的名称和路径省略，方便操作员修正名单。
 查看和修改都在目标机本地执行，不会启动 daemon。
@@ -354,7 +372,8 @@ gld --json node rotate-credential <machine_id> --credential-stdin < new-node-cre
 成功后旧凭据失效、旧连接关闭，`revoked` 变为 `false`。在目标机的私有配置中替换 `credential`
 并重新运行节点，Hub ID、机器 ID 和项目句柄保持不变。这里管理的是节点专用凭据，现有 MCP/OAuth 授权保持不变。
 
-在目标机准备仅执行账号可读的 JSON 文件，例如 `node.json`：
+在目标机所有共享项目之外的私有目录，准备仅执行账号可读的 JSON 文件，例如 `node.json`。
+下面只授权其中一项共享项目写入；只读配置省略 `writable_workspaces`：
 
 ```json
 {
@@ -362,9 +381,21 @@ gld --json node rotate-credential <machine_id> --credential-stdin < new-node-cre
   "hub_id": "<登记返回的32位Hub ID>",
   "machine_id": "<登记返回的32位机器ID>",
   "credential": "<与登记时相同的专用随机凭据>",
-  "workspaces": ["<明确共享的本机项目ID>"]
+  "workspaces": ["<允许文件写入的本机项目ID>", "<只读共享的本机项目ID>"],
+  "writable_workspaces": ["<允许文件写入的本机项目ID>"]
 }
 ```
+
+`workspaces` 是完整共享名单；`writable_workspaces` 是其中允许文件写入的项目完整 ID，必须去重且为其子集。
+旧 JSON 和旧 pending 没有这个字段时继续全部只读；空列表保存时也省略该字段。
+配对恢复会核对原共享与写入范围，不会因重试把旧只读配置升级成可写。
+只有目标机本地操作员可扩大这份范围，Hub 调用参数或内部身份字段不能代替本机授权。
+
+配置文件须位于每个共享项目根目录之外；共享根也须与 gld 控制数据目录（`GLD_HOME`，
+默认 `~/.config/gld`）分开，不能包含它或位于它里面。否则项目文件权限可能触及节点凭据、
+项目登记或下一次启动的授权。`gld join` 在保存 pending 和发送请求前检查，`gld node shares` 在替换前检查，
+`gld node run` 在建立连接前检查。检查使用实际目录，解析配置父目录、项目目录和控制目录的符号链接；
+目录无法解析时明确拒绝。
 
 `hub_url` 是基地址，保留已有 `/hub` 等前缀，不填 `/mcp`。
 节点连接的是基地址下 `/nodes/v1/connect/<machine_id>`；同一入口的反向代理须转发这条
@@ -392,16 +423,27 @@ gld node run --config node.json
 不会把网络停机当成重复节点。Hub 关停返回 HTTP503，可重试。Ctrl-C 可中断连接、退避和收尾等待，
 退出节点连接进程；这不表示已开始的同步工具被强制取消，也不回滚已经执行的动作。
 
-AI 仍调用原来的 `list_workspaces`、`workspace_context`、`read_file` 等工具。
+AI 先用 `list_workspaces` 选定目标，再用 `workspace_context`、`read_file` 读取项目；
+获准写入时，用原有 `patch_check` 预检、`apply_patch` 修改文件，继续传同一个 `workspace` 句柄。
 原生节点成员的 `kind` 是 `node`，名称为 `机器名/项目名`，并返回
-`machine_id`、`online`、`revoked`、`tool_profile`。其 `id` 是绑定机器与目标项目的 Hub 不透明句柄，
+`machine_id`、`online`、`revoked`、`read_only`、`tool_profile`。其 `id` 是绑定机器与目标项目的 Hub 不透明句柄，
 每次调用传这一句柄；不同机器的同名项目不会混用。列表不把远端目录冒充成本机路径。
 成员目录在 Hub 持久保存，离线仍能识别原句柄，重连不会变成另一个项目。
+节点报告 `read_only=true` 时，目录的 `tool_profile` 为 `read-only`；允许文件写入时为 `file-write`。
+`file-write` 是节点目录的能力标记，不是 `gld set` 可设置的全局或本机工具档。
+旧节点未报告 `read_only` 时按只读处理；目录权限以最近一次发现为准，实际调用仍受目标机当前配置约束。
 
-本阶段有效工具集取 Hub、节点只读工具表和目标项目权限的交集。只有通过完整服务鉴权的调用方
-可发现/使用原生节点；noauth 和现有项目 grant 即使猜到 ID 也不可访问。
+本阶段在原有节点只读工具上只增加 `apply_patch`、`patch_check`；有效工具集取 Hub、节点上限、
+目标机显式共享和可写名单、本机项目工具档的交集。`confine-reads` 须持续开启，
+目标项目的 [Planning](#planning-三种模式)、路径与符号链接限制、敏感操作的 `confirm` 检查继续生效。
+补丁复用已有版本前置条件、写协调、落盘前复核和回滚；应按
+[文件版本规则](#文件版本别让补丁盖掉别人的改动) 传回 `expected_versions`。
+预检通过不保证稍后的写入通过，也不增加跨编辑器的原子 CAS 或断电恢复保证；
+回滚未完成时仍须先核对实际文件。文件授权不会开放命令启动、Agent 委派或节点配置管理。
+
+只有通过完整服务鉴权的调用方可发现/使用原生节点；noauth 和现有项目 grant 即使猜到 ID 也不可访问。
 Hub 根据已验证主体重建内部 `params._meta`，忽略客户端伪造的内部身份；
-节点核对绑定的 Hub，再将主体转换为独立调用方，并叠加目标机的共享项目只读范围。
+节点核对绑定的 Hub，再将主体转换为独立调用方，并按本次目标项目叠加目标机本地权限。
 原始 OAuth、bearer 或 grant 令牌不随工具调用转发。共享 bearer 仍代表共享主体，
 不同 OAuth client_id 的调用方保持分开。
 
@@ -418,14 +460,18 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 | `MACHINE_OFFLINE` | 没有可用连接，本次未发送；不会改用 Hub 本机或另一个同名项目 |
 | `MACHINE_REVOKED` | 该机器的专用凭据已撤销，本次未发送；须由操作员轮换为新凭据后恢复 |
 | `MACHINE_BUSY` | 这台机器的连接正忙，本次未发送；稍后显式再调 |
-| `NODE_TOOL_UNSUPPORTED` | 节点当前工具表没有该工具，本次未发送；M0 的写入/命令执行会被拒绝 |
+| `NODE_TOOL_UNSUPPORTED` | 节点握手工具表没有该工具，本次未发送；核对节点版本与文件写入授权，命令执行仍未开放 |
 | `NODE_ARGUMENT_UNSUPPORTED` | 节点不接受某个参数，本次未发送；核对参数后再调 |
 | `NODE_REQUEST_TOO_LARGE` | 请求超出节点消息上限，在写入网络前拒绝 |
-| `NODE_OUTCOME_UNKNOWN` | 已进入发送/等待阶段，但未收到有效回复；不自动补发，不冒称未执行 |
+| `NODE_OUTCOME_UNKNOWN` | 已进入发送/等待阶段，但未收到有效回复；写入可能已完成，须先核对目标文件，不自动补发 |
+
+收到 `NODE_OUTCOME_UNKNOWN` 后，保留原机器和项目句柄，重连后先读回受影响的文件，与原补丁核对。
+确认仍需修改时，再按最新内容和版本提交补丁；无法核实就保留结果未知，不因超时原样重试。
 
 初始化、读写、消息大小与单次工具等待均有上限；空闲期处理标准 WebSocket Ping/Pong 和关闭，
 旧连接确认关闭后才释放名额。一个机器的等待不占全局连接表锁，其他机器可独立处理请求。
-本阶段未提供远端写入、命令启动或桌面能力；已有 ccnm 的 `remote_*` 契约继续独立使用。
+项目文件读写已接通；命令运行、查询、停止及跨主体结果隔离接续下一步，桌面仍后置。
+已有 ccnm 的 `remote_*` 契约继续独立使用。
 
 ### 成员还可以在别的机器上
 

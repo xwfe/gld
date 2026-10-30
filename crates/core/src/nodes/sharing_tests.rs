@@ -14,6 +14,7 @@ fn config(ids: Vec<String>) -> NodeConfig {
         machine_id: "b".repeat(32),
         credential: CREDENTIAL.into(),
         workspaces: ids,
+        writable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }
@@ -43,6 +44,14 @@ fn sharing_view_keeps_missing_projects_visible_without_disclosing_secrets() {
     assert!(!output.contains(CREDENTIAL));
     assert!(!output.contains("credential"));
     assert!(!output.contains("private-ca-file-marker"));
+
+    config.writable_workspaces = config.workspaces.clone();
+    let writable = catalog(&data, &config);
+    assert!(!writable[0].read_only);
+    assert!(writable[1].read_only);
+    assert!(writable[2].read_only);
+    data.profiles[0].runtime.tool_profile = "read-only".into();
+    assert!(catalog(&data, &config)[0].read_only);
 }
 
 #[test]
@@ -81,8 +90,14 @@ fn exercise_sharing() {
         root.path().join("web").to_string_lossy().into_owned(),
         Some("web".into()),
     );
+    std::fs::create_dir_all(&api.path).unwrap();
+    std::fs::create_dir_all(&web.path).unwrap();
+    let containing_config = WorkspaceProfile::new(
+        root.path().to_string_lossy().into_owned(),
+        Some("config-container".into()),
+    );
     DataStore::update_file(|data| {
-        data.profiles = vec![api.clone(), web.clone()];
+        data.profiles = vec![api.clone(), web.clone(), containing_config];
         Ok(())
     })
     .unwrap();
@@ -99,13 +114,15 @@ fn exercise_sharing() {
         2,
         "view is available while the node holds its lock"
     );
-    assert!(replace(&path, &["web".into()]).is_err());
+    assert!(replace(&path, &["web".into()], &["web".into()]).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), saved);
     drop(storage);
 
-    let updated = replace(&path, &["web".into()]).unwrap();
+    let updated = replace(&path, &["web".into()], &["web".into()]).unwrap();
     assert_eq!(updated.workspaces.len(), 1);
     assert_eq!(updated.workspaces[0].id, web.id);
+    assert!(!updated.workspaces[0].read_only);
+    assert!(!show(&path).unwrap().workspaces[0].read_only);
     assert!(!serde_json::to_string(&updated)
         .unwrap()
         .contains(CREDENTIAL));
@@ -116,22 +133,55 @@ fn exercise_sharing() {
     assert_eq!(stored.credential, original.credential);
     assert_eq!(stored.ca_certificate, original.ca_certificate);
     assert_eq!(stored.workspaces, vec![web.id.clone()]);
+    assert_eq!(stored.writable_workspaces, vec![web.id.clone()]);
 
     let saved = std::fs::read(&path).unwrap();
     for invalid in [
         vec![],
         vec!["unknown".into()],
         vec!["web".into(), web.id.clone()],
+        vec!["config-container".into()],
     ] {
-        assert!(replace(&path, &invalid).is_err());
+        assert!(replace(&path, &invalid, &[]).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), saved);
     }
+    for invalid in [
+        vec!["unknown".into()],
+        vec!["api".into()],
+        vec!["web".into(), web.id.clone()],
+    ] {
+        assert!(replace(&path, &["web".into()], &invalid).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+    DataStore::update_file(|data| {
+        data.profiles[1].runtime.tool_profile = "read-only".into();
+        Ok(())
+    })
+    .unwrap();
+    assert!(show(&path).unwrap().workspaces[0].read_only);
+    assert!(replace(&path, &["web".into()], &["web".into()]).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), saved);
+    DataStore::update_file(|data| {
+        data.profiles[1].runtime.tool_profile = "core".into();
+        Ok(())
+    })
+    .unwrap();
+
+    let expanded = replace(&path, &["api".into(), "web".into()], &["web".into()]).unwrap();
+    assert!(expanded.workspaces[0].read_only);
+    assert!(!expanded.workspaces[1].read_only);
+    let revoked = replace(&path, &["web".into()], &[]).unwrap();
+    assert!(revoked.workspaces[0].read_only);
+    assert!(read_config(&path).unwrap().writable_workspaces.is_empty());
+    let saved = std::fs::read(&path).unwrap();
+    let stored: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert!(stored.get("writable_workspaces").is_none());
     DataStore::update_file(|data| {
         data.profiles[0].runtime.confine_reads = false;
         Ok(())
     })
     .unwrap();
-    assert!(replace(&path, &[api.id]).is_err());
+    assert!(replace(&path, &[api.id], &[]).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), saved);
     DataStore::update_file(|data| {
         data.profiles.retain(|profile| profile.id != web.id);

@@ -14,6 +14,7 @@ fn config(url: &str) -> NodeConfig {
         machine_id: MACHINE.into(),
         credential: TOKEN.into(),
         workspaces: vec![PROJECT.into()],
+        writable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }
@@ -113,6 +114,47 @@ fn node_configuration_requires_explicit_unique_full_project_ids() {
     value.credential = TOKEN.into();
     value.machine_id = "m".repeat(32);
     assert!(value.validate().is_err());
+}
+
+#[test]
+fn old_configuration_defaults_to_read_only_and_omits_empty_write_permissions() {
+    let old = json!({
+        "hub_url": "https://example.invalid",
+        "hub_id": HUB,
+        "machine_id": MACHINE,
+        "credential": TOKEN,
+        "workspaces": [PROJECT],
+        "ca_certificate": null
+    });
+    let mut loaded: NodeConfig = serde_json::from_value(old.clone()).unwrap();
+    loaded.validate().unwrap();
+    assert!(loaded.writable_workspaces.is_empty());
+    assert_eq!(serde_json::to_value(&loaded).unwrap(), old);
+
+    loaded.writable_workspaces = vec![PROJECT.into()];
+    let saved = serde_json::to_value(&loaded).unwrap();
+    assert_eq!(saved["writable_workspaces"], json!([PROJECT]));
+    let restored: NodeConfig = serde_json::from_value(saved).unwrap();
+    restored.validate().unwrap();
+    assert_eq!(restored.writable_workspaces, vec![PROJECT]);
+}
+
+#[test]
+fn file_write_permissions_require_a_unique_subset_of_shared_projects() {
+    let mut value = config("https://example.invalid");
+    value.workspaces.push(HUB.into());
+    value.writable_workspaces = vec![PROJECT.into()];
+    value.validate().unwrap();
+    for invalid in [
+        vec![PROJECT.into(), PROJECT.into()],
+        vec![MACHINE.into()],
+        vec!["api".into()],
+    ] {
+        value.writable_workspaces = invalid;
+        assert!(value.validate().is_err());
+    }
+    value.writable_workspaces.clear();
+    value.validate().unwrap();
 }
 
 #[test]

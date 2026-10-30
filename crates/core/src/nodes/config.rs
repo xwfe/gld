@@ -74,6 +74,9 @@ pub struct NodeConfig {
     pub machine_id: String,
     pub credential: String,
     pub workspaces: Vec<String>,
+    /// 本机操作员明确允许文件写入的共享项目；缺省保持只读，不授予命令或管理能力。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_workspaces: Vec<String>,
     #[serde(default)]
     pub ca_certificate: Option<PathBuf>,
 }
@@ -84,6 +87,7 @@ impl fmt::Debug for NodeConfig {
             .field("hub_id", &self.hub_id)
             .field("machine_id", &self.machine_id)
             .field("workspaces", &self.workspaces)
+            .field("writable_workspaces", &self.writable_workspaces)
             .field("credential", &"[redacted]")
             .finish_non_exhaustive()
     }
@@ -102,6 +106,16 @@ impl NodeConfig {
         }
         validate_credential(&self.credential)?;
         validate_workspace_ids(&self.workspaces)?;
+        let mut writable = HashSet::new();
+        if self
+            .writable_workspaces
+            .iter()
+            .any(|id| !self.workspaces.contains(id) || !writable.insert(id))
+        {
+            return Err(
+                "Node writable_workspaces must contain distinct IDs from workspaces".into(),
+            );
+        }
         let url = self.parsed_url()?;
         if self
             .ca_certificate
@@ -225,7 +239,7 @@ fn validate_projects(projects: &[NodeProject]) -> Result<(), String> {
                 || p.name.chars().any(char::is_control)
                 || !matches!(
                     p.tool_profile.as_str(),
-                    "core" | "compact" | "advanced" | "read-only"
+                    "core" | "compact" | "advanced" | "read-only" | "file-write"
                 )
         })
     {

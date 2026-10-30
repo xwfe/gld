@@ -171,7 +171,10 @@ enum Members {
     /// 每次请求从数据文件读：增删成员、成员改配置立刻生效，不用重启 hub。
     DataFile,
     /// 节点只共享明确选中的本机项目；不启动监听器或继承 Hub 成员。
-    Node(Vec<String>),
+    Node {
+        shared: Vec<String>,
+        writable: Vec<String>,
+    },
     /// 固定的一份，给单元测试用；套 Mutex 是为了测"改完配置下一次调用就生效"。
     #[cfg(test)]
     Fixed(Box<Mutex<Fixed>>),
@@ -506,7 +509,9 @@ impl Hub {
                     tool.get("name")
                         .and_then(Value::as_str)
                         .is_some_and(|name| {
-                            !HIDDEN_TOOLS.contains(&name) && (!read_only || read_only_allows(name))
+                            !HIDDEN_TOOLS.contains(&name)
+                                && self.node_tool_allowed(name)
+                                && (!read_only || read_only_allows(name))
                         })
                 })
                 .map(|mut tool| {
@@ -564,6 +569,9 @@ impl Hub {
 
     /// 和 [`Self::list_tools_for`] 一个口径：表里没有的，硬发 `tools/call` 也是 Unknown tool。
     fn exposes(&self, name: &str, grant: Option<&Grant>) -> bool {
+        if !self.node_tool_allowed(name) {
+            return false;
+        }
         let read_only = grant.is_some_and(|grant| grant.read_only);
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
@@ -614,7 +622,7 @@ impl Hub {
         self.relay.retain(&settings.relayed_mcp_servers);
         let members = visible_for(members, auth);
         if canonical == LIST_WORKSPACES {
-            let mut listed = list_workspaces(&members);
+            let mut listed = self.node_catalog(&members);
             if self.work_sessions_offered(&settings, auth.grant()) && auth.is_authenticated() {
                 listed["work_sessions"] = json!({
                     "tool": work_sessions::TOOL,
@@ -801,6 +809,7 @@ impl Hub {
                     info["tool_count"] = json!(count);
                 }
             }
+            self.restrict_node_surface(&mut info, auth.grant());
             self.with_connection_surface(info, auth.grant())
         } else {
             call_tool_as(&context, &Caller::from_auth(auth), canonical, args)
@@ -1005,7 +1014,7 @@ impl Hub {
                 ))
             })
             .map_err(|error| error.to_string())?,
-            Members::Node(ids) => self.node_snapshot(ids)?,
+            Members::Node { shared, .. } => self.node_snapshot(shared)?,
             #[cfg(test)]
             Members::Fixed(fixed) => {
                 let fixed = fixed.lock().expect("fixed members").clone();
@@ -1064,7 +1073,7 @@ impl Hub {
             settings,
             self.usage.clone(),
         )?;
-        if matches!(self.members, Members::Node(_)) {
+        if matches!(self.members, Members::Node { .. }) {
             // 节点不自动带出整机 Skill / 用户说明；项目根说明走受限文件读取。
             context.agent_context = None;
             context.ai_instructions = member.runtime.ai_instructions.clone();
@@ -1159,7 +1168,7 @@ impl Hub {
                 .state()
                 .ok()
                 .map(|state| state.mode),
-            "instructions": if matches!(self.members, Members::Node(_)) {
+            "instructions": if matches!(self.members, Members::Node { .. }) {
                 native::project_instructions(context)
             } else { context.current_ai_instructions() },
             "skills": skills,
@@ -1169,6 +1178,7 @@ impl Hub {
         if context.policy.allows_all_commands() {
             out["risk"] = json!(crate::tools::policy::ALLOW_ALL_NOTICE);
         }
+        self.restrict_node_surface(&mut out, grant);
         tool_ok(out)
     }
 }

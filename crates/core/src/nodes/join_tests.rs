@@ -14,11 +14,14 @@ fn token() -> String {
     format!("{}.{}.{}", "a".repeat(32), "b".repeat(32), "c".repeat(64))
 }
 
-fn projects() -> Vec<SharedProject> {
+fn projects(root: &std::path::Path) -> Vec<SharedProject> {
+    let path = root.join("project");
+    std::fs::create_dir_all(&path).unwrap();
     vec![SharedProject {
         id: "d".repeat(32),
         name: "api".into(),
-        path: "test-project".into(),
+        path: path.to_string_lossy().into_owned(),
+        read_only: false,
     }]
 }
 
@@ -27,6 +30,7 @@ fn options(root: &std::path::Path, hub_url: String) -> JoinOptions {
         hub_url,
         config_path: root.join("node.json"),
         workspaces: vec!["api".into()],
+        writable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }
@@ -70,12 +74,147 @@ fn only_explicit_unique_local_projects_with_confined_reads_are_selected() {
 }
 
 #[test]
+fn writable_projects_are_explicit_unique_and_confined_to_the_shared_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let mut selected = projects(root.path());
+    selected.push(SharedProject {
+        id: "e".repeat(32),
+        name: "web".into(),
+        path: "other-test-project".into(),
+        read_only: false,
+    });
+    let ids: Vec<_> = selected.iter().map(|project| project.id.clone()).collect();
+    assert_eq!(
+        select_writable_workspaces(&mut selected, &["web".into(), "api".into()]).unwrap(),
+        ids,
+        "write flags are normalized to the complete share order"
+    );
+    assert!(selected.iter().all(|project| !project.read_only));
+    assert_eq!(
+        select_writable_workspaces(&mut selected, &["api".into()]).unwrap(),
+        vec![ids[0].clone()]
+    );
+    assert!(!selected[0].read_only);
+    assert!(selected[1].read_only);
+    for invalid in [
+        vec!["private".into()],
+        vec!["f".repeat(32)],
+        vec!["api".into(), ids[0].clone()],
+    ] {
+        let before = selected.clone();
+        assert!(select_writable_workspaces(&mut selected, &invalid).is_err());
+        assert_eq!(selected, before);
+    }
+    selected[1].name = "api".into();
+    assert!(select_writable_workspaces(&mut selected, &["api".into()]).is_err());
+    selected[1].name = ids[0].clone();
+    assert_eq!(
+        select_writable_workspaces(&mut selected, &ids[..1]).unwrap(),
+        ids[..1],
+        "exact project IDs take precedence over another project's name"
+    );
+    assert!(selected[1].read_only);
+    assert!(select_writable_workspaces(&mut selected, &[])
+        .unwrap()
+        .is_empty());
+    assert!(selected.iter().all(|project| project.read_only));
+}
+
+#[test]
+fn local_read_only_profiles_cannot_be_enabled_for_file_writes() {
+    let mut profile = crate::workspace::WorkspaceProfile::new("api-dir".into(), Some("api".into()));
+    profile.runtime.tool_profile = "read-only".into();
+    let data = AppData {
+        profiles: vec![profile],
+        ..AppData::default()
+    };
+    let mut selected = resolve_in(&data, &["api".into()]).unwrap();
+    assert!(select_writable_workspaces(&mut selected, &["api".into()])
+        .unwrap_err()
+        .contains("tool profile"));
+    assert!(select_writable_workspaces(&mut selected, &[])
+        .unwrap()
+        .is_empty());
+    assert!(selected[0].read_only);
+}
+
+#[test]
+fn pairing_refuses_private_configuration_inside_any_shared_project_before_persistence() {
+    let root = tempfile::tempdir().unwrap();
+    for writable in [false, true] {
+        let selected = projects(root.path());
+        let mut settings = options(root.path(), "https://example.invalid/hub".into());
+        settings.config_path = PathBuf::from(&selected[0].path).join("node.json");
+        if writable {
+            settings.writable_workspaces = vec!["api".into()];
+        }
+        let error = PreparedJoin::prepare_with_projects(settings, token(), selected)
+            .err()
+            .unwrap();
+        assert!(error.contains("outside every shared project"));
+        for file in ["node.json", "node.json.pending", "node.json.lock"] {
+            assert!(!root.path().join("project").join(file).exists());
+        }
+    }
+}
+
+#[test]
+fn pending_pairing_requires_the_original_file_write_permissions() {
+    for writable in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let url = "https://example.invalid/hub";
+        let mut initial = options(root.path(), url.into());
+        if writable {
+            initial.writable_workspaces = vec!["api".into()];
+        }
+        let prepared =
+            PreparedJoin::prepare_with_projects(initial, token(), projects(root.path())).unwrap();
+        assert_eq!(prepared.preview().workspaces[0].read_only, !writable);
+        assert_eq!(
+            prepared.preview().access,
+            if writable {
+                "project-file-write"
+            } else {
+                "read-only"
+            }
+        );
+        prepared.storage.save_pending(&prepared.config).unwrap();
+        let machine_id = prepared.config.machine_id.clone();
+        drop(prepared);
+        let pending_path = root.path().join("node.json.pending");
+        let pending = std::fs::read(&pending_path).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&pending).unwrap();
+        assert_eq!(saved.get("writable_workspaces").is_some(), writable);
+
+        let mut changed = options(root.path(), url.into());
+        if !writable {
+            changed.writable_workspaces = vec!["api".into()];
+        }
+        assert!(
+            PreparedJoin::prepare_with_projects(changed, token(), projects(root.path())).is_err()
+        );
+        assert_eq!(std::fs::read(&pending_path).unwrap(), pending);
+        assert!(!root.path().join("node.json").exists());
+
+        let mut original = options(root.path(), url.into());
+        if writable {
+            original.writable_workspaces = vec!["d".repeat(32)];
+        }
+        let resumed =
+            PreparedJoin::prepare_with_projects(original, token(), projects(root.path())).unwrap();
+        assert!(resumed.preview().resuming);
+        assert_eq!(resumed.config.machine_id, machine_id);
+        assert_eq!(resumed.preview().workspaces[0].read_only, !writable);
+    }
+}
+
+#[test]
 fn preparation_does_not_persist_pending_or_overwrite_existing_configuration() {
     let root = tempfile::tempdir().unwrap();
     let prepared = PreparedJoin::prepare_with_projects(
         options(root.path(), "https://example.invalid/hub/".into()),
         token(),
-        projects(),
+        projects(root.path()),
     )
     .unwrap();
     assert!(!root.path().join("node.json.pending").exists());
@@ -90,7 +229,7 @@ fn preparation_does_not_persist_pending_or_overwrite_existing_configuration() {
     let resumed = PreparedJoin::prepare_with_projects(
         options(root.path(), "https://example.invalid/hub".into()),
         token(),
-        projects(),
+        projects(root.path()),
     )
     .unwrap();
     assert!(resumed.preview().resuming);
@@ -98,7 +237,7 @@ fn preparation_does_not_persist_pending_or_overwrite_existing_configuration() {
     assert_eq!(resumed.config.credential, credential);
     drop(resumed);
     let wrong = options(root.path(), "https://other.invalid/hub".into());
-    assert!(PreparedJoin::prepare_with_projects(wrong, token(), projects()).is_err());
+    assert!(PreparedJoin::prepare_with_projects(wrong, token(), projects(root.path())).is_err());
     let store = LocalConfig::lock(&root.path().join("node.json")).unwrap();
     let pending = store.load_pending().unwrap().unwrap();
     store.finish(&pending).unwrap();
@@ -107,7 +246,7 @@ fn preparation_does_not_persist_pending_or_overwrite_existing_configuration() {
     assert!(PreparedJoin::prepare_with_projects(
         options(root.path(), "https://example.invalid/hub".into()),
         token(),
-        projects()
+        projects(root.path())
     )
     .is_err());
     assert_eq!(
@@ -139,13 +278,20 @@ async fn failed_response_keeps_the_same_request_and_credential_for_retry() {
     .await;
     let root = tempfile::tempdir().unwrap();
     let url = format!("{base}/hub");
-    let first =
-        PreparedJoin::prepare_with_projects(options(root.path(), url.clone()), token(), projects())
-            .unwrap();
+    let first = PreparedJoin::prepare_with_projects(
+        options(root.path(), url.clone()),
+        token(),
+        projects(root.path()),
+    )
+    .unwrap();
     assert!(first.execute().await.unwrap_err().contains("503"));
     assert!(!root.path().join("node.json").exists());
-    let retry = PreparedJoin::prepare_with_projects(options(root.path(), url), token(), projects())
-        .unwrap();
+    let retry = PreparedJoin::prepare_with_projects(
+        options(root.path(), url),
+        token(),
+        projects(root.path()),
+    )
+    .unwrap();
     let joined = retry.execute().await.unwrap();
     let saved = requests.lock().unwrap();
     assert_eq!(saved.len(), 2);
@@ -189,9 +335,12 @@ async fn redirects_are_rejected_without_forwarding_credentials() {
     ))
     .await;
     let root = tempfile::tempdir().unwrap();
-    let prepared =
-        PreparedJoin::prepare_with_projects(options(root.path(), base), token(), projects())
-            .unwrap();
+    let prepared = PreparedJoin::prepare_with_projects(
+        options(root.path(), base),
+        token(),
+        projects(root.path()),
+    )
+    .unwrap();
     let error = prepared.execute().await.unwrap_err();
     assert!(error.contains("307"));
     assert!(!error.contains("response-body-secret"));
@@ -217,9 +366,12 @@ async fn wrong_identity_malformed_and_oversized_responses_keep_pending_state() {
         ))
         .await;
         let root = tempfile::tempdir().unwrap();
-        let prepared =
-            PreparedJoin::prepare_with_projects(options(root.path(), base), token(), projects())
-                .unwrap();
+        let prepared = PreparedJoin::prepare_with_projects(
+            options(root.path(), base),
+            token(),
+            projects(root.path()),
+        )
+        .unwrap();
         let credential = prepared.config.credential.clone();
         let error = prepared.execute().await.unwrap_err();
         assert!(!error.contains(&credential));

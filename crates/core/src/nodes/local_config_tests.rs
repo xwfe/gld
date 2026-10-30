@@ -7,6 +7,7 @@ fn config() -> NodeConfig {
         machine_id: "b".repeat(32),
         credential: "c".repeat(64),
         workspaces: vec!["d".repeat(32)],
+        writable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }
@@ -38,6 +39,126 @@ fn pending_identity_survives_reopening_and_is_published_without_secret_changes()
     {
         use std::os::unix::fs::MetadataExt;
         assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn pending_file_write_scope_cannot_change_before_publication() {
+    for writable in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("node.json");
+        let store = LocalConfig::lock(&path).unwrap();
+        let mut original = config();
+        if writable {
+            original.writable_workspaces = original.workspaces.clone();
+        }
+        store.save_pending(&original).unwrap();
+        let saved = fs::read(&store.pending).unwrap();
+        let legacy: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(legacy.get("writable_workspaces").is_some(), writable);
+        let mut changed = original.clone();
+        changed.writable_workspaces = if writable {
+            Vec::new()
+        } else {
+            original.workspaces.clone()
+        };
+        assert!(store.save_pending(&changed).is_err());
+        assert!(store.finish(&changed).is_err());
+        assert!(!path.exists());
+        assert_eq!(fs::read(&store.pending).unwrap(), saved);
+        store.finish(&original).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.writable_workspaces, original.writable_workspaces);
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
+}
+
+#[test]
+fn configuration_locations_require_existing_project_directories_and_stay_outside_them() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let nested = project.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let projects = vec![project.to_string_lossy().into_owned()];
+    validate_config_location(&root.path().join("node.json"), &projects).unwrap();
+    for path in [project.join("node.json"), nested.join("node.json")] {
+        assert!(validate_config_location(&path, &projects)
+            .unwrap_err()
+            .contains("outside every shared project"));
+    }
+    let missing = root.path().join("missing");
+    assert!(validate_config_location(
+        &root.path().join("node.json"),
+        &[missing.to_string_lossy().into_owned()],
+    )
+    .is_err());
+    let file = root.path().join("file");
+    fs::write(&file, "not a project directory").unwrap();
+    assert!(validate_config_location(
+        &root.path().join("node.json"),
+        &[file.to_string_lossy().into_owned()],
+    )
+    .is_err());
+}
+
+#[test]
+fn shared_roots_cannot_contain_or_live_inside_the_gld_control_data_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let control = root.path().join("control");
+    let inside = control.join("project");
+    let separate = root.path().join("separate-project");
+    fs::create_dir_all(&inside).unwrap();
+    fs::create_dir(&separate).unwrap();
+    let config = root.path().join("node.json");
+    for shared in [root.path(), control.as_path(), inside.as_path()] {
+        assert!(validate_config_location_in(
+            &config,
+            &[shared.to_string_lossy().into_owned()],
+            &control,
+        )
+        .unwrap_err()
+        .contains("control data directory"));
+    }
+    validate_config_location_in(
+        &config,
+        &[separate.to_string_lossy().into_owned()],
+        &control,
+    )
+    .unwrap();
+    assert!(validate_config_location_in(
+        &config,
+        &[separate.to_string_lossy().into_owned()],
+        &root.path().join("missing-control"),
+    )
+    .is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn configuration_location_checks_resolve_project_and_parent_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let alias = root.path().join("alias");
+    symlink(&project, &alias).unwrap();
+    for (config_parent, shared_root) in [(&project, &alias), (&alias, &project)] {
+        assert!(validate_config_location(
+            &config_parent.join("node.json"),
+            &[shared_root.to_string_lossy().into_owned()],
+        )
+        .unwrap_err()
+        .contains("outside every shared project"));
+    }
+    let config = root.path().join("node.json");
+    for (shared_root, data_home) in [(&project, &alias), (&alias, &project)] {
+        assert!(validate_config_location_in(
+            &config,
+            &[shared_root.to_string_lossy().into_owned()],
+            data_home,
+        )
+        .unwrap_err()
+        .contains("control data directory"));
     }
 }
 

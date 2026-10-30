@@ -32,8 +32,15 @@ pub fn auth_from_meta(
     params: &Value,
     expected_hub_id: &str,
     shared_ids: &[String],
+    writable_ids: &[String],
 ) -> Result<AuthContext, String> {
     validate_workspace_ids(shared_ids)?;
+    if !writable_ids.is_empty() {
+        validate_workspace_ids(writable_ids)?;
+    }
+    if writable_ids.iter().any(|id| !shared_ids.contains(id)) {
+        return Err("Writable node projects must be explicitly shared".into());
+    }
     let caller: ForwardedCaller = serde_json::from_value(
         params
             .get("_meta")
@@ -51,12 +58,17 @@ pub fn auth_from_meta(
     // Tuple 编码避免分隔符碰撞；node 作用域与本机/MCP 调用方分开。
     let client_id = serde_json::to_string(&(expected_hub_id, caller.subject))
         .map_err(|_| "Cannot encode node caller identity")?;
+    // Hub 已把句柄改为目标完整 ID。名称、前缀及外部 metadata 都不能给本次调用加写权。
+    let writable = params
+        .pointer("/arguments/workspace")
+        .and_then(Value::as_str)
+        .is_some_and(|id| writable_ids.iter().any(|allowed| allowed == id));
     Ok(
         AuthContext::new(Principal::OAuthClient { client_id }, "node").with_grant(Some(Grant {
             id: format!("node-share-{expected_hub_id}"),
             name: "Explicit node project share".into(),
             workspaces: shared_ids.to_vec(),
-            read_only: true,
+            read_only: !writable,
             browser: false,
         })),
     )
@@ -88,6 +100,7 @@ mod tests {
             &json!({"_meta":forwarded_meta(&owner(id), hub).unwrap()}),
             hub,
             &[PROJECT.into()],
+            &[],
         )
         .unwrap()
     }
@@ -116,10 +129,52 @@ mod tests {
     fn metadata_is_required_bound_and_not_read_from_arguments() {
         let meta = forwarded_meta(&owner("alice"), HUB).unwrap();
         let ids = vec![PROJECT.into()];
-        assert!(auth_from_meta(&json!({"arguments":{"_meta":meta}}), HUB, &ids).is_err());
-        assert!(auth_from_meta(&json!({"_meta":meta}), OTHER, &ids).is_err());
+        assert!(auth_from_meta(&json!({"arguments":{"_meta":meta}}), HUB, &ids, &[]).is_err());
+        assert!(auth_from_meta(&json!({"_meta":meta}), OTHER, &ids, &[]).is_err());
         let mut extra = meta.clone();
         extra[META_KEY]["grant"] = json!({"read_only":false});
-        assert!(auth_from_meta(&json!({"_meta":extra}), HUB, &ids).is_err());
+        assert!(auth_from_meta(&json!({"_meta":extra}), HUB, &ids, &[]).is_err());
+    }
+
+    #[test]
+    fn file_write_permission_requires_an_exact_locally_selected_project() {
+        let meta = forwarded_meta(&owner("alice"), HUB).unwrap();
+        let shared = vec![PROJECT.into(), OTHER.into()];
+        let writable = vec![PROJECT.into()];
+        let request = |workspace: Value| json!({"name":"apply_patch", "arguments":{"workspace":workspace}, "_meta":meta});
+        let writer = auth_from_meta(&request(json!(PROJECT)), HUB, &shared, &writable).unwrap();
+        assert!(!writer.grant().unwrap().read_only);
+        assert!(!Caller::from_auth(&writer).may_read_user_prompts());
+        for workspace in [json!(OTHER), json!("api"), json!("3333"), Value::Null] {
+            let reader = auth_from_meta(&request(workspace), HUB, &shared, &writable).unwrap();
+            assert!(reader.grant().unwrap().read_only);
+            assert_eq!(
+                reader.tag(),
+                writer.tag(),
+                "permission does not change the verified subject"
+            );
+        }
+        assert!(
+            auth_from_meta(&request(json!(PROJECT)), HUB, &shared, &[])
+                .unwrap()
+                .grant()
+                .unwrap()
+                .read_only
+        );
+        assert!(auth_from_meta(
+            &request(json!(PROJECT)),
+            HUB,
+            &[PROJECT.into()],
+            &[OTHER.into()]
+        )
+        .is_err());
+        let forged = json!({"name":"apply_patch", "arguments":{"workspace":OTHER,"writable_workspaces":[OTHER]}, "_meta":meta});
+        assert!(
+            auth_from_meta(&forged, HUB, &shared, &writable)
+                .unwrap()
+                .grant()
+                .unwrap()
+                .read_only
+        );
     }
 }

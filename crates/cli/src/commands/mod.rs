@@ -65,8 +65,13 @@ pub async fn run(cli: Cli) -> CliResult {
     if let Command::Node(crate::cli::NodeCmd::Run { config }) = &cli.command {
         return node::run_config(config).await;
     }
-    if let Command::Node(crate::cli::NodeCmd::Shares { config, workspaces }) = &cli.command {
-        return node::shares(config, workspaces, out);
+    if let Command::Node(crate::cli::NodeCmd::Shares {
+        config,
+        workspaces,
+        writable_workspaces,
+    }) = &cli.command
+    {
+        return node::shares(config, workspaces, writable_workspaces, out);
     }
     if let Command::Join(args) = &cli.command {
         return join::run(args, out).await;

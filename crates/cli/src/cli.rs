@@ -228,7 +228,7 @@ pub enum Command {
     #[command(subcommand)]
     Remote(RemoteCmd),
 
-    /// 原生节点：登记机器，用一条出站连接共享指定项目（当前只读）
+    /// 原生节点：登记机器，用一条出站连接共享指定项目（默认只读）
     #[command(subcommand)]
     Node(NodeCmd),
 
@@ -386,7 +386,7 @@ pub enum NodeCmd {
         #[arg(long, required = true)]
         credential_stdin: bool,
     },
-    /// 查看目标机共享名单；传入 --share 完整替换，修改前须停止该配置的节点进程
+    /// 查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
     Shares {
         /// 仅本账号可读的节点 JSON 配置；运行中也可查看
         #[arg(long)]
@@ -394,6 +394,9 @@ pub enum NodeCmd {
         /// 新的完整共享名单，接受项目完整 ID 或唯一名称；可重复，至少保留一个项目；省略则只查看
         #[arg(long = "share")]
         workspaces: Vec<String>,
+        /// 允许文件写入的项目，须同时在 --share 中；可重复；替换时省略则全部只读，不授权命令或管理工具
+        #[arg(long = "write", value_name = "PROJECT", requires = "workspaces")]
+        writable_workspaces: Vec<String>,
     },
     /// 在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
     Run {
@@ -416,6 +419,9 @@ pub struct JoinArgs {
     /// 明确共享的已登记本机项目名称或完整 ID；可重复指定
     #[arg(long, required = true)]
     pub share: Vec<String>,
+    /// 允许文件写入的项目名称或完整 ID，须同时在 --share 中；可重复；默认只读，不授权命令或管理工具
+    #[arg(long = "write", value_name = "PROJECT", requires = "share")]
+    pub writable_workspaces: Vec<String>,
     /// 从管道或文件接收一次性邀请，不将其放入 argv
     #[arg(long, required = true)]
     pub invite_stdin: bool,
@@ -425,6 +431,88 @@ pub struct JoinArgs {
     /// 确认所显示的 Hub、执行账号和共享项目，供非交互调用使用
     #[arg(long)]
     pub yes: bool,
+}
+
+#[cfg(test)]
+mod node_share_tests {
+    use super::*;
+
+    #[test]
+    fn file_write_flags_require_a_complete_share_selection() {
+        let error = Cli::try_parse_from([
+            "gld",
+            "node",
+            "shares",
+            "--config",
+            "node.json",
+            "--write",
+            "api",
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let parsed = Cli::try_parse_from([
+            "gld",
+            "node",
+            "shares",
+            "--config",
+            "node.json",
+            "--share",
+            "api",
+            "--share",
+            "web",
+            "--write",
+            "api",
+            "--write",
+            "web",
+        ])
+        .unwrap();
+        let Command::Node(NodeCmd::Shares {
+            workspaces,
+            writable_workspaces,
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected node shares");
+        };
+        assert_eq!(workspaces, ["api", "web"]);
+        assert_eq!(writable_workspaces, ["api", "web"]);
+    }
+
+    #[test]
+    fn pairing_and_share_replacement_default_to_read_only() {
+        let parsed = Cli::try_parse_from([
+            "gld",
+            "join",
+            "--hub",
+            "https://example.invalid",
+            "--config",
+            "node.json",
+            "--share",
+            "api",
+            "--invite-stdin",
+        ])
+        .unwrap();
+        let Command::Join(join) = parsed.command else {
+            panic!("expected join");
+        };
+        assert!(join.writable_workspaces.is_empty());
+        for extra in [Vec::new(), vec!["--share", "api"]] {
+            let mut args = vec!["gld", "node", "shares", "--config", "node.json"];
+            args.extend(extra);
+            let parsed = Cli::try_parse_from(args).unwrap();
+            let Command::Node(NodeCmd::Shares {
+                writable_workspaces,
+                ..
+            }) = parsed.command
+            else {
+                panic!("expected node shares");
+            };
+            assert!(writable_workspaces.is_empty());
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

@@ -128,7 +128,57 @@ fn same_config(a: &NodeConfig, b: &NodeConfig) -> bool {
         && a.machine_id == b.machine_id
         && a.credential == b.credential
         && a.workspaces == b.workspaces
+        && a.writable_workspaces == b.writable_workspaces
         && a.ca_certificate == b.ca_certificate
+}
+
+/// 私有配置及同目录 pending/lock 不得放进共享项目，避免凭据泄露或远端改变下一次启动的范围。
+pub fn validate_config_location(path: &Path, project_paths: &[String]) -> Result<(), String> {
+    let data_home = crate::home::data_home()
+        .map_err(|_| "Cannot locate gld's control data directory".to_string())?;
+    validate_config_location_in(path, project_paths, &data_home)
+}
+
+fn validate_config_location_in(
+    path: &Path,
+    project_paths: &[String],
+    data_home: &Path,
+) -> Result<(), String> {
+    let filename = path
+        .file_name()
+        .ok_or("Node configuration needs a file name")?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .map_err(|_| "Node configuration directory must already exist")?;
+    let config_path = parent.join(filename);
+    let data_home = data_home
+        .canonicalize()
+        .map_err(|_| "Cannot resolve gld's control data directory")?;
+    if !data_home.is_dir() {
+        return Err("The control data path for this node must be an existing directory".into());
+    }
+    for project_path in project_paths {
+        let root = Path::new(project_path).canonicalize().map_err(|_| {
+            "Cannot resolve a shared project directory for node configuration safety"
+        })?;
+        if !root.is_dir() {
+            return Err("Every shared project path must be an existing directory".into());
+        }
+        if root.starts_with(&data_home) || data_home.starts_with(&root) {
+            return Err(
+                "Node shared projects must be separate from gld's control data directory".into(),
+            );
+        }
+        if config_path.starts_with(&root) {
+            return Err(
+                "Private node configuration must be outside every shared project directory".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn path_exists(path: &Path) -> Result<bool, String> {

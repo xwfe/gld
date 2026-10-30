@@ -3,6 +3,8 @@
 
 mod common;
 
+#[path = "native_nodes/file_writes.rs"]
+mod file_write_tests;
 #[path = "native_nodes/pairing.rs"]
 mod pairing_tests;
 #[path = "native_nodes/sharing.rs"]

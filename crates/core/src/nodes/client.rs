@@ -36,7 +36,10 @@ const MAX_CA_BYTES: u64 = 64 * 1024;
 /// 同步 CLI 入口。不会启动本机 MCP/OAuth/隧道，也不修改本机项目登记。
 pub fn run(config: NodeConfig) -> Result<(), String> {
     config.validate()?;
-    let hub = Arc::new(Hub::for_node(config.workspaces.clone())?);
+    let hub = Arc::new(Hub::for_node(
+        config.workspaces.clone(),
+        config.writable_workspaces.clone(),
+    )?);
     crate::async_rt::block_on(async move {
         let shutdown = async {
             let _ = tokio::signal::ctrl_c().await;
@@ -148,7 +151,7 @@ fn control_auth(config: &NodeConfig) -> AuthContext {
         id: "node-control".into(),
         name: "node project inventory".into(),
         workspaces: config.workspaces.clone(),
-        read_only: true,
+        read_only: config.writable_workspaces.is_empty(),
         browser: false,
     }))
 }
@@ -353,7 +356,12 @@ where
             continue;
         }
         let auth = if method == "tools/call" {
-            match auth_from_meta(&body["params"], &config.hub_id, &config.workspaces) {
+            match auth_from_meta(
+                &body["params"],
+                &config.hub_id,
+                &config.workspaces,
+                &config.writable_workspaces,
+            ) {
                 Ok(auth) => auth,
                 Err(_) => {
                     send_response(

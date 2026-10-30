@@ -120,7 +120,7 @@ Commands:
   share        给服务拿一个公网 HTTPS 地址（ChatGPT 只能连公网，127.0.0.1 填进去连不上）
   upgrade      改服务配置（端口 / 认证 / 工具集 / 公网入口），改完自动重启；也能改项目的目录和名称
   remote       远端项目：另一台机器上由 ccnm 管着的 workspace，经 ccnm mcp bridge 访问
-  node         原生节点：登记机器，用一条出站连接共享指定项目（当前只读）
+  node         原生节点：登记机器，用一条出站连接共享指定项目（默认只读）
   join         用一次性邀请配对，生成目标机的私有节点配置
   grant        只开部分项目的凭据：给别人或另一个客户端只开几个项目，随时作废
   agent        委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
@@ -928,10 +928,11 @@ Options:
       --json                             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart                     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --share <SHARE>                    明确共享的已登记本机项目名称或完整 ID；可重复指定
-      --invite-stdin                     从管道或文件接收一次性邀请，不将其放入 argv
       --timeout <SECS>                   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
-      --ca-certificate <CA_CERTIFICATE>  显式信任的 DER CA 证书；仍核验 TLS 主机名
+      --write <PROJECT>                  允许文件写入的项目名称或完整 ID，须同时在 --share 中；可重复；默认只读，不授权命令或管理工具
       --home <DIR>                       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --invite-stdin                     从管道或文件接收一次性邀请，不将其放入 argv
+      --ca-certificate <CA_CERTIFICATE>  显式信任的 DER CA 证书；仍核验 TLS 主机名
       --no-color                         关闭彩色输出（也可设置环境变量 NO_COLOR）
       --yes                              确认所显示的 Hub、执行账号和共享项目，供非交互调用使用
   -h, --help                             Print help
@@ -941,7 +942,7 @@ Options:
 ## gld node
 
 ```text
-原生节点：登记机器，用一条出站连接共享指定项目（当前只读）
+原生节点：登记机器，用一条出站连接共享指定项目（默认只读）
 
 Usage: gld node [OPTIONS] <COMMAND>
 
@@ -950,7 +951,7 @@ Commands:
   register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、机器 ID 和名称
   revoke             撤销节点凭据并关闭其连接；保留机器身份和项目目录
   rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
-  shares             查看目标机共享名单；传入 --share 完整替换，修改前须停止该配置的节点进程
+  shares             查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
   run                在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
 
 Options:
@@ -1054,7 +1055,7 @@ Options:
 ## gld node shares
 
 ```text
-查看目标机共享名单；传入 --share 完整替换，修改前须停止该配置的节点进程
+查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
 
 Usage: gld node shares [OPTIONS] --config <CONFIG>
 
@@ -1064,6 +1065,7 @@ Options:
       --json                以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --share <WORKSPACES>  新的完整共享名单，接受项目完整 ID 或唯一名称；可重复，至少保留一个项目；省略则只查看
       --no-autostart        守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --write <PROJECT>     允许文件写入的项目，须同时在 --share 中；可重复；替换时省略则全部只读，不授权命令或管理工具
       --timeout <SECS>      等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --home <DIR>          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color            关闭彩色输出（也可设置环境变量 NO_COLOR）

@@ -8,9 +8,10 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::data::{AppData, DataStore};
+use crate::tools::registry::exposed_tool_names;
 
 use super::config::{validate_workspace_ids, NodeConfig, RegisteredMachine};
-use super::local_config::LocalConfig;
+use super::local_config::{validate_config_location, LocalConfig};
 use super::pairing::{invitation_hub_id, PairRequest};
 
 #[cfg(test)]
@@ -23,6 +24,7 @@ pub struct JoinOptions {
     pub hub_url: String,
     pub config_path: PathBuf,
     pub workspaces: Vec<String>,
+    pub writable_workspaces: Vec<String>,
     pub ca_certificate: Option<PathBuf>,
 }
 
@@ -31,6 +33,7 @@ pub struct SharedProject {
     pub id: String,
     pub name: String,
     pub path: String,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,11 +75,20 @@ impl PreparedJoin {
     fn prepare_with_projects(
         options: JoinOptions,
         invitation: String,
-        projects: Vec<SharedProject>,
+        mut projects: Vec<SharedProject>,
     ) -> Result<Self, String> {
         let hub_id = invitation_hub_id(&invitation)?;
         let workspaces: Vec<String> = projects.iter().map(|project| project.id.clone()).collect();
         validate_workspace_ids(&workspaces)?;
+        let writable_workspaces =
+            select_writable_workspaces(&mut projects, &options.writable_workspaces)?;
+        validate_config_location(
+            &options.config_path,
+            &projects
+                .iter()
+                .map(|project| project.path.clone())
+                .collect::<Vec<_>>(),
+        )?;
         let ca_certificate = options
             .ca_certificate
             .map(|path| {
@@ -94,6 +106,7 @@ impl PreparedJoin {
                 uuid::Uuid::new_v4().simple()
             ),
             workspaces,
+            writable_workspaces,
             ca_certificate,
         };
         config.validate()?;
@@ -116,6 +129,7 @@ impl PreparedJoin {
             if pending.hub_url != config.hub_url
                 || pending.hub_id != config.hub_id
                 || pending.workspaces != config.workspaces
+                || pending.writable_workspaces != config.writable_workspaces
                 || pending.ca_certificate != config.ca_certificate
             {
                 return Err("Pending pairing has different Hub or sharing settings; retry with the original settings".into());
@@ -129,7 +143,11 @@ impl PreparedJoin {
             hub_id: config.hub_id.clone(),
             execution_account: execution_account(),
             workspaces: projects,
-            access: "read-only",
+            access: if config.writable_workspaces.is_empty() {
+                "read-only"
+            } else {
+                "project-file-write"
+            },
             desktop: false,
             resuming,
             config_path: storage.path().to_path_buf(),
@@ -174,6 +192,49 @@ pub fn resolve_workspaces(selectors: &[String]) -> Result<Vec<SharedProject>, St
         .map_err(|_| "Cannot read local project registrations".to_string())?
 }
 
+/// 从刚解析的本机项目收窄权限，顺序按共享名单规范化；省略时全部只读。
+pub(super) fn select_writable_workspaces(
+    projects: &mut [SharedProject],
+    selectors: &[String],
+) -> Result<Vec<String>, String> {
+    let mut writable = HashSet::new();
+    for selector in selectors {
+        let by_id = projects.iter().any(|project| project.id == *selector);
+        let candidates: Vec<_> = projects
+            .iter()
+            .filter(|project| {
+                if by_id {
+                    project.id == *selector
+                } else {
+                    project.name == *selector
+                }
+            })
+            .collect();
+        let [project] = candidates.as_slice() else {
+            return Err(
+                "Every writable project must be selected in --share by full ID or unique name"
+                    .into(),
+            );
+        };
+        if project.read_only {
+            return Err(
+                "A writable project must use a local tool profile that supports file writes".into(),
+            );
+        }
+        if !writable.insert(project.id.clone()) {
+            return Err("A writable project was selected more than once".into());
+        }
+    }
+    for project in projects.iter_mut() {
+        project.read_only = !writable.contains(&project.id);
+    }
+    Ok(projects
+        .iter()
+        .filter(|project| !project.read_only)
+        .map(|project| project.id.clone())
+        .collect())
+}
+
 fn resolve_in(data: &AppData, selectors: &[String]) -> Result<Vec<SharedProject>, String> {
     if selectors.is_empty() || selectors.len() > 256 {
         return Err("Select 1..=256 local projects by full ID or unique name".into());
@@ -206,6 +267,7 @@ fn resolve_in(data: &AppData, selectors: &[String]) -> Result<Vec<SharedProject>
             id: profile.id.clone(),
             name: profile.name.clone(),
             path: profile.path.clone(),
+            read_only: !exposed_tool_names(&profile.runtime.tool_profile).contains(&"apply_patch"),
         });
     }
     validate_workspace_ids(

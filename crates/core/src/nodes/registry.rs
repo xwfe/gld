@@ -37,7 +37,7 @@ impl NativeMember {
         json!({
             "id": self.id, "name": self.name, "kind": "node",
             "machine_id": self.machine_id, "online": self.online, "revoked": self.revoked,
-            "tool_profile": self.tool_profile
+            "tool_profile": self.tool_profile, "read_only": self.tool_profile != "file-write"
         })
     }
 }
@@ -129,7 +129,7 @@ impl Nodes {
                     remote_workspace_id: project.id.clone(),
                     online,
                     revoked: machine.revoked,
-                    tool_profile: "read-only".into(),
+                    tool_profile: project.tool_profile.clone(),
                 });
             }
         }
@@ -402,7 +402,13 @@ fn parse_projects(result: &Value) -> Result<Vec<NodeProject>, String> {
         projects.push(NodeProject {
             id: id.into(),
             name: name.into(),
-            tool_profile: "read-only".into(),
+            tool_profile: match item.get("read_only") {
+                // 老节点没有显式文件写授权字段；其本机 profile 不能当成远端写权限。
+                None | Some(Value::Bool(true)) => "read-only",
+                Some(Value::Bool(false)) => "file-write",
+                Some(_) => return Err("invalid node project read_only flag".into()),
+            }
+            .into(),
         });
     }
     Ok(projects)
@@ -503,6 +509,24 @@ mod tests {
         ))
         .is_err());
         assert!(parse_projects(&json!({"isError":true})).is_err());
+    }
+
+    #[test]
+    fn discovery_defaults_legacy_profiles_to_read_only_and_requires_boolean_permission() {
+        let mut local =
+            json!({"id":"a".repeat(32),"name":"api","kind":"local","tool_profile":"advanced"});
+        let discover = |item: &Value| {
+            parse_projects(&json!({"structuredContent":{"ok":true,"workspaces":[item]}}))
+        };
+        assert_eq!(discover(&local).unwrap()[0].tool_profile, "read-only");
+        local["read_only"] = json!(false);
+        assert_eq!(discover(&local).unwrap()[0].tool_profile, "file-write");
+        local["read_only"] = json!(true);
+        assert_eq!(discover(&local).unwrap()[0].tool_profile, "read-only");
+        for invalid in [json!("false"), json!(0), Value::Null, json!({})] {
+            local["read_only"] = invalid;
+            assert!(discover(&local).is_err());
+        }
     }
 
     #[test]

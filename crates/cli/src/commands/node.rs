@@ -36,7 +36,7 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
                 id,
                 credential: read_credential(credential_stdin)?,
             },
-            "已登记专用凭据。目标机用私有配置文件运行 gld node run --config；当前只提供项目读取。",
+            "已登记专用凭据。目标机用私有配置文件运行 gld node run --config；项目默认只读，文件写入须在目标机显式授权。",
         ),
         NodeCmd::Revoke { machine_id } => (
             Request::NodeRevoke { machine_id },
@@ -92,6 +92,16 @@ fn read_credential(enabled: bool) -> Result<String, CliError> {
 pub async fn run_config(path: &Path) -> CliResult {
     let storage = gld_core::nodes::local_config::LocalConfig::lock(path).map_err(CliError::new)?;
     let config = storage.load().map_err(CliError::new)?;
+    let projects =
+        gld_core::nodes::join::resolve_workspaces(&config.workspaces).map_err(CliError::new)?;
+    gld_core::nodes::local_config::validate_config_location(
+        storage.path(),
+        &projects
+            .into_iter()
+            .map(|project| project.path)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(CliError::new)?;
     tokio::task::spawn_blocking(move || {
         let _configuration_lock = storage;
         gld_core::nodes::client::run(config)
@@ -101,10 +111,15 @@ pub async fn run_config(path: &Path) -> CliResult {
     .map_err(CliError::new)
 }
 
-pub fn shares(path: &Path, workspaces: &[String], out: Output) -> CliResult {
+pub fn shares(
+    path: &Path,
+    workspaces: &[String],
+    writable_workspaces: &[String],
+    out: Output,
+) -> CliResult {
     let changed = !workspaces.is_empty();
     let view = if changed {
-        gld_core::nodes::sharing::replace(path, workspaces)
+        gld_core::nodes::sharing::replace(path, workspaces, writable_workspaces)
     } else {
         gld_core::nodes::sharing::show(path)
     }
@@ -129,13 +144,17 @@ pub fn shares(path: &Path, workspaces: &[String], out: Output) -> CliResult {
                     } else {
                         "缺失或未限制读取".into()
                     },
-                    "只读".into(),
+                    if workspace.read_only {
+                        "只读".into()
+                    } else {
+                        "文件写入".into()
+                    },
                 ]
             })
             .collect();
         out.table(&["项目 ID", "名称", "路径", "本机登记", "权限"], &rows);
         if changed {
-            out.note("已替换共享名单。重新运行节点并连接 Hub 后生效。");
+            out.note("已替换共享名单及文件写入权限。重新运行节点并连接 Hub 后生效；命令和管理工具不开放。");
         }
     }
     Ok(())

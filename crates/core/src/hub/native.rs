@@ -2,17 +2,29 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "native_file_tests.rs"]
+mod file_tests;
+
 impl Hub {
-    pub fn for_node(shared_ids: Vec<String>) -> Result<Self, String> {
-        if shared_ids.is_empty() {
-            return Err("节点必须明确指定至少一个本机项目 ID。".into());
+    pub fn for_node(shared_ids: Vec<String>, writable_ids: Vec<String>) -> Result<Self, String> {
+        crate::nodes::config::validate_workspace_ids(&shared_ids)?;
+        if !writable_ids.is_empty() {
+            crate::nodes::config::validate_workspace_ids(&writable_ids)?;
+        }
+        if writable_ids.iter().any(|id| !shared_ids.contains(id)) {
+            return Err("节点的可写项目必须包含在明确共享的项目中。".into());
         }
         let hub = Self::with_members(
             &HubConfig {
-                tool_profile: "read-only".into(),
+                // 从完整定义取 schema，再用节点上限筛选，保留原只读工具而不开放命令。
+                tool_profile: "advanced".into(),
                 ..HubConfig::default()
             },
-            Members::Node(shared_ids.clone()),
+            Members::Node {
+                shared: shared_ids.clone(),
+                writable: writable_ids,
+            },
             Connections::new(),
         );
         let (members, _) = hub.snapshot()?;
@@ -29,6 +41,68 @@ impl Hub {
 
     pub fn nodes(&self) -> Arc<Nodes> {
         self.nodes.clone()
+    }
+
+    /// 节点复用真实的只读工具表，再单独允许文件补丁；策略分类表还含会执行命令的检查。
+    pub(super) fn node_tool_allowed(&self, name: &str) -> bool {
+        let Members::Node { writable, .. } = &self.members else {
+            return true;
+        };
+        matches!(name, LIST_WORKSPACES | WORKSPACE_CONTEXT)
+            || read_only_allows(name)
+            || (!writable.is_empty() && matches!(name, "apply_patch" | "patch_check"))
+    }
+
+    fn node_project_read_only(&self, member: &WorkspaceProfile) -> bool {
+        let Members::Node { writable, .. } = &self.members else {
+            return true;
+        };
+        !writable.contains(&member.id)
+            || !member.runtime.confine_reads
+            || !exposed_tool_names(&member.runtime.tool_profile).contains(&"apply_patch")
+    }
+
+    pub(super) fn node_catalog(&self, members: &[Member]) -> Value {
+        let mut listed = list_workspaces(members);
+        if matches!(self.members, Members::Node { .. }) {
+            if let Some(items) = listed["workspaces"].as_array_mut() {
+                for (member, item) in members.iter().zip(items) {
+                    if let Member::Local(member) = member {
+                        // 发现调用没有 workspace，不能拿它的只读 grant 代替目标机实际权限。
+                        let read_only = self.node_project_read_only(member);
+                        item["read_only"] = json!(read_only);
+                        item["tool_profile"] =
+                            json!(if read_only { "read-only" } else { "file-write" });
+                    }
+                }
+            }
+        }
+        listed
+    }
+
+    /// 项目能力展示与硬发调用共用同一个上限，避免借写授权宣告命令或管理工具。
+    pub(super) fn restrict_node_surface(&self, info: &mut Value, grant: Option<&Grant>) {
+        if !matches!(self.members, Members::Node { .. }) {
+            return;
+        }
+        let Some(tools) = info.get_mut("tools").and_then(Value::as_array_mut) else {
+            return;
+        };
+        tools.retain(|name| name.as_str().is_some_and(|name| self.exposes(name, grant)));
+        let read_only = !tools.iter().any(|name| name == "apply_patch");
+        let count = tools.len();
+        if info.get("tool_count").is_some() {
+            info["tool_count"] = json!(count);
+        }
+        info["read_only"] = json!(read_only);
+        info["tool_profile"] = json!(if read_only { "read-only" } else { "file-write" });
+        if let Some(aggregate) = info
+            .get_mut("tool_api")
+            .and_then(|api| api.get_mut("aggregate_tools"))
+            .and_then(Value::as_array_mut)
+        {
+            aggregate.retain(|name| name.as_str().is_some_and(|name| self.exposes(name, grant)));
+        }
     }
 
     pub(super) fn node_snapshot(
