@@ -4034,3 +4034,46 @@ Clippy `-D warnings`、fmt --check 和文档定稿后的五组文档检查通过
 
 隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1258 passed / 0 failed；
 Clippy `-D warnings`、fmt --check 通过。协议仍15，工具表未改，现有服务、OAuth/grant、安装、发布均未改动，未推送。
+
+## 95. M1 目标机跑命令，关连接不再陪等在途调用（2026-10-30）
+
+**范围与基线：**用户要求继续推进并优化设计。基线 `73bb903`，工作树干净。按任务表做 M1 最后一项：命令运行、查询、停止和跨主体结果隔离；
+顺手修 §94 记下的“关连接最坏等 90 秒”。
+
+| 改动 | 提交 | 验证 |
+| --- | --- | --- |
+| `--run` 点名项目才能跑命令，权限分读、写、命令三级 | `12caeb3` | 见下 |
+| 节点退出时停掉自己起的命令，新增 SIGTERM 处理 | `12caeb3` | 去掉这行后 SIGTERM、撤销两条测试变红 |
+| 关连接在途调用最多再等 2 秒，之后切断 | `8841e62` | 去掉切断那一行后，中继压住回包 45 秒的两条测试都红；撤销和 `gld daemon stop` 现在都在 10 秒内返回 |
+
+**设计取舍：**
+
+- 没复用 `--write`。`gld grant --write` 含跑命令，节点这边 `--write` 已验证为只管文件（§91），而且命令等于交出账号，默认不能顺带开。文档写明了两边的差别。
+- `--run` 自带文件写入，配置里 `runnable_workspaces` 必须是 `writable_workspaces` 的子集。不设“能跑不能写”：那档看着比实际安全。
+- 权限只按完整项目 ID 判。名字和 ID 前缀拿到的是只读 grant，硬发 `exec_command` 只会收到 `unknown_tool`（有测试）。
+- Hub 用目录里的 `tool_profile` 提前拦一次，只为报错写明白（`NODE_COMMANDS_NOT_ALLOWED`），判定点仍在节点。旧节点不报告 `commands` 字段时按没开处理。
+- `Hub::for_node` 的三个 `Vec<String>` 收成 `NodeAccess`：这是权限边界，三个同类型参数排错了编译器不报。
+
+**真实链路验证（CLI、Hub HTTP、TLS、WSS，隔离 `GLD_HOME`）：**同一台机器上 `--run` 的项目能跑，只写的项目报 `NODE_COMMANDS_NOT_ALLOWED` 且没跑；
+默认 guarded 下 `sh` 报 `POLICY_REJECTED`，目标机改 `command-policy=all` 后才跑，说明目标机策略照样管用；
+命令跑着时断线，机器离线期间命令继续写文件，重连后 `list_runs` 看到退出码 0，文件只有一行（没有重放）；`kill_session` 后记 `killed`；
+SIGTERM 后进程没了、节点重启后记 `interrupted`；`gld node revoke` 后节点退出，命令也停；`kill -9` 时命令还活着，重启后记 `unknown`（这条是把缺口写实，不是修好了）。
+
+**主体隔离：**要两个 OAuth 客户端，用 core 的 hub 测试走 `forwarded_meta` / `auth_from_meta` 验：bob 拿 alice 的 `session_id`，`read_output`、`write_stdin`、`kill_session` 都是 `SESSION_NOT_FOUND`，`list_runs` 是空的；alice 换一个新连接对象还能找回并停掉。没有用两个真实 OAuth 客户端走 HTTP 跑过。
+
+**踩到的：**
+
+- 测试第一版以为 `command-policy=all` 放开 `cmd` 里的 shell 拼接，其实只放白名单和确认，拼接仍拒，要用 `argv` 调 `sh -c`。生产代码没问题，是我没摸清就写了测试。
+- 又一次差点犯 §94 的错：`clippy ... | tail -3 && cargo test` 没开 `pipefail`，clippy 失败没拦住后面的步骤。这次没有提交，修完后的检查都开了 `pipefail`。
+- 变异检查留下的 `sleep 600` 进程已按工作目录筛出来清掉。
+
+**边界，没做的：**
+
+- 节点停止的瞬间如果 `exec_command` 刚好还没登记会话，这条命令会漏掉；窗口只有进程启动那几毫秒，没处理。
+- `exec_health_check`、任务收尾、委派、配置管理在节点上仍不开放。
+- 调用等 yield 时占着这台机器的连接，别的调用（包括 `kill_session`）收到 `MACHINE_BUSY`，最多 30 秒。文档教的做法是传小 yield 再查，没做连接内并发。
+- 节点在真实另一台机器、Windows 上都没跑过，命令相关测试只在 Unix 编译。
+
+隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1272 passed / 0 failed；Clippy `-D warnings`、fmt --check 通过。
+协议仍15，Hub 对外工具表未改，连接器不用 Refresh；新增配置字段缺省不开，旧配置继续有效。现有服务、OAuth/grant、安装、发布均未改动，未推送。
+
