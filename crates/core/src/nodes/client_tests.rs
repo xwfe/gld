@@ -321,6 +321,57 @@ async fn an_oversized_tool_result_fails_only_that_call_and_keeps_the_connection(
     assert_eq!(next_json(&mut hub).await, small);
 }
 
+fn image_response(output: &str) -> (Value, String) {
+    let encoded = "QUJD".repeat(1000);
+    let structured = json!({
+        "ok": true, "path": "a.png", "mime_type": "image/png", "bytes": 3000,
+        "base64": encoded, "data_url": format!("data:image/png;base64,{encoded}"),
+    });
+    let result = crate::tools::workspace::wrap_mcp_tool_result(
+        "view_image",
+        &json!({"output": output}),
+        structured,
+    );
+    (json!({"jsonrpc":"2.0","id":1,"result":result}), encoded)
+}
+
+#[test]
+fn view_image_keeps_only_the_copy_the_client_asked_for() {
+    let (mut response, encoded) = image_response("mcp_image");
+    assert_eq!(response.to_string().matches(encoded.as_str()).count(), 3);
+    keep_one_image_copy(&mut response);
+    assert_eq!(response.to_string().matches(encoded.as_str()).count(), 1);
+    let result = &response["result"];
+    assert_eq!(result["content"][0]["type"], "image");
+    assert_eq!(result["content"][0]["data"], json!(encoded));
+    assert_eq!(result["structuredContent"]["bytes"], 3000);
+
+    let (mut response, encoded) = image_response("data_url");
+    keep_one_image_copy(&mut response);
+    let result = &response["result"];
+    assert!(result["structuredContent"].get("base64").is_none());
+    assert!(result["structuredContent"]["data_url"]
+        .as_str()
+        .unwrap()
+        .ends_with(encoded.as_str()));
+    // 文本块要和结构化结果相等，否则 Hub 不会同步改里面的项目句柄。
+    let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text, result["structuredContent"]);
+}
+
+#[test]
+fn a_failed_view_image_is_left_alone() {
+    let failure = wrap_tool_result(tool_err_code(
+        "BINARY_FILE",
+        "not an image".into(),
+        "validation",
+    ));
+    let mut response = json!({"jsonrpc":"2.0","id":1,"result":failure});
+    let before = response.clone();
+    keep_one_image_copy(&mut response);
+    assert_eq!(response, before);
+}
+
 /// 5 Mbps 上行发 4 MB 约 7 秒。写超时以前是 5 秒，慢网下回包发到一半就断线。
 #[tokio::test]
 async fn a_large_reply_on_a_slow_link_is_not_cut_off_after_five_seconds() {

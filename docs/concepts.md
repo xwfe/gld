@@ -459,6 +459,8 @@ Hub 根据已验证主体重建内部 `params._meta`，忽略客户端伪造的�
 或本机 MCP 转发；项目文件可通过普通读取工具按需访问。
 回包保留目标机的正文、图片和错误状态，只将 `hub_workspace` 和其等值 JSON 文本副本改成
 Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路径仍是目标机上的路径。
+`view_image` 是例外：节点消息只有 8 MiB，经目标机时回包里没有 `base64` 字段；默认只回图片块，也没有 `data_url`，
+`output=data_url` 时只留 `data_url`。本机项目的回包不变。
 
 | 返回代码 | 含义与处理 |
 | --- | --- |
@@ -469,7 +471,7 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 | `NODE_TOOL_UNSUPPORTED` | 节点握手工具表没有该工具，本次未发送；核对节点版本与文件写入授权，命令执行仍未开放 |
 | `NODE_ARGUMENT_UNSUPPORTED` | 节点不接受某个参数，本次未发送；核对参数后再调 |
 | `NODE_REQUEST_TOO_LARGE` | 请求超出节点消息上限，在写入网络前拒绝 |
-| `NODE_RESPONSE_TOO_LARGE` | 工具已在目标机执行，但结果超过 8 MiB 的节点消息上限被丢弃；连接照常。少要点输出再调，比如 `view_image` 调小 `max_bytes`（回包约为原图 4 倍，原图超过约 2 MiB 就会撞上） |
+| `NODE_RESPONSE_TOO_LARGE` | 工具已在目标机执行，但结果超过 8 MiB 的节点消息上限被丢弃；连接照常。少要点输出再调，比如 `view_image` 调小 `max_bytes`（回包约为原图 1.33 倍，原图超过约 6 MiB 才会撞上；`output=data_url` 约 2.67 倍，超过约 3 MiB 就撞） |
 | `NODE_OUTCOME_UNKNOWN` | 已进入发送/等待阶段，但未收到有效回复；写入可能已完成，须先核对目标文件，不自动补发 |
 
 收到 `NODE_OUTCOME_UNKNOWN` 后，保留原机器和项目句柄，重连后先读回受影响的文件，与原补丁核对。

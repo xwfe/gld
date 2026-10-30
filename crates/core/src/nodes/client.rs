@@ -202,8 +202,43 @@ where
     write_text(socket, text).await
 }
 
+/// `view_image` 的结果里同一张图有三份 base64：图片块、`base64`、`data_url`，回包约为原图 4 倍。
+/// 节点消息只有 8 MiB，这里只留客户端要的那一份；图片块模式约为原图 1.33 倍，默认 5 MiB 的图放得下。
+/// 只在节点上裁：本机客户端已经在用的字段不动。`data_url` 模式的文本块跟着重写，
+/// 它和结构化结果相等，Hub 才认得出来并同步改句柄（`registry.rs::tag_result`）。
+fn keep_one_image_copy(response: &mut Value) {
+    let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    let image_block = result
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "image"));
+    let Some(structured) = result
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    structured.remove("base64");
+    if image_block {
+        structured.remove("data_url");
+        return;
+    }
+    let text = Value::Object(structured.clone()).to_string();
+    if let Some(block) = result
+        .get_mut("content")
+        .and_then(|blocks| blocks.get_mut(0))
+    {
+        block["text"] = json!(text);
+    }
+}
+
 /// 处理器的结果已经在本机生效（补丁可能已落盘），超限时只能丢弃正文，换一条小错误回给这一次调用。
-/// 以前整个节点退出，机器离线到有人手动重启；`view_image` 回包约为原图 4 倍，2 MiB 的图就会撞上。
+/// 以前整个节点退出，机器离线到有人手动重启。
 async fn send_result<S>(
     socket: &mut WebSocketStream<S>,
     result: Value,
@@ -463,7 +498,15 @@ where
         };
         let tool_call = method == "tools/call";
         let handler = hub.clone();
-        let response = tokio::task::spawn_blocking(move || handler.handle_request(&auth, &body).0);
+        let response = tokio::task::spawn_blocking(move || {
+            let mut response = handler.handle_request(&auth, &body).0;
+            if tool_call
+                && body.pointer("/params/name").and_then(Value::as_str) == Some("view_image")
+            {
+                keep_one_image_copy(&mut response);
+            }
+            response
+        });
         match wait_response(&mut socket, response, shutdown, stability).await? {
             CallOutcome::Response(result) => send_result(&mut socket, result, tool_call).await?,
             CallOutcome::End(end) => return Ok(end),

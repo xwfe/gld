@@ -661,17 +661,10 @@ fn node_process_recovers_initial_and_live_network_outages_without_parallel_conne
     }
 }
 
-#[test]
-fn an_oversized_node_result_fails_only_that_call_and_the_node_stays_online() {
-    let hub = Env::new();
-    let service = hub.serve("local", "bearer");
-    let relay = TlsRelay::new(service.port);
-    let machine = Env::new();
-    let ids = projects(&machine, "machine-a");
-    // 1000×1000 噪声 PNG 约 3 MB，没到 view_image 的 5 MiB/2000 像素自动缩放线；
-    // 回包里同一张图编码三次，约 12 MB，超过 8 MiB 的节点消息上限。
+/// 不可压缩的 PNG，`side`×`side` 约 3×side² 字节。
+fn noise_png(path: &Path, side: u32) -> u64 {
     let mut seed = 0x2545_f491_u32;
-    let pixels: Vec<u8> = (0..1000 * 1000 * 3)
+    let pixels: Vec<u8> = (0..side * side * 3)
         .map(|_| {
             seed ^= seed << 13;
             seed ^= seed >> 17;
@@ -679,13 +672,62 @@ fn an_oversized_node_result_fails_only_that_call_and_the_node_stays_online() {
             seed as u8
         })
         .collect();
-    let image_path = machine.project.path().join("api/noise.png");
-    image::RgbImage::from_raw(1000, 1000, pixels)
+    image::RgbImage::from_raw(side, side, pixels)
         .unwrap()
-        .save(&image_path)
+        .save(path)
         .unwrap();
-    let bytes = std::fs::metadata(&image_path).unwrap().len();
+    std::fs::metadata(path).unwrap().len()
+}
+
+/// 约 3 MB 的图以前编码三份、约 12 MB，撞 8 MiB 上限；现在节点只回一份。
+#[test]
+fn a_three_megabyte_image_comes_back_through_the_node_as_one_image_block() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "machine-a");
+    let bytes = noise_png(&machine.project.path().join("api/noise.png"), 1000);
     assert!((2_200_000..5 * 1024 * 1024).contains(&bytes), "{bytes}");
+
+    let registration = register(&hub, "machine-a", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let config_path = write_config(&machine, "node.json", &value);
+    let mut node = NodeProcess::start(&machine, &config_path);
+    let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
+
+    let reply = service.rpc(
+        "tools/call",
+        json!({"name":"view_image","arguments":{"workspace":api,"path":"noise.png"}}),
+    );
+    let body = reply.json();
+    let result = &body["result"];
+    assert_eq!(result["isError"], false, "{}", reply.body.len());
+    assert_eq!(result["content"][0]["type"], "image");
+    let data = result["content"][0]["data"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    assert_eq!(decoded.len() as u64, bytes);
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["bytes"], json!(bytes));
+    assert!(structured.get("base64").is_none() && structured.get("data_url").is_none());
+    assert!(reply.body.len() < data.len() + 4096, "{}", reply.body.len());
+    node.stop();
+}
+
+#[test]
+fn an_oversized_node_result_fails_only_that_call_and_the_node_stays_online() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "machine-a");
+    // 1500×1500 噪声 PNG 约 6.8 MB，只留一份编码也有约 9 MB，超过 8 MiB 的节点消息上限；
+    // 要显式放宽 max_bytes，否则默认 5 MiB 的线会先把它缩小。
+    let bytes = noise_png(&machine.project.path().join("api/noise.png"), 1500);
+    assert!((6_400_000..10 * 1024 * 1024).contains(&bytes), "{bytes}");
 
     let registration = register(&hub, "machine-a", TOKEN_A);
     let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
@@ -695,7 +737,10 @@ fn an_oversized_node_result_fails_only_that_call_and_the_node_stays_online() {
     let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
     let connections = relay.connections();
 
-    let result = service.call_raw("view_image", json!({"workspace": api, "path": "noise.png"}));
+    let result = service.call_raw(
+        "view_image",
+        json!({"workspace": api, "path": "noise.png", "max_bytes": 10_485_760}),
+    );
     assert_eq!(
         result["error"]["code"], "NODE_RESPONSE_TOO_LARGE",
         "{result}"
