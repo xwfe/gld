@@ -1,6 +1,6 @@
 # RFC-0008：保持现有连接的连续升级
 
-日期：2026-10-17。状态：**草案，未实现。**
+日期：2026-10-17，2026-10-30 按当前源码修订。状态：**稳定宿主基础实现中（§5），还没有零中断。**
 
 现在的升级做法是换二进制 + `gld daemon restart`：服务断开零点几秒，在跑的命令被停掉，连接器、授权、地址都不动
 （[安装 · 升级](../install.md#升级)）。本文讨论的是怎样连这点中断都没有：在跑的命令、在途请求、进行中的授权跨版本都不断。
@@ -8,7 +8,7 @@
 实现和验证事实追加到[生命周期审查](../reviews/2026-09-23-lifecycle-and-docs-audit.md)。
 
 写作时的源码基线是 `54bacbf` 加浏览器 grant 等改动（daemon 协议 6），在线构建是 `eea05359c42b`（0.8.3，协议 5）。
-下述旧代边界已对照这两版的 Hub 与 App 生命周期代码。
+§2 那张表 2026-10-30 对照 `a3b73c0`（协议 15，多了原生节点、work_session、Agent 委派）重新核过，有变化的行已改。
 
 ## 1. 结论与承诺边界
 
@@ -28,19 +28,22 @@
 | 资源/行为 | 当前所有者及源码证据 | 对升级的直接影响 |
 |---|---|---|
 | daemon 单实例与 IPC | `crates/daemon/src/lifecycle.rs`：`daemon.lock` 的跨进程排他锁；`server.rs`：进程内 App 与 IPC accept loop | 同一 `GLD_HOME` 不能直接并排启动两个普通 daemon；绕开锁不是交接协议 |
-| restart | `crates/cli/src/commands/daemon.rs`：`Restart` 调用 `stop` 后再 `start` | 不是滚动切换；原入口存在停服窗口 |
-| Hub 的端口与 tunnel | `crates/core/src/hub/runtime.rs`：`HubRuntime` 持有监听任务、shutdown sender、Hub、tunnel；`start` 先停止旧 runtime；`stop_runtime` 关闭监听、停止 tunnel、调用 Hub shutdown | 对外连接及隧道不独立于 daemon 存活；重启不能保持原连接 |
-| 进程退出与命令 | `crates/core/src/app/runtime.rs`：`shutdown_all` 在停止服务前、后都调用 `terminate_all_sessions_everywhere` | 正常退出也会终止运行中命令；不只是 `--force` 才有影响 |
+| restart | `crates/cli/src/commands/daemon.rs`：`Restart` 先看盘上运行记录，有命令在跑就不重启（`--force` 跳过），之后 `stop` 再 `start` | 不是滚动切换；原入口存在停服窗口 |
+| Hub 的端口与 tunnel | `crates/core/src/hub/runtime.rs`：`HubRuntime` 持有监听任务、shutdown sender、Hub、work_session 启动检查、tunnel；`start` 先停止旧 runtime；`stop_runtime` 关闭监听、停止 tunnel、调用 Hub shutdown | 对外连接及隧道不独立于 daemon 存活；重启不能保持原连接 |
+| 进程退出与命令 | `crates/core/src/app/runtime.rs`：`shutdown_all` 在停止服务前、后都调用 `terminate_all_sessions_everywhere`，中间还 `agents::interrupt_all` 停委派的 Agent | 正常退出也会终止运行中命令和 Agent；不只是 `--force` 才有影响 |
 | graceful shutdown | `crates/core/src/runtime/port.rs`：监听任务等待约 3 秒，超时后 `abort` | 只是有截止时间的退出等待，不能证明长请求完整结束 |
-| Hub 内部连接 | `crates/core/src/hub/mod.rs`：`Hub::shutdown` 终止 Hub scope 会话，并关闭远端连接及 machine relay | 等待 HTTP 监听退出不足以保持其他 Hub 会话 |
-| MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；没有升级用的在途请求登记及 admission gate | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
+| Hub 内部连接 | `crates/core/src/hub/mod.rs`：`Hub::shutdown` 终止 Hub scope 会话，并关闭 ccnm 远端连接、原生节点连接及 machine relay | 等待 HTTP 监听退出不足以保持其他 Hub 会话 |
+| MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；Actions 监听器（`actions/listener.rs`）、`gld tool call`（`dispatch.rs` → `App::call_tool`）是另外两条进同一批工具的入口；没有升级用的在途请求登记及 admission gate | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
 | OAuth 身份 | `crates/core/src/auth/oauth_flow.rs` 与 `client_registry.rs`：签名 secret、client registry 等可持久化；授权码 pending map 是 OAuthRuntime 内存状态 | 复用密钥有利于保留已签发 token，但进行中的授权流程仍可能丢失 |
+| 原生节点 | `crates/core/src/nodes/registry.rs`：`Nodes` 持有每台机器唯一的一条 WSS；连接从 Hub 监听器的 `/nodes/v1/connect/{machine_id}`（或全局入口）进来，`Hub` 经 `nodes.call` 转发 | 连接挂在公网入口上，不能跟着执行代走；换代断连接等于每台机器都要重连 |
+| 委派的 Agent | `crates/core/src/agents/run.rs`：`LIVE` 表和子进程都在起它的进程里，`agent_manage start` 和 `gld agent approve/stop` 都能起或停；任务记录和 owner 锁在盘上 | 属于工作区执行状态；停和放行必须到起它的进程里做，看记录不用 |
+| 通用任务空间 | `crates/core/src/hub/work_sessions.rs` 与 `managed_workspaces/`：登记在数据目录自己的存储里，不走 `DataStore`；启动检查由 `HubRuntime` 拉起，碰 `workspace_runtime` | 跟执行状态走，不跟监听器走 |
 | exec 会话 | `crates/core/src/tools/session.rs`：ExecSession 持有进程 Child、ChildStdin、输出 reader task、内存状态；run record 另行落盘 | 持久化日志不等于接管进程和 stdin；重启后读取历史不能算命令连续运行与交互能力保留 |
 | workspace 执行状态 | `crates/core/src/tools/workspace_runtime.rs`：SessionStore、workspace 写入序号与运行归属均在进程内；文件写锁通过同一 `GLD_HOME` 下的 fs2 锁协调 | 只把 session ID 路由回旧代仍不足够；新旧代并行写同一 workspace 会漏记对方的写入序号 |
-| 配置存储 | `crates/core/src/data/store.rs`：整个数据文件读改写以进程内 Mutex 串行；正常架构依赖单 daemon 单写者 | 两代普通 App 共同写配置可能覆盖彼此修改；不能只取消 daemon 单实例锁 |
+| 配置存储 | `crates/core/src/data/store.rs`：整个数据文件读改写以进程内 Mutex 串行；正常架构依赖单 daemon 单写者。工具路径（`tools/`、`hub/`、`agents/`、`managed_workspaces/`、`machine_mcp/`、`bridge/`）现在只读不写它，写入都在 `App`、`nodes::config`、`nodes::pairing`、`secret/`、`global_gateway.rs` | 两代普通 App 共同写配置可能覆盖彼此修改；不能只取消 daemon 单实例锁 |
 | 现有 global gateway | `crates/core/src/global_gateway.rs`：有流式 HTTP 转发实现，但其 runtime 和 tunnel 也归同一 daemon，且被 `App::shutdown_all` 停止 | 转发代码可以复用；现有生命周期本身不提供升级隔离 |
 
-另一个容易误用的接口是 SIGHUP：当前 `server.rs` 将其作为退出信号处理，没有原地热加载含义。`restore_runtime_state` 只根据保存的配置重新启动服务，不恢复原进程的连接、授权 pending map、stdin 管道或运行时任务。
+另一个容易误用的接口是 SIGHUP：当前 `server.rs` 将其作为退出信号处理，没有原地热加载含义（节点进程 `nodes/client.rs` 也一样）。`restore_runtime_state` 只根据保存的配置重新启动服务，不恢复原进程的连接、授权 pending map、stdin 管道或运行时任务。
 
 ## 3. 最小可落地的运行时所有权方案
 
@@ -78,6 +81,33 @@
 6. 候选失败时，在未产生新状态迁移的范围内保留或恢复原路由。回退代码不撤销已经执行的工具副作用；持久化格式不兼容时必须在激活前拒绝，而不能依靠回退补救。
 
 可复用 `global_gateway.rs` 的请求和响应流转发代码，但必须将它的监听及 tunnel 生命周期移出会被替换的执行代。仅原样保留当前 `App::shutdown_all` 调用关系无法达到上述效果。
+
+### 3.4 第一版怎么落地（2026-10-30 按当前源码定的）
+
+本节写实现上定下来的做法，上面三节仍是设计依据。这里“执行代”的代码在 `crates/core/src/generation/`。
+
+**进程关系。**`gld daemon run` 这个进程就是宿主，它起一个子进程 `gld daemon generation`（隐藏子命令，不给人直接敲）当执行代。
+
+**私有通道是子进程的 stdin/stdout 这对匿名管道，一行一条 JSON。**不开 socket、不开端口，不进文件系统，所以没有第二个入口，也没有路径可以让客户端或项目命令连上来。执行代一启动就把这对管道 `dup` 成带 close-on-exec 的新描述符，再把 0 指向 `/dev/null`、1 指向 stderr：项目命令继承不到它们，哪段代码误 `println!` 也不会写进通道。Windows 上用 `stop_std_handles_being_inherited` 关继承（没有真机验证）。代价是通道不能交接：宿主一退，执行代就读到 EOF，按正常退出收掉命令后自己退。“稳定宿主更替”那一期要换成可重新连接的通道，这是已知的债。
+
+**身份只来自宿主。**宿主验完鉴权，把 caller（principal、scope、grant 含 browser 标记）作为通道上的字段发给执行代。这些字段由宿主从 `AuthContext` 生成，不从 HTTP 请求里读任何东西，客户端写什么请求头或 JSON 字段都影响不到。
+
+**谁持有什么：**
+
+| 宿主 | 执行代 |
+|---|---|
+| 对外监听（Hub、单项目 MCP、Actions、全局入口）、隧道、OAuth 与 client registry、原生节点 WSS、配置与密钥的写入、`gld` 的 IPC socket | `ToolContext`、`SessionStore` 与命令进程、写入序号、委派的 Agent、ccnm 远端连接、本机 MCP 转发、work_session 启动检查 |
+
+- **原生节点连接归宿主。**WSS 从公网入口进来，换代时断开就等于每台机器都要重连。执行代要调节点时经通道反过来问宿主（列成员、转发一次调用）。节点上的命令在节点进程里，不属于这边任何一代。`nodes/` 内部逻辑没动，只把 `Hub` 对 `Nodes` 的两处调用接到一个小接口上。节点进程 `gld node run` 自己仍是单体，升级节点仍是重启它，不在本期范围。
+- **配置单写者靠硬约束。**执行代启动时关掉本进程的 `DataStore` 写入，写就返回错误；工具路径本来就不写，这是防以后有人不小心加上。
+- **Planning 的状态文件不算执行状态。**`gld` 的 plan/goal 操作本来就按文件协调（直连模式也这么走），留在宿主；只有切 plan 模式时“停掉工作区里的命令”这一步发给执行代。
+- **工作区所有权。**键是规范化后的项目根目录（远端成员、work_session 用各自的 id）。第一次调用把它绑到当前执行代，之后一直走那一代。判断所有权和计数在同一把锁里，切换也拿这把锁，所以不存在“查完是空的、切的时候已经有新请求”的窗口。
+- **在途计数是实数。**请求进入执行代前加一、拿到回包才减一，客户端中途断开不减。按代和按工作区各记一份。
+- **发现类请求（`initialize`、`tools/list`）走最老的那一代。**这样不会先发布新工具，再把调用送给不认识它的旧代。准备新代时要求它的工具表包含当前代的全部工具，少一个就拒绝。
+
+**用户怎么操作。**`gld start`、`gld daemon restart` 照旧。多了四条：`gld daemon upgrade status`（只读）、`prepare <二进制路径>`（起新代、验证，不动路由）、`switch`（切过去）、`abort`（放弃新代）。`prepare` 不复制二进制，直接从给的路径起，所以路径要是一份版本化的副本（比如 `~/.local/opt/gld-<版本>/gld`）。
+
+**执行代挂了怎么办。**宿主留在原端口。正在执行的请求收到 JSON-RPC 错误 `generation_lost`，说明结果未知、不会自动重放；宿主退避重启一个新执行代，配置和认证都不受影响。挂掉的那代起的命令成孤儿（和现在 `kill -9` 守护进程一样），记录判成 `unknown`。
 
 ## 4. 旧 0.8.3 的首次迁移硬限制
 
