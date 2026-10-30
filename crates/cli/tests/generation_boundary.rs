@@ -933,6 +933,52 @@ fn a_client_cannot_forge_the_internal_identity() {
     assert!(!reply.body.contains("web-only"), "{}", reply.body);
 }
 
+/// 当前代挂了、替代的一直起不来时操作员切到了新版本：之后替代的才起来，也不能把路由抢回去。
+#[test]
+fn a_late_replacement_does_not_undo_a_switch() {
+    let env = Env::new();
+    let exe_dir = tempfile::tempdir().expect("exe dir");
+    let exe = exe_dir.path().join("gld");
+    std::fs::copy(env!("CARGO_BIN_EXE_gld"), &exe).unwrap();
+    env.ok(&["add", ".", "--name", "api"]);
+    let started = Command::new(&exe)
+        .args(["daemon", "start"])
+        .env("GLD_HOME", env.home.path())
+        .env("NO_COLOR", "1")
+        .current_dir(env.project.path())
+        .output()
+        .expect("start");
+    assert!(started.status.success(), "{started:?}");
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    let status = env.json(&["--json", "daemon", "upgrade", "status"]);
+    let old = generation(&status, "g1")["pid"].as_u64().unwrap() as u32;
+
+    // 原来的二进制换成坏的，于是替代一直失败。
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::remove_file(&exe).unwrap();
+    std::fs::write(&exe, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    kill_9(old);
+    wait_for("发现当前代没了", || {
+        env.json(&["--json", "daemon", "upgrade", "status"])["current"].is_null()
+    });
+
+    env.ok(&["daemon", "upgrade", "switch"]);
+    assert_eq!(
+        env.json(&["--json", "daemon", "upgrade", "status"])["current"],
+        "g2"
+    );
+    // 现在替代能起来了。退避最长到第 8 秒左右还会再试几次。
+    std::fs::remove_file(&exe).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_gld"), &exe).unwrap();
+    std::thread::sleep(Duration::from_secs(9));
+
+    let status = env.json(&["--json", "daemon", "upgrade", "status"]);
+    assert_eq!(status["current"], "g2", "路由被抢回去了：{status}");
+    assert_eq!(generation_pids(&status).len(), 1, "{status}");
+    assert_eq!(status["restarts"], 0, "{status}");
+}
+
 /// 嵌套很深的请求：宿主解析得了，多包两层就超过 serde 的递归上限。
 /// 以前执行代解析失败后只打一行日志，宿主那头永远等不到回包，在途计数也永远不归零。
 #[test]
@@ -1053,6 +1099,14 @@ fn a_replaced_incompatible_binary_is_reported_and_the_host_keeps_answering() {
     wait_for("记下失败原因", || {
         env.json(&["--json", "daemon", "upgrade", "status"])["last_failure"].is_string()
     });
+
+    // 没有当前代时不能准备新版本：拿什么核对工具表？
+    let refused = env.gld(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("重启"),
+        "{refused:?}"
+    );
 
     // 宿主和认证都还在；工具调用如实报不可用，没执行。
     let wrong = post_json(port, "/mcp", &rpc_body("tools/list", json!({})), Some("x"));

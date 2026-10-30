@@ -86,6 +86,8 @@ struct State {
     /// 准备好了、还没切过去的。除了核对用的请求，什么都不路由给它。
     prepared: Option<Arc<Link>>,
     preparing: bool,
+    /// 正在替挂掉的当前代找替代。只开一个线程，第二次丢失不再多开。
+    replacing: bool,
     owners: HashMap<String, OwnedWorkspace>,
     /// 服务在跑时的配置。新起的代按它建 Hub，起不来也不丢。
     hub_config: Option<HubConfig>,
@@ -138,6 +140,7 @@ impl Router {
                 current: None,
                 prepared: None,
                 preparing: false,
+                replacing: false,
                 owners: HashMap::new(),
                 hub_config: None,
                 next_id: 1,
@@ -519,6 +522,12 @@ impl Router {
             if state.preparing {
                 return Err("正在准备另一个新代".into());
             }
+            if state.current.is_none() {
+                return Err(
+                    "当前执行代刚退出，正在重启，这时没有东西可以核对新版本。等它恢复再准备，看 gld daemon upgrade status"
+                        .into(),
+                );
+            }
             if let Some(prepared) = &state.prepared {
                 return Err(format!(
                     "已经准备好了 g{}（{}）。先 gld daemon upgrade switch 切过去，或者 abort 放弃它",
@@ -795,7 +804,11 @@ impl Router {
                 let lost = state.current.take();
                 state.last_failure = Some(format!("当前执行代 g{id} 退出了：{reason}"));
                 eprintln!("当前执行代 g{id} 退出了（{reason}），重启一个。");
-                (!state.shutting_down).then_some(lost).flatten()
+                let start = !state.shutting_down && !state.replacing;
+                if start {
+                    state.replacing = true;
+                }
+                start.then_some(lost).flatten()
             } else {
                 eprintln!("旧执行代 g{id} 退出了（{reason}）。");
                 None
@@ -817,8 +830,13 @@ impl Router {
                 loop {
                     std::thread::sleep(RESTART_BACKOFF[attempt.min(RESTART_BACKOFF.len() - 1)]);
                     attempt += 1;
-                    if router.lock().shutting_down {
-                        return;
+                    {
+                        let mut state = router.lock();
+                        // 操作员这期间切到了准备好的新代：不用替了。
+                        if state.shutting_down || state.current.is_some() {
+                            state.replacing = false;
+                            return;
+                        }
                     }
                     match router.bring_up_replacement(&exe) {
                         Ok(()) => return,
@@ -867,11 +885,14 @@ impl Router {
         }
         {
             let mut state = self.lock();
-            if state.shutting_down {
+            // 起进程要时间，这中间操作员可能已经切到了新代，这一个不能把路由抢回去。
+            if state.shutting_down || state.current.is_some() {
+                state.replacing = false;
                 drop(state);
                 link.kill();
                 return Ok(());
             }
+            state.replacing = false;
             state.generations.push(Arc::clone(&link));
             state.current = Some(Arc::clone(&link));
             state.restarts += 1;
