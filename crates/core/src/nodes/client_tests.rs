@@ -361,11 +361,7 @@ fn view_image_keeps_only_the_copy_the_client_asked_for() {
 
 #[test]
 fn a_failed_view_image_is_left_alone() {
-    let failure = wrap_tool_result(tool_err_code(
-        "BINARY_FILE",
-        "not an image".into(),
-        "validation",
-    ));
+    let failure = wrap_tool_result(tool_err_code("BINARY_FILE", "not an image", "validation"));
     let mut response = json!({"jsonrpc":"2.0","id":1,"result":failure});
     let before = response.clone();
     keep_one_image_copy(&mut response);
