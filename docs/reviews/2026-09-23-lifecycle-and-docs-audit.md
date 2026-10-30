@@ -3839,3 +3839,39 @@ Windows ACL 的真机边界沿用 §88；本次不把本机通过外推到其他
 现有服务、OAuth/grant、安装、发布均未改动，未推送。
 
 记录更新曾因补丁只取长行前半段而返回 context_not_found；按实际整行重建后提交，失败补丁未落盘。
+
+## 90. RFC-0013 研判：WSS 回连方向合理，补 Hub 身份、代理、超时与超大回包（2026-10-30）
+
+**范围与基线：**用户问“一个 Hub、任意目标机主动加入”的规划，以及“目标机用 WSS 长连接回连 Hub、
+复用 Axum/Tokio 和成熟 WebSocket 库”是否合理，并要求把两轮研判补进 RFC。基线 `b066d4f`。
+同一目录里另一个会话正在做 M1 文件写入（18 个文件未提交），本节只读源码，只改 RFC-0013 和本文件，没有编译或跑测试。
+
+**结论：**WSS 合理，是现有入口（Cloudflare、FRP、自建反代）下最合适的传输：走 443、HTTP/1.1 Upgrade，
+这几种反代都能转发，双向且延迟低。HTTP 长轮询可留作后备；gRPC/HTTP2 过不了 FRP 的 http 代理和不少 nginx 配置；
+QUIC、Iroh 走 UDP 常被挡；SSH 反向隧道要每台机器配 sshd。
+
+**上一轮意见在 `2e5ddad`～`b066d4f` 已落实的**（不再写进 RFC）：只共享目标机显式选中的项目；
+M0→M1 先于桌面；复用 Peer/handle_request 跑标准 JSON-RPC；tokio-tungstenite 固定 `=0.29.0`，与 axum 的 ws 同版；
+Hub 空闲时每 20 秒 Ping、20 秒没等到 Pong 就断开，节点 60 秒收不到任何帧就断开；有抖动的有界退避；
+消息和帧上限 8 MiB；凭据放 `Authorization` 头并标 sensitive；TLS 校验不降级；macOS 未签名升级要重新授权已写进 §5/§9。
+
+**仍未覆盖、已补进 RFC 的：**
+
+| 发现 | 证据 | RFC 位置 |
+| --- | --- | --- |
+| 节点回包超 8 MiB 时 `gld node run` 直接退出，机器离线到有人手动重启；`view_image` 回包约为原图 4 倍，约 2 MiB 以上的图就会触发 | `nodes/client.rs::send_response` 超限返回 `Failure::permanent`，`reconnect.rs` 遇 `Retry::Never` 返回错误；`workspace.rs::wrap_mcp_tool_result` 和 `image_tool.rs` 让 base64 出现三份；`view_image` 在 `CORE_READ_ONLY_TOOLS` 里 | §7.2 |
+| Hub 单次调用超时 30 秒，与 `exec_command` 的 yield 上限、带端口服务的默认等待相同；按上限传参必然超时、整条连接被关 | `nodes/registry.rs` 的 `CALL`；`tools/args.rs` 的 yield 上限；`tools/service.rs` 的 `DEFAULT_WAIT_MS`；`connection.rs` 把超时当致命错误 | §7.2 |
+| 一个调用在途时，其他调用方立刻收到 `MACHINE_BUSY` | `connection.rs::try_with_peer` 的 compare_exchange | §7.2 |
+| 节点认 Hub 只靠 TLS 和响应头 `x-gld-hub-id`；hub_id 在邀请里，不是秘密；凭据在 Hub 证明自己之前已发出 | `nodes/client.rs` 握手后只比对这个响应头；`pairing.rs` 的邀请令牌含 hub_id | §7.3，强度待用户定 |
+| 配对跟着 `HTTPS_PROXY` 走，长连接不认代理；只能经代理出网的机器 join 成功、run 一直超时 | `join.rs` 用 reqwest（只对回环地址 `no_proxy`）；`client.rs` 用 `connect_async_tls_with_config` 直连 | §7.4 |
+| 只信内置 webpki 根证书；配 `ca_certificate` 后只信这一张 DER，不读系统证书库 | tokio-tungstenite 特性 `rustls-tls-webpki-roots`；`client.rs::ca_connector`；`join.rs` 的 `tls_built_in_root_certs(false)` | §7.4 |
+| 邀请不给地址、不查入口；临时隧道每次重启换地址，OpenAI 隧道没有节点能连的地址 | `gld node invite` 只提示用 join 接收；`gld share` 默认 trycloudflare | §3 |
+| 截图：8 MiB 上限加 5 秒写超时，发满要约 1.7 MB/s 上行 | `transport.rs`、`client.rs` 的 `WRITE_TIMEOUT` | §8 |
+
+**待用户决定：**§7.3 选 A（钉住 Hub 公钥，挡住冒充）还是 B（再加逐条签名，连转发插话的中间人也挡住）。
+建议在命令执行接入节点之前至少做 A。
+
+**未验证与后续：**以上都是读源码推出的，没有写测试复现；另一个会话正在改 `nodes/`，这时编译会抢它的构建锁，
+还会编进它没写完的代码。超大回包让节点退出是已提交代码里的缺陷，修复要改 `nodes/client.rs`，
+而这个文件正被那个会话修改，等它提交后再修并补回归。文档检查：新增文字不含家目录路径和相对链接；
+命令存在性检查不扫 `docs/rfc/`、`docs/reviews/` 子目录。现有服务、依赖和锁文件都没动，未推送。
