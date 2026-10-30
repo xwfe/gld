@@ -230,6 +230,33 @@ pub struct Routed {
     pub context: Option<SharedToolContext>,
 }
 
+/// 执行代摸不到节点连接（归宿主，RFC-0008 §3.4），要用就经这个接口问。
+pub trait NodeBridge: Send + Sync {
+    fn members(&self) -> Result<Vec<NativeMember>, String>;
+    fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value;
+}
+
+/// 一条请求在执行代之间该怎么走，见 [`Hub::execution_route`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionRoute {
+    /// 工具表这类发现请求：走最老的一代。
+    Discovery,
+    /// 不碰工作区状态（`list_workspaces`、节点调用、选不中成员的报错）：走当前代。
+    Unbound,
+    /// 碰这个工作区：走它的主人，没主人就绑给当前代。
+    Owned(String),
+}
+
+/// 经宿主问节点失败时给模型的回包，和节点离线时一个形状。
+pub(crate) fn node_bridge_failure(message: &str) -> Value {
+    plain_result(tool_err(WorkspaceError::Tool {
+        code: "NODE_REGISTRY_UNAVAILABLE",
+        message: format!("Cannot reach the node registry: {message}"),
+        category: "runtime",
+        retryable: true,
+    }))
+}
+
 pub struct Hub {
     members: Members,
     tool_profile: String,
@@ -240,6 +267,8 @@ pub struct Hub {
     /// 远端成员的 bridge 连接。本地成员一条都用不到。
     connections: Connections,
     nodes: Arc<Nodes>,
+    /// 在执行代里跑时才有：节点调用经它交给宿主，[`Self::nodes`] 那张表此时是空的。
+    node_bridge: Option<Arc<dyn NodeBridge>>,
     /// 转发本机装好的 MCP server（`gld mcp on` 开了才有东西）。
     relay: Relay,
     /// 测试用：不读这台机器的 `~/.claude.json`，用给定的一份；也不真起进程。
@@ -287,6 +316,7 @@ impl Hub {
             contexts: Mutex::new(HashMap::new()),
             connections,
             nodes: Arc::new(Nodes::new()),
+            node_bridge: None,
             relay: Relay::new(),
             #[cfg(test)]
             installed: None,
@@ -294,6 +324,74 @@ impl Hub {
             opener: None,
             #[cfg(test)]
             managed_home: None,
+        }
+    }
+
+    pub fn with_node_bridge(mut self, bridge: Arc<dyn NodeBridge>) -> Self {
+        self.node_bridge = Some(bridge);
+        self
+    }
+
+    fn node_members(&self) -> Result<Vec<NativeMember>, String> {
+        match &self.node_bridge {
+            Some(bridge) => bridge.members(),
+            None => self.nodes.members(),
+        }
+    }
+
+    fn node_call(
+        &self,
+        auth: &AuthContext,
+        member: &NativeMember,
+        tool: &str,
+        args: Value,
+    ) -> Value {
+        match &self.node_bridge {
+            Some(bridge) => bridge.call(auth, member, tool, args),
+            None => self.nodes.call(auth, member, tool, args),
+        }
+    }
+
+    /// 这条请求的工作区归属。宿主在转发前调，只看不执行；解析规则和 [`Self::call`] 共用。
+    ///
+    /// 选不中成员（名字错了、grant 看不到）按 `Unbound` 走：错误由执行代按原来的样子报，
+    /// 这里只决定路由，不提前拒绝，也不因此记下一个不存在的工作区。
+    pub fn execution_route(&self, auth: &AuthContext, body: &Value) -> ExecutionRoute {
+        if body.get("method").and_then(Value::as_str) != Some("tools/call") {
+            return ExecutionRoute::Discovery;
+        }
+        let params = body.get("params").cloned().unwrap_or(Value::Null);
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return ExecutionRoute::Unbound;
+        };
+        let canonical = canonical_tool_name(name);
+        // 本机 MCP server 的进程不分工作区，但有连接和会话，整个算一个“工作区”。
+        if machine_mcp::is_tool(canonical) {
+            return ExecutionRoute::Owned("machine-mcp".into());
+        }
+        let args = crate::mcp::tool_arguments(name, &params);
+        let Some(selector) = args
+            .get("workspace")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return ExecutionRoute::Unbound;
+        };
+        if crate::managed_workspaces::is_id(selector) {
+            return ExecutionRoute::Owned(selector.to_string());
+        }
+        let Ok((members, _)) = self.snapshot() else {
+            return ExecutionRoute::Unbound;
+        };
+        let members = visible_for(members, auth);
+        match resolve_member(&members, selector) {
+            Ok(Member::Local(profile)) => ExecutionRoute::Owned(
+                crate::generation::router::root_key(std::path::Path::new(&profile.path)),
+            ),
+            Ok(Member::Remote(remote)) => ExecutionRoute::Owned(remote.id.clone()),
+            // 节点上的状态在节点那台机器上，这边哪一代转发都一样。
+            Ok(Member::Native(_)) | Err(_) => ExecutionRoute::Unbound,
         }
     }
 
@@ -698,7 +796,7 @@ impl Hub {
                         category: "validation", retryable: false,
                     })));
                 }
-                let result = self.nodes.call(auth, native, canonical, args.clone());
+                let result = self.node_call(auth, native, canonical, args.clone());
                 if canonical == "server_info" && result["structuredContent"]["ok"] == true {
                     // 工具在节点执行，但 connection 描述的是客户端当前连接的 Hub。
                     let structured = self.with_connection_surface(result["structuredContent"].clone(), auth.grant());
@@ -1041,7 +1139,7 @@ impl Hub {
             })
             .collect();
         if matches!(self.members, Members::DataFile) {
-            members.extend(self.nodes.members()?.into_iter().map(Member::Native));
+            members.extend(self.node_members()?.into_iter().map(Member::Native));
         }
         Ok((members, settings))
     }
@@ -1190,7 +1288,7 @@ impl Hub {
 /// 和 [`build_tool_context`] 读的字段一一对应：那边多读一个字段而这里没加，
 /// 改了那个配置 hub 就会一直用旧的。不直接拿整份设置比，是因为里面有密钥、
 /// hub 成员列表这些常变但无关的东西，每次变都重建会把正在跑的命令一起杀掉。
-fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> String {
+pub(crate) fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> String {
     serde_json::to_string(&(
         &member.path,
         &member.name,

@@ -28,6 +28,7 @@ pub mod bridge;
 pub mod computer;
 pub mod data;
 pub mod error;
+pub mod generation;
 pub mod global_gateway;
 pub mod harness;
 pub mod health;

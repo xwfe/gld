@@ -55,6 +55,11 @@ pub fn running_in(project_root: &Path) -> Option<String> {
         .map(|(id, _)| id.clone())
 }
 
+/// 这个进程里在跑几个委派。
+pub fn live_count() -> usize {
+    live().len()
+}
+
 /// 这个进程里有没有在跑这个任务。
 pub fn is_live(task_id: &str) -> bool {
     live().contains_key(task_id)

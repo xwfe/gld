@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use profile::AgentProfile;
 use store::{AgentTask, Review, State};
 
-pub use run::{interrupt_all, running_in};
+pub use run::{interrupt_all, live_count, running_in};
 
 /// 提示最长多少字节。再长的放 `brief` 里。
 pub const PROMPT_MAX_BYTES: usize = 64 * 1024;
