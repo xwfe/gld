@@ -20,6 +20,10 @@ use crate::bridge::peer::{Peer, PeerError};
 /// 多台机器一起忙时更久。切断后调用方拿到“结果不明”，和断线一样，不会重放。
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
+/// 连接正忙时最多等多久再报 BUSY。客户端常把几个读请求并行发出来，每个只要几十毫秒，
+/// 立刻拒绝的话 8 个里有 6 个失败（真机测过）；真正卡住的调用（等命令 yield、慢网）等完也还是 BUSY，不无限排队。
+const BUSY_WAIT: Duration = Duration::from_secs(5);
+
 /// Axum 把同一 WebSocket 消息包装成自己的类型；这里只转换类型，不解析 JSON-RPC。
 pub struct AxumSocket(WebSocket);
 pub type AxumTransport = SocketTransport<AxumSocket>;
@@ -144,17 +148,29 @@ impl Connection {
         })
     }
 
-    /// 并发 RPC 当场拒绝。RPC 可等正在结束的短暂 idle poll，不因心跳误报 Busy。
-    pub fn try_with_peer<R>(
+    /// 同一时刻只有一个 RPC。别的调用短等一下，等不到就报 Busy，这时什么都没发。
+    /// RPC 可等正在结束的短暂 idle poll，不因心跳误报 Busy。
+    pub fn with_peer<R>(
         &self,
         call: impl FnOnce(&mut Peer<AxumTransport>) -> Result<R, PeerError>,
     ) -> Result<R, ConnectionError> {
         if self.closing.load(Ordering::Acquire) || self.is_closed() {
             return Err(ConnectionError::Closed);
         }
-        self.in_flight
+        let deadline = Instant::now() + BUSY_WAIT;
+        while self
+            .in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| ConnectionError::Busy)?;
+            .is_err()
+        {
+            if self.closing.load(Ordering::Acquire) || self.is_closed() {
+                return Err(ConnectionError::Closed);
+            }
+            if Instant::now() >= deadline {
+                return Err(ConnectionError::Busy);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let _in_flight = InFlight(&self.in_flight);
         let mut peer = self.peer.lock().unwrap_or_else(|e| e.into_inner());
         if self.closing.load(Ordering::Acquire) || !peer.transport_mut().is_open() {
