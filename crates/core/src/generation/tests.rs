@@ -148,3 +148,12 @@ fn a_workspace_has_one_owner_key_however_its_path_is_written() {
     let dotted = router::root_key(&root.path().join("."));
     assert_eq!(plain, dotted);
 }
+
+/// 只有确定没发出去的才能叫客户端重试：其余的工具可能已经跑过了。
+#[test]
+fn only_a_call_that_never_left_is_safe_to_retry() {
+    assert!(CallError::Unavailable("restarting".into()).surely_not_executed());
+    assert!(!CallError::Lost.surely_not_executed());
+    assert!(!CallError::TimedOut.surely_not_executed());
+    assert!(!CallError::Refused("worker_panicked".into()).surely_not_executed());
+}

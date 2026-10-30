@@ -438,7 +438,7 @@ async fn execute_action(
                         code: "GENERATION_UNAVAILABLE",
                         message: error.to_string(),
                         category: "runtime",
-                        retryable: !matches!(error, crate::generation::CallError::Lost),
+                        retryable: error.surely_not_executed(),
                     })
                 }),
             None => tools::call_tool_as(

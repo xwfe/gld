@@ -247,13 +247,15 @@ pub enum ExecutionRoute {
     Owned(String),
 }
 
-/// 经宿主问节点失败时给模型的回包，和节点离线时一个形状。
+/// 经宿主问节点失败时给模型的回包。等不到回复时节点可能已经执行了，所以不能叫它直接重试。
 pub(crate) fn node_bridge_failure(message: &str) -> Value {
     plain_result(tool_err(WorkspaceError::Tool {
-        code: "NODE_REGISTRY_UNAVAILABLE",
-        message: format!("Cannot reach the node registry: {message}"),
+        code: "NODE_RESULT_UNKNOWN",
+        message: format!(
+            "Did not get a result from the node; the call may already have run there: {message}"
+        ),
         category: "runtime",
-        retryable: true,
+        retryable: false,
     }))
 }
 

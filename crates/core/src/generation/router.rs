@@ -48,6 +48,14 @@ pub enum CallError {
     Refused(String),
 }
 
+impl CallError {
+    /// 确定没有执行，客户端可以放心重试。其余情况工具可能已经跑过（`Lost`，或者跑完了回包发不出来、
+    /// panic 的 `Refused`），重试有可能把副作用做两遍，只能让调用方自己查。
+    pub fn surely_not_executed(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+    }
+}
+
 impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

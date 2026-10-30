@@ -148,21 +148,18 @@ fn generation_failure(body: &Value, error: &CallError) -> Value {
         // 通知没有回包可言。
         return Value::Null;
     }
-    let (reason, retryable, suggestion) = match error {
+    let (reason, suggestion) = match error {
         CallError::Lost => (
             "generation_lost",
-            false,
             "The tool process exited while handling this call, so the outcome is unknown and it may already have taken effect. It was not retried. Check the current state (for example with list_runs) before calling again.",
         ),
-        CallError::Unavailable(_) | CallError::TimedOut => (
+        CallError::Unavailable(_) => (
             "generation_unavailable",
-            true,
             "The call was not executed. The tool process is restarting; retry shortly.",
         ),
-        CallError::Refused(_) => (
+        CallError::Refused(_) | CallError::TimedOut => (
             "worker_failed",
-            false,
-            "Retry the request; if it keeps failing, restart the service with gld daemon restart.",
+            "The call failed inside the tool process and may already have taken effect. Check the current state before calling again; if it keeps failing, restart the service with gld daemon restart.",
         ),
     };
     json!({
@@ -174,7 +171,7 @@ fn generation_failure(body: &Value, error: &CallError) -> Value {
             "data": {
                 "stage": "generation",
                 "reason": reason,
-                "retryable": retryable,
+                "retryable": error.surely_not_executed(),
                 "suggestion": suggestion,
             }
         }
