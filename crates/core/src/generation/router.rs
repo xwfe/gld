@@ -258,14 +258,15 @@ impl Router {
         body: &Value,
     ) -> Result<McpReply, CallError> {
         let route = hub.execution_route(auth, body);
-        let (key, discovery) = match route {
+        let (key, discovery) = match &route {
             ExecutionRoute::Discovery => (None, true),
             ExecutionRoute::Unbound => (None, false),
-            ExecutionRoute::Owned(key) => (Some(key), false),
+            ExecutionRoute::Owned(key) => (Some(key.clone()), false),
         };
         let op = Op::HubMcp {
             auth: WireAuth::from(auth),
             body: body.clone(),
+            route,
         };
         mcp_reply(self.forward(key, discovery, &op)?)
     }

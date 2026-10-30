@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use super::BuildIdentity;
 use crate::auth::{AuthContext, Grant, Principal};
+use crate::hub::ExecutionRoute;
 use crate::nodes::registry::NativeMember;
 use crate::settings::HubConfig;
 
@@ -72,6 +73,8 @@ pub enum Op {
     HubMcp {
         auth: WireAuth,
         body: Value,
+        /// 宿主认定的归属，执行代要核对，见 [`crate::hub::Hub::handle_routed`]。
+        route: ExecutionRoute,
     },
     WorkspaceMcp {
         workspace_id: String,

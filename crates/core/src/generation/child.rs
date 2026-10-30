@@ -252,9 +252,9 @@ impl Generation {
                     "tools": hub.list_tools(),
                 }))
             }
-            Op::HubMcp { auth, body } => {
+            Op::HubMcp { auth, body, route } => {
                 let hub = self.current_hub()?;
-                let (response, routed) = hub.handle_request(&auth.into_auth(), &body);
+                let (response, routed) = hub.handle_routed(&auth.into_auth(), &body, &route);
                 let member = routed.as_ref().map(|routed| routed.workspace_id.clone());
                 let audit = routed
                     .and_then(|routed| routed.context)
