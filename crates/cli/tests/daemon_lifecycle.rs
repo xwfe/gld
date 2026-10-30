@@ -634,6 +634,18 @@ fn a_command_whose_daemon_was_killed_is_on_record_as_unknown() {
     let pid = daemon["pid"].as_u64().expect("daemon pid").to_string();
     let session_id = start_ticker(&env, &[], &ticker);
 
+    // 命令是执行代起的，只杀宿主的话执行代会收好它再退（记 interrupted，
+    // `generation_boundary.rs` 测那一条）。这里要的是谁也来不及收的情况：一起杀，执行代先。
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(env.home.path().join("daemon.json")).expect("daemon.json"),
+    )
+    .expect("daemon.json 是 JSON");
+    for generation in record["generation_pids"].as_array().expect("执行代 pid") {
+        let killed = Command::new("kill")
+            .args(["-9", &generation.to_string()])
+            .status();
+        assert!(killed.is_ok_and(|status| status.success()));
+    }
     let killed = Command::new("kill").args(["-9", &pid]).status();
     assert!(killed.is_ok_and(|status| status.success()));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

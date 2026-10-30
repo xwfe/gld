@@ -28,12 +28,22 @@ pub async fn run(command: &DaemonCmd, out: Output) -> CliResult {
             start(&paths, out).await
         }
         DaemonCmd::Status => status(&paths, out).await,
-        DaemonCmd::Run { no_restore } => server::run(ServerOptions {
-            paths,
-            restore_runtime_state: !no_restore,
-        })
-        .await
-        .map_err(CliError::from),
+        DaemonCmd::Run { no_restore } => {
+            keep_running_on_broken_pipe();
+            server::run(ServerOptions {
+                paths,
+                restore_runtime_state: !no_restore,
+            })
+            .await
+            .map_err(CliError::from)
+        }
+        DaemonCmd::Generation => {
+            keep_running_on_broken_pipe();
+            tokio::task::spawn_blocking(gld_core::generation::child::serve)
+                .await
+                .map_err(|error| CliError::new(format!("执行代异常退出：{error}")))?
+                .map_err(CliError::from)
+        }
         DaemonCmd::Logs { lines, follow } => {
             super::logs::tail_files(
                 out,
@@ -43,6 +53,17 @@ pub async fn run(command: &DaemonCmd, out: Output) -> CliResult {
             )
             .await
         }
+    }
+}
+
+/// `main` 把 SIGPIPE 恢复成了默认（命令行接 `| head` 时要安静退出）。常驻进程不能这样：
+/// 执行代一挂，宿主往它的管道写一个字节就会被信号带走，而宿主存在的意义就是不被它带走。
+/// 项目命令不受影响：标准库起子进程时会把 SIGPIPE 设回默认。
+fn keep_running_on_broken_pipe() {
+    // SAFETY: 只改这个进程对 SIGPIPE 的处理方式，没有回调。
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 }
 
@@ -101,9 +122,21 @@ async fn refuse_while_commands_run(paths: &DaemonPaths, out: Output) -> CliResul
     let DaemonProbe::Running(info) = lifecycle::probe(paths).await else {
         return Ok(());
     };
-    let commands = runs::running_under(&paths.home.join("runs"), info.pid);
+    // 命令和 Agent 是执行代起的，记录里的 owner 是它们；守护进程本身也算上，
+    // 新命令行对着还没换的旧守护进程时只有这一个。
+    let mut owners = vec![info.pid];
+    if let Some(record) = lifecycle::DaemonRecord::read(&paths.record) {
+        owners.extend(record.generation_pids);
+    }
+    let commands: Vec<_> = owners
+        .iter()
+        .flat_map(|owner| runs::running_under(&paths.home.join("runs"), *owner))
+        .collect();
     // 委派出去的 Agent 也是守护进程起的，重启一样会停掉（RFC-0009）。
-    let delegated = gld_core::agents::running_under(&paths.home, info.pid);
+    let delegated: Vec<_> = owners
+        .iter()
+        .flat_map(|owner| gld_core::agents::running_under(&paths.home, *owner))
+        .collect();
     if commands.is_empty() && delegated.is_empty() {
         return Ok(());
     }

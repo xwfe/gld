@@ -661,6 +661,18 @@ coding 会话采用前述 2 分钟 / 挂后台命令 10 分钟的规则。
   同一个主体，共用一条 bearer 令牌的客户端也是。真要互相看不见，给每个客户端各注册
   一个 OAuth 客户端。
 
+### 工具跑在子进程里，它挂了会怎样
+
+服务分两个进程。`gld daemon run` 拿着端口、隧道、OAuth 和配置，工具和命令在它起的子进程 `gld daemon generation` 里跑（这个子进程叫执行代，见 [RFC-0008](rfc/0008-continuous-upgrades.md) §3.4）。平时看不出区别，`gld ps` 和 `gld daemon status` 报的 pid 都是前者。
+
+子进程意外退出时，端口、地址、已发的 token 和连接器的授权都不动，服务自动起一个新的，下一次调用接着用。受影响的只有这些：
+
+- **正在跑的那次调用**收到 JSON-RPC 错误，`error.data.reason` 是 `generation_lost`，`retryable` 是 `false`：调用可能已经产生了副作用，结果未知，gld 不替你重放。先用 `list_runs` 之类查清现状，再决定要不要重来。
+- **新代还没起来时进来的调用**最多等 10 秒，等不到就收到 `generation_unavailable`，`retryable` 是 `true`：这种确定没执行，直接重试就行。
+- **它起的命令**不会跟着停，但也没人管了：`session_id` 查到的是 `unknown`，进程还在跑就要自己收。
+
+反过来，守护进程本身被 `kill -9` 时，子进程会把命令停掉（记成 `interrupted`）再退出，不留孤儿。
+
 ### 改了什么要不要重启
 
 | 操作 | 服务要不要重启 |

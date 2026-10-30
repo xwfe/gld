@@ -606,6 +606,9 @@ pub enum DaemonCmd {
         #[arg(short = 'f', long)]
         follow: bool,
     },
+    /// 内部用：执行代进程，由守护进程拉起，通过管道和它说话
+    #[command(hide = true)]
+    Generation,
 }
 
 // ------------------------------------------------------------- workspace
