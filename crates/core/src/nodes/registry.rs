@@ -20,7 +20,11 @@ use super::hub_key::MessageSigner;
 use super::identity::forwarded_meta;
 
 const HANDSHAKE: Duration = Duration::from_secs(10);
-const CALL: Duration = Duration::from_secs(30);
+/// 工具自己最多等 30 秒（`exec_command` 的 yield 上限），回包在路上再给 30 秒。超时等于断线：
+/// 连接被关、节点重连、调用方拿到“结果不明”，所以必须比工具等待长，慢网下宁可多等。
+/// 这是上限，调用一回包就返回。不能超过节点的 `IDLE_TIMEOUT`：调用期间 Hub 不发 Ping，
+/// 节点那么久收不到任何帧就会自己断开。
+pub(super) const CALL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct NativeMember {

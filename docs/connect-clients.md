@@ -333,7 +333,7 @@ ChatGPT 里：Plugins → `+` → Add custom MCP server，**Connection 选 Tunne
 （全部项目），见 [security.md](security.md#openai-隧道能选到隧道的人就有服务凭据)。
 
 **官方限制：**单个请求从排队到回包最长 120 秒，请求或回包最大 10 MiB，每条隧道每分钟 600 次。
-gld 单次调用最多等 30 秒、回包最大 1 MiB，都在范围内。
+gld 单次调用最多等 30 秒（经目标机的调用最多 60 秒）、回包最大 1 MiB，都在范围内。
 
 **起不来时**，`gld share` 的报错里附着 tunnel-client 日志的最后几行，完整的在
 `~/.config/gld/logs/hub/tunnel-client.log`（`gld logs` 也有）。gld 只等它在本机就绪：它的 `/readyz` 回 200，

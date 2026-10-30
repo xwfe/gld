@@ -10,11 +10,14 @@ mod pairing_tests;
 #[path = "native_nodes/sharing.rs"]
 mod sharing_tests;
 
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -22,6 +25,7 @@ use common::env::{free_port, Env};
 use common::http::post_json;
 use common::service::Service;
 use serde_json::{json, Value};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch};
 use tokio_rustls::rustls::{self, pki_types::CertificateDer, pki_types::PrivatePkcs8KeyDer};
@@ -47,12 +51,58 @@ struct TlsRelay {
     accepted: Arc<AtomicUsize>,
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
+    held_until: Arc<Mutex<Option<Instant>>>,
     available: watch::Sender<bool>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 struct ActiveRelay(Arc<AtomicUsize>);
+
+/// 节点发出的字节压到 `held_until` 才转给 Hub，模拟回包在路上走得慢；
+/// Hub 发给节点的不受影响，Text 帧的完整性也由 TCP 保证。
+struct SlowFromNode<S> {
+    inner: S,
+    held_until: Arc<Mutex<Option<Instant>>>,
+    sleeping: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for SlowFromNode<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = &mut *self;
+        if this.sleeping.is_none() {
+            let until = this.held_until.lock().unwrap().take();
+            this.sleeping = until.map(|until| Box::pin(tokio::time::sleep_until(until.into())));
+        }
+        if let Some(sleeping) = this.sleeping.as_mut() {
+            if sleeping.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            this.sleeping = None;
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for SlowFromNode<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, data)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
 
 impl Drop for ActiveRelay {
     fn drop(&mut self) {
@@ -83,6 +133,8 @@ impl TlsRelay {
         let peak = Arc::new(AtomicUsize::new(0));
         let active_count = active.clone();
         let peak_count = peak.clone();
+        let held_until = Arc::new(Mutex::new(None));
+        let held = held_until.clone();
         let (available, availability) = watch::channel(true);
         let (stop, mut stopping) = oneshot::channel();
         let thread = std::thread::spawn(move || {
@@ -104,12 +156,14 @@ impl TlsRelay {
                             let tls = tls.clone();
                             let active = active_count.clone();
                             let peak = peak_count.clone();
+                            let held = held.clone();
                             tokio::spawn(async move {
                                 tokio::select! {
                                     biased;
                                     _ = availability.changed() => {}
                                     _ = async move {
-                                        let Ok(mut client) = tls.accept(tcp).await else { return };
+                                        let Ok(client) = tls.accept(tcp).await else { return };
+                                        let mut client = SlowFromNode { inner: client, held_until: held, sleeping: None };
                                         let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)).await else { return };
                                         let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                                         peak.fetch_max(current, Ordering::SeqCst);
@@ -128,6 +182,7 @@ impl TlsRelay {
             accepted,
             active,
             peak,
+            held_until,
             available,
             stop: Some(stop),
             thread: Some(thread),
@@ -140,6 +195,11 @@ impl TlsRelay {
 
     fn set_available(&self, available: bool) {
         self.available.send_replace(available);
+    }
+
+    /// 从现在起节点发出的下一段字节，要等 `delay` 才到 Hub。
+    fn hold_node_bytes(&self, delay: Duration) {
+        *self.held_until.lock().unwrap() = Some(Instant::now() + delay);
     }
 }
 
@@ -649,6 +709,41 @@ fn an_oversized_node_result_fails_only_that_call_and_the_node_stays_online() {
         relay.connections(),
         connections,
         "no reconnection was needed"
+    );
+    node.stop();
+}
+
+/// 以前 Hub 只等 30 秒，超时算致命错误：连接被关、节点重连、调用方拿到“结果不明”。
+/// 把 `nodes/registry.rs` 的 `CALL` 改回 30 秒，这条就会红。
+#[test]
+fn a_reply_slower_than_thirty_seconds_still_arrives_on_the_same_connection() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "machine-a");
+    let registration = register(&hub, "machine-a", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let config_path = write_config(&machine, "node.json", &value);
+    let mut node = NodeProcess::start(&machine, &config_path);
+    let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
+    let connections = relay.connections();
+
+    relay.hold_node_bytes(Duration::from_secs(32));
+    let started = Instant::now();
+    let reply = service.rpc_waiting(
+        "tools/call",
+        json!({"name":"read_file","arguments":{"workspace":api,"path":"README.md"}}),
+        Duration::from_secs(50),
+    );
+    let result = &reply.json()["result"]["structuredContent"];
+    assert_eq!(result["content"], "machine-a/api\n", "{result}");
+    assert!(started.elapsed() >= Duration::from_secs(31));
+    assert_eq!(
+        relay.connections(),
+        connections,
+        "a slow reply must not cost a reconnection"
     );
     node.stop();
 }

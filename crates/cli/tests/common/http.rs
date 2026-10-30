@@ -32,6 +32,18 @@ impl Reply {
 }
 
 pub fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Reply {
+    request_waiting(port, method, path, headers, body, Duration::from_secs(10))
+}
+
+/// 服务端确实要慢慢回的场景用：默认 10 秒读超时等不到，报错看着像服务坏了。
+pub fn request_waiting(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    wait: Duration,
+) -> Reply {
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
          Content-Length: {}\r\n",
@@ -43,9 +55,7 @@ pub fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], bo
     head.push_str("\r\n");
 
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    stream.set_read_timeout(Some(wait)).unwrap();
     // 头和体一次写完。分两次 write 的话，服务端可能在只读了头之后就决定
     // 拒绝（401 直接返回，根本不读 body），随后带着"还没读走的 body"关闭连接——
     // 这种关闭内核发的是 RST 而不是 FIN，客户端读响应时拿到 ECONNRESET。

@@ -4,10 +4,12 @@
 //! 每次调用用 `workspace` 参数选项目。以前各测试自己拼"项目端口 + 项目 token"，
 //! 现在统一走这里，免得每个文件各写一版、哪天调用形状变了只改到一处。
 
+use std::time::Duration;
+
 use serde_json::Value;
 
 use super::env::{free_port, Env};
-use super::http::{post_json, Reply};
+use super::http::{post_json, request_waiting, Reply};
 
 /// 一个跑起来的服务，和测试项目在服务里的名字。
 pub struct Service {
@@ -57,6 +59,20 @@ impl Service {
         })
         .to_string();
         post_json(self.port, "/mcp", &body, self.bearer())
+    }
+
+    /// 同上，但肯多等一会儿：测回包确实慢的场景用。
+    pub fn rpc_waiting(&self, method: &str, params: Value, wait: Duration) -> Reply {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params
+        })
+        .to_string();
+        let auth = self.bearer().map(|token| format!("Bearer {token}"));
+        let mut headers = vec![("Content-Type", "application/json")];
+        if let Some(value) = auth.as_deref() {
+            headers.push(("Authorization", value));
+        }
+        request_waiting(self.port, "POST", "/mcp", &headers, &body, wait)
     }
 
     /// 对测试项目调一个工具（自动带上 `workspace`），返回工具自己的结构化结果。
