@@ -79,7 +79,7 @@ fn frames_round_trip_one_per_line() {
     writer
         .send(&HostFrame::Call {
             id: 7,
-            op: serde_json::to_value(Op::Ping).unwrap(),
+            op: serde_json::to_string(&Op::Ping).unwrap(),
         })
         .unwrap();
     writer
@@ -104,6 +104,29 @@ fn frames_round_trip_one_per_line() {
 
 fn writer_bytes(writer: FrameWriter<Vec<u8>>) -> Vec<u8> {
     writer.into_inner()
+}
+
+/// 内容嵌套到 serde 的递归上限也不能让帧本身解析失败：解析不了就拿不到 id，对面只能永远等。
+#[test]
+fn deep_content_never_breaks_the_frame_itself() {
+    let depth = 200;
+    let deep = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+    let line = serde_json::to_string(&HostFrame::Call {
+        id: 9,
+        op: deep.clone(),
+    })
+    .unwrap();
+    let HostFrame::Call { id, op } = serde_json::from_str(&line).unwrap() else {
+        panic!("{line}");
+    };
+    assert_eq!((id, op), (9, deep));
+    let line = serde_json::to_string(&GenerationFrame::Reply {
+        id: 9,
+        ok: true,
+        value: "[".repeat(depth),
+    })
+    .unwrap();
+    assert!(serde_json::from_str::<GenerationFrame>(&line).is_ok());
 }
 
 /// 对端发一条没有换行的巨型消息时要报错，不能一直攒到把内存吃光。

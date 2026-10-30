@@ -19,26 +19,20 @@ use crate::settings::HubConfig;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// 宿主发给执行代的。
+///
+/// `op`、`value` 都是编码好的 JSON 文本，不是嵌套的对象。客户端发来的请求和工具回包可以嵌套得很深，
+/// 再包两层就超过 `serde_json` 的递归上限（128 层）：一整条帧解析失败，连 `id` 都拿不到，
+/// 对面没法回错误，请求就永远挂着。外层固定一层，里层解析失败时还能按 `id` 回一句。
+/// `ok` 为假时 `value` 是给人看的错误文字。
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum HostFrame {
-    Hello {
-        generation_protocol: u32,
-    },
-    /// `op` 留成 JSON：执行代不认识的操作要回一条拒绝，不能把整条连接弄断。
-    Call {
-        id: u64,
-        op: Value,
-    },
-    HostReply {
-        id: u64,
-        ok: bool,
-        value: Value,
-    },
+    Hello { generation_protocol: u32 },
+    Call { id: u64, op: String },
+    HostReply { id: u64, ok: bool, value: String },
 }
 
-/// 执行代发给宿主的。一条消息只活到写进管道，不值得为变体大小差异装箱。
-#[allow(clippy::large_enum_variant)]
+/// 执行代发给宿主的。内容的编码方式见 [`HostFrame`]。
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum GenerationFrame {
@@ -52,11 +46,11 @@ pub enum GenerationFrame {
     Reply {
         id: u64,
         ok: bool,
-        value: Value,
+        value: String,
     },
     HostCall {
         id: u64,
-        op: HostOp,
+        op: String,
     },
 }
 

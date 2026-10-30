@@ -206,25 +206,25 @@ impl Generation {
         }
     }
 
-    fn answer(self: Arc<Self>, id: u64, op: Value) {
-        let parsed = serde_json::from_value::<Op>(op);
+    fn answer(self: Arc<Self>, id: u64, op: String) {
+        let parsed = serde_json::from_str::<Op>(&op);
         let leave_after = matches!(parsed, Ok(Op::Shutdown));
         // 工具 panic 只该影响这一条调用。没这层的话这个线程没了，宿主那头永远等不到回包。
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match parsed {
             Ok(op) => self.run(op),
-            Err(error) => Err(format!("这个执行代不认识这条操作：{error}")),
+            Err(error) => Err(format!("执行代读不懂这条操作，没有执行：{error}")),
         }))
         .unwrap_or_else(|_| Err("worker_panicked".to_string()));
         let (ok, value) = match outcome {
-            Ok(value) => (true, value),
-            Err(message) => (false, json!(message)),
+            Ok(value) => (true, value.to_string()),
+            Err(message) => (false, message),
         };
         if let Err(error) = self.writer.send(&GenerationFrame::Reply { id, ok, value }) {
             // 回包超过上限这种情况，宿主那头还在等，得回它一句，不然那条请求永远挂着。
             let _ = self.writer.send(&GenerationFrame::Reply {
                 id,
                 ok: false,
-                value: json!(format!("回包发不出去：{error}")),
+                value: format!("回包发不出去：{error}"),
             });
         }
         if leave_after {
@@ -582,6 +582,7 @@ impl HostBridge {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (reply, wait) = mpsc::channel();
         self.lock_pending().insert(id, reply);
+        let op = serde_json::to_string(&op).map_err(|error| error.to_string())?;
         if let Err(error) = self.writer.send(&GenerationFrame::HostCall { id, op }) {
             self.lock_pending().remove(&id);
             return Err(format!("问宿主失败：{error}"));
@@ -591,12 +592,12 @@ impl HostBridge {
         answer.unwrap_or_else(|_| Err("等宿主回复超时".to_string()))
     }
 
-    fn settle(&self, id: u64, ok: bool, value: Value) {
+    fn settle(&self, id: u64, ok: bool, value: String) {
         if let Some(reply) = self.lock_pending().remove(&id) {
             let _ = reply.send(if ok {
-                Ok(value)
+                serde_json::from_str(&value).map_err(|error| error.to_string())
             } else {
-                Err(value.as_str().unwrap_or("宿主拒绝了这次调用").to_string())
+                Err(value)
             });
         }
     }

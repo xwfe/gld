@@ -9,13 +9,14 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::router::{CallError, Router};
 use super::wire::{read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op};
 use super::{BuildIdentity, GENERATION_PROTOCOL};
 
-type Reply = Result<Value, String>;
+/// 成功时是编码好的 JSON 文本，由等它的线程解析：读线程要给所有调用收包，不该替谁花这个时间。
+type Reply = Result<String, String>;
 
 /// 一个执行代子进程。挂了不重连：通道是它的 stdin/stdout，进程没了通道也就没了。
 pub(super) struct Link {
@@ -142,7 +143,8 @@ impl Link {
                 self.id
             )));
         }
-        let op = serde_json::to_value(op).map_err(|error| CallError::Refused(error.to_string()))?;
+        let op =
+            serde_json::to_string(op).map_err(|error| CallError::Refused(error.to_string()))?;
         if let Err(error) = self.writer.send(&HostFrame::Call { id, op }) {
             self.lock_pending().remove(&id);
             // 整行没写完对方就不会处理，所以这里可以放心说没执行。
@@ -158,7 +160,10 @@ impl Link {
         if answer.is_err() {
             self.lock_pending().remove(&id);
         }
-        answer?.map_err(CallError::Refused)
+        let text = answer?.map_err(CallError::Refused)?;
+        // 执行代已经跑完了才走到这里，所以解析失败也只能说结果没拿到，不能说没执行。
+        serde_json::from_str(&text)
+            .map_err(|error| CallError::Refused(format!("工具跑完了，但回包读不出来：{error}")))
     }
 
     /// 先礼后兵：让它自己收好，等不到就杀。
@@ -217,11 +222,7 @@ impl Link {
                 GenerationFrame::Refused { reason } => break format!("它拒绝了：{reason}"),
                 GenerationFrame::Reply { id, ok, value } => {
                     if let Some(reply) = self.lock_pending().remove(&id) {
-                        let _ = reply.send(if ok {
-                            Ok(value)
-                        } else {
-                            Err(value.as_str().unwrap_or("执行代拒绝了").to_string())
-                        });
+                        let _ = reply.send(if ok { Ok(value) } else { Err(value) });
                     }
                 }
                 GenerationFrame::HostCall { id, op } => {
@@ -232,9 +233,9 @@ impl Link {
                     // 节点调用最长 60 秒，不能占着这条读线程：别的回包都得从这儿过。
                     let handle = router.handle().clone();
                     handle.spawn_blocking(move || {
-                        let (ok, value) = match answer_host_call(&router, op) {
-                            Ok(value) => (true, value),
-                            Err(message) => (false, json!(message)),
+                        let (ok, value) = match answer_host_call(&router, &op) {
+                            Ok(value) => (true, value.to_string()),
+                            Err(message) => (false, message),
                         };
                         let _ = link.writer.send(&HostFrame::HostReply { id, ok, value });
                     });
@@ -259,7 +260,8 @@ impl Link {
     }
 }
 
-fn answer_host_call(router: &Router, op: HostOp) -> Result<Value, String> {
+fn answer_host_call(router: &Router, op: &str) -> Result<Value, String> {
+    let op = serde_json::from_str::<HostOp>(op).map_err(|error| error.to_string())?;
     match op {
         HostOp::NodeMembers => router.node_members(),
         HostOp::NodeCall {

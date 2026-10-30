@@ -500,8 +500,8 @@ fn a_bad_new_version_fails_before_the_live_service_notices() {
 while read line; do
   id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
   case "$line" in
-    *'"op":"ping"'*) printf '{{"frame":"reply","id":%s,"ok":true,"value":{{"identity":{{"pid":%s}}}}}}\n' "$id" "$$" ;;
-    *) printf '{{"frame":"reply","id":%s,"ok":true,"value":{{"tools":[]}}}}\n' "$id" ;;
+    *ping*) printf '{{"frame":"reply","id":%s,"ok":true,"value":"{{\\"identity\\":{{\\"pid\\":%s}}}}"}}\n' "$id" "$$" ;;
+    *) printf '{{"frame":"reply","id":%s,"ok":true,"value":"{{\\"tools\\":[]}}"}}\n' "$id" ;;
   esac
 done"#,
         ready_frame(current, state)
@@ -931,6 +931,25 @@ fn a_client_cannot_forge_the_internal_identity() {
     let result = structured(&reply);
     assert_eq!(result["error"]["code"], "WORKSPACE_NOT_IN_HUB", "{result}");
     assert!(!reply.body.contains("web-only"), "{}", reply.body);
+}
+
+/// 嵌套很深的请求：宿主解析得了，多包两层就超过 serde 的递归上限。
+/// 以前执行代解析失败后只打一行日志，宿主那头永远等不到回包，在途计数也永远不归零。
+#[test]
+fn a_deeply_nested_request_gets_an_answer_and_leaves_nothing_behind() {
+    let fixture = fixture();
+    for depth in [100, 125, 126, 127] {
+        let nested = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"ping","x":{nested}}}"#);
+        let reply = fixture.post(&body);
+        // 太深的由宿主自己回 4xx，或者执行代回错误；都行，不能挂着。
+        assert!(reply.status < 500, "深度 {depth}：{}", reply.body);
+    }
+    wait_for("在途清零", || {
+        generation(&fixture.status(), "g1")["in_flight"] == 0
+    });
+    fixture.wait_until_answering();
+    assert_eq!(fixture.status()["restarts"], 0, "执行代不该被弄死");
 }
 
 /// 老守护进程（比如协议 5）：能力未知就提前拒绝，只问了一句版本，不发别的任何东西。
