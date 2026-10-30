@@ -124,7 +124,10 @@ impl Drop for Admission {
         if let Some(key) = &self.key {
             let mut state = self.router.lock();
             if let Some(owned) = state.owners.get_mut(key) {
-                owned.in_flight = owned.in_flight.saturating_sub(1);
+                // 崩溃后这个键可能已经绑给了别的代，那边的计数不归这条请求管。
+                if owned.generation == self.link.id {
+                    owned.in_flight = owned.in_flight.saturating_sub(1);
+                }
             }
         }
         self.router.retire_idle();
@@ -150,10 +153,10 @@ impl Router {
                 restarts: 0,
                 retired: 0,
                 last_failure: None,
+                last_reconcile: None,
                 shutting_down: false,
             }),
             changed: Condvar::new(),
-                last_reconcile: None,
             handle: Handle::current(),
             me: me.clone(),
             on_generations_changed,
@@ -402,9 +405,6 @@ impl Router {
         totals
     }
 
-    fn routable(&self) -> Vec<Arc<Link>> {
-        let state = self.lock();
-        state
     /// 平时每次工具调用都会顺手收掉离开的成员，可切换之后旧代可能再也收不到调用。
     /// 所以有旧代时由这边定期叫它做，收完把已经不存在的工作区从它名下摘掉，它才退得了。
     fn reconcile_draining(&self) {
@@ -463,6 +463,9 @@ impl Router {
         });
     }
 
+    fn routable(&self) -> Vec<Arc<Link>> {
+        let state = self.lock();
+        state
             .generations
             .iter()
             .filter(|link| !state.is_prepared(link.id))
@@ -673,6 +676,18 @@ impl Router {
         if pong["identity"]["pid"].as_u64() != Some(u64::from(link.pid())) {
             return Err("应答里的身份和它启动时报的不一致".into());
         }
+        // 先建 Hub：服务自己的工具（`work_session`、`remote_*`）要它建好了才列得出来。
+        let config = self.lock().hub_config.clone();
+        if let Some(config) = &config {
+            link.call(
+                &Op::HubConfigure {
+                    config: Box::new(config.clone()),
+                    sweep: false,
+                },
+                Some(CONTROL_TIMEOUT),
+            )
+            .map_err(|error| format!("按当前配置建不起 Hub：{error}"))?;
+        }
         let names = link
             .call(&Op::ToolNames, Some(CONTROL_TIMEOUT))
             .map_err(|error| format!("问不到工具表：{error}"))?;
@@ -699,17 +714,6 @@ impl Router {
                         .join("、")
                 ));
             }
-        }
-        let config = self.lock().hub_config.clone();
-        if let Some(config) = &config {
-            link.call(
-                &Op::HubConfigure {
-                    config: Box::new(config.clone()),
-                    sweep: false,
-                },
-                Some(CONTROL_TIMEOUT),
-            )
-            .map_err(|error| format!("按当前配置建不起 Hub：{error}"))?;
         }
         Ok(config)
     }

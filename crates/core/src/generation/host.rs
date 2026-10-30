@@ -29,6 +29,8 @@ pub(super) struct Link {
     alive: AtomicBool,
     pub in_flight: AtomicUsize,
     child: Mutex<Child>,
+    /// 已经 `wait` 过了，这个 pid 随时可能发给别的进程。
+    reaped: AtomicBool,
 }
 
 impl Link {
@@ -77,6 +79,7 @@ impl Link {
             alive: AtomicBool::new(true),
             in_flight: AtomicUsize::new(0),
             child: Mutex::new(child),
+            reaped: AtomicBool::new(false),
         });
 
         let (ready, wait_ready) = mpsc::channel();
@@ -177,10 +180,13 @@ impl Link {
             .child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.reaped.load(Ordering::SeqCst) {
+            return;
+        }
         #[cfg(unix)]
         {
             // SAFETY: 子进程是 process_group(0) 起的，进程组号就是它的 pid。
-            // 没 wait 之前这个 pid 不会被回收，所以不会杀错。
+            // 上面看过还没 wait，wait 也要拿这把锁，所以 pid 还没被回收，不会杀错。
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
@@ -249,11 +255,14 @@ impl Link {
         // 在途调用立刻知道它没了，不用等超时。
         self.lock_pending().clear();
         self.kill();
-        let _ = self
-            .child
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .wait();
+        {
+            let mut child = self
+                .child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _ = child.wait();
+            self.reaped.store(true, Ordering::SeqCst);
+        }
         if let Some(router) = router.upgrade() {
             router.on_lost(self.id, &reason);
         }

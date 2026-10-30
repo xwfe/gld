@@ -207,10 +207,14 @@ impl Generation {
     }
 
     fn answer(self: Arc<Self>, id: u64, op: String) {
-        let parsed = serde_json::from_str::<Op>(&op);
+        let parsed = serde_json::from_str::<Op>(&op).map_err(|error| error.to_string());
         let leave_after = matches!(parsed, Ok(Op::Shutdown));
         // 工具 panic 只该影响这一条调用。没这层的话这个线程没了，宿主那头永远等不到回包。
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match parsed {
+            // 正在收尾：最后一轮停命令之后再起的，进程一退就成孤儿。
+            Ok(_) if self.leaving.load(Ordering::SeqCst) => {
+                Err("执行代正在退出，没有执行".to_string())
+            }
             Ok(op) => self.run(op),
             Err(error) => Err(format!("执行代读不懂这条操作，没有执行：{error}")),
         }))
@@ -236,7 +240,7 @@ impl Generation {
         match op {
             Op::Ping => Ok(json!({ "identity": BuildIdentity::current() })),
             Op::Status => Ok(status()),
-            Op::ToolNames => Ok(json!({ "tools": all_tool_names() })),
+            Op::ToolNames => Ok(json!({ "tools": self.all_tool_names() })),
             Op::HubConfigure { config, sweep } => {
                 self.configure_hub(&config, sweep);
                 Ok(json!({}))
@@ -245,14 +249,14 @@ impl Generation {
                 self.shutdown_hub();
                 Ok(json!({}))
             }
-            Op::ServedTools => {
-                let hub = self.current_hub()?;
-                Ok(json!({
-                    "build": tools::exec::server_snapshot(),
             Op::HubReconcile => {
                 self.current_hub()?.reconcile()?;
                 Ok(json!({}))
             }
+            Op::ServedTools => {
+                let hub = self.current_hub()?;
+                Ok(json!({
+                    "build": tools::exec::server_snapshot(),
                     "tools": hub.list_tools(),
                 }))
             }
@@ -348,6 +352,18 @@ impl Generation {
         }
     }
 
+    /// 工具内核加上服务自己的（`list_workspaces`、`work_session`、`remote_*`、转发）。
+    fn all_tool_names(&self) -> Vec<String> {
+        let mut listed = tools::list_tools();
+        if let Ok(hub) = self.current_hub() {
+            listed.extend(hub.list_tools());
+        }
+        listed
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    }
+
     fn current_hub(&self) -> Result<Arc<Hub>, String> {
         self.hub
             .read()
@@ -428,12 +444,16 @@ impl Generation {
         workspace_runtime::terminate_all_sessions_everywhere();
     }
 
-    /// 自己要走（宿主没了、收到信号）：收好再退。只走一次。
+    /// 自己要走（宿主没了、收到信号）：收好再退。两条路同时来时后到的不能先返回，
+    /// 它一返回进程就结束了，前面那条的收尾只做到一半。
     fn leave(&self) {
-        if !self.leaving.swap(true, Ordering::SeqCst) {
-            self.stop_everything();
-            self.exit_now();
+        if self.leaving.swap(true, Ordering::SeqCst) {
+            loop {
+                std::thread::park();
+            }
         }
+        self.stop_everything();
+        self.exit_now();
     }
 
     fn exit_now(&self) {
@@ -459,13 +479,6 @@ fn profile_by_id(workspace_id: &str) -> Result<WorkspaceProfile, String> {
     DataStore::read_file(|data| Ok(data.profiles.iter().find(|p| p.id == workspace_id).cloned()))
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("没有这个项目：{workspace_id}"))
-}
-
-fn all_tool_names() -> Vec<String> {
-    tools::list_tools()
-        .iter()
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
-        .collect()
 }
 
 /// 监听器只用这几个字段写日志。整份审计快照随调用次数增长，不值得每次过管道。
