@@ -561,10 +561,8 @@ fn run_git(
     args: &[&str],
     limit: Duration,
 ) -> Result<GitOutput, WorkspaceError> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(cwd)
-        .args(args)
+    let mut cmd = git_command(cwd)?;
+    cmd.args(args)
         // 改用 spawn 后 stdin 默认会继承守护进程的；原来 output() 给的是空输入，保持不变。
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -655,6 +653,42 @@ fn git_timeout(args: &[&str], limit: Duration) -> WorkspaceError {
         category: "runtime",
         retryable: true,
     }
+}
+
+/// 所有在项目目录里跑的 git 都从这里起。
+///
+/// 裸仓库不用 `.git` 目录，`HEAD`、`config`、`objects/`、`refs/` 都是普通文件，只给文件写入权限的调用方
+/// 也写得出来；git 在里面运行时会照 `config` 执行 `core.fsmonitor`、filter 这些命令。
+/// `safe.bareRepository` 要 git 2.38，Ubuntu 22.04 自带的是 2.34，所以先自己查一遍；
+/// 配置项留着，防的是 git 认而这里没认出来的形状。
+pub(crate) fn git_command(cwd: &std::path::Path) -> Result<Command, WorkspaceError> {
+    if let Some(dir) = bare_repository_above(cwd) {
+        return Err(WorkspaceError::ToolDetails {
+            code: "GIT_BARE_REPOSITORY_REFUSED",
+            message: "This directory looks like a bare Git repository, so its config could run commands, and git tools refuse to run in it. Use a normal checkout.".into(),
+            category: "security",
+            retryable: false,
+            details: json!({ "directory": dir.display().to_string() }),
+        });
+    }
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "safe.bareRepository=explicit", "-C"])
+        .arg(cwd);
+    Ok(cmd)
+}
+
+/// 和 git 找仓库的顺序一样往上走：一层里有 `.git` 就是普通仓库，到此为止；否则看这层像不像裸仓库。
+fn bare_repository_above(cwd: &std::path::Path) -> Option<&std::path::Path> {
+    for dir in cwd.ancestors() {
+        if dir.join(".git").exists() {
+            return None;
+        }
+        let has = |name: &str| dir.join(name).exists();
+        if has("HEAD") && ((has("objects") && has("refs")) || has("commondir")) {
+            return Some(dir);
+        }
+    }
+    None
 }
 
 fn run_git_diff(

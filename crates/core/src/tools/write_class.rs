@@ -11,7 +11,7 @@
 //!
 //! | 这一类 | 是什么 | 改 | 删 |
 //! | --- | --- | --- | --- |
-//! | `.git/**` | Git 自己的对象库和配置，不是仓库源文件 | 永远拒 | 永远拒 |
+//! | 任意一层的 `.git` | Git 自己的对象库和配置，不是仓库源文件 | 永远拒 | 永远拒 |
 //! | `.github/workflows/**`、`.github/actions/**` | 改一行就能改变 CI 在 GitHub 上执行什么 | 要 confirm | 要 confirm |
 //! | `.github/CODEOWNERS` | 决定谁有权批准 PR | 要 confirm | 要 confirm |
 //! | `.github/**` 其他 | issue 模板、说明文档这类 | 放行 | 要 confirm |
@@ -26,6 +26,16 @@
 //! 能干什么是另一层，在 `policy.rs`：那一层看的是命令文本，仍然把 `.git` 和
 //! `.github` 一起当删除保护对象，因为从命令文本里分不出"改一行 workflow"和
 //! "把 .github 递归删掉"。两层的宽严不同是有意的，不要为了"一致"把哪一边拉齐。
+
+/// 路径里有没有哪一层是 Git 目录。只查第一层不够：写得出 `sub/.git/config`，`git_status path=sub`
+/// 就会按里面的 `core.fsmonitor` 执行命令，只给文件写入权限的调用方也能跑任意代码。
+/// 大小写不敏感的文件系统上 `.GIT` 就是 `.git`，Windows 还认 `.git.` 和短名 `git~1`。
+pub fn is_git_internal(path: &str) -> bool {
+    path.replace('\\', "/").split('/').any(|part| {
+        let part = part.trim_end_matches(['.', ' ']).to_ascii_lowercase();
+        part == ".git" || part == "git~1"
+    })
+}
 
 /// 一个写目标属于哪一类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,21 +70,20 @@ impl WriteClass {
     pub fn of(path: &str) -> Self {
         let normalized = path.replace('\\', "/");
         let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
+        if is_git_internal(normalized) {
+            return Self::GitInternals;
+        }
         let mut parts = normalized.split('/');
         let first = parts.next().unwrap_or("");
-        match first {
-            ".git" => return Self::GitInternals,
-            ".github" => {
-                let second = parts.next().unwrap_or("");
-                return match second {
-                    // 目录本身（".github"）没有第二段，当成 GithubOther：
-                    // 补丁的目标总是文件，这种形状只会来自畸形输入。
-                    "workflows" | "actions" => Self::CiWorkflow,
-                    "CODEOWNERS" => Self::CodeOwners,
-                    _ => Self::GithubOther,
-                };
-            }
-            _ => {}
+        if first == ".github" {
+            let second = parts.next().unwrap_or("");
+            return match second {
+                // 目录本身（".github"）没有第二段，当成 GithubOther：
+                // 补丁的目标总是文件，这种形状只会来自畸形输入。
+                "workflows" | "actions" => Self::CiWorkflow,
+                "CODEOWNERS" => Self::CodeOwners,
+                _ => Self::GithubOther,
+            };
         }
         if is_critical_file_name(normalized) {
             return Self::CriticalFile;

@@ -5,7 +5,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -325,8 +324,8 @@ fn git_value(root: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Option<std::process::Output> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(root).args(args);
+    let mut cmd = crate::tools::git::git_command(root).ok()?;
+    cmd.args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -405,7 +404,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let status = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
