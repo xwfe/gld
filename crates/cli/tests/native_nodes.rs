@@ -602,6 +602,58 @@ fn node_process_recovers_initial_and_live_network_outages_without_parallel_conne
 }
 
 #[test]
+fn an_oversized_node_result_fails_only_that_call_and_the_node_stays_online() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "machine-a");
+    // 1000×1000 噪声 PNG 约 3 MB，没到 view_image 的 5 MiB/2000 像素自动缩放线；
+    // 回包里同一张图编码三次，约 12 MB，超过 8 MiB 的节点消息上限。
+    let mut seed = 0x2545_f491_u32;
+    let pixels: Vec<u8> = (0..1000 * 1000 * 3)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        })
+        .collect();
+    let image_path = machine.project.path().join("api/noise.png");
+    image::RgbImage::from_raw(1000, 1000, pixels)
+        .unwrap()
+        .save(&image_path)
+        .unwrap();
+    let bytes = std::fs::metadata(&image_path).unwrap().len();
+    assert!((2_200_000..5 * 1024 * 1024).contains(&bytes), "{bytes}");
+
+    let registration = register(&hub, "machine-a", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let config_path = write_config(&machine, "node.json", &value);
+    let mut node = NodeProcess::start(&machine, &config_path);
+    let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
+    let connections = relay.connections();
+
+    let result = service.call_raw("view_image", json!({"workspace": api, "path": "noise.png"}));
+    assert_eq!(
+        result["error"]["code"], "NODE_RESPONSE_TOO_LARGE",
+        "{result}"
+    );
+    assert_eq!(read(&service, &api)["content"], "machine-a/api\n");
+    assert!(
+        node.0.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "the node process must keep running"
+    );
+    assert_eq!(
+        relay.connections(),
+        connections,
+        "no reconnection was needed"
+    );
+    node.stop();
+}
+
+#[test]
 fn node_registration_does_not_truncate_an_overlong_credential() {
     let env = Env::new();
     let token = "x".repeat(300);

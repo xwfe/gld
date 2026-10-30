@@ -469,6 +469,7 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 | `NODE_TOOL_UNSUPPORTED` | 节点握手工具表没有该工具，本次未发送；核对节点版本与文件写入授权，命令执行仍未开放 |
 | `NODE_ARGUMENT_UNSUPPORTED` | 节点不接受某个参数，本次未发送；核对参数后再调 |
 | `NODE_REQUEST_TOO_LARGE` | 请求超出节点消息上限，在写入网络前拒绝 |
+| `NODE_RESPONSE_TOO_LARGE` | 工具已在目标机执行，但结果超过 8 MiB 的节点消息上限被丢弃；连接照常。少要点输出再调，比如 `view_image` 调小 `max_bytes`（回包约为原图 4 倍，原图超过约 2 MiB 就会撞上） |
 | `NODE_OUTCOME_UNKNOWN` | 已进入发送/等待阶段，但未收到有效回复；写入可能已完成，须先核对目标文件，不自动补发 |
 
 收到 `NODE_OUTCOME_UNKNOWN` 后，保留原机器和项目句柄，重连后先读回受影响的文件，与原补丁核对。

@@ -268,7 +268,7 @@ async fn a_relay_cannot_alter_a_hub_message_even_when_it_keeps_the_signature_tag
 }
 
 #[tokio::test]
-async fn oversized_response_is_terminal_before_any_write() {
+async fn an_oversized_control_reply_is_terminal_before_any_write() {
     let (mut node, mut hub) = sockets().await;
     let failure = send_response(&mut node, json!("x".repeat(MAX_MESSAGE_BYTES)))
         .await
@@ -277,6 +277,48 @@ async fn oversized_response_is_terminal_before_any_write() {
     // 在随后合法消息之前没有任何超限正文写入 socket。
     node.send(Message::Text("marker".into())).await.unwrap();
     assert!(matches!(hub.next().await, Some(Ok(Message::Text(value))) if value == "marker"));
+}
+
+async fn next_json(hub: &mut WebSocketStream<DuplexStream>) -> Value {
+    match tokio::time::timeout(Duration::from_secs(2), hub.next())
+        .await
+        .unwrap()
+    {
+        Some(Ok(Message::Text(text))) => {
+            assert!(text.len() < 4096, "only a small error may be written");
+            serde_json::from_str(text.as_str()).unwrap()
+        }
+        other => panic!("expected one JSON reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_oversized_tool_result_fails_only_that_call_and_keeps_the_connection() {
+    let (mut node, mut hub) = sockets().await;
+    let huge = |id: u64| {
+        json!({"jsonrpc":"2.0","id":id,"result":{
+            "content":[{"type":"text","text":"x".repeat(MAX_MESSAGE_BYTES)}],"isError":false}})
+    };
+    send_result(&mut node, huge(7), true).await.unwrap();
+    let reply = next_json(&mut hub).await;
+    assert_eq!(reply["id"], 7);
+    assert_eq!(reply["result"]["isError"], true);
+    let error = &reply["result"]["structuredContent"]["error"];
+    assert_eq!(error["code"], "NODE_RESPONSE_TOO_LARGE");
+    assert_eq!(error["retryable"], false);
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("ran on this machine"));
+
+    // 非工具调用没有工具结果的形状，回标准 JSON-RPC 错误；两次之后连接仍能照常收发。
+    send_result(&mut node, huge(8), false).await.unwrap();
+    let reply = next_json(&mut hub).await;
+    assert_eq!(reply["id"], 8);
+    assert_eq!(reply["error"]["code"], -32603);
+    let small = json!({"jsonrpc":"2.0","id":9,"result":{"ok":true}});
+    send_result(&mut node, small.clone(), true).await.unwrap();
+    assert_eq!(next_json(&mut hub).await, small);
 }
 
 #[tokio::test]

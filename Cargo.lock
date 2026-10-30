@@ -584,6 +584,7 @@ dependencies = [
  "clap_complete",
  "gld-core",
  "gld-daemon",
+ "image",
  "libc",
  "serde",
  "serde_json",

@@ -3977,3 +3977,26 @@ ChatGPT 最后一次经 gld 操作在 13:59，本步 18:3x 开始时没有在途
 隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1249 passed / 0 failed；
 Clippy `-D warnings`、fmt --check、CLI 文档重生成（只变 `node register` 帮助两行）和文档定稿后的五组文档检查通过。
 守护进程 Request/Response 未改，协议仍15。现有服务、OAuth/grant、安装、发布均未改动，未推送。
+
+## 93. 节点超大回包只让这一次调用失败，不再让节点退出（2026-10-30）
+
+**范围与基线：**用户要求修 §90 的第一项。基线 `c3c12d1`，工作树干净，ChatGPT 最后一次经 gld 操作仍是 13:59。
+只改节点回包；30 秒调用超时、代理、入口核对和 `view_image` 三份编码不在本步。
+
+**问题：**节点回包超过 8 MiB 时，`nodes/client.rs::send_response` 返回永久失败，`gld node run` 不再重连、进程退出，
+机器离线到有人手动重启；Hub 那边这次调用报 `NODE_OUTCOME_UNKNOWN`。`view_image` 回包约为原图 4 倍，
+约 2 MiB 以上、没触发自动缩放的图就会触发，M0 起节点只读工具里就有它。
+
+**修复：**处理器结果超限时只丢弃正文，换一条小回复给这一次调用，连接和进程照常。
+`tools/call` 回 `NODE_RESPONSE_TOO_LARGE` 工具错误（`isError: true`，`retryable: false`），写明“工具已在目标机执行、结果被丢弃、请少要点输出”；
+其他方法回 JSON-RPC `-32603`。没用 JSON-RPC 错误回 `tools/call`，因为 Hub 把节点的 JSON-RPC 错误一律显示成
+`NODE_REQUEST_REJECTED`（“节点拒绝了请求”），对已经落盘的补丁是错误信息。节点自己拼的控制和错误回复仍保留超限即永久失败的保护。
+
+**验证：**新增2项。节点单元测试：超限工具结果变成小于 4 KiB 的工具错误、id 不变，非工具调用回 `-32603`，之后同一连接照常收发。
+真实 CLI/TLS/WSS 测试：目标机项目里放 1000×1000 噪声 PNG（约 3 MB），经 Hub 调 `view_image` 得到 `NODE_RESPONSE_TOO_LARGE`，
+随后同一台机器读文件正常，节点进程仍在运行，中继连接数不变。把 `client.rs` 换回 `c3c12d1` 版本重跑这条测试，
+得到 `NODE_OUTCOME_UNKNOWN` 而失败，确认它确实抓得住原缺陷。测试用的 PNG 由 `image` 生成，CLI 测试新增这条 dev-dependency，
+版本沿用 core 已锁定的 0.25，锁文件只多一条依赖边。
+
+隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1251 passed / 0 failed；
+Clippy `-D warnings`、fmt --check 和文档定稿后的五组文档检查通过。协议仍15，现有服务、OAuth/grant、安装、发布均未改动，未推送。

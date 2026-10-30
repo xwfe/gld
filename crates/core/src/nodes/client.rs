@@ -15,6 +15,7 @@ use tokio_tungstenite::{Connector, WebSocketStream};
 use crate::auth::{AuthContext, Grant, Principal};
 use crate::bridge::peer::PROTOCOL_VERSION;
 use crate::hub::Hub;
+use crate::tools::workspace::{tool_err_code, wrap_tool_result};
 
 use super::config::NodeConfig;
 use super::hub_key::{
@@ -184,6 +185,7 @@ fn control_auth(config: &NodeConfig) -> AuthContext {
     }))
 }
 
+/// 节点自己拼的控制和错误回复都很小；超限说明代码出错，按不可重试处理。
 async fn send_response<S>(socket: &mut WebSocketStream<S>, response: Value) -> Result<(), Failure>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -197,6 +199,53 @@ where
             "node response exceeds its message limit",
         ));
     }
+    write_text(socket, text).await
+}
+
+/// 处理器的结果已经在本机生效（补丁可能已落盘），超限时只能丢弃正文，换一条小错误回给这一次调用。
+/// 以前整个节点退出，机器离线到有人手动重启；`view_image` 回包约为原图 4 倍，2 MiB 的图就会撞上。
+async fn send_result<S>(
+    socket: &mut WebSocketStream<S>,
+    result: Value,
+    tool_call: bool,
+) -> Result<(), Failure>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if result.is_null() {
+        return Ok(());
+    }
+    let text = result.to_string();
+    if text.len() <= MAX_MESSAGE_BYTES {
+        return write_text(socket, text).await;
+    }
+    send_response(socket, oversized_reply(&result, tool_call, text.len())).await
+}
+
+fn oversized_reply(result: &Value, tool_call: bool, bytes: usize) -> Value {
+    if !tool_call {
+        return rpc_error(
+            result,
+            -32603,
+            "Node response exceeds the message limit and was discarded",
+        );
+    }
+    let message = format!(
+        "The tool ran on this machine, but its result ({bytes} bytes) exceeds the \
+         {MAX_MESSAGE_BYTES}-byte node message limit and was discarded. \
+         Ask for less output, such as a smaller max_bytes or a narrower range."
+    );
+    json!({
+        "jsonrpc": "2.0",
+        "id": result.get("id").cloned().unwrap_or(Value::Null),
+        "result": wrap_tool_result(tool_err_code("NODE_RESPONSE_TOO_LARGE", message, "validation")),
+    })
+}
+
+async fn write_text<S>(socket: &mut WebSocketStream<S>, text: String) -> Result<(), Failure>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Text(text.into())))
         .await
         .map_err(|_| Failure::transient("node response write timed out"))?
@@ -409,10 +458,11 @@ where
         } else {
             control_auth(config)
         };
+        let tool_call = method == "tools/call";
         let handler = hub.clone();
         let response = tokio::task::spawn_blocking(move || handler.handle_request(&auth, &body).0);
         match wait_response(&mut socket, response, shutdown, stability).await? {
-            CallOutcome::Response(result) => send_response(&mut socket, result).await?,
+            CallOutcome::Response(result) => send_result(&mut socket, result, tool_call).await?,
             CallOutcome::End(end) => return Ok(end),
         }
     }
