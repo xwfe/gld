@@ -20,6 +20,9 @@ mod tests;
 
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 一整条 RPC 消息的写超时，8 MiB 约需 280 KB/s（2.2 Mbps）。Ping 这类小控制帧仍用 5 秒：
+/// 写不出去说明连接已坏，不必多等。
+pub(super) const MESSAGE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 握手或接管 HTTP/1.1 Upgrade 时使用；限制应在库接收/拼接 message 之前生效。
 pub fn socket_config() -> WebSocketConfig {
@@ -110,7 +113,11 @@ where
         })?;
         // 写入也必须有界；不加发送队列，否则超时返回后旧请求还可能被排队发送。
         let outcome = async_rt::block_on(async {
-            tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Text(line.into()))).await
+            tokio::time::timeout(
+                MESSAGE_WRITE_TIMEOUT,
+                socket.send(Message::Text(line.into())),
+            )
+            .await
         });
         match outcome {
             Ok(Ok(())) => Ok(()),

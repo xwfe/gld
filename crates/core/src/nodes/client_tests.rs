@@ -321,6 +321,40 @@ async fn an_oversized_tool_result_fails_only_that_call_and_keeps_the_connection(
     assert_eq!(next_json(&mut hub).await, small);
 }
 
+/// 5 Mbps 上行发 4 MB 约 7 秒。写超时以前是 5 秒，慢网下回包发到一半就断线。
+#[tokio::test]
+async fn a_large_reply_on_a_slow_link_is_not_cut_off_after_five_seconds() {
+    let (mut node, mut hub) = sockets().await;
+    let reply = json!({"jsonrpc":"2.0","id":1,"result":{"text":"x".repeat(1024 * 1024)}});
+    let drain = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        hub.next().await
+    });
+    send_result(&mut node, reply.clone(), true).await.unwrap();
+    match drain.await.unwrap() {
+        Some(Ok(Message::Text(text))) => assert_eq!(text.len(), reply.to_string().len()),
+        other => panic!("expected the whole reply, got {other:?}"),
+    }
+}
+
+/// 这几个数互相牵制，只改一个不会报错，要到线上才发现调用被无故断开。
+#[test]
+fn the_hub_call_budget_fits_the_longest_tool_wait_and_a_slow_reply() {
+    use crate::tools::args::bounded;
+    let longest_wait = [
+        ("exec_command", "yield_time_ms"),
+        ("write_stdin", "yield_time_ms"),
+        ("kill_session", "wait_ms"),
+    ]
+    .iter()
+    .map(|(tool, arg)| bounded(&json!({ *arg: u64::MAX }), tool, arg))
+    .max()
+    .unwrap();
+    let call = crate::nodes::registry::CALL;
+    assert!(call >= Duration::from_millis(longest_wait) + MESSAGE_WRITE_TIMEOUT);
+    assert!(call <= IDLE_TIMEOUT);
+}
+
 #[tokio::test]
 async fn eof_during_http_upgrade_is_a_transient_connection_failure() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

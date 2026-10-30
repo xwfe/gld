@@ -22,7 +22,7 @@ use super::hub_key::{
     new_nonce, verify_handshake, Binding, MessageVerifier, NONCE_HEADER, PROOF_HEADER,
 };
 use super::identity::auth_from_meta;
-use super::transport::{socket_config, MAX_MESSAGE_BYTES};
+use super::transport::{socket_config, MAX_MESSAGE_BYTES, MESSAGE_WRITE_TIMEOUT};
 
 #[path = "reconnect.rs"]
 mod reconnect;
@@ -246,10 +246,13 @@ async fn write_text<S>(socket: &mut WebSocketStream<S>, text: String) -> Result<
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Text(text.into())))
-        .await
-        .map_err(|_| Failure::transient("node response write timed out"))?
-        .map_err(Failure::websocket)
+    tokio::time::timeout(
+        MESSAGE_WRITE_TIMEOUT,
+        socket.send(Message::Text(text.into())),
+    )
+    .await
+    .map_err(|_| Failure::transient("node response write timed out"))?
+    .map_err(Failure::websocket)
 }
 
 async fn flush_control<S>(socket: &mut WebSocketStream<S>) -> Result<(), Failure>
