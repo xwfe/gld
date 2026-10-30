@@ -233,7 +233,15 @@ pub async fn dispatch(
             ok(&started)
         }
         R::DenyAgentTask { task_id } => ok(&app.deny_agent_task(&task_id)?),
-        R::StopAgentTask { task_id } => ok(&app.stop_agent_task(&task_id)?),
+        R::StopAgentTask { task_id } => {
+            // 要经管道问执行代，不占异步 worker。
+            let app = app.clone();
+            let stopped = tokio::task::spawn_blocking(move || app.stop_agent_task(&task_id))
+                .await
+                .map_err(|error| RpcError::internal(format!("停止委派的任务失败：{error}")))?
+                .map_err(RpcError::from)?;
+            ok(&stopped)
+        }
         R::McpServers => ok(&app.mcp_servers()?),
         R::SwitchMcpServers { names, on, all } => ok(&app.switch_mcp_servers(names, on, all)?),
         R::TestMcpServer { name } => {
@@ -366,13 +374,13 @@ pub async fn dispatch(
             ok(&app.list_tools(&profile.id)?)
         }
         R::ServedTools => {
-            let Some(tools) = gld_core::hub::runtime::served_tools().await else {
+            let Some((build, tools)) = gld_core::hub::runtime::served_tools().await else {
                 return Err(RpcError::from(gld_core::AppError::Message(
                     "服务没在跑，没有正在给客户端的工具表；`gld start` 之后再查".into(),
                 )));
             };
             Ok(serde_json::json!({
-                "build": gld_core::tools::exec::server_snapshot(),
+                "build": build,
                 "surface": gld_core::tools::registry::surface_digest(&tools),
                 "tools": tools
             }))

@@ -36,15 +36,17 @@ impl App {
         let path = self.workspace_root(id)?;
         let state = PlanningService::new(&path).set_mode(mode)?;
         if mode == PlanningMode::Plan {
-            tokio::task::spawn_blocking(move || {
-                crate::tools::workspace_runtime::runtime_for(&path).terminate_all_sessions()
-            })
-            .await
-            .map_err(|error| {
+            let failed = |error: String| {
                 AppError::Message(format!(
                     "已切到 plan 模式，但停止工作区里还在跑的命令时出错：{error}"
                 ))
-            })?;
+            };
+            tokio::task::spawn_blocking(move || {
+                crate::generation::exec::terminate_workspace_sessions(&path)
+            })
+            .await
+            .map_err(|error| failed(error.to_string()))?
+            .map_err(failed)?;
         }
         Ok(state)
     }

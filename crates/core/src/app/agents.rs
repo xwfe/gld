@@ -26,6 +26,21 @@ impl App {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> AppResult<AgentTask> {
+        // Agent 进程和它的 LIVE 记录要在这个工作区所属的执行代里，
+        // 那一代的写入和命令拦截才看得见它（RFC-0009 第 5 节第 3 条）。
+        if let Some(router) = crate::generation::router() {
+            let (_, task) = agents::get(&crate::home::data_home()?, task_id).map_err(convert)?;
+            let reply = router
+                .approve_agent(
+                    std::path::Path::new(&task.workspace_root),
+                    task_id,
+                    agent,
+                    model,
+                    effort,
+                )
+                .map_err(|error| AppError::Message(error.to_string()))?;
+            return Ok(serde_json::from_value(reply)?);
+        }
         agents::approve_with(
             &crate::home::data_home()?,
             task_id,
@@ -43,6 +58,12 @@ impl App {
     }
 
     pub fn stop_agent_task(&self, task_id: &str) -> AppResult<AgentTask> {
+        if let Some(router) = crate::generation::router() {
+            let reply = router
+                .stop_agent(task_id)
+                .map_err(|error| AppError::Message(error.to_string()))?;
+            return Ok(serde_json::from_value(reply)?);
+        }
         agents::stop(&crate::home::data_home()?, task_id).map_err(convert)
     }
 }

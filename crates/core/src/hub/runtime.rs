@@ -76,6 +76,13 @@ pub async fn start(
         stop_runtime(previous).await;
     }
     let hub = Arc::new(Hub::new(config));
+    // 有执行代时工具在那边跑：监听器开始收请求之前，那边的 Hub 要先建好。
+    let router = crate::generation::router();
+    if let Some(router) = router.clone() {
+        router.set_nodes(Some(hub.nodes()));
+        let config = config.clone();
+        let _ = tokio::task::spawn_blocking(move || router.hub_configure(&config)).await;
+    }
     let spawned = crate::mcp::spawn_hub_listener(
         config.local_port,
         hub.clone(),
@@ -90,6 +97,7 @@ pub async fn start(
             if let Some(tunnel) = outcome.tunnel {
                 tunnel.stop().await;
             }
+            stop_generations_hub(router).await;
             return Err(AppError::Message(error));
         }
     };
@@ -99,7 +107,12 @@ pub async fn start(
         shutdown: Some(shutdown),
         handle,
         hub,
-        startup_sweep: crate::managed_workspaces::startup::StartupSweep::launch(config),
+        // 有执行代时启动检查在那边跑：它碰的命令和工作区都归那边。
+        startup_sweep: if router.is_some() {
+            None
+        } else {
+            crate::managed_workspaces::startup::StartupSweep::launch(config)
+        },
         tunnel: outcome.tunnel,
         public_base: outcome.public_base,
         tunnel_error: outcome.error,
@@ -135,12 +148,20 @@ pub async fn attach_tunnel(outcome: TunnelOutcome) {
 ///
 /// 和监听器用的是同一个 `Hub`，所以就是客户端拿到的那一份——不是按当前 CLI 的
 /// 代码重新算的（审查 D04：客户端看不到的工具，要分清是服务没给还是客户端缓存了旧表）。
-pub async fn served_tools() -> Option<Vec<serde_json::Value>> {
+pub async fn served_tools() -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
     let hub = RUNTIME.lock().await.as_ref()?.hub.clone();
     // 列远端成员要读配置，别在 async worker 上做同步 IO。
-    tokio::task::spawn_blocking(move || hub.list_tools())
-        .await
-        .ok()
+    tokio::task::spawn_blocking(move || match crate::generation::router() {
+        Some(router) => {
+            let reply = router.served_tools().ok()?;
+            let tools = reply["tools"].as_array().cloned()?;
+            Some((reply["build"].clone(), tools))
+        }
+        None => Some((crate::tools::exec::server_snapshot(), hub.list_tools())),
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// 旧 /hub 入口直接把节点 socket 交给同一个 Hub，不再建立代理连接。
@@ -209,6 +230,16 @@ pub async fn state() -> HubState {
     }
 }
 
+async fn stop_generations_hub(router: Option<Arc<crate::generation::Router>>) {
+    if let Some(router) = router {
+        let _ = tokio::task::spawn_blocking(move || {
+            router.hub_shutdown();
+            router.set_nodes(None);
+        })
+        .await;
+    }
+}
+
 async fn stop_runtime(mut runtime: HubRuntime) {
     STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
     if let Some(sweep) = &runtime.startup_sweep {
@@ -224,6 +255,7 @@ async fn stop_runtime(mut runtime: HubRuntime) {
     if let Some(tunnel) = runtime.tunnel.take() {
         tunnel.stop().await;
     }
+    stop_generations_hub(crate::generation::router()).await;
     // 成员里经 hub 起的命令，hub 停了就没人能再读它们的输出或杀掉它们。
     // 结束进程要阻塞等待，不能占着异步 worker。
     let hub = runtime.hub;
