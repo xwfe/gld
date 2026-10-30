@@ -69,9 +69,16 @@ pub async fn run(cli: Cli) -> CliResult {
         config,
         workspaces,
         writable_workspaces,
+        runnable_workspaces,
     }) = &cli.command
     {
-        return node::shares(config, workspaces, writable_workspaces, out);
+        return node::shares(
+            config,
+            workspaces,
+            writable_workspaces,
+            runnable_workspaces,
+            out,
+        );
     }
     if let Command::Join(args) = &cli.command {
         return join::run(args, out).await;

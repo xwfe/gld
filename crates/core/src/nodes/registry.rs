@@ -14,7 +14,7 @@ use crate::bridge::peer::PeerError;
 use crate::bridge::session::Offered;
 use crate::tools::workspace::{tool_err, WorkspaceError};
 
-use super::config::{self, AuthenticatedMachine, NodeProject};
+use super::config::{self, runs_commands, AuthenticatedMachine, NodeProject};
 use super::connection::{Connection, ConnectionError};
 use super::hub_key::MessageSigner;
 use super::identity::forwarded_meta;
@@ -42,7 +42,9 @@ impl NativeMember {
         json!({
             "id": self.id, "name": self.name, "kind": "node",
             "machine_id": self.machine_id, "online": self.online, "revoked": self.revoked,
-            "tool_profile": self.tool_profile, "read_only": self.tool_profile != "file-write"
+            "tool_profile": self.tool_profile,
+            "read_only": !matches!(self.tool_profile.as_str(), "file-write" | "commands"),
+            "commands": self.tool_profile == "commands",
         })
     }
 }
@@ -206,6 +208,14 @@ impl Nodes {
                 "MACHINE_OFFLINE",
                 "The selected machine is offline; nothing was sent.",
                 true,
+            );
+        }
+        // 权限以目标机为准，这里只是早点说清楚怎么开：否则调用方只看到“节点没有这个工具”。
+        if runs_commands(name) && member.tool_profile != "commands" {
+            return failure(
+                "NODE_COMMANDS_NOT_ALLOWED",
+                "The operator of this machine has not enabled commands for this project; nothing was sent. They enable it on that machine with `gld node shares --run`.",
+                false,
             );
         }
         let Some(arguments) = args.as_object_mut() else {
@@ -407,11 +417,12 @@ fn parse_projects(result: &Value) -> Result<Vec<NodeProject>, String> {
         projects.push(NodeProject {
             id: id.into(),
             name: name.into(),
-            tool_profile: match item.get("read_only") {
-                // 老节点没有显式文件写授权字段；其本机 profile 不能当成远端写权限。
-                None | Some(Value::Bool(true)) => "read-only",
-                Some(Value::Bool(false)) => "file-write",
-                Some(_) => return Err("invalid node project read_only flag".into()),
+            // 老节点没有显式授权字段；其本机 profile 不能当成远端写或命令权限。
+            tool_profile: match (item.get("read_only"), item.get("commands")) {
+                (None | Some(Value::Bool(true)), None | Some(Value::Bool(false))) => "read-only",
+                (Some(Value::Bool(false)), None | Some(Value::Bool(false))) => "file-write",
+                (Some(Value::Bool(false)), Some(Value::Bool(true))) => "commands",
+                _ => return Err("invalid node project permission flags".into()),
             }
             .into(),
         });
@@ -526,8 +537,15 @@ mod tests {
         assert_eq!(discover(&local).unwrap()[0].tool_profile, "read-only");
         local["read_only"] = json!(false);
         assert_eq!(discover(&local).unwrap()[0].tool_profile, "file-write");
+        local["commands"] = json!(true);
+        assert_eq!(discover(&local).unwrap()[0].tool_profile, "commands");
         local["read_only"] = json!(true);
+        assert!(discover(&local).is_err(), "commands without file writes");
+        local["commands"] = json!("true");
+        assert!(discover(&local).is_err());
+        local["commands"] = json!(false);
         assert_eq!(discover(&local).unwrap()[0].tool_profile, "read-only");
+        local.as_object_mut().unwrap().remove("commands");
         for invalid in [json!("false"), json!(0), Value::Null, json!({})] {
             local["read_only"] = invalid;
             assert!(discover(&local).is_err());

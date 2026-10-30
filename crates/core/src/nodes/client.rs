@@ -40,17 +40,31 @@ const MAX_CA_BYTES: u64 = 64 * 1024;
 /// 同步 CLI 入口。不会启动本机 MCP/OAuth/隧道，也不修改本机项目登记。
 pub fn run(config: NodeConfig) -> Result<(), String> {
     config.validate()?;
-    let hub = Arc::new(Hub::for_node(
-        config.workspaces.clone(),
-        config.writable_workspaces.clone(),
-    )?);
-    crate::async_rt::block_on(async move {
-        let shutdown = async {
-            let _ = tokio::signal::ctrl_c().await;
-        };
+    let hub = Arc::new(Hub::for_node(config.access())?);
+    let outcome = crate::async_rt::block_on(async move {
+        let shutdown = stop_signal();
         tokio::pin!(shutdown);
         run_until(config, hub, &mut shutdown).await
-    })
+    });
+    // 不管是被停还是凭据被撤销退出，这里起的命令都没人能再读、再停了，不能留着以这个账号跑。
+    crate::tools::workspace_runtime::terminate_all_sessions_everywhere();
+    outcome
+}
+
+/// 开机自启时系统用 SIGTERM 停进程；只等 Ctrl-C 的话进程会直接死，命令留在后台。
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 async fn run_until<F>(config: NodeConfig, hub: Arc<Hub>, shutdown: &mut F) -> Result<(), String>

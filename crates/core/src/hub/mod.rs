@@ -64,6 +64,7 @@ use crate::bridge::session::{CodingError, Connections};
 use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
 use crate::machine_mcp::{self, installed::Installed, relay::Relay};
+use crate::nodes::config::NodeAccess;
 use crate::nodes::registry::{NativeMember, Nodes};
 use crate::planning::PlanningService;
 use crate::settings::{AppSettings, HubConfig};
@@ -171,10 +172,7 @@ enum Members {
     /// 每次请求从数据文件读：增删成员、成员改配置立刻生效，不用重启 hub。
     DataFile,
     /// 节点只共享明确选中的本机项目；不启动监听器或继承 Hub 成员。
-    Node {
-        shared: Vec<String>,
-        writable: Vec<String>,
-    },
+    Node(NodeAccess),
     /// 固定的一份，给单元测试用；套 Mutex 是为了测"改完配置下一次调用就生效"。
     #[cfg(test)]
     Fixed(Box<Mutex<Fixed>>),
@@ -796,6 +794,8 @@ impl Hub {
 
         let structured = if canonical == WORKSPACE_CONTEXT {
             self.workspace_context(member, &context, auth.grant())
+        } else if native::runs_commands(canonical) && !self.node_project_runs_commands(member) {
+            native::commands_not_allowed(canonical, member)
         } else if !exposed_tool_names(&context.tool_profile).contains(&canonical) {
             tool_not_in_workspace(canonical, member, &context.tool_profile)
         } else if canonical == "server_info" {
@@ -809,7 +809,7 @@ impl Hub {
                     info["tool_count"] = json!(count);
                 }
             }
-            self.restrict_node_surface(&mut info, auth.grant());
+            self.restrict_node_surface(&mut info, member, auth.grant());
             self.with_connection_surface(info, auth.grant())
         } else {
             call_tool_as(&context, &Caller::from_auth(auth), canonical, args)
@@ -1014,7 +1014,7 @@ impl Hub {
                 ))
             })
             .map_err(|error| error.to_string())?,
-            Members::Node { shared, .. } => self.node_snapshot(shared)?,
+            Members::Node(access) => self.node_snapshot(&access.shared)?,
             #[cfg(test)]
             Members::Fixed(fixed) => {
                 let fixed = fixed.lock().expect("fixed members").clone();
@@ -1073,7 +1073,7 @@ impl Hub {
             settings,
             self.usage.clone(),
         )?;
-        if matches!(self.members, Members::Node { .. }) {
+        if matches!(self.members, Members::Node(_)) {
             // 节点不自动带出整机 Skill / 用户说明；项目根说明走受限文件读取。
             context.agent_context = None;
             context.ai_instructions = member.runtime.ai_instructions.clone();
@@ -1168,7 +1168,7 @@ impl Hub {
                 .state()
                 .ok()
                 .map(|state| state.mode),
-            "instructions": if matches!(self.members, Members::Node { .. }) {
+            "instructions": if matches!(self.members, Members::Node(_)) {
                 native::project_instructions(context)
             } else { context.current_ai_instructions() },
             "skills": skills,
@@ -1178,7 +1178,7 @@ impl Hub {
         if context.policy.allows_all_commands() {
             out["risk"] = json!(crate::tools::policy::ALLOW_ALL_NOTICE);
         }
-        self.restrict_node_surface(&mut out, grant);
+        self.restrict_node_surface(&mut out, member, grant);
         tool_ok(out)
     }
 }

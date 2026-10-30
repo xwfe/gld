@@ -16,6 +16,7 @@ pub async fn run(args: &JoinArgs, out: Output) -> CliResult {
             config_path: args.config.clone(),
             workspaces: args.share.clone(),
             writable_workspaces: args.writable_workspaces.clone(),
+            runnable_workspaces: args.runnable_workspaces.clone(),
             ca_certificate: args.ca_certificate.clone(),
         },
         invitation,
@@ -24,7 +25,7 @@ pub async fn run(args: &JoinArgs, out: Output) -> CliResult {
     let preview = serde_json::to_string_pretty(prepared.preview())
         .map_err(|_| CliError::new("无法显示节点配对范围。"))?;
     out.note(format!(
-        "将以当前执行账号共享以下项目；read_only 为 false 的项目允许文件写入，命令、管理工具和桌面访问关闭：\n{preview}"
+        "将以当前执行账号共享以下项目；read_only 为 false 的项目允许文件写入，commands 为 true 的项目能以这个账号跑命令（不是沙箱，能调用 Hub 的人等于拿到这个账号）；管理工具和桌面访问关闭：\n{preview}"
     ));
     if !args.yes {
         confirm()?;

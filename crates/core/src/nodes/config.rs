@@ -70,6 +70,49 @@ pub struct AuthenticatedMachine {
     pub machine: MachineRecord,
 }
 
+/// 只有目标机显式 `--run` 的项目才开放的工具。`read_output`、`list_runs` 只读自己的记录，
+/// 已在只读工具表里；`exec_health_check` 不算：跑命令的 AI 用 `check_exec_environment` 就够。
+pub fn runs_commands(name: &str) -> bool {
+    matches!(name, "exec_command" | "write_stdin" | "kill_session")
+}
+
+/// 目标机操作员放开的范围，一级包一级：共享（读）⊃ 文件写入 ⊃ 跑命令。
+/// 能跑命令就能改任何文件，所以不设“能跑命令但不能写”这一档，否则看着比实际安全。
+#[derive(Clone, Debug, Default)]
+pub struct NodeAccess {
+    pub shared: Vec<String>,
+    pub writable: Vec<String>,
+    pub runnable: Vec<String>,
+}
+
+impl NodeAccess {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_workspace_ids(&self.shared)?;
+        let mut writable = HashSet::new();
+        if self
+            .writable
+            .iter()
+            .any(|id| !self.shared.contains(id) || !writable.insert(id))
+        {
+            return Err(
+                "Node writable_workspaces must contain distinct IDs from workspaces".into(),
+            );
+        }
+        let mut runnable = HashSet::new();
+        if self
+            .runnable
+            .iter()
+            .any(|id| !self.writable.contains(id) || !runnable.insert(id))
+        {
+            return Err(
+                "Node runnable_workspaces must contain distinct IDs from writable_workspaces"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
@@ -83,6 +126,10 @@ pub struct NodeConfig {
     /// 本机操作员明确允许文件写入的共享项目；缺省保持只读，不授予命令或管理能力。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable_workspaces: Vec<String>,
+    /// 本机操作员明确允许跑命令的项目，必须也在 `writable_workspaces` 里。命令以这个账号的身份跑，
+    /// 不是沙箱：能调用 Hub 的人等于拿到这个账号。缺省不开。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runnable_workspaces: Vec<String>,
     #[serde(default)]
     pub ca_certificate: Option<PathBuf>,
 }
@@ -94,6 +141,7 @@ impl fmt::Debug for NodeConfig {
             .field("machine_id", &self.machine_id)
             .field("workspaces", &self.workspaces)
             .field("writable_workspaces", &self.writable_workspaces)
+            .field("runnable_workspaces", &self.runnable_workspaces)
             .field("credential", &"[redacted]")
             .finish_non_exhaustive()
     }
@@ -102,6 +150,14 @@ impl fmt::Debug for NodeConfig {
 impl NodeConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
         super::local_config::read_config(path)
+    }
+
+    pub fn access(&self) -> NodeAccess {
+        NodeAccess {
+            shared: self.workspaces.clone(),
+            writable: self.writable_workspaces.clone(),
+            runnable: self.runnable_workspaces.clone(),
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -114,17 +170,7 @@ impl NodeConfig {
             return Err("Node hub_public_key must be the 64-character lowercase hexadecimal key from the invitation or Hub registration".into());
         }
         validate_credential(&self.credential)?;
-        validate_workspace_ids(&self.workspaces)?;
-        let mut writable = HashSet::new();
-        if self
-            .writable_workspaces
-            .iter()
-            .any(|id| !self.workspaces.contains(id) || !writable.insert(id))
-        {
-            return Err(
-                "Node writable_workspaces must contain distinct IDs from workspaces".into(),
-            );
-        }
+        self.access().validate()?;
         let url = self.parsed_url()?;
         if self
             .ca_certificate
@@ -248,7 +294,7 @@ fn validate_projects(projects: &[NodeProject]) -> Result<(), String> {
                 || p.name.chars().any(char::is_control)
                 || !matches!(
                     p.tool_profile.as_str(),
-                    "core" | "compact" | "advanced" | "read-only" | "file-write"
+                    "core" | "compact" | "advanced" | "read-only" | "file-write" | "commands"
                 )
         })
     {

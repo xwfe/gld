@@ -931,9 +931,10 @@ Options:
       --timeout <SECS>                   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --write <PROJECT>                  允许文件写入的项目名称或完整 ID，须同时在 --share 中；可重复；默认只读，不授权命令或管理工具
       --home <DIR>                       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --run <PROJECT>                    允许跑命令的项目（自带文件写入），须同时在 --share 中；可重复；能调用 Hub 的人等于拿到这个账号
       --invite-stdin                     从管道或文件接收一次性邀请，不将其放入 argv
-      --ca-certificate <CA_CERTIFICATE>  显式信任的 DER CA 证书；仍核验 TLS 主机名
       --no-color                         关闭彩色输出（也可设置环境变量 NO_COLOR）
+      --ca-certificate <CA_CERTIFICATE>  显式信任的 DER CA 证书；仍核验 TLS 主机名
       --yes                              确认所显示的 Hub、执行账号和共享项目，供非交互调用使用
   -h, --help                             Print help
   -V, --version                          Print version
@@ -1066,6 +1067,7 @@ Options:
       --share <WORKSPACES>  新的完整共享名单，接受项目完整 ID 或唯一名称；可重复，至少保留一个项目；省略则只查看
       --no-autostart        守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --write <PROJECT>     允许文件写入的项目，须同时在 --share 中；可重复；替换时省略则全部只读，不授权命令或管理工具
+      --run <PROJECT>       允许跑命令的项目（自带文件写入），须同时在 --share 中；可重复；能调用 Hub 的人等于拿到这个账号
       --timeout <SECS>      等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --home <DIR>          数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color            关闭彩色输出（也可设置环境变量 NO_COLOR）

@@ -8,7 +8,7 @@ use crate::data::{AppData, DataStore};
 use crate::tools::registry::exposed_tool_names;
 
 use super::config::NodeConfig;
-use super::join::{resolve_workspaces, select_writable_workspaces, SharedProject};
+use super::join::{resolve_workspaces, select_access, SharedProject};
 use super::local_config::{read_config, validate_config_location, LocalConfig};
 
 #[cfg(test)]
@@ -24,6 +24,7 @@ pub struct SharedWorkspace {
     pub path: Option<String>,
     pub available: bool,
     pub read_only: bool,
+    pub commands: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,11 +46,12 @@ pub fn show(path: &Path) -> Result<SharingView, String> {
         .map_err(|_| "Cannot read local project registrations".into())
 }
 
-/// 完整替换共享与文件写入名单，运行期间拒绝修改；重新运行节点后向 Hub 重新报告目录。
+/// 完整替换共享、文件写入和跑命令名单，运行期间拒绝修改；重新运行节点后向 Hub 重新报告目录。
 pub fn replace(
     path: &Path,
     selectors: &[String],
     writable_selectors: &[String],
+    runnable_selectors: &[String],
 ) -> Result<SharingView, String> {
     let storage = LocalConfig::lock(path)?;
     let mut config = storage.load()?;
@@ -61,7 +63,8 @@ pub fn replace(
             .map(|project| project.path.clone())
             .collect::<Vec<_>>(),
     )?;
-    config.writable_workspaces = select_writable_workspaces(&mut projects, writable_selectors)?;
+    (config.writable_workspaces, config.runnable_workspaces) =
+        select_access(&mut projects, writable_selectors, runnable_selectors)?;
     config.workspaces = projects.iter().map(|project| project.id.clone()).collect();
     storage.replace(&config)?;
     Ok(view(
@@ -78,6 +81,7 @@ fn selected(project: SharedProject) -> SharedWorkspace {
         path: Some(project.path),
         available: true,
         read_only: project.read_only,
+        commands: project.commands,
     }
 }
 
@@ -87,17 +91,23 @@ fn catalog(data: &AppData, config: &NodeConfig) -> Vec<SharedWorkspace> {
         .iter()
         .map(|id| {
             let profile = data.profiles.iter().find(|profile| profile.id == *id);
+            // 和节点运行时同一个口径：项目关了 confine-reads 或工具档收紧了，就算名单里有也不算。
+            let allows = |tool: &str| {
+                profile.is_some_and(|profile| {
+                    profile.runtime.confine_reads
+                        && exposed_tool_names(&profile.runtime.tool_profile).contains(&tool)
+                })
+            };
+            let read_only = !config.writable_workspaces.contains(id) || !allows("apply_patch");
             SharedWorkspace {
                 id: id.clone(),
                 name: profile.map(|profile| profile.name.clone()),
                 path: profile.map(|profile| profile.path.clone()),
                 available: profile.is_some_and(|profile| profile.runtime.confine_reads),
-                read_only: !config.writable_workspaces.contains(id)
-                    || !profile.is_some_and(|profile| {
-                        profile.runtime.confine_reads
-                            && exposed_tool_names(&profile.runtime.tool_profile)
-                                .contains(&"apply_patch")
-                    }),
+                read_only,
+                commands: !read_only
+                    && config.runnable_workspaces.contains(id)
+                    && allows("exec_command"),
             }
         })
         .collect()

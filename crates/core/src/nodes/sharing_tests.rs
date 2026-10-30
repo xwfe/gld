@@ -7,6 +7,11 @@ const TEST_NAME: &str =
 const CHILD: &str = "GLD_TEST_NODE_SHARING_CHILD";
 const CREDENTIAL: &str = "isolated-node-sharing-test-secret-1234567890";
 
+/// 只验共享和文件写入这两级时不用每处都写空的 `--run`。
+fn replace(path: &Path, selectors: &[String], writable: &[String]) -> Result<SharingView, String> {
+    super::replace(path, selectors, writable, &[])
+}
+
 fn config(ids: Vec<String>) -> NodeConfig {
     NodeConfig {
         hub_url: "https://example.invalid/hub".into(),
@@ -16,6 +21,7 @@ fn config(ids: Vec<String>) -> NodeConfig {
         credential: CREDENTIAL.into(),
         workspaces: ids,
         writable_workspaces: Vec::new(),
+        runnable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }
@@ -171,9 +177,16 @@ fn exercise_sharing() {
     let expanded = replace(&path, &["api".into(), "web".into()], &["web".into()]).unwrap();
     assert!(expanded.workspaces[0].read_only);
     assert!(!expanded.workspaces[1].read_only);
+    let running = super::replace(&path, &["web".into()], &[], &["web".into()]).unwrap();
+    assert!(running.workspaces[0].commands && !running.workspaces[0].read_only);
+    assert!(show(&path).unwrap().workspaces[0].commands);
+    let stored = read_config(&path).unwrap();
+    assert_eq!(stored.writable_workspaces, std::slice::from_ref(&web.id));
+    assert_eq!(stored.runnable_workspaces, std::slice::from_ref(&web.id));
     let revoked = replace(&path, &["web".into()], &[]).unwrap();
-    assert!(revoked.workspaces[0].read_only);
+    assert!(revoked.workspaces[0].read_only && !revoked.workspaces[0].commands);
     assert!(read_config(&path).unwrap().writable_workspaces.is_empty());
+    assert!(read_config(&path).unwrap().runnable_workspaces.is_empty());
     let saved = std::fs::read(&path).unwrap();
     let stored: serde_json::Value = serde_json::from_slice(&saved).unwrap();
     assert!(stored.get("writable_workspaces").is_none());

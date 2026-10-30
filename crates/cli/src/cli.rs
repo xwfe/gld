@@ -397,6 +397,9 @@ pub enum NodeCmd {
         /// 允许文件写入的项目，须同时在 --share 中；可重复；替换时省略则全部只读，不授权命令或管理工具
         #[arg(long = "write", value_name = "PROJECT", requires = "workspaces")]
         writable_workspaces: Vec<String>,
+        /// 允许跑命令的项目（自带文件写入），须同时在 --share 中；可重复；能调用 Hub 的人等于拿到这个账号
+        #[arg(long = "run", value_name = "PROJECT", requires = "workspaces")]
+        runnable_workspaces: Vec<String>,
     },
     /// 在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
     Run {
@@ -422,6 +425,9 @@ pub struct JoinArgs {
     /// 允许文件写入的项目名称或完整 ID，须同时在 --share 中；可重复；默认只读，不授权命令或管理工具
     #[arg(long = "write", value_name = "PROJECT", requires = "share")]
     pub writable_workspaces: Vec<String>,
+    /// 允许跑命令的项目（自带文件写入），须同时在 --share 中；可重复；能调用 Hub 的人等于拿到这个账号
+    #[arg(long = "run", value_name = "PROJECT", requires = "share")]
+    pub runnable_workspaces: Vec<String>,
     /// 从管道或文件接收一次性邀请，不将其放入 argv
     #[arg(long, required = true)]
     pub invite_stdin: bool,
@@ -482,6 +488,42 @@ mod node_share_tests {
     }
 
     #[test]
+    fn command_flags_require_a_complete_share_selection() {
+        let error = Cli::try_parse_from([
+            "gld",
+            "node",
+            "shares",
+            "--config",
+            "node.json",
+            "--run",
+            "api",
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let parsed = Cli::try_parse_from([
+            "gld",
+            "join",
+            "--hub",
+            "https://example.invalid",
+            "--config",
+            "node.json",
+            "--share",
+            "api",
+            "--run",
+            "api",
+            "--invite-stdin",
+        ])
+        .unwrap();
+        let Command::Join(join) = parsed.command else {
+            panic!("expected join");
+        };
+        assert_eq!(join.runnable_workspaces, ["api"]);
+    }
+
+    #[test]
     fn pairing_and_share_replacement_default_to_read_only() {
         let parsed = Cli::try_parse_from([
             "gld",
@@ -499,6 +541,7 @@ mod node_share_tests {
             panic!("expected join");
         };
         assert!(join.writable_workspaces.is_empty());
+        assert!(join.runnable_workspaces.is_empty());
         for extra in [Vec::new(), vec!["--share", "api"]] {
             let mut args = vec!["gld", "node", "shares", "--config", "node.json"];
             args.extend(extra);

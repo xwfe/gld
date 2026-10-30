@@ -9,6 +9,7 @@ fn config() -> NodeConfig {
         credential: "c".repeat(64),
         workspaces: vec!["d".repeat(32)],
         writable_workspaces: Vec::new(),
+        runnable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }

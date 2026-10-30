@@ -2,33 +2,31 @@
 
 use super::*;
 
+pub(super) use crate::nodes::config::runs_commands;
+
 #[cfg(test)]
 #[path = "native_file_tests.rs"]
 mod file_tests;
 
+#[cfg(all(test, unix))]
+#[path = "native_command_tests.rs"]
+mod command_tests;
+
 impl Hub {
-    pub fn for_node(shared_ids: Vec<String>, writable_ids: Vec<String>) -> Result<Self, String> {
-        crate::nodes::config::validate_workspace_ids(&shared_ids)?;
-        if !writable_ids.is_empty() {
-            crate::nodes::config::validate_workspace_ids(&writable_ids)?;
-        }
-        if writable_ids.iter().any(|id| !shared_ids.contains(id)) {
-            return Err("节点的可写项目必须包含在明确共享的项目中。".into());
-        }
+    pub fn for_node(access: NodeAccess) -> Result<Self, String> {
+        access.validate()?;
+        let shared_count = access.shared.len();
         let hub = Self::with_members(
             &HubConfig {
                 // 从完整定义取 schema，再用节点上限筛选，保留原只读工具而不开放命令。
                 tool_profile: "advanced".into(),
                 ..HubConfig::default()
             },
-            Members::Node {
-                shared: shared_ids.clone(),
-                writable: writable_ids,
-            },
+            Members::Node(access),
             Connections::new(),
         );
         let (members, _) = hub.snapshot()?;
-        if members.len() != shared_ids.len()
+        if members.len() != shared_count
             || members.iter().any(|member| match member {
                 Member::Local(profile) => !profile.runtime.confine_reads,
                 _ => true,
@@ -47,10 +45,10 @@ impl Hub {
                 tool_profile: "advanced".into(),
                 ..HubConfig::default()
             },
-            Members::Node {
+            Members::Node(NodeAccess {
                 shared: shared_ids,
-                writable: Vec::new(),
-            },
+                ..NodeAccess::default()
+            }),
             Connections::new(),
         )
     }
@@ -59,36 +57,57 @@ impl Hub {
         self.nodes.clone()
     }
 
-    /// 节点复用真实的只读工具表，再单独允许文件补丁；策略分类表还含会执行命令的检查。
+    /// 节点复用真实的只读工具表，再单独允许文件补丁和跑命令；策略分类表还含会执行命令的检查。
+    /// 这里只按工具名判断整台节点开不开，具体项目在 `call_local` 里再判一次。
     pub(super) fn node_tool_allowed(&self, name: &str) -> bool {
-        let Members::Node { writable, .. } = &self.members else {
+        let Members::Node(access) = &self.members else {
             return true;
         };
         matches!(name, LIST_WORKSPACES | WORKSPACE_CONTEXT)
             || read_only_allows(name)
-            || (!writable.is_empty() && matches!(name, "apply_patch" | "patch_check"))
+            || (!access.writable.is_empty() && matches!(name, "apply_patch" | "patch_check"))
+            || (!access.runnable.is_empty() && runs_commands(name))
     }
 
     fn node_project_read_only(&self, member: &WorkspaceProfile) -> bool {
-        let Members::Node { writable, .. } = &self.members else {
+        let Members::Node(access) = &self.members else {
             return true;
         };
-        !writable.contains(&member.id)
+        !access.writable.contains(&member.id)
             || !member.runtime.confine_reads
             || !exposed_tool_names(&member.runtime.tool_profile).contains(&"apply_patch")
     }
 
+    /// 不是节点时恒为真：本机服务的命令权限走项目工具档和 grant，不走这里。
+    pub(super) fn node_project_runs_commands(&self, member: &WorkspaceProfile) -> bool {
+        let Members::Node(access) = &self.members else {
+            return true;
+        };
+        access.runnable.contains(&member.id)
+            && !self.node_project_read_only(member)
+            && exposed_tool_names(&member.runtime.tool_profile).contains(&"exec_command")
+    }
+
+    fn node_profile(&self, member: &WorkspaceProfile) -> &'static str {
+        if self.node_project_read_only(member) {
+            "read-only"
+        } else if self.node_project_runs_commands(member) {
+            "commands"
+        } else {
+            "file-write"
+        }
+    }
+
     pub(super) fn node_catalog(&self, members: &[Member]) -> Value {
         let mut listed = list_workspaces(members);
-        if matches!(self.members, Members::Node { .. }) {
+        if matches!(self.members, Members::Node(_)) {
             if let Some(items) = listed["workspaces"].as_array_mut() {
                 for (member, item) in members.iter().zip(items) {
                     if let Member::Local(member) = member {
                         // 发现调用没有 workspace，不能拿它的只读 grant 代替目标机实际权限。
-                        let read_only = self.node_project_read_only(member);
-                        item["read_only"] = json!(read_only);
-                        item["tool_profile"] =
-                            json!(if read_only { "read-only" } else { "file-write" });
+                        item["read_only"] = json!(self.node_project_read_only(member));
+                        item["commands"] = json!(self.node_project_runs_commands(member));
+                        item["tool_profile"] = json!(self.node_profile(member));
                     }
                 }
             }
@@ -97,27 +116,35 @@ impl Hub {
     }
 
     /// 项目能力展示与硬发调用共用同一个上限，避免借写授权宣告命令或管理工具。
-    pub(super) fn restrict_node_surface(&self, info: &mut Value, grant: Option<&Grant>) {
-        if !matches!(self.members, Members::Node { .. }) {
+    pub(super) fn restrict_node_surface(
+        &self,
+        info: &mut Value,
+        member: &WorkspaceProfile,
+        grant: Option<&Grant>,
+    ) {
+        if !matches!(self.members, Members::Node(_)) {
             return;
         }
         let Some(tools) = info.get_mut("tools").and_then(Value::as_array_mut) else {
             return;
         };
-        tools.retain(|name| name.as_str().is_some_and(|name| self.exposes(name, grant)));
+        let runs = self.node_project_runs_commands(member);
+        let shown = |name: &str| self.exposes(name, grant) && (runs || !runs_commands(name));
+        tools.retain(|name| name.as_str().is_some_and(shown));
         let read_only = !tools.iter().any(|name| name == "apply_patch");
         let count = tools.len();
         if info.get("tool_count").is_some() {
             info["tool_count"] = json!(count);
         }
         info["read_only"] = json!(read_only);
-        info["tool_profile"] = json!(if read_only { "read-only" } else { "file-write" });
+        info["commands"] = json!(runs);
+        info["tool_profile"] = json!(self.node_profile(member));
         if let Some(aggregate) = info
             .get_mut("tool_api")
             .and_then(|api| api.get_mut("aggregate_tools"))
             .and_then(Value::as_array_mut)
         {
-            aggregate.retain(|name| name.as_str().is_some_and(|name| self.exposes(name, grant)));
+            aggregate.retain(|name| name.as_str().is_some_and(shown));
         }
     }
 
@@ -139,6 +166,19 @@ impl Hub {
         })
         .map_err(|error| error.to_string())
     }
+}
+
+pub(super) fn commands_not_allowed(tool: &str, member: &WorkspaceProfile) -> Value {
+    tool_err(WorkspaceError::ToolDetails {
+        code: "NODE_COMMANDS_NOT_ALLOWED",
+        message: format!(
+            "{tool} is not allowed in {}: the operator of this machine has not enabled commands for this project. Nothing ran.",
+            member.name
+        ),
+        category: "permission",
+        retryable: false,
+        details: json!({ "workspace": local_ref(member) }),
+    })
 }
 
 /// 不自动读取节点账号的全局说明/Skills。项目根说明沿用受限且有界的 read_file。

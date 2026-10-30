@@ -116,11 +116,17 @@ pub fn shares(
     path: &Path,
     workspaces: &[String],
     writable_workspaces: &[String],
+    runnable_workspaces: &[String],
     out: Output,
 ) -> CliResult {
     let changed = !workspaces.is_empty();
     let view = if changed {
-        gld_core::nodes::sharing::replace(path, workspaces, writable_workspaces)
+        gld_core::nodes::sharing::replace(
+            path,
+            workspaces,
+            writable_workspaces,
+            runnable_workspaces,
+        )
     } else {
         gld_core::nodes::sharing::show(path)
     }
@@ -132,6 +138,7 @@ pub fn shares(
             ("机器 ID", view.machine_id),
             ("配置", view.config_path.display().to_string()),
         ]);
+        let runs_commands = view.workspaces.iter().any(|workspace| workspace.commands);
         let rows: Vec<_> = view
             .workspaces
             .into_iter()
@@ -145,7 +152,9 @@ pub fn shares(
                     } else {
                         "缺失或未限制读取".into()
                     },
-                    if workspace.read_only {
+                    if workspace.commands {
+                        "文件写入、跑命令".into()
+                    } else if workspace.read_only {
                         "只读".into()
                     } else {
                         "文件写入".into()
@@ -155,7 +164,10 @@ pub fn shares(
             .collect();
         out.table(&["项目 ID", "名称", "路径", "本机登记", "权限"], &rows);
         if changed {
-            out.note("已替换共享名单及文件写入权限。重新运行节点并连接 Hub 后生效；命令和管理工具不开放。");
+            out.note("已替换共享名单及权限。重新运行节点并连接 Hub 后生效；管理工具不开放。");
+            if runs_commands {
+                out.note("能跑命令的项目不是沙箱：命令以当前账号执行，能调用这个 Hub 的人等于拿到这个账号。");
+            }
         }
     }
     Ok(())

@@ -25,6 +25,7 @@ pub struct JoinOptions {
     pub config_path: PathBuf,
     pub workspaces: Vec<String>,
     pub writable_workspaces: Vec<String>,
+    pub runnable_workspaces: Vec<String>,
     pub ca_certificate: Option<PathBuf>,
 }
 
@@ -34,6 +35,7 @@ pub struct SharedProject {
     pub name: String,
     pub path: String,
     pub read_only: bool,
+    pub commands: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,8 +82,11 @@ impl PreparedJoin {
         let (hub_id, hub_public_key) = invitation_identity(&invitation)?;
         let workspaces: Vec<String> = projects.iter().map(|project| project.id.clone()).collect();
         validate_workspace_ids(&workspaces)?;
-        let writable_workspaces =
-            select_writable_workspaces(&mut projects, &options.writable_workspaces)?;
+        let (writable_workspaces, runnable_workspaces) = select_access(
+            &mut projects,
+            &options.writable_workspaces,
+            &options.runnable_workspaces,
+        )?;
         validate_config_location(
             &options.config_path,
             &projects
@@ -108,6 +113,7 @@ impl PreparedJoin {
             ),
             workspaces,
             writable_workspaces,
+            runnable_workspaces,
             ca_certificate,
         };
         config.validate()?;
@@ -132,6 +138,7 @@ impl PreparedJoin {
                 || pending.hub_public_key != config.hub_public_key
                 || pending.workspaces != config.workspaces
                 || pending.writable_workspaces != config.writable_workspaces
+                || pending.runnable_workspaces != config.runnable_workspaces
                 || pending.ca_certificate != config.ca_certificate
             {
                 return Err("Pending pairing has different Hub or sharing settings; retry with the original settings".into());
@@ -145,10 +152,12 @@ impl PreparedJoin {
             hub_id: config.hub_id.clone(),
             execution_account: execution_account(),
             workspaces: projects,
-            access: if config.writable_workspaces.is_empty() {
-                "read-only"
-            } else {
+            access: if !config.runnable_workspaces.is_empty() {
+                "project-commands"
+            } else if !config.writable_workspaces.is_empty() {
                 "project-file-write"
+            } else {
+                "read-only"
             },
             desktop: false,
             resuming,
@@ -195,11 +204,51 @@ pub fn resolve_workspaces(selectors: &[String]) -> Result<Vec<SharedProject>, St
 }
 
 /// 从刚解析的本机项目收窄权限，顺序按共享名单规范化；省略时全部只读。
-pub(super) fn select_writable_workspaces(
+/// `--run` 自带文件写入：能跑命令就能改文件，再要求写一遍 `--write` 只是多一步。
+pub(super) fn select_access(
     projects: &mut [SharedProject],
+    write_selectors: &[String],
+    run_selectors: &[String],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut writable = pick_projects(projects, write_selectors, "writable")?;
+    let runnable = pick_projects(projects, run_selectors, "command")?;
+    if projects
+        .iter()
+        .any(|p| writable.contains(&p.id) && p.read_only)
+    {
+        return Err(
+            "A writable project must use a local tool profile that supports file writes".into(),
+        );
+    }
+    if projects
+        .iter()
+        .any(|p| runnable.contains(&p.id) && (p.read_only || !p.commands))
+    {
+        return Err(
+            "A command project must use a local tool profile that supports commands".into(),
+        );
+    }
+    writable.extend(runnable.iter().cloned());
+    for project in projects.iter_mut() {
+        project.read_only = !writable.contains(&project.id);
+        project.commands = runnable.contains(&project.id);
+    }
+    let ids = |keep: fn(&SharedProject) -> bool| {
+        projects
+            .iter()
+            .filter(|project| keep(project))
+            .map(|project| project.id.clone())
+            .collect::<Vec<_>>()
+    };
+    Ok((ids(|p| !p.read_only), ids(|p| p.commands)))
+}
+
+fn pick_projects(
+    projects: &[SharedProject],
     selectors: &[String],
-) -> Result<Vec<String>, String> {
-    let mut writable = HashSet::new();
+    label: &str,
+) -> Result<HashSet<String>, String> {
+    let mut picked = HashSet::new();
     for selector in selectors {
         let by_id = projects.iter().any(|project| project.id == *selector);
         let candidates: Vec<_> = projects
@@ -213,28 +262,15 @@ pub(super) fn select_writable_workspaces(
             })
             .collect();
         let [project] = candidates.as_slice() else {
-            return Err(
-                "Every writable project must be selected in --share by full ID or unique name"
-                    .into(),
-            );
+            return Err(format!(
+                "Every {label} project must be selected in --share by full ID or unique name"
+            ));
         };
-        if project.read_only {
-            return Err(
-                "A writable project must use a local tool profile that supports file writes".into(),
-            );
-        }
-        if !writable.insert(project.id.clone()) {
-            return Err("A writable project was selected more than once".into());
+        if !picked.insert(project.id.clone()) {
+            return Err(format!("A {label} project was selected more than once"));
         }
     }
-    for project in projects.iter_mut() {
-        project.read_only = !writable.contains(&project.id);
-    }
-    Ok(projects
-        .iter()
-        .filter(|project| !project.read_only)
-        .map(|project| project.id.clone())
-        .collect())
+    Ok(picked)
 }
 
 fn resolve_in(data: &AppData, selectors: &[String]) -> Result<Vec<SharedProject>, String> {
@@ -265,11 +301,13 @@ fn resolve_in(data: &AppData, selectors: &[String]) -> Result<Vec<SharedProject>
         if !selected.insert(&profile.id) {
             return Err("A local project was selected more than once".into());
         }
+        let tools = exposed_tool_names(&profile.runtime.tool_profile);
         projects.push(SharedProject {
             id: profile.id.clone(),
             name: profile.name.clone(),
             path: profile.path.clone(),
-            read_only: !exposed_tool_names(&profile.runtime.tool_profile).contains(&"apply_patch"),
+            read_only: !tools.contains(&"apply_patch"),
+            commands: tools.contains(&"exec_command"),
         });
     }
     validate_workspace_ids(

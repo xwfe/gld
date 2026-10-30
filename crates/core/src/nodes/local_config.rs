@@ -130,6 +130,7 @@ fn same_config(a: &NodeConfig, b: &NodeConfig) -> bool {
         && a.credential == b.credential
         && a.workspaces == b.workspaces
         && a.writable_workspaces == b.writable_workspaces
+        && a.runnable_workspaces == b.runnable_workspaces
         && a.ca_certificate == b.ca_certificate
 }
 

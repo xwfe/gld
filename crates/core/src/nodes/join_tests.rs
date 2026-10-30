@@ -13,6 +13,14 @@ use serde_json::json;
 /// 第四段是邀请里的 Hub 公钥，配对回包必须给出同一把。
 const HUB_KEY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
+/// 只验文件写入这一级时不用每处都写空的 `--run`。
+fn select_writable_workspaces(
+    projects: &mut [SharedProject],
+    selectors: &[String],
+) -> Result<Vec<String>, String> {
+    select_access(projects, selectors, &[]).map(|(writable, _)| writable)
+}
+
 fn token() -> String {
     format!(
         "{}.{}.{}.{HUB_KEY}",
@@ -30,6 +38,7 @@ fn projects(root: &std::path::Path) -> Vec<SharedProject> {
         name: "api".into(),
         path: path.to_string_lossy().into_owned(),
         read_only: false,
+        commands: true,
     }]
 }
 
@@ -39,6 +48,7 @@ fn options(root: &std::path::Path, hub_url: String) -> JoinOptions {
         config_path: root.join("node.json"),
         workspaces: vec!["api".into()],
         writable_workspaces: Vec::new(),
+        runnable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }
@@ -90,6 +100,7 @@ fn writable_projects_are_explicit_unique_and_confined_to_the_shared_selection() 
         name: "web".into(),
         path: "other-test-project".into(),
         read_only: false,
+        commands: true,
     });
     let ids: Vec<_> = selected.iter().map(|project| project.id.clone()).collect();
     assert_eq!(
@@ -126,6 +137,67 @@ fn writable_projects_are_explicit_unique_and_confined_to_the_shared_selection() 
         .unwrap()
         .is_empty());
     assert!(selected.iter().all(|project| project.read_only));
+}
+
+#[test]
+fn run_implies_file_writes_and_stays_inside_the_shared_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let mut selected = projects(root.path());
+    selected.push(SharedProject {
+        id: "e".repeat(32),
+        name: "web".into(),
+        path: "other-test-project".into(),
+        read_only: false,
+        commands: true,
+    });
+    let (api, web) = (selected[0].id.clone(), selected[1].id.clone());
+    let (writable, runnable) =
+        select_access(&mut selected, &["web".into()], &["api".into()]).unwrap();
+    assert_eq!(writable, [api.clone(), web]);
+    assert_eq!(runnable, std::slice::from_ref(&api));
+    assert!(!selected[0].read_only && selected[0].commands);
+    assert!(!selected[1].read_only && !selected[1].commands);
+
+    // 同一个项目同时写 --write 和 --run 不算重复。
+    let mut selected = projects(root.path());
+    let (writable, runnable) =
+        select_access(&mut selected, std::slice::from_ref(&api), &["api".into()]).unwrap();
+    assert_eq!((writable.len(), runnable.len()), (1, 1));
+
+    for invalid in [vec!["missing".to_string()], vec!["api".into(), api.clone()]] {
+        let mut selected = projects(root.path());
+        assert!(select_access(&mut selected, &[], &invalid).is_err());
+    }
+
+    // 本机工具档不支持命令，或者根本不让写，都不能靠 --run 打开。
+    let mut no_commands = projects(root.path());
+    no_commands[0].commands = false;
+    assert!(select_access(&mut no_commands, &[], &["api".into()]).is_err());
+    let mut read_only = projects(root.path());
+    read_only[0].read_only = true;
+    assert!(select_access(&mut read_only, &[], &["api".into()]).is_err());
+}
+
+#[test]
+fn pending_pairing_cannot_gain_command_permission_by_retrying() {
+    let root = tempfile::tempdir().unwrap();
+    let url = "https://example.invalid/hub";
+    let initial = options(root.path(), url.into());
+    let prepared =
+        PreparedJoin::prepare_with_projects(initial, token(), projects(root.path())).unwrap();
+    prepared.storage.save_pending(&prepared.config).unwrap();
+    drop(prepared);
+    let mut changed = options(root.path(), url.into());
+    changed.runnable_workspaces = vec!["api".into()];
+    assert!(PreparedJoin::prepare_with_projects(changed, token(), projects(root.path())).is_err());
+
+    let mut fresh = options(root.path(), url.into());
+    fresh.config_path = root.path().join("fresh.json");
+    fresh.runnable_workspaces = vec!["api".into()];
+    let prepared =
+        PreparedJoin::prepare_with_projects(fresh, token(), projects(root.path())).unwrap();
+    assert_eq!(prepared.preview().access, "project-commands");
+    assert!(prepared.preview().workspaces[0].commands);
 }
 
 #[test]

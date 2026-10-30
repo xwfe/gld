@@ -165,7 +165,7 @@ fn native_file_writes_are_explicit_machine_scoped_and_revoked_by_sharing_replace
     );
     let execution = service.call_raw("exec_command", json!({"workspace":a_api,"argv":["pwd"]}));
     assert_eq!(
-        execution["error"]["code"], "NODE_TOOL_UNSUPPORTED",
+        execution["error"]["code"], "NODE_COMMANDS_NOT_ALLOWED",
         "{execution}"
     );
 

@@ -16,6 +16,7 @@ fn config(url: &str) -> NodeConfig {
         credential: TOKEN.into(),
         workspaces: vec![PROJECT.into()],
         writable_workspaces: Vec::new(),
+        runnable_workspaces: Vec::new(),
         ca_certificate: None,
     }
 }
@@ -199,6 +200,28 @@ fn file_write_permissions_require_a_unique_subset_of_shared_projects() {
     }
     value.writable_workspaces.clear();
     value.validate().unwrap();
+}
+
+#[test]
+fn command_permissions_require_the_project_to_be_writable_too() {
+    let mut value = config("https://example.invalid");
+    value.workspaces.push(HUB.into());
+    value.writable_workspaces = vec![PROJECT.into()];
+    value.runnable_workspaces = vec![PROJECT.into()];
+    value.validate().unwrap();
+    for invalid in [
+        vec![PROJECT.into(), PROJECT.into()],
+        vec![HUB.into()],
+        vec![MACHINE.into()],
+    ] {
+        value.runnable_workspaces = invalid;
+        assert!(value.validate().is_err());
+    }
+    value.runnable_workspaces.clear();
+    let saved = serde_json::to_value(&value).unwrap();
+    assert!(saved.get("runnable_workspaces").is_none());
+    let old: NodeConfig = serde_json::from_value(saved).unwrap();
+    assert!(old.runnable_workspaces.is_empty());
 }
 
 #[test]

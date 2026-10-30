@@ -283,6 +283,7 @@ gld join --hub https://hub.example.com/hub --config node.json --share api --shar
 `--write` 选中的项目必须同时在完整 `--share` 名单中。省略 `--write` 时全部只读。
 本机项目的工具档须允许文件写入，否则 `--write` 会报错，不会代改项目配置。
 命令先显示 Hub ID、执行账号、共享目录和逐项目权限，`read_only=false` 表示允许文件写入，
+`commands=true` 表示能跑命令（见下面[让目标机跑命令](#让目标机跑命令)），
 再从终端取得一次确认；非交互使用显式 `--yes`。文件写入授权不包含命令执行或配置管理权限。
 确认前不会发送邀请或创建含凭据的配对状态。配对只生成配置，随后用
 `gld node run --config node.json` 在前台连接；目标端不会为配对启动本机 daemon。
@@ -333,6 +334,36 @@ gld node shares --config node.json --share api --share web
 修改只更新目标机文件，重新运行节点并完成项目发现后 Hub 才更新目录；剩余项目句柄保持不变，
 被移除的项目不再接受调用。修改保留 Hub 地址和身份、机器 ID、节点凭据及 CA 信任设置。
 
+#### 让目标机跑命令
+
+默认不开。要开就在目标机点名项目，`gld join` 和 `gld node shares` 都用 `--run`：
+
+```bash
+gld node shares --config node.json --share api --share web --run api
+gld node run --config node.json
+```
+
+这样 `api` 能写文件、能跑命令，`web` 只读。`--run` 自带文件写入，不用再写 `--write`：能跑命令就能改任何文件，
+没有“能跑不能写”这一档。注意和 `gld grant` 不一样，那边 `--write` 就包含跑命令；节点这边 `--write` 只管文件。
+
+**开之前想清楚：命令以这个账号的身份跑，不是沙箱。** 能调用这个 Hub 的人等于拿到这个账号，
+包括读到同账号下的 `node.json` 和 `GLD_HOME` 里的凭据。想隔离就给节点单独开一个系统账号。
+
+- **能用的工具：**`exec_command`、`write_stdin`、`kill_session`，加上本来就有的 `read_output`、`list_runs`。
+  用法和本机项目一样。其他工具（比如任务收尾、委派、配置管理）仍然不开放。
+- **目标机说了算：**本机项目的 `command-policy` 和工具档照样管用，默认 guarded 下不在白名单的命令报 `POLICY_REJECTED`；
+  目标机把项目工具档改成只读后立刻生效，不用重启节点。
+- **只有自己看得到：**命令按 Hub 上的调用方分开，别人拿着 `session_id` 也只会收到 `SESSION_NOT_FOUND`，`list_runs` 里也没有。
+  共用一条 Bearer 令牌的客户端算同一个调用方，要分开就给每个客户端单独走 OAuth。
+- **断线不重跑：**连接断了命令继续跑，重连后用 `read_output` 或 `list_runs` 看结果。
+  调用时断线会收到 `NODE_OUTCOME_UNKNOWN`，这时命令可能已经起来了，先 `list_runs` 查，别直接再发一次。
+- **节点退出命令就停：**按 Ctrl-C、系统发 SIGTERM、机器被 `gld node revoke` 撤销导致节点退出，它起的命令都会被停掉，
+  `list_runs` 里记 `interrupted`。节点进程被 `kill -9` 或崩溃时没人收，命令会继续跑（`timeout_ms` 也是节点在管，节点没了就不生效），
+  得到目标机上手动停；节点再起来后记录显示 `unknown`。
+- **等命令时机器是忙的：**`exec_command` 的 `yield_time_ms` 等多久，这台机器的连接就占多久（最多 30 秒），
+  别的调用（包括 `kill_session`）这段时间收到 `MACHINE_BUSY`，再调一次就行。长命令传 `yield_time_ms: 0` 或一个小值，
+  再用 `read_output` 查，别让它占着。
+
 `--json` 输出 `hub_url`、`hub_id`、`machine_id`、`config_path` 和 `workspaces`，不输出凭据或 CA 路径。
 每个项目有 `id`、仍可取得的 `name` / `path`、`available` 和 `read_only`。
 只有配置明确允许文件写入、项目仍有登记且开启 `confine-reads`、本机工具档也允许文件写入时，
@@ -374,7 +405,8 @@ gld --json node rotate-credential <machine_id> --credential-stdin < new-node-cre
 并重新运行节点，Hub ID、机器 ID 和项目句柄保持不变。这里管理的是节点专用凭据，现有 MCP/OAuth 授权保持不变。
 
 在目标机所有共享项目之外的私有目录，准备仅执行账号可读的 JSON 文件，例如 `node.json`。
-下面只授权其中一项共享项目写入；只读配置省略 `writable_workspaces`：
+下面只授权其中一项共享项目写入；只读配置省略 `writable_workspaces`。要跑命令时再加
+`"runnable_workspaces": ["<项目ID>"]`，这些项目必须也在 `writable_workspaces` 里：
 
 ```json
 {
@@ -468,13 +500,15 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 | `MACHINE_OFFLINE` | 没有可用连接，本次未发送；不会改用 Hub 本机或另一个同名项目 |
 | `MACHINE_REVOKED` | 该机器的专用凭据已撤销，本次未发送；须由操作员轮换为新凭据后恢复 |
 | `MACHINE_BUSY` | 这台机器的连接正忙，本次未发送；稍后显式再调 |
-| `NODE_TOOL_UNSUPPORTED` | 节点握手工具表没有该工具，本次未发送；核对节点版本与文件写入授权，命令执行仍未开放 |
+| `NODE_COMMANDS_NOT_ALLOWED` | 目标机没给这个项目开命令，什么都没跑；要开见[让目标机跑命令](#让目标机跑命令) |
+| `NODE_TOOL_UNSUPPORTED` | 节点握手工具表没有该工具，本次未发送；核对节点版本与文件写入授权 |
 | `NODE_ARGUMENT_UNSUPPORTED` | 节点不接受某个参数，本次未发送；核对参数后再调 |
 | `NODE_REQUEST_TOO_LARGE` | 请求超出节点消息上限，在写入网络前拒绝 |
 | `NODE_RESPONSE_TOO_LARGE` | 工具已在目标机执行，但结果超过 8 MiB 的节点消息上限被丢弃；连接照常。少要点输出再调，比如 `view_image` 调小 `max_bytes`（回包约为原图 1.33 倍，原图超过约 6 MiB 才会撞上；`output=data_url` 约 2.67 倍，超过约 3 MiB 就撞） |
 | `NODE_OUTCOME_UNKNOWN` | 已进入发送/等待阶段，但未收到有效回复；写入可能已完成，须先核对目标文件，不自动补发 |
 
-收到 `NODE_OUTCOME_UNKNOWN` 后，保留原机器和项目句柄，重连后先读回受影响的文件，与原补丁核对。
+收到 `NODE_OUTCOME_UNKNOWN` 后，保留原机器和项目句柄，重连后先读回受影响的文件，与原补丁核对；
+跑命令的先用 `list_runs` 查它起来没有。
 确认仍需修改时，再按最新内容和版本提交补丁；无法核实就保留结果未知，不因超时原样重试。
 
 Hub 等一次回包最多 60 秒（工具自己最多等 30 秒，回包在路上再给 30 秒），调用一回包就返回。超过 60 秒才算超时，
@@ -484,7 +518,7 @@ Hub 等一次回包最多 60 秒（工具自己最多等 30 秒，回包在路�
 
 初始化、读写、消息大小与单次工具等待均有上限；空闲期处理标准 WebSocket Ping/Pong 和关闭，
 旧连接确认关闭后才释放名额。一个机器的等待不占全局连接表锁，其他机器可独立处理请求。
-项目文件读写已接通；命令运行、查询、停止及跨主体结果隔离接续下一步，桌面仍后置。
+项目文件读写和命令都已接通，桌面仍后置。
 已有 ccnm 的 `remote_*` 契约继续独立使用。
 
 ### 成员还可以在别的机器上

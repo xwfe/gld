@@ -14,10 +14,11 @@ fn node_file_ceiling_rejects_execution_and_management_even_with_full_auth() {
             tool_profile: "advanced".into(),
             ..HubConfig::default()
         },
-        Members::Node {
+        Members::Node(NodeAccess {
             shared: vec![id.clone()],
             writable: vec![id.clone()],
-        },
+            runnable: Vec::new(),
+        }),
         Connections::new(),
     );
     let auth = AuthContext::new(Principal::SharedSecret, "node-test");
@@ -104,7 +105,12 @@ fn exercise_local_policy() {
     .unwrap();
     let shared = vec![api.id.clone(), web.id.clone()];
     let writable = vec![api.id.clone()];
-    let hub = Hub::for_node(shared.clone(), writable.clone()).unwrap();
+    let hub = Hub::for_node(NodeAccess {
+        shared: shared.clone(),
+        writable: writable.clone(),
+        runnable: Vec::new(),
+    })
+    .unwrap();
     let origin = AuthContext::new(
         Principal::OAuthClient {
             client_id: "alice".into(),

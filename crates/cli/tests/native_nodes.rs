@@ -3,6 +3,9 @@
 
 mod common;
 
+#[cfg(unix)]
+#[path = "native_nodes/commands.rs"]
+mod command_tests;
 #[path = "native_nodes/file_writes.rs"]
 mod file_write_tests;
 #[path = "native_nodes/pairing.rs"]
@@ -556,7 +559,7 @@ fn native_nodes_route_real_projects_through_authenticated_wss_and_global_gateway
     );
     assert_eq!(unknown["error"]["code"], "NODE_ARGUMENT_UNSUPPORTED");
     let write = service.call_raw("exec_command", json!({"workspace":a_api,"argv":["pwd"]}));
-    assert_eq!(write["error"]["code"], "NODE_TOOL_UNSUPPORTED");
+    assert_eq!(write["error"]["code"], "NODE_COMMANDS_NOT_ALLOWED");
     let escape = service.call_raw(
         "read_file",
         json!({"workspace":a_api,"path":"../web/README.md"}),

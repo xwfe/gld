@@ -208,6 +208,7 @@ async fn a_relay_cannot_alter_a_hub_message_even_when_it_keeps_the_signature_tag
         credential: "c".repeat(64),
         workspaces: vec![project.clone()],
         writable_workspaces: Vec::new(),
+        runnable_workspaces: Vec::new(),
         ca_certificate: None,
     };
     let binding = Binding::new(&config.hub_id, &config.machine_id, &new_nonce().unwrap()).unwrap();
