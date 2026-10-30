@@ -284,9 +284,12 @@ impl Nodes {
             .values()
             .filter_map(|entry| entry.connection.clone())
             .collect();
-        for connection in connections {
-            connection.close();
-        }
+        // 一起关：每条都可能要等在途调用收尾，一条条来就成了机器数乘等待时间。
+        std::thread::scope(|scope| {
+            for connection in &connections {
+                scope.spawn(|| connection.close());
+            }
+        });
     }
 }
 

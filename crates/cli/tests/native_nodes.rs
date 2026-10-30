@@ -796,6 +796,80 @@ fn a_reply_slower_than_thirty_seconds_still_arrives_on_the_same_connection() {
     node.stop();
 }
 
+/// 一次调用最多等 60 秒，不能让撤销和停服务陪着等：`gld daemon stop` 只等 20 秒。
+/// 把 `nodes/connection.rs` 里切断在途调用那一行去掉，这两条就会红。
+fn stuck_call_fixture() -> (Env, Service, TlsRelay, Env, Value, PathBuf) {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "machine-a");
+    let registration = register(&hub, "machine-a", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let path = write_config(&machine, "node.json", &value);
+    (hub, service, relay, machine, registration, path)
+}
+
+#[test]
+fn revoking_a_machine_cuts_a_stuck_call_instead_of_waiting_for_it() {
+    let (hub, service, relay, machine, registration, path) = stuck_call_fixture();
+    let _node = NodeProcess::start(&machine, &path);
+    let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
+    relay.hold_node_bytes(Duration::from_secs(45));
+    std::thread::scope(|scope| {
+        let call = scope.spawn(|| {
+            service.rpc_waiting(
+                "tools/call",
+                json!({"name":"read_file","arguments":{"workspace":api,"path":"README.md"}}),
+                Duration::from_secs(50),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        let machine_id = registration["machine_id"].as_str().unwrap();
+        assert_eq!(
+            hub.json(&["--json", "node", "revoke", machine_id])["revoked"],
+            true
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let reply = call.join().unwrap().json();
+        assert_eq!(
+            reply["result"]["structuredContent"]["error"]["code"], "NODE_OUTCOME_UNKNOWN",
+            "{reply}"
+        );
+    });
+}
+
+#[test]
+fn stopping_the_daemon_is_not_held_up_by_a_stuck_call() {
+    let (hub, service, relay, machine, _, path) = stuck_call_fixture();
+    let _node = NodeProcess::start(&machine, &path);
+    let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
+    relay.hold_node_bytes(Duration::from_secs(45));
+    std::thread::scope(|scope| {
+        // 守护进程退出时这条 HTTP 连接可能回不来，这里只关心它不拖住退出。
+        scope.spawn(|| {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                service.rpc_waiting(
+                    "tools/call",
+                    json!({"name":"read_file","arguments":{"workspace":api,"path":"README.md"}}),
+                    Duration::from_secs(50),
+                )
+            }));
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        let stopped = hub.gld(&["daemon", "stop"]);
+        assert!(
+            stopped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+        assert!(started.elapsed() < Duration::from_secs(15));
+    });
+}
+
 #[test]
 fn node_registration_does_not_truncate_an_overlong_credential() {
     let env = Env::new();

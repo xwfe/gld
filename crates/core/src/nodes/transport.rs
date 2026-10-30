@@ -3,10 +3,12 @@
 
 use std::io;
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 
@@ -34,6 +36,7 @@ pub fn socket_config() -> WebSocketConfig {
 pub struct SocketTransport<S> {
     socket: Option<S>,
     signer: Option<MessageSigner>,
+    cancel: Option<Arc<Notify>>,
     last_error: String,
     last_ping: Instant,
     waiting_pong: Option<Instant>,
@@ -65,6 +68,7 @@ impl<S> SocketTransport<S> {
         Self {
             socket: Some(socket),
             signer: None,
+            cancel: None,
             last_error: String::new(),
             last_ping: Instant::now(),
             waiting_pong: None,
@@ -77,6 +81,12 @@ impl<S> SocketTransport<S> {
         self
     }
 
+    /// 发一次通知就切断正在等的收发。调用方持着 Peer 的锁阻塞在这里，别的线程没有别的办法叫停它。
+    pub(crate) fn cancellable(mut self, cancel: Arc<Notify>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
     pub fn is_open(&self) -> bool {
         self.socket.is_some()
     }
@@ -84,6 +94,13 @@ impl<S> SocketTransport<S> {
     fn disconnect(&mut self, reason: &str) {
         self.last_error = reason.into();
         self.socket.take();
+    }
+}
+
+async fn cancelled(cancel: Option<&Arc<Notify>>) {
+    match cancel {
+        Some(cancel) => cancel.notified().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -111,14 +128,25 @@ where
         let socket = self.socket.as_mut().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "node connection is closed")
         })?;
+        let cancel = self.cancel.clone();
         // 写入也必须有界；不加发送队列，否则超时返回后旧请求还可能被排队发送。
         let outcome = async_rt::block_on(async {
-            tokio::time::timeout(
-                MESSAGE_WRITE_TIMEOUT,
-                socket.send(Message::Text(line.into())),
-            )
-            .await
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel.as_ref()) => None,
+                result = tokio::time::timeout(
+                    MESSAGE_WRITE_TIMEOUT,
+                    socket.send(Message::Text(line.into())),
+                ) => Some(result),
+            }
         });
+        let Some(outcome) = outcome else {
+            self.disconnect("node connection is closing; request outcome may be unknown");
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                self.last_error.clone(),
+            ));
+        };
         match outcome {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => {
@@ -143,8 +171,9 @@ where
             return Ok(None);
         };
         let mut saw_pong = false;
+        let cancel = self.cancel.clone();
         let outcome = async_rt::block_on(async {
-            tokio::time::timeout(timeout, async {
+            let read = tokio::time::timeout(timeout, async {
                 loop {
                     match socket.next().await {
                         Some(Ok(Message::Text(text))) => return Ok(Some(text.to_string())),
@@ -169,8 +198,14 @@ where
                         }
                     }
                 }
-            })
-            .await
+            });
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel.as_ref()) => {
+                    Ok(Err("node connection is closing; request outcome may be unknown"))
+                }
+                result = read => result,
+            }
         });
         if saw_pong {
             self.waiting_pong = None;

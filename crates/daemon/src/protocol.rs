@@ -474,7 +474,7 @@ impl Request {
                 | Request::TestMcpServer { .. }
                 // 要停它起的命令，每条最多等 1.5 秒收尾。
                 | Request::RemoveGrant { .. }
-                // 持久变更后等该节点已有的有界 RPC 收尾，再关闭实际连接。
+                // 持久变更后给该节点的在途调用一点时间收尾，再关闭实际连接。
                 | Request::NodeRevoke { .. }
                 | Request::NodeRotateCredential { .. }
                 // 要算目录大小、删整棵目录，日志攒久了有几百 MB。

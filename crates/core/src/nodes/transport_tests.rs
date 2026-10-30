@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use tokio::sync::Notify;
 
 struct Socket {
     incoming: VecDeque<Message>,
@@ -131,4 +132,51 @@ fn a_large_request_on_a_slow_link_is_not_cut_off_after_five_seconds() {
         drain.join().unwrap(),
         Some(Ok(Message::Text(text))) if text.len() == line.len()
     ));
+}
+
+/// Hub 要关连接时，调用方正持着 Peer 的锁阻塞在收发里，只能靠这个通知叫停。
+#[test]
+fn a_cancelled_read_stops_waiting_at_once_and_closes_the_socket() {
+    let cancel = Arc::new(Notify::new());
+    let (transport, _) = fixture(vec![], false);
+    let mut transport = transport.cancellable(cancel.clone());
+    let notifier = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        cancel.notify_one();
+    });
+    let started = Instant::now();
+    assert!(matches!(
+        transport.recv_line(Duration::from_secs(30)),
+        Ok(None)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!transport.is_open());
+    assert!(transport.stderr_tail().contains("outcome may be unknown"));
+    notifier.join().unwrap();
+}
+
+/// 对面不读时写也会卡住；缓冲区只有 16 KiB，1 MiB 写不完。
+#[test]
+fn a_cancelled_write_stops_waiting_at_once_and_closes_the_socket() {
+    let (hub, node) = tokio::io::duplex(16 * 1024);
+    let hub = async_rt::block_on(WebSocketStream::from_raw_socket(
+        hub,
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        Some(socket_config()),
+    ));
+    let cancel = Arc::new(Notify::new());
+    let mut hub = WebSocketTransport::new(hub)
+        .unwrap()
+        .cancellable(cancel.clone());
+    let notifier = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        cancel.notify_one();
+    });
+    let started = Instant::now();
+    let error = hub.send_line(&"x".repeat(1024 * 1024)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!hub.is_open());
+    notifier.join().unwrap();
+    drop(node);
 }
