@@ -4077,3 +4077,37 @@ SIGTERM 后进程没了、节点重启后记 `interrupted`；`gld node revoke` �
 隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1272 passed / 0 failed；Clippy `-D warnings`、fmt --check 通过。
 协议仍15，Hub 对外工具表未改，连接器不用 Refresh；新增配置字段缺省不开，旧配置继续有效。现有服务、OAuth/grant、安装、发布均未改动，未推送。
 
+## 96. 独立审查 §95：只给文件写入的项目能跑任意命令（2026-10-30）
+
+**范围与基线：**§95 是权限边界，派一个只读子代理审 `73bb903..30da137`，只给代码和要判断的问题，不给我的结论。下面每条都由我复核。
+
+**高，已修：`--write` 项目能以节点账号跑任意命令。**这是 §91 文件写入带进来的（只查路径第一段的 `.git`），§95 才把“`--write` 只管文件”写成了边界。
+路径：`apply_patch` 新建 `sub/.git/config`，写 `core.fsmonitor = touch X; false #`，再调 `git_status path=sub`，git 就执行这条命令，而 `exec_command` 是被拒的。
+不含 `.git` 的裸仓库形状（`bare/{HEAD,config,objects,refs}`）也行。先写了会失败的测试：修之前嵌套 `.git` 写得进去；只去掉 git 那层防护时，
+测试停在“git 执行了项目里的命令”那行（git 2.56），两条路都是真的。
+
+修法分两层，都不依赖调用方是谁：
+- 写：任意一层的 `.git` 都拒（`write_class::is_git_internal`），大小写不敏感，含 Windows 的 `.git.` 和 `git~1`。
+- 读：所有在项目里跑的 git 都从 `git_command` 起。往上找仓库时，先碰到像裸仓库的目录就报 `GIT_BARE_REPOSITORY_REFUSED`，形状包括只有 `HEAD` 和 `commondir`、对象库在别处的。
+  另带 `-c safe.bareRepository=explicit`；单靠它不够，这个配置要 git 2.38，而 Ubuntu 22.04 自带 2.34。
+
+没走“拒绝顶层不是项目根的仓库”：本机项目里有嵌套仓库是常见正常用法，而文件写入已经改不到它们的配置了。
+
+**剩下的缺口，已写进 security.md：**仓库配置本来就指向仓库里的脚本（`core.fsmonitor`、filter、textconv）时，改脚本等于能执行。工具层分不出来，这种仓库不要给 `--write`。
+`--write` 现在的准确说法是“不开放命令工具”，不是“绝对跑不了代码”。项目本身是裸仓库时 git 工具也会拒，这是这次带来的行为变化，本机项目同样受影响。
+
+**中，已修：SIGHUP 时不收命令。**前台运行时关终端、SSH 断开发 SIGHUP，节点直接死，命令留在后台。子代理实跑确认，修后两条真实链路测试：SIGHUP 时节点和命令都停；
+SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数再查是否被忽略，查到的是自己，测试抓到后改了顺序。
+
+**低，已修：项目从目标机移除后命令不停。**`forget_departed` 只收 `hub` 入口，节点调用方的入口是 `node`，调用方又调不到 `kill_session` 了。现在按实际入口收，core 测试验证进程消失。
+
+**低，只写了文档：**Hub 连过 `--run` 节点后回滚旧二进制，旧版校验不认 `commands`，整个 Hub 报 `HUB_UNAVAILABLE`。只读代码，没实跑。旧二进制没法改，所以写进 install.md 的回滚说明：连数据目录一起回退。
+
+**没修：**
+- 工具档改成只读后，`kill_session` 也被拒，已起的命令要等节点重启或命令超时。本机项目同样如此，改工具档的是目标机操作员，他能自己停。
+- 子代理标“不确定”的那条（同一目录登记两个权限不同的项目时可能把活记录写成 `unknown`）：`gld add` 看路径去重，走不到；没再深挖手改数据文件的情况。
+
+**子代理核对过、没发现问题的：**取消逻辑（`Notify` 的 permit 语义、`close` 与 `try_with_peer` 竞态、锁）、主体隔离、退出路径、新旧版本互配。这些是它读代码的结论，我没有逐条复跑。
+
+隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：见任务表当前基线。协议仍15，工具表未改，现有服务、OAuth/grant、安装、发布均未改动，未推送。
+

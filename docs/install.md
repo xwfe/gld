@@ -191,6 +191,8 @@ gld health                               # 本地、公网 /mcp，OAuth 元数�
 **回滚**：把备份的二进制按同样的"写新文件再改名"放回去，再 `gld daemon restart`。数据目录一般
 不用回滚；真要回，先 `gld daemon stop`，再把备份的 `tgz` 解回 `~/.config`。回滚到的版本比当前的旧、
 工具表不一样时，ChatGPT 也要点一次 Refresh。
+Hub 连过开了 `--run` 的目标机之后，不能只换回不认识这一档的旧二进制：旧版读到登记里的 `commands` 权限会报错，
+连本机项目的调用也一起报 `HUB_UNAVAILABLE`。这时要连数据目录一起回退。
 
 > 注意别和 `gld upgrade` 搞混：那条命令改的是**服务和项目的配置**（端口、认证、公网入口、
 > 项目目录），不升级 gld 自己。升级 gld 只有"换二进制 + `gld daemon restart`"这一条路。
