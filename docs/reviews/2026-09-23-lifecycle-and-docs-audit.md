@@ -4109,5 +4109,8 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 
 **子代理核对过、没发现问题的：**取消逻辑（`Notify` 的 permit 语义、`close` 与 `try_with_peer` 竞态、锁）、主体隔离、退出路径、新旧版本互配。这些是它读代码的结论，我没有逐条复跑。
 
-隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：见任务表当前基线。协议仍15，工具表未改，现有服务、OAuth/grant、安装、发布均未改动，未推送。
+隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1277 passed / 0 failed；Clippy `-D warnings`、fmt --check 通过。协议仍15，工具表未改，现有服务、OAuth/grant、安装、发布均未改动，未推送。
+
+**提交顺序的问题：**提交这一节时，改文档的脚本因为字符串没对上而失败，同一条命令后面的 `git commit` 照跑（换行不算门控）。全量是提交前跑过的，代码没坏，
+但 `2f8b7ee` 没带上它的测试，测试落在 `35dff90`；任务表和 RFC 的更新也漏了，由后一个提交补上。没有改写历史。
 
