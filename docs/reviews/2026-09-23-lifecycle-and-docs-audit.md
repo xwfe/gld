@@ -4000,3 +4000,37 @@ Clippy `-D warnings`、fmt --check、CLI 文档重生成（只变 `node register
 
 隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1251 passed / 0 failed；
 Clippy `-D warnings`、fmt --check 和文档定稿后的五组文档检查通过。协议仍15，现有服务、OAuth/grant、安装、发布均未改动，未推送。
+
+## 94. 节点调用超时放宽到 60 秒、回包写超时 30 秒、view_image 只回一份编码、README 重写（2026-10-30）
+
+**范围与基线：**用户要求继续 §90 的 `view_image` 和 30 秒超时，认为操作和网络都可能超过 30 秒，提议放宽到 60 秒；另要求从用户角度重写 README。
+基线 `aeb8f3b`，工作树干净。命令执行还没接入节点，这轮改的是它要踩的约束，不是命令执行本身。
+
+**研判：**60 秒可行，但只改它不解决网络问题。读源码发现弱网时先触发的是 5 秒写超时，5 Mbps 上行发 4 MB 约 7 秒，
+不论 Hub 肯等多久，节点写到第 5 秒就断线重连。所以三个数一起定：工具最多等 30 秒，消息写最多 30 秒，Hub 最多等 60 秒。
+节点的 `IDLE_TIMEOUT` 也是 60 秒，调用期间 Hub 不发 Ping，这是 `CALL` 的硬上限，再往上放要先改它。
+新增一条测试锁住这几个数的关系。Ping 等控制帧的写超时仍是 5 秒。
+
+| 改动 | 提交 | 验证 |
+| --- | --- | --- |
+| Hub 等回包 30 → 60 秒 | `2922361` | 真实 CLI/TLS/WSS：中继压住节点回包 32 秒，同一连接拿到结果、连接数不变；`CALL` 还是 30 时 30.6 秒报错 |
+| RPC 消息写超时 5 → 30 秒 | `50c3a21` | 两条测试让对端 6 秒后才读；压回 5 秒时都在 5.04 秒失败 |
+| `view_image` 经节点只回一份编码 | `8f2a957`、`793cc40` | 3 MB 噪声图经真实链路拿到图片块，解码后字节数一致，回包不超过编码长度加 4 KiB；超限改用 6.8 MB 的图验证 |
+| README 重写 | `67eab33` | 见下 |
+
+`8f2a957` 提交时检查没过：把测试和 `git commit` 用 `;` 串在一起，一条单元测试编译失败没拦住，`793cc40` 修复。没改写历史，所以 `8f2a957` 单独检出时 lib 测试编译不过。
+
+**图片的取舍：**只在节点发回包前裁，本机客户端输出和工具表都不变，连接器不用 Refresh。默认只回图片块，约为原图 1.33 倍，默认 5 MiB 的图放得下；
+`output=data_url` 要在结构化结果和文本块里各留一份（`tag_result` 靠两者相等才同步句柄），约 2.67 倍，原图超过约 3 MiB 仍报 `NODE_RESPONSE_TOO_LARGE`。
+
+**README：**用隔离 `GLD_HOME` 跑过 `gld start`、`add`、`ls`、`doctor`、`health`、`upgrade --auth bearer`、`secret ls`、`stop`、`daemon stop`；
+无令牌请求回 401，带令牌的 `list_workspaces`、`git_status` 正常。核对 v0.8.3 源码时发现 `command-policy` 没进那一版，写进了未发版说明。
+
+**代价：**60 秒是上限，正常调用一回包就返回。但卡住的调用占连接的时间变长：别的调用立刻收到 `MACHINE_BUSY` 的窗口从最长 30 秒变成 60 秒；
+停服务要等在途调用结束，`Connection::close` 最坏从约 35 秒（写 5 + 等 30）变成约 90 秒（写 30 + 等 60），而 `gld daemon stop` 只等 20 秒。
+这一条只读了代码，没实测。这个差距以前就有，没在这轮改；真遇到再让关闭不等在途调用。
+
+**没验证：**慢网是中继和测试里模拟的，没在真实弱网、跨机器上跑；`gld share`（会开公网地址）和 `claude mcp add`（会改本机客户端配置）没实跑，只核对了帮助；ChatGPT 配置步骤沿用已有文档，这轮没重走。
+
+隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1258 passed / 0 failed；
+Clippy `-D warnings`、fmt --check 通过。协议仍15，工具表未改，现有服务、OAuth/grant、安装、发布均未改动，未推送。
