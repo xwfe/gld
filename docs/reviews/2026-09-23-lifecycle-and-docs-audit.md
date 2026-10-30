@@ -4114,3 +4114,6 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 **提交顺序的问题：**提交这一节时，改文档的脚本因为字符串没对上而失败，同一条命令后面的 `git commit` 照跑（换行不算门控）。全量是提交前跑过的，代码没坏，
 但 `2f8b7ee` 没带上它的测试，测试落在 `35dff90`；任务表和 RFC 的更新也漏了，由后一个提交补上。没有改写历史。
 
+**CI：**用户让推，main 推到 `dabb233`。Linux、macOS 测试和 MSRV 都过，Windows job 红在 `computer/probe/state.rs` 的 unused-mut（`17ea95b` 留下的，Windows 开了 `-D warnings`，这是它第一次上 CI）。
+本机交叉检查走不通：`ring` 缺 Windows 头文件。`00406e5` 修完后 8 个 job 全过，这轮节点代码在 Windows 上编译通过；Windows 上只真跑了补丁落盘和写锁那组测试，节点和命令相关的没跑过。
+
