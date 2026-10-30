@@ -18,6 +18,7 @@ impl Directory {
             "gld-computer-probe-{}",
             uuid::Uuid::new_v4().simple()
         ));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
