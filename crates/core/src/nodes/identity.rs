@@ -7,6 +7,8 @@ use super::config::{valid_id, validate_workspace_ids};
 use crate::auth::{AuthContext, Grant, Principal};
 
 pub const META_KEY: &str = "gld.node";
+/// 经节点进来的调用方的入口名，和 [`crate::hub::HUB_SCOPE`] 分开。
+pub const NODE_SCOPE: &str = "node";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,13 +66,15 @@ pub fn auth_from_meta(
         .and_then(Value::as_str)
         .is_some_and(|id| writable_ids.iter().any(|allowed| allowed == id));
     Ok(
-        AuthContext::new(Principal::OAuthClient { client_id }, "node").with_grant(Some(Grant {
-            id: format!("node-share-{expected_hub_id}"),
-            name: "Explicit node project share".into(),
-            workspaces: shared_ids.to_vec(),
-            read_only: !writable,
-            browser: false,
-        })),
+        AuthContext::new(Principal::OAuthClient { client_id }, NODE_SCOPE).with_grant(Some(
+            Grant {
+                id: format!("node-share-{expected_hub_id}"),
+                name: "Explicit node project share".into(),
+                workspaces: shared_ids.to_vec(),
+                read_only: !writable,
+                browser: false,
+            },
+        )),
     )
 }
 

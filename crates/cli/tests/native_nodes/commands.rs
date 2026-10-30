@@ -263,3 +263,59 @@ fn a_killed_node_leaves_its_command_running_and_the_record_says_unknown() {
     assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
     assert_eq!(reason, "unknown");
 }
+
+/// 前台运行时关终端、SSH 断开发的是 SIGHUP。接不住的话节点直接死，命令留在后台。
+#[test]
+fn a_hangup_stops_the_node_and_its_commands() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let (path, _) = start(&hub, &machine, &relay, &[0]);
+    let mut node = NodeProcess::start(&machine, &path);
+    let api = find(&wait_inventory(&service, 2, 2), "target/api");
+
+    allow_all_commands(&machine);
+    background(&service, &api, "echo $$ > pid.txt; exec sleep 600");
+    let pid = command_pid(&machine);
+    let node_pid = node.0.as_ref().unwrap().id() as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(node_pid, libc::SIGHUP) }, 0);
+    node.wait_stopped();
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "the command outlived its node"
+    );
+}
+
+/// `nohup gld node run` 就是要它扛过 SIGHUP，不能因为我们接了这个信号就退出。
+#[test]
+fn a_node_started_with_nohup_survives_a_hangup() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let (path, _) = start(&hub, &machine, &relay, &[0]);
+    let mut wrapper = Command::new("sh");
+    wrapper
+        .args(["-c", "trap '' HUP; exec \"$@\"", "sh"])
+        .arg(env!("CARGO_BIN_EXE_gld"))
+        .args(["node", "run", "--config"])
+        .arg(&path)
+        .env("GLD_HOME", machine.home.path())
+        .current_dir(machine.project.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut node = NodeProcess(Some(wrapper.spawn().unwrap()));
+    wait_inventory(&service, 2, 2);
+
+    let node_pid = node.0.as_ref().unwrap().id() as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(node_pid, libc::SIGHUP) }, 0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        node.0.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "a nohup node exited on SIGHUP"
+    );
+    wait_inventory(&service, 2, 2);
+}

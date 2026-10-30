@@ -1122,12 +1122,14 @@ impl Hub {
             gone.iter().filter_map(|id| contexts.remove(id)).collect()
         };
         // 只收经 hub 起的：操作员收回的是"经这个入口访问它"的权限，那个工作区
-        // 自己的监听器和命令行起的命令不在这次收回的范围里。
+        // 自己的监听器和命令行起的命令不在这次收回的范围里。节点上的入口叫 node：
+        // 项目移除后调用方连 kill_session 都调不到它了，这里不收就没人收。
+        let scope = match self.members {
+            Members::Node(_) => crate::nodes::identity::NODE_SCOPE,
+            _ => HUB_SCOPE,
+        };
         for cached in departed {
-            cached
-                .context
-                .runtime
-                .terminate_sessions_in_scope(HUB_SCOPE);
+            cached.context.runtime.terminate_sessions_in_scope(scope);
         }
         let still_here: Vec<String> = members
             .iter()

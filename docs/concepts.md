@@ -358,7 +358,8 @@ gld node run --config node.json
 ```
 
 这样 `api` 能写文件、能跑命令，`web` 只读。`--run` 自带文件写入，不用再写 `--write`：能跑命令就能改任何文件，
-没有“能跑不能写”这一档。注意和 `gld grant` 不一样，那边 `--write` 就包含跑命令；节点这边 `--write` 只管文件。
+没有“能跑不能写”这一档。注意和 `gld grant` 不一样，那边 `--write` 就包含跑命令；节点这边 `--write` 不开放命令工具
+（有一种例外，见 [security.md](security.md#原生节点目标机认-hub-靠钉住的公钥不只靠证书)）。
 
 **开之前想清楚：命令以这个账号的身份跑，不是沙箱。** 能调用这个 Hub 的人等于拿到这个账号，
 包括读到同账号下的 `node.json` 和 `GLD_HOME` 里的凭据。想隔离就给节点单独开一个系统账号。
@@ -371,8 +372,9 @@ gld node run --config node.json
   共用一条 Bearer 令牌的客户端算同一个调用方，要分开就给每个客户端单独走 OAuth。
 - **断线不重跑：**连接断了命令继续跑，重连后用 `read_output` 或 `list_runs` 看结果。
   调用时断线会收到 `NODE_OUTCOME_UNKNOWN`，这时命令可能已经起来了，先 `list_runs` 查，别直接再发一次。
-- **节点退出命令就停：**按 Ctrl-C、系统发 SIGTERM、机器被 `gld node revoke` 撤销导致节点退出，它起的命令都会被停掉，
-  `list_runs` 里记 `interrupted`。节点进程被 `kill -9` 或崩溃时没人收，命令会继续跑（`timeout_ms` 也是节点在管，节点没了就不生效），
+- **节点退出命令就停：**按 Ctrl-C、系统发 SIGTERM、关终端或 SSH 断开（SIGHUP，用 `nohup` 起的不算）、
+  机器被 `gld node revoke` 撤销导致节点退出，它起的命令都会被停掉，`list_runs` 里记 `interrupted`。
+  项目从目标机移除后，它上面的命令也会停。节点进程被 `kill -9` 或崩溃时没人收，命令会继续跑（`timeout_ms` 也是节点在管，节点没了就不生效），
   得到目标机上手动停；节点再起来后记录显示 `unknown`。
 - **等命令时机器是忙的：**`exec_command` 的 `yield_time_ms` 等多久，这台机器的连接就占多久（最多 30 秒），
   别的调用（包括 `kill_session`）这段时间收到 `MACHINE_BUSY`，再调一次就行。长命令传 `yield_time_ms: 0` 或一个小值，

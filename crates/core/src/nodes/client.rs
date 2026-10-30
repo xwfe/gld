@@ -51,20 +51,39 @@ pub fn run(config: NodeConfig) -> Result<(), String> {
     outcome
 }
 
-/// 开机自启时系统用 SIGTERM 停进程；只等 Ctrl-C 的话进程会直接死，命令留在后台。
+/// 开机自启时系统用 SIGTERM 停进程，前台运行时关终端或 SSH 断开发 SIGHUP；没接住的话进程直接死，
+/// 命令留在后台。`nohup` 的意思就是“别因为 SIGHUP 退出”，那种情况不接：一接就把忽略覆盖掉了。
 async fn stop_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
         if let Ok(mut term) = signal(SignalKind::terminate()) {
+            let hangup = async {
+                // 先查再接：接了之后查到的就是自己的处理函数了。
+                if !hangup_ignored() {
+                    if let Ok(mut hup) = signal(SignalKind::hangup()) {
+                        hup.recv().await;
+                        return;
+                    }
+                }
+                std::future::pending::<()>().await
+            };
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = term.recv() => {}
+                _ = hangup => {}
             }
             return;
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(unix)]
+fn hangup_ignored() -> bool {
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    let queried = unsafe { libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current) };
+    queried == 0 && current.sa_sigaction == libc::SIG_IGN
 }
 
 async fn run_until<F>(config: NodeConfig, hub: Arc<Hub>, shutdown: &mut F) -> Result<(), String>
