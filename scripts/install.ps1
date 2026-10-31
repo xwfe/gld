@@ -78,17 +78,21 @@
         $installed = Join-Path $installDir 'gld.exe'
         $staged = Join-Path $installDir ".gld.installing.$PID.exe"
         Copy-Item $binary $staged -Force
-        # A running exe cannot be overwritten but can be renamed, so move the old one aside.
-        $old = "$installed.old"
-        if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
+        # A running exe cannot be overwritten but can be renamed, so move the old one aside. A node may still
+        # be running from an earlier .old file that cannot be deleted yet, so each one gets its own name.
+        $old = "$installed.old.$PID"
+        Remove-Item "$installed.old.*" -Force -ErrorAction SilentlyContinue
         $replaced = Test-Path $installed
-        if ($replaced) { Move-Item $installed $old -Force }
         try {
-            Move-Item $staged $installed -Force
-        } catch {
-            if ($replaced) { Move-Item $old $installed -Force }
+            if ($replaced) { Move-Item $installed $old -Force }
+            try {
+                Move-Item $staged $installed -Force
+            } catch {
+                if ($replaced) { Move-Item $old $installed -Force }
+                throw
+            }
+        } finally {
             Remove-Item $staged -Force -ErrorAction SilentlyContinue
-            throw
         }
         if ($replaced) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
 
@@ -96,12 +100,17 @@
         if ($replaced) { Write-Host "Replaced the previous version. If a node runs in the background, run: gld node autostart enable" }
 
         # The user-level Path needs no administrator rights. Update this window too so it works right away.
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        # Go through the registry: [Environment] expands %VAR% entries and writes them back flattened.
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+        $userPath = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         if (-not (($userPath -split ';') -contains $installDir)) {
             $newPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
-            [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+            $key.SetValue('Path', $newPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            # Setting any variable this way makes Windows tell open programs that the environment changed.
+            [Environment]::SetEnvironmentVariable('GLD_INSTALL_PATH_NOTICE', $null, 'User')
             Write-Host "Added $installDir to the user Path."
         }
+        $key.Close()
         if (-not (($env:Path -split ';') -contains $installDir)) { $env:Path = "$env:Path;$installDir" }
     } finally {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue

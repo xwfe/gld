@@ -225,7 +225,7 @@ fn log_of(config: &Path) -> String {
 }
 
 #[test]
-fn a_revoked_service_stops_for_good_with_a_clean_exit_and_says_why() {
+fn a_refused_service_keeps_trying_because_a_401_may_not_come_from_the_hub() {
     let fixture = Fixture::new("revoked");
     let mut node = service_process(&fixture.machine, &fixture.config);
     wait_inventory(&fixture.service, 2, 2);
@@ -237,12 +237,35 @@ fn a_revoked_service_stops_for_good_with_a_clean_exit_and_says_why() {
     fixture
         .hub
         .ok(&["node", "revoke", machine["machine_id"].as_str().unwrap()]);
+    wait_until("the log should show the refusal", || {
+        log_of(&fixture.config).contains("trying again in 600s")
+    });
+    let log = log_of(&fixture.config);
+    assert!(log.contains("HTTP 401"), "{log}");
+    assert!(log.contains("stopped this node's commands"), "{log}");
+    assert!(node.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    node.stop();
+}
+
+#[test]
+fn a_service_stops_for_good_when_the_endpoint_cannot_prove_it_is_the_hub() {
+    let fixture = Fixture::new("impostor");
+    // 换一个公钥，等于配对之后地址背后换了别的服务。
+    let mut value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture.config).unwrap()).unwrap();
+    let key = value["hub_public_key"].as_str().unwrap();
+    let private = gld_core::nodes::hub_key::generate_private_key().unwrap();
+    let other = gld_core::nodes::hub_key::HubKey::from_stored(&private)
+        .unwrap()
+        .public_key();
+    assert_ne!(key, other);
+    value["hub_public_key"] = json!(other);
+    let config = write_config(&fixture.machine, "impostor.json", &value);
+    let mut node = service_process(&fixture.machine, &config);
     node.wait_stopped();
     let status = node.0.as_mut().unwrap().try_wait().unwrap().unwrap();
     assert!(status.success(), "launchd restarts on a non-zero exit");
-    let log = log_of(&fixture.config);
-    assert!(log.contains("HTTP 401"), "{log}");
-    assert!(log.contains("joins the Hub again"), "{log}");
+    assert!(log_of(&config).contains("joins the Hub again"));
 }
 
 #[test]
@@ -268,12 +291,76 @@ fn a_certificate_failure_keeps_the_service_alive_where_a_foreground_node_would_e
 }
 
 #[test]
-fn a_service_with_a_missing_project_exits_cleanly_instead_of_being_restarted_forever() {
+fn a_service_waits_for_a_missing_project_and_exits_only_when_the_config_is_gone() {
     let fixture = Fixture::new("gone");
     fixture.machine.ok(&["rm", "--yes", "api"]);
+    let mut node = service_process(&fixture.machine, &fixture.config);
+    wait_until("the log should show the wait", || {
+        log_of(&fixture.config).contains("trying again in 60s")
+    });
+    assert!(node.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    // 等的时候不占着配置，用户能改共享名单。
+    assert!(!gld_core::nodes::local_config::LocalConfig::in_use(&fixture.config).unwrap());
+    node.stop();
+
+    std::fs::remove_file(&fixture.config).unwrap();
     let mut node = service_process(&fixture.machine, &fixture.config);
     node.wait_stopped();
     let status = node.0.as_mut().unwrap().try_wait().unwrap().unwrap();
     assert!(status.success());
-    assert!(log_of(&fixture.config).contains("not starting"));
+    assert!(log_of(&fixture.config).contains("configuration is gone"));
+}
+
+#[test]
+fn disable_will_not_claim_success_while_the_node_keeps_running() {
+    let fixture = Fixture::new("stubborn");
+    let status = parsed(&fixture.autostart("enable"));
+    wait_inventory(&fixture.service, 2, 2);
+    let definition = fixture.definition(&status);
+    // 模拟连不上用户服务的会话：停止命令什么都没做。
+    let pid = fixture.pid().unwrap();
+    let kept = fixture.stubs.path().join("node.pid.kept");
+    std::fs::rename(fixture.stubs.path().join("node.pid"), &kept).unwrap();
+    let output = fixture.autostart("disable");
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("still running"), "{error}");
+    assert!(definition.exists(), "autostart must stay in place");
+    // 还原，让清理能收掉进程。
+    std::fs::write(fixture.stubs.path().join("node.pid"), pid).unwrap();
+}
+
+#[test]
+fn a_failed_start_leaves_no_definition_behind() {
+    let fixture = Fixture::new("nostart");
+    for name in ["launchctl", "systemctl"] {
+        std::fs::write(
+            fixture.stubs.path().join(name),
+            "#!/bin/sh\ncase \"$*\" in *bootstrap*|*enable*|*daemon-reload*) echo refused >&2; exit 1 ;; esac\nexit 0\n",
+        )
+        .unwrap();
+    }
+    let output = fixture.autostart("enable");
+    assert!(!output.status.success());
+    let shown = parsed(&fixture.autostart("status"));
+    assert_eq!(shown["installed"], false);
+    assert_eq!(shown["running"], false);
+    let label = shown["label"].as_str().unwrap().to_string();
+    assert!(!fixture.definition(&json!({ "label": label })).exists());
+}
+
+#[test]
+fn leaving_while_a_foreground_node_runs_changes_nothing() {
+    let fixture = Fixture::new("busy");
+    let mut node = NodeProcess::start(&fixture.machine, &fixture.config);
+    wait_inventory(&fixture.service, 2, 2);
+    let left = fixture
+        .cli()
+        .args(["leave", "--yes", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+    assert!(!left.status.success());
+    assert!(fixture.config.exists());
+    node.stop();
 }

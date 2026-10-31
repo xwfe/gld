@@ -51,12 +51,21 @@ fn find_in(dir: &Path) -> Result<PathBuf, String> {
     let mut found: Vec<PathBuf> = match fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .filter_map(|path| {
+                // 配对没做完只剩 pending 时也算：不然 gld leave 不写路径就清不掉它。
+                match path.extension()?.to_str()? {
+                    "json" => Some(path),
+                    "pending" => Some(path.with_extension("")),
+                    _ => None,
+                }
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            })
             .collect(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(_) => return Err("Cannot read the node configuration directory".into()),
     };
     found.sort();
+    found.dedup();
     match found.len() {
         0 => Err("This machine has not joined a Hub; run gld join first, or pass --config".into()),
         1 => Ok(found.remove(0)),
@@ -72,7 +81,7 @@ fn find_in(dir: &Path) -> Result<PathBuf, String> {
     }
 }
 
-const IN_USE: &str =
+pub const IN_USE: &str =
     "Node configuration is in use; stop the node or wait for the other configuration command";
 
 pub struct LocalConfig {

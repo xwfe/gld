@@ -4,6 +4,8 @@ use std::io::{IsTerminal, Read};
 use std::path::Path;
 
 use gld_core::app::HubStatusDto;
+use gld_core::nodes::config::NodeConfig;
+use gld_core::nodes::local_config::LocalConfig;
 use gld_daemon::Request;
 use serde_json::Value;
 
@@ -121,9 +123,10 @@ impl JoinCommands {
 }
 
 fn checked_entry(url: &str) -> Result<String, CliError> {
-    gld_core::nodes::config::parse_hub_url(url)
+    let parsed = gld_core::nodes::config::parse_hub_url(url.trim())
         .map_err(|error| CliError::new(format!("--hub 的地址目标机用不了：{error}")))?;
-    Ok(url.trim_end_matches('/').to_string())
+    // 用解析后的：它会转义引号和控制字符，这个值接下来要拼进目标机粘贴的命令。
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 /// 目标机把这个地址存进配置，之后一直连它。所以必须是固定的，临时地址和 OpenAI 隧道都得在这里拦下：
@@ -172,25 +175,17 @@ fn read_credential(enabled: bool) -> Result<String, CliError> {
 }
 
 pub async fn run_config(path: &Path, service: bool) -> CliResult {
-    if service {
+    let (storage, config) = if service {
         gld_core::nodes::service::detach_console();
         gld_core::nodes::service::log_to(path);
-    }
-    // 拿不到锁时退出码非 0：前台那个停了之后，服务管理器一分钟内再拉起这个就接上了。
-    let storage = gld_core::nodes::local_config::LocalConfig::lock(path).map_err(|error| {
-        if service {
-            gld_core::nodes::service::report(&error);
+        match open_for_service(path).await {
+            Some(opened) => opened,
+            None => return Ok(()),
         }
-        CliError::new(error)
-    })?;
-    let config = match load_config(&storage) {
-        Ok(config) => config,
-        // 配置坏了或项目被删，拉起多少次都一样。退出码 0，服务管理器不再反复拉起，原因在日志里。
-        Err(error) if service => {
-            gld_core::nodes::service::report(&format!("{error}; not starting"));
-            return Ok(());
-        }
-        Err(error) => return Err(CliError::new(error)),
+    } else {
+        let storage = LocalConfig::lock(path).map_err(CliError::new)?;
+        let config = load_config(&storage).map_err(CliError::new)?;
+        (storage, config)
     };
     tokio::task::spawn_blocking(move || {
         let _configuration_lock = storage;
@@ -205,9 +200,43 @@ pub async fn run_config(path: &Path, service: bool) -> CliResult {
     .map_err(CliError::new)
 }
 
-fn load_config(
-    storage: &gld_core::nodes::local_config::LocalConfig,
-) -> Result<gld_core::nodes::config::NodeConfig, String> {
+/// 外置盘还没挂载、数据文件一时读不了，等一会儿就好，退出的话要等到下次开机才回来。所以都在进程里等，
+/// 也不依赖服务管理器的重启策略（Windows 计划任务的不可靠）。只有配置文件没了才退出：这份节点已经不存在了。
+async fn open_for_service(path: &Path) -> Option<(LocalConfig, NodeConfig)> {
+    use gld_core::nodes::local_config::IN_USE;
+    use gld_core::nodes::service::report;
+    let mut reported_busy = false;
+    loop {
+        if !path.exists() {
+            report("node configuration is gone; not starting");
+            return None;
+        }
+        let wait = match LocalConfig::lock(path) {
+            Ok(storage) => match load_config(&storage) {
+                Ok(config) => return Some((storage, config)),
+                Err(error) => {
+                    report(&format!("{error}; trying again in 60s"));
+                    60
+                }
+            },
+            // 前台节点开着，或者诊断命令正好探了一下锁。查询很便宜，短间隔等它放开。
+            Err(error) if error == IN_USE => {
+                if !reported_busy {
+                    report(&format!("{error}; waiting for it"));
+                    reported_busy = true;
+                }
+                5
+            }
+            Err(error) => {
+                report(&format!("{error}; trying again in 60s"));
+                60
+            }
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    }
+}
+
+fn load_config(storage: &LocalConfig) -> Result<NodeConfig, String> {
     let config = storage.load()?;
     let projects = gld_core::nodes::join::resolve_workspaces(&config.workspaces)?;
     gld_core::nodes::local_config::validate_config_location(

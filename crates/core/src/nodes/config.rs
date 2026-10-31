@@ -15,7 +15,8 @@ use super::hub_key::HubKey;
 
 const MAX_PROJECTS: usize = 256;
 pub(super) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
-const AUTH_FAILED: &str = "Invalid node credentials";
+pub const AUTH_FAILED: &str = "Invalid node credentials";
+const REGISTRY_UNAVAILABLE: &str = "Node registry is unavailable";
 
 #[cfg(test)]
 #[path = "config_tests.rs"]
@@ -544,7 +545,11 @@ pub fn authenticate(machine_id: &str, credential: &str) -> Result<AuthenticatedM
     DataStore::read_file(|data| {
         authenticate_in(data, machine_id, credential).map_err(AppError::Message)
     })
-    .map_err(|_| AUTH_FAILED.into())
+    .map_err(|error| match error {
+        AppError::Message(message) => message,
+        // 数据文件读不了是 Hub 自己的故障，不能说成凭据错：401 会让目标机停掉正在跑的命令。
+        _ => REGISTRY_UNAVAILABLE.into(),
+    })
 }
 
 fn authenticate_in(
@@ -555,9 +560,9 @@ fn authenticate_in(
     if !valid_id(machine_id) || validate_credential(credential).is_err() {
         return Err(AUTH_FAILED.into());
     }
-    validate_registry(data).map_err(|_| AUTH_FAILED)?;
+    validate_registry(data).map_err(|_| REGISTRY_UNAVAILABLE)?;
     if !valid_id(&data.node_hub_id) {
-        return Err(AUTH_FAILED.into());
+        return Err(REGISTRY_UNAVAILABLE.into());
     }
     let hash = credential_hash(credential);
     let machine = data

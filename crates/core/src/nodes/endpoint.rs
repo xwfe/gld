@@ -83,8 +83,14 @@ pub async fn upgrade(
         _ => None,
     };
     let admitted = tokio::task::spawn_blocking(move || {
-        let authenticated = super::config::authenticate(&machine_id, &credential)
-            .map_err(|_| "INVALID_NODE_CREDENTIALS")?;
+        let authenticated =
+            super::config::authenticate(&machine_id, &credential).map_err(|error| {
+                if error == super::config::AUTH_FAILED {
+                    "INVALID_NODE_CREDENTIALS"
+                } else {
+                    "NODE_REGISTRY_UNAVAILABLE"
+                }
+            })?;
         // 先认凭据再看 nonce：没凭据的请求一律 401，不透露节点协议细节。
         let binding = nonce
             .and_then(|nonce| Binding::new(&authenticated.hub_id, &machine_id, &nonce).ok())
@@ -108,7 +114,7 @@ pub async fn upgrade(
         Ok(Err(code @ "NODE_NONCE_REQUIRED")) => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error":code}))).into_response()
         }
-        Ok(Err(code @ "NODE_HUB_KEY_UNAVAILABLE")) => {
+        Ok(Err(code @ ("NODE_HUB_KEY_UNAVAILABLE" | "NODE_REGISTRY_UNAVAILABLE"))) => {
             return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":code}))).into_response()
         }
         Ok(Err(code)) => {

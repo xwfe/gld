@@ -39,28 +39,34 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_CA_BYTES: u64 = 64 * 1024;
 
-/// 连接循环为什么结束。`must_rejoin` 的只有重新加入才能解决，服务模式靠它决定还要不要再试。
+/// 连接循环为什么结束，服务模式靠它决定怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NodeEnd {
+    Other,
+    /// HTTP 401，见 [`Retry::Refused`]。
+    Refused,
+    /// 对方证明不了自己是配对时的 Hub。节点凭据在证明之前就发出去了，不能反复送给它。
+    WrongHub,
+}
+
 #[derive(Debug)]
 pub(super) struct NodeError {
     pub message: String,
-    pub must_rejoin: bool,
+    pub end: NodeEnd,
 }
 
 impl NodeError {
-    fn rejoin(message: impl Into<String>) -> Self {
+    fn ended(end: NodeEnd, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            must_rejoin: true,
+            end,
         }
     }
 }
 
 impl From<String> for NodeError {
     fn from(message: String) -> Self {
-        Self {
-            message,
-            must_rejoin: false,
-        }
+        Self::ended(NodeEnd::Other, message)
     }
 }
 
@@ -245,7 +251,8 @@ where
                 };
                 if header("x-gld-hub-id") != Some(config.hub_id.as_str()) {
                     let _ = tokio::time::timeout(WRITE_TIMEOUT, SinkExt::close(&mut socket)).await;
-                    return Err(NodeError::rejoin(
+                    return Err(NodeError::ended(
+                        NodeEnd::WrongHub,
                         "node endpoint returned a different Hub identity",
                     ));
                 }
@@ -253,7 +260,7 @@ where
                     .is_some_and(|proof| verify_handshake(&config.hub_public_key, &binding, proof))
                 {
                     let _ = tokio::time::timeout(WRITE_TIMEOUT, SinkExt::close(&mut socket)).await;
-                    return Err(NodeError::rejoin("node endpoint could not prove the pinned Hub key; it is not the paired Hub, or the Hub key changed and this machine must join again"));
+                    return Err(NodeError::ended(NodeEnd::WrongHub, "node endpoint could not prove the pinned Hub key; it is not the paired Hub, or the Hub key changed and this machine must join again"));
                 }
                 backoff.connected();
                 super::service::note("connected to the Hub");
@@ -278,8 +285,8 @@ where
                 }
             }
         };
-        if failure.retry == Retry::Rejoin {
-            return Err(NodeError::rejoin(failure.message));
+        if failure.retry == Retry::Refused {
+            return Err(NodeError::ended(NodeEnd::Refused, failure.message));
         }
         let random = uuid::Uuid::new_v4().as_u128() as u64;
         let delay = backoff.next(&failure, std::time::Instant::now(), random)?;

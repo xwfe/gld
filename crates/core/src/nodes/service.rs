@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use crate::hub::Hub;
 
-use super::client;
+use super::client::{self, NodeEnd};
 use super::config::NodeConfig;
 
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+const RETRY_AFTER_REFUSED: Duration = Duration::from_secs(600);
 
 static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -45,7 +46,9 @@ pub(super) fn note(message: &str) {
 
 /// 笔记本在酒店 Wi-Fi 上醒来，认证页面会劫持 TLS；反代更新时节点入口会短暂 404。前台进程退出让人去看，
 /// 服务模式没有人看，退出就一直离线到下次开机，所以这些错误隔一分钟再试，进程不退。
-/// 只有凭据被撤销、Hub 身份对不上才停：重试解决不了，得重新加入；这时退出码是 0，服务管理器不会反复拉起。
+/// 只有 Hub 身份对不上才停，退出码 0，服务管理器不再拉起：节点凭据在对方证明身份之前就发出去了，不能反复送给冒充者。
+/// 401 不停：多半是凭据被撤销，但也可能是反代自己的认证，响应没签名分不清，退出的话反代修好了节点也回不来。
+/// 所以先按撤销处理、停掉这里起的命令，再每十分钟试一次。
 pub fn run(config: NodeConfig) -> Result<(), String> {
     config.validate()?;
     let hub = Arc::new(Hub::for_node(config.access())?);
@@ -65,7 +68,7 @@ pub fn run(config: NodeConfig) -> Result<(), String> {
                     report("stopped by the service manager");
                     break;
                 }
-                Err(error) if error.must_rejoin => {
+                Err(error) if error.end == NodeEnd::WrongHub => {
                     report(&format!(
                         "{}; not retrying until this machine joins the Hub again",
                         error.message
@@ -73,15 +76,26 @@ pub fn run(config: NodeConfig) -> Result<(), String> {
                     break;
                 }
                 Err(error) => {
-                    report(&format!(
-                        "{}; trying again in {}s",
-                        error.message,
-                        RETRY_AFTER.as_secs()
-                    ));
+                    let wait = if error.end == NodeEnd::Refused {
+                        // 停命令要阻塞等子进程收尾，在异步上下文里直接调会 panic。
+                        let _ = tokio::task::spawn_blocking(
+                            crate::tools::workspace_runtime::terminate_all_sessions_everywhere,
+                        )
+                        .await;
+                        report(&format!(
+                            "{}; stopped this node's commands. If the credential was revoked, join the Hub again",
+                            error.message
+                        ));
+                        RETRY_AFTER_REFUSED
+                    } else {
+                        report(&error.message);
+                        RETRY_AFTER
+                    };
+                    report(&format!("trying again in {}s", wait.as_secs()));
                     tokio::select! {
                         biased;
                         _ = &mut shutdown => break,
-                        _ = tokio::time::sleep(RETRY_AFTER) => {}
+                        _ = tokio::time::sleep(wait) => {}
                     }
                 }
             }

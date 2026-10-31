@@ -102,9 +102,6 @@ actual="$(sha256_of "$tmp/$archive")"
 tar xzf "$tmp/$archive" -C "$tmp" || fail "解压 $archive 失败，没有安装。"
 binary="$tmp/gld-$version-$target/gld"
 [ -f "$binary" ] || fail "$archive 里没有 gld，没有安装。"
-chmod 755 "$binary"
-# 先跑一次：跑不起来的二进制（架构不对、缺运行库）不能盖掉原来能用的那个。
-reported="$("$binary" --version 2>&1)" || fail "下载的 gld 在这台机器上跑不起来：${reported}。没有安装。"
 
 previous=""
 if [ -x "$install_dir/gld" ]; then
@@ -114,6 +111,9 @@ mkdir -p "$install_dir" || fail "建不了目录 ${install_dir}。可以用 GLD_
 staged="$install_dir/.gld.installing.$$"
 cp "$binary" "$staged" || fail "写不了 ${install_dir}。可以用 GLD_INSTALL_DIR 换一个。"
 chmod 755 "$staged"
+# 在安装目录试跑一次：跑不起来的二进制（架构不对、缺运行库）不能盖掉原来能用的那个。
+# 不在临时目录跑：/tmp 常挂 noexec，报出来的原因是错的。
+reported="$("$staged" --version 2>&1)" || fail "下载的 gld 在这台机器上跑不起来：${reported}。没有安装。"
 # 同目录改名是原子的：中途断掉只会留下旧版本，不会留下半个文件。正在跑的旧进程不受影响。
 mv -f "$staged" "$install_dir/gld"
 staged=""

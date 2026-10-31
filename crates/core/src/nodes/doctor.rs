@@ -216,7 +216,11 @@ fn probe_check(outcome: HubProbe, running: bool) -> DoctorCheck {
             "Hub 认为这台机器已在线，但本机没有节点在跑",
             "刚断的旧连接最多一分钟后释放。一直这样就是别处在用同一份配置，先停掉那边。",
         ),
-        HubProbe::Rejected(401) => fail(LABEL, "节点凭据被撤销或换过（HTTP 401）", REJOIN),
+        HubProbe::Rejected(401) => fail(
+            LABEL,
+            "节点凭据被撤销或换过（HTTP 401）",
+            "在 Hub 上 gld node invite <名称>，这里 gld leave 后按新命令重新加入。Hub 上没撤销过的话，看入口的反代是不是加了自己的认证。",
+        ),
         HubProbe::Rejected(404) => fail(
             LABEL,
             "入口通了，但没有节点路由（HTTP 404）",

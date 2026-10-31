@@ -220,7 +220,7 @@ impl Proxy {
             ProxyError::Unreachable(format!("node proxy {} closed the connection", self.address))
         };
         let mut header = Vec::with_capacity(256);
-        while !header.ends_with(b"\r\n\r\n") {
+        while !header.ends_with(b"\r\n\r\n") && !header.ends_with(b"\n\n") {
             if header.len() >= MAX_RESPONSE_HEADER {
                 return Err(ProxyError::Rejected(format!(
                     "node proxy {} sent an oversized response",
@@ -230,9 +230,12 @@ impl Proxy {
             let byte = stream.read_u8().await.map_err(|_| lost())?;
             header.push(byte);
         }
-        std::str::from_utf8(&header)
-            .ok()
-            .and_then(|text| text.split_whitespace().nth(1))
+        // 只解析状态码：后面的头和原因短语里可能有非 UTF-8 字节，不影响判断。
+        header
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|part| !part.is_empty())
+            .nth(1)
+            .and_then(|status| std::str::from_utf8(status).ok())
             .and_then(|status| status.parse().ok())
             .ok_or_else(|| {
                 ProxyError::Rejected(format!(

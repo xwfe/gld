@@ -146,7 +146,10 @@ impl PreparedJoin {
                 || pending.runnable_workspaces != config.runnable_workspaces
                 || pending.ca_certificate != config.ca_certificate
             {
-                return Err("Pending pairing has different Hub or sharing settings; retry with the original settings".into());
+                return Err(format!(
+                    "Pending pairing has different Hub or sharing settings; retry with the original settings, or discard it with gld leave --config {}",
+                    config_path.display()
+                ));
             }
             config = pending;
         }

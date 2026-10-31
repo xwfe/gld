@@ -2,19 +2,20 @@
 
 use std::io::{BufRead, IsTerminal, Read, Write};
 
-use gld_core::app::{App, WorkspaceCreateOptions};
+use gld_core::app::{EnsuredWorkspace, WorkspaceCreateOptions};
 use gld_core::nodes::join::{JoinOptions, PreparedJoin};
+use gld_daemon::Request;
 
+use crate::backend::Backend;
 use crate::cli::{JoinArgs, LeaveArgs};
 use crate::error::{CliError, CliResult};
 use crate::output::Output;
 
 pub async fn run(args: &JoinArgs, out: Output) -> CliResult {
     let invitation = read_invitation(args.invite_stdin)?;
-    let mut projects = SharedDirectories::default();
-    let workspaces = projects.selectors(&args.share, &out)?;
-    let writable_workspaces = projects.selectors(&args.writable_workspaces, &out)?;
-    let runnable_workspaces = projects.selectors(&args.runnable_workspaces, &out)?;
+    let workspaces = shared_directories(&args.share, out).await?;
+    let writable_workspaces = shared_directories(&args.writable_workspaces, out).await?;
+    let runnable_workspaces = shared_directories(&args.runnable_workspaces, out).await?;
     let prepared = PreparedJoin::prepare(
         JoinOptions {
             hub_url: args.hub.clone(),
@@ -72,48 +73,43 @@ pub async fn run(args: &JoinArgs, out: Output) -> CliResult {
     Ok(())
 }
 
-/// `--share` 能直接写目录，目标机不用先学 `gld add`。登记写本机数据文件，不拉起守护进程。
-#[derive(Default)]
-struct SharedDirectories {
-    app: Option<App>,
-}
-
-impl SharedDirectories {
-    fn selectors(&mut self, selectors: &[String], out: &Output) -> Result<Vec<String>, CliError> {
-        selectors
-            .iter()
-            .map(|selector| {
-                let absolute = super::absolutize(std::path::Path::new(selector))?;
-                if !looks_like_directory(selector) {
-                    return Ok(selector.clone());
-                }
-                if !absolute.is_dir() {
-                    // 名称里理论上也能有分隔符，先当名称查一次；都不是才是写错了目录，比如没换邀请里的示例路径。
-                    if gld_core::nodes::join::resolve_workspaces(std::slice::from_ref(selector))
-                        .is_ok()
-                    {
-                        return Ok(selector.clone());
-                    }
-                    return Err(CliError::new(format!(
-                        "目录不存在：{}，没有配对，邀请还能用。把它换成要共享的目录。",
-                        absolute.display()
-                    )));
-                }
-                let app = match &mut self.app {
-                    Some(app) => app,
-                    empty => empty.insert(App::load()?),
-                };
-                let ensured = app.ensure_workspace(&absolute, WorkspaceCreateOptions::default())?;
-                if ensured.created {
-                    out.note(format!(
-                        "已登记本机项目「{}」（{}）。这一步只写本机记录，配对取消也不会撤销；不要了就 gld rm {}。",
-                        ensured.profile.name, ensured.profile.path, ensured.profile.name
-                    ));
-                }
-                Ok(ensured.profile.id)
+/// `--share` 能直接写目录，目标机不用先学 `gld add`。和 `gld add` 走同一个入口：守护进程在跑就交给它，
+/// 不然两个进程会同时写数据文件（锁只在进程内）；没在跑就写本机文件，不会为此拉起守护进程。
+async fn shared_directories(selectors: &[String], out: Output) -> Result<Vec<String>, CliError> {
+    let mut resolved = Vec::with_capacity(selectors.len());
+    for selector in selectors {
+        if !looks_like_directory(selector) {
+            resolved.push(selector.clone());
+            continue;
+        }
+        let absolute = super::absolutize(std::path::Path::new(selector))?;
+        if !absolute.is_dir() {
+            // 名称里理论上也能有分隔符，先当名称查一次；都不是才是写错了目录，比如没换邀请里的示例路径。
+            if gld_core::nodes::join::resolve_workspaces(std::slice::from_ref(selector)).is_ok() {
+                resolved.push(selector.clone());
+                continue;
+            }
+            return Err(CliError::new(format!(
+                "目录不存在：{}，没有配对，邀请还能用。把它换成要共享的目录。",
+                absolute.display()
+            )));
+        }
+        let mut backend = Backend::connect(false, None, out).await?;
+        let ensured: EnsuredWorkspace = backend
+            .call_typed(Request::EnsureWorkspace {
+                path: absolute,
+                options: WorkspaceCreateOptions::default(),
             })
-            .collect()
+            .await?;
+        if ensured.created {
+            out.note(format!(
+                "已登记本机项目「{}」（{}）。这一步只写本机记录，配对取消也不会撤销；不要了就 gld rm {}。",
+                ensured.profile.name, ensured.profile.path, ensured.profile.name
+            ));
+        }
+        resolved.push(ensured.profile.id);
     }
+    Ok(resolved)
 }
 
 /// 只把明显是路径的写法当目录，`--share api` 不会因为当前目录下碰巧有个 api 就变成登记新项目。
@@ -135,8 +131,14 @@ pub fn leave(args: &LeaveArgs, out: Output) -> CliResult {
             "已取消，节点配置没动。",
         )?;
     }
-    // 不先撤掉的话，服务管理器会反复拉起一个配置已经不在的节点。配置读不出来（只剩 pending）时也没配过自启动。
-    let _ = gld_core::nodes::autostart::disable(&config);
+    // 不先撤掉的话，服务管理器会反复拉起一个配置已经不在的节点。撤不掉就别往下走：删了配置，定义却留着，
+    // 用户还以为干净了。只剩 pending 的读不出配置，那种本来也没配过自启动。
+    if gld_core::nodes::local_config::read_config(&config).is_ok() {
+        let removed = gld_core::nodes::autostart::disable(&config).map_err(CliError::new)?;
+        if removed {
+            out.note("已撤掉自启动。");
+        }
+    }
     let left = gld_core::nodes::sharing::leave(&config).map_err(CliError::new)?;
     if !out.json_or(&left) {
         out.line("已删除节点配置和凭据，项目文件没动。");

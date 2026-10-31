@@ -13,8 +13,8 @@ pub(in crate::nodes) enum Retry {
     Transient,
     Conflict,
     Never,
-    /// 凭据被撤销或轮换，重试多少次都一样，得重新加入。
-    Rejoin,
+    /// HTTP 401：多半是凭据被撤销或换过，但这个响应没有签名，也可能来自反代自己的认证。
+    Refused,
 }
 
 /// 诊断要分清是哪一层出的错，光看 `retry` 分不出来。
@@ -65,7 +65,7 @@ impl Failure {
             Error::Http(response) => {
                 let status = response.status().as_u16();
                 let retry = match status {
-                    401 => Retry::Rejoin,
+                    401 => Retry::Refused,
                     409 => Retry::Conflict,
                     429 | 500..=599 => Retry::Transient,
                     _ => Retry::Never,
@@ -141,7 +141,7 @@ impl Backoff {
         random: u64,
     ) -> Result<Duration, String> {
         match failure.retry {
-            Retry::Never | Retry::Rejoin => return Err(failure.message.clone()),
+            Retry::Never | Retry::Refused => return Err(failure.message.clone()),
             Retry::Conflict if !self.connected_once => {
                 return Err(format!(
                     "{}; this machine is already connected",
@@ -204,7 +204,7 @@ mod tests {
         for status in [400, 403, 404] {
             assert_eq!(Failure::websocket(http(status)).retry, Retry::Never);
         }
-        assert_eq!(Failure::websocket(http(401)).retry, Retry::Rejoin);
+        assert_eq!(Failure::websocket(http(401)).retry, Retry::Refused);
         for status in [429, 500, 502, 503, 504] {
             assert_eq!(Failure::websocket(http(status)).retry, Retry::Transient);
         }

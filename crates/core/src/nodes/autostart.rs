@@ -104,22 +104,54 @@ fn spec_for(config_path: &Path) -> Result<Spec, String> {
     let exe = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|_| "Cannot locate this program for autostart")?;
-    Ok(Spec {
+    let spec = Spec {
         label: label(&config.machine_id),
-        exe,
-        config: config_path
-            .canonicalize()
-            .map_err(|_| "Cannot resolve the node configuration path")?,
+        exe: without_verbatim_prefix(exe),
+        config: without_verbatim_prefix(
+            config_path
+                .canonicalize()
+                .map_err(|_| "Cannot resolve the node configuration path")?,
+        ),
         env: CAPTURED_ENV
             .iter()
             .filter_map(|name| {
-                std::env::var(name)
-                    .ok()
-                    .filter(|value| !value.is_empty())
-                    .map(|value| (name.to_string(), value))
+                let value = std::env::var(name).ok().filter(|value| !value.is_empty())?;
+                // 服务的工作目录不是这里，相对路径的 GLD_HOME 会指到别处，节点就找不到项目了。
+                let value = match *name {
+                    "GLD_HOME" => crate::home::data_home()
+                        .map(|home| home.display().to_string())
+                        .unwrap_or(value),
+                    _ => value,
+                };
+                Some((name.to_string(), value))
             })
             .collect(),
-    })
+    };
+    // 换行能往 systemd 单元里多塞一行指令，也会写坏 plist。这些值只来自本账号，但不该写进去。
+    let texts = [
+        spec.exe.display().to_string(),
+        spec.config.display().to_string(),
+    ];
+    if texts
+        .iter()
+        .map(String::as_str)
+        .chain(spec.env.iter().map(|(_, value)| value.as_str()))
+        .any(|text| text.chars().any(char::is_control))
+    {
+        return Err(
+            "A path or environment variable for autostart contains control characters".into(),
+        );
+    }
+    Ok(spec)
+}
+
+/// Windows 的 canonicalize 给出 `\\?\C:\…`，别的程序未必认，写进任务定义要还原成普通路径。
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(plain) if plain.as_bytes().get(1) == Some(&b':') => PathBuf::from(plain),
+        _ => path,
+    }
 }
 
 /// 把这份配置交给服务管理器并启动。已配过的先停掉再换，重跑就是升级后的重启。
@@ -130,16 +162,20 @@ pub fn enable(config_path: &Path) -> Result<Status, String> {
     stop_service(manager, &spec.label);
     // 自启动的已经停了，还占着锁就是前台那个。两个都留着，后起的拿不到锁，每分钟报一次错。
     wait_until_free(&spec.config)?;
-    let mut notes = match manager {
-        Manager::Launchd => {
-            write_definition(definition.as_deref(), &launchd_plist(&spec))?;
-            start_launchd(&spec.label, definition.as_deref())?
+    let started = match manager {
+        Manager::Launchd => write_definition(definition.as_deref(), &launchd_plist(&spec))
+            .and_then(|()| start_launchd(&spec.label, definition.as_deref())),
+        Manager::Systemd => write_definition(definition.as_deref(), &systemd_unit(&spec))
+            .and_then(|()| start_systemd(&spec.label)),
+        Manager::TaskScheduler => start_task(&spec),
+    };
+    let mut notes = match started {
+        Ok(notes) => notes,
+        Err(error) => {
+            // 报了失败就不能留着：定义里可能有代理密码，下次登录还会自己起来，而用户以为没配上。
+            let _ = remove_service(manager, &spec.label, definition.as_deref());
+            return Err(error);
         }
-        Manager::Systemd => {
-            write_definition(definition.as_deref(), &systemd_unit(&spec))?;
-            start_systemd(&spec.label)?
-        }
-        Manager::TaskScheduler => start_task(&spec)?,
     };
     let running = wait_until_running(&spec.config);
     if !running {
@@ -170,21 +206,33 @@ pub fn disable(config_path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     stop_service(manager, &label);
+    // 只看命令有没有返回成功不够：比如 su 切来的会话连不上用户服务，定义删了，节点却还连着 Hub，
+    // 这时说“已停止”就是在权限上误导人。没停下就报错，定义留着。
+    wait_until_free(config_path).map_err(|_| {
+        "The node is still running, so autostart was left in place. If it runs in a terminal press Ctrl-C there; otherwise run this from a normal login session, not su".to_string()
+    })?;
+    remove_service(manager, &label, definition.as_deref())?;
+    Ok(true)
+}
+
+fn remove_service(manager: Manager, label: &str, definition: Option<&Path>) -> Result<(), String> {
     match manager {
-        Manager::Launchd => remove_definition(definition.as_deref())?,
+        Manager::Launchd => remove_definition(definition),
         Manager::Systemd => {
-            let _ = tool("systemctl", &["--user", "disable", &unit_name(&label)]);
-            remove_definition(definition.as_deref())?;
+            let _ = tool("systemctl", &["--user", "disable", &unit_name(label)]);
+            remove_definition(definition)?;
             let _ = tool("systemctl", &["--user", "daemon-reload"]);
+            Ok(())
         }
         Manager::TaskScheduler => {
-            let deleted = tool("schtasks", &["/Delete", "/TN", &task_name(&label), "/F"])?;
-            if !deleted.status.success() {
-                return Err(tool_error("schtasks /Delete", &deleted));
+            let deleted = tool("schtasks", &["/Delete", "/TN", &task_name(label), "/F"])?;
+            if deleted.status.success() {
+                Ok(())
+            } else {
+                Err(tool_error("schtasks /Delete", &deleted))
             }
         }
     }
-    Ok(true)
 }
 
 pub fn status(config_path: &Path) -> Result<Status, String> {
@@ -319,7 +367,6 @@ fn start_launchd(label: &str, definition: Option<&Path>) -> Result<Vec<String>, 
         }
         std::thread::sleep(Duration::from_secs(1));
     };
-    let _ = std::fs::remove_file(&plist);
     Err(tool_error("launchctl bootstrap", &failure))
 }
 
@@ -445,8 +492,9 @@ fn systemd_quote(value: &str) -> String {
 
 // ------------------------------------------------------------------ Windows
 
+/// 放在根目录：建任务子文件夹，普通账号可能没权限。
 fn task_name(label: &str) -> String {
-    format!("gld\\{label}")
+    label.to_string()
 }
 
 fn start_task(spec: &Spec) -> Result<Vec<String>, String> {
@@ -486,7 +534,7 @@ fn start_task(spec: &Spec) -> Result<Vec<String>, String> {
         return Err(tool_error("schtasks /Run", &started));
     }
     Ok(vec![
-        "It starts at this account's next login, not at boot; proxy and PATH come from the account's own environment, not from this shell".into(),
+        "It starts at this account's next login, not at boot; GLD_HOME, proxy and PATH come from the account's own environment, not from this shell".into(),
     ])
 }
 

@@ -257,13 +257,16 @@ fn the_default_location_is_found_only_when_it_is_unambiguous() {
     let error = find_in(dir.path()).unwrap_err();
     assert!(error.contains("gld join"), "{error}");
 
-    // 未完成的配对、锁和日志都不算一份配置。
-    for sidecar in ["a.json.pending", "a.json.lock", "a.json.log"] {
+    // 锁和日志不算一份配置。
+    for sidecar in ["a.json.lock", "a.json.log"] {
         fs::write(dir.path().join(sidecar), "").unwrap();
     }
     assert!(find_in(dir.path()).is_err());
 
+    // 没配对完的算，gld leave 要能找到它；和正式配置同时在时只算一份。
     let first = dir.path().join("a.json");
+    fs::write(dir.path().join("a.json.pending"), "").unwrap();
+    assert_eq!(find_in(dir.path()).unwrap(), first);
     fs::write(&first, "{}").unwrap();
     assert_eq!(find_in(dir.path()).unwrap(), first);
 

@@ -154,6 +154,21 @@ async fn connect_keeps_bytes_that_follow_the_proxy_response() {
 }
 
 #[tokio::test]
+async fn unusual_but_harmless_proxy_responses_are_accepted() {
+    for response in [
+        &b"HTTP/1.1 200 Conex\xE3o OK\r\nVia: caf\xE9\r\n\r\n"[..],
+        &b"HTTP/1.0 200 OK\n\n"[..],
+    ] {
+        let response: &'static [u8] = response;
+        let (address, _task) = fake_proxy(response).await;
+        proxy_at(&address, "")
+            .connect("hub.example.com", 443)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn credentials_are_decoded_and_sent_as_basic_auth() {
     let (address, task) = fake_proxy(b"HTTP/1.1 200 OK\r\n\r\n").await;
     proxy_at(&address, "us%40er:p%3Ass@")

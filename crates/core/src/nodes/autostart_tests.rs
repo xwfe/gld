@@ -62,6 +62,19 @@ fn the_windows_task_runs_as_this_account_without_elevation() {
     assert!(xml.contains("&quot;--service&quot;"));
 }
 
+#[test]
+fn verbatim_windows_paths_become_ordinary_ones() {
+    let plain = |text: &str| {
+        without_verbatim_prefix(PathBuf::from(text))
+            .display()
+            .to_string()
+    };
+    assert_eq!(plain(r"\\?\C:\Users\me\gld.exe"), r"C:\Users\me\gld.exe");
+    // UNC 那种还原要改写法，留着不动。
+    assert_eq!(plain(r"\\?\UNC\host\share"), r"\\?\UNC\host\share");
+    assert_eq!(plain("/usr/bin/gld"), "/usr/bin/gld");
+}
+
 #[cfg(unix)]
 #[test]
 fn definitions_are_private_and_replace_the_old_one_atomically() {

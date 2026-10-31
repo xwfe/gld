@@ -280,3 +280,31 @@ fn an_invitation_needs_an_entry_the_target_can_keep_using() {
         "{shown}"
     );
 }
+
+#[test]
+fn a_hub_that_cannot_read_its_data_says_503_not_401() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "steady");
+    let registration = register(&hub, "steady", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let path = write_config(&machine, "steady.json", &value);
+
+    // 401 会让目标机停掉正在跑的命令，Hub 自己的故障不能说成凭据错。
+    let data = hub.home.path().join("data/profiles.json");
+    let saved = std::fs::read(&data).unwrap();
+    std::fs::write(&data, "not json").unwrap();
+    let (healthy, checks, text) = doctor(&machine, &path);
+    std::fs::write(&data, saved).unwrap();
+    assert!(!healthy, "{text}");
+    assert!(
+        check(&checks, "Hub 握手")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("503"),
+        "{text}"
+    );
+}

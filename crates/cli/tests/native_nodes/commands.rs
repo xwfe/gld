@@ -194,6 +194,44 @@ fn revoking_a_machine_stops_the_commands_it_was_running() {
     );
 }
 
+#[test]
+fn a_service_stops_its_commands_on_a_401_even_though_it_keeps_running() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "target");
+    let registration = register(&hub, "target", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    value["writable_workspaces"] = json!([ids[0]]);
+    value["runnable_workspaces"] = json!([ids[0]]);
+    let path = write_config(&machine, "revoked.json", &value);
+    let child = command(&machine)
+        .args(["node", "run", "--service", "--config"])
+        .arg(&path)
+        .spawn()
+        .unwrap();
+    let mut node = NodeProcess(Some(child));
+    let api = find(&wait_inventory(&service, 2, 2), "target/api");
+    allow_all_commands(&machine);
+    background(&service, &api, "echo $$ > pid.txt; exec sleep 600");
+    let pid = command_pid(&machine);
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+
+    hub.json(&[
+        "--json",
+        "node",
+        "revoke",
+        registration["machine_id"].as_str().unwrap(),
+    ]);
+    wait_until("revoked commands should stop", || unsafe {
+        libc::kill(pid, 0) != 0
+    });
+    assert!(node.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    node.stop();
+}
+
 /// 自启动由系统发 SIGTERM 停进程。节点走了就没人读得到、停得了这条命令，不能留着以这个账号跑。
 #[cfg(unix)]
 #[test]
