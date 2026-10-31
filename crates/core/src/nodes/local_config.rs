@@ -16,6 +16,62 @@ mod windows_private;
 #[path = "local_config_tests.rs"]
 mod tests;
 
+/// 不写 `--config` 时的位置：数据目录下 `nodes/<Hub ID>.json`，按 Hub 分开，一台机器能接多个 Hub。
+pub fn default_path(hub_id: &str) -> Result<PathBuf, String> {
+    let dir = nodes_dir()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|_| "Cannot create the node configuration directory")?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(&dir).map_err(|_| "Cannot create the node configuration directory")?;
+    Ok(dir.join(format!("{hub_id}.json")))
+}
+
+/// 查看、运行、退出都用它定位配置：写了路径就用，没写就找默认目录里唯一的一份。
+pub fn find(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    find_in(&nodes_dir()?)
+}
+
+fn nodes_dir() -> Result<PathBuf, String> {
+    crate::home::data_home()
+        .map(|home| home.join("nodes"))
+        .map_err(|_| "Cannot locate gld's control data directory".to_string())
+}
+
+fn find_in(dir: &Path) -> Result<PathBuf, String> {
+    let mut found: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err("Cannot read the node configuration directory".into()),
+    };
+    found.sort();
+    match found.len() {
+        0 => Err("This machine has not joined a Hub; run gld join first, or pass --config".into()),
+        1 => Ok(found.remove(0)),
+        _ => Err(format!(
+            "This machine has {} node configurations; pick one with --config: {}",
+            found.len(),
+            found
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 pub struct LocalConfig {
     path: PathBuf,
     pending: PathBuf,

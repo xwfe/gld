@@ -11,7 +11,7 @@ use crate::data::{AppData, DataStore};
 use crate::tools::registry::exposed_tool_names;
 
 use super::config::{validate_workspace_ids, NodeConfig, RegisteredMachine};
-use super::local_config::{validate_config_location, LocalConfig};
+use super::local_config::{default_path, validate_config_location, LocalConfig};
 use super::pairing::{invitation_identity, PairRequest};
 
 #[cfg(test)]
@@ -22,7 +22,8 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 pub struct JoinOptions {
     pub hub_url: String,
-    pub config_path: PathBuf,
+    /// 省略时放到数据目录，见 [`super::local_config::default_path`]。
+    pub config_path: Option<PathBuf>,
     pub workspaces: Vec<String>,
     pub writable_workspaces: Vec<String>,
     pub runnable_workspaces: Vec<String>,
@@ -80,6 +81,10 @@ impl PreparedJoin {
         mut projects: Vec<SharedProject>,
     ) -> Result<Self, String> {
         let (hub_id, hub_public_key) = invitation_identity(&invitation)?;
+        let config_path = match options.config_path {
+            Some(path) => path,
+            None => default_path(&hub_id)?,
+        };
         let workspaces: Vec<String> = projects.iter().map(|project| project.id.clone()).collect();
         validate_workspace_ids(&workspaces)?;
         let (writable_workspaces, runnable_workspaces) = select_access(
@@ -88,7 +93,7 @@ impl PreparedJoin {
             &options.runnable_workspaces,
         )?;
         validate_config_location(
-            &options.config_path,
+            &config_path,
             &projects
                 .iter()
                 .map(|project| project.path.clone())
@@ -123,7 +128,7 @@ impl PreparedJoin {
             .map_err(|_| "Invalid node Hub URL")?
             .pop_if_empty();
         config.hub_url = base.to_string();
-        let storage = LocalConfig::lock(&options.config_path)?;
+        let storage = LocalConfig::lock(&config_path)?;
         if storage.exists()? {
             return Err(
                 "Node configuration already exists; use node run or a different configuration path"

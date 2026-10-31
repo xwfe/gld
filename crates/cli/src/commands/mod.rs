@@ -63,7 +63,8 @@ pub async fn run(cli: Cli) -> CliResult {
     }
     // 节点只出站，不连接/自动拉起本机守护进程；登记凭据仍走 Backend 单写入口。
     if let Command::Node(crate::cli::NodeCmd::Run { config }) = &cli.command {
-        return node::run_config(config).await;
+        let config = find_node_config(config.as_deref())?;
+        return node::run_config(&config).await;
     }
     if let Command::Node(crate::cli::NodeCmd::Shares {
         config,
@@ -73,7 +74,7 @@ pub async fn run(cli: Cli) -> CliResult {
     }) = &cli.command
     {
         return node::shares(
-            config,
+            &find_node_config(config.as_deref())?,
             workspaces,
             writable_workspaces,
             runnable_workspaces,
@@ -158,6 +159,10 @@ pub async fn run(cli: Cli) -> CliResult {
 /// 在守护进程眼里是 `~/.config/ccnm`——那个目录碰巧存在的话（很多工具都在
 /// `~/.config` 下放配置），gld 会一声不吭地把它登记成工作区，用户看到的现象是
 /// "同一条命令跑两次，冒出两个工作区"，而第二个指向一个完全不相干的目录。
+fn find_node_config(explicit: Option<&Path>) -> CliResult<PathBuf> {
+    gld_core::nodes::local_config::find(explicit).map_err(crate::error::CliError::new)
+}
+
 pub fn absolutize(path: &Path) -> CliResult<PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());

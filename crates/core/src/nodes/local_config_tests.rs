@@ -248,3 +248,36 @@ fn readable_by_other_accounts_or_symlink_lock_files_are_rejected() {
         0o644
     );
 }
+
+#[test]
+fn the_default_location_is_found_only_when_it_is_unambiguous() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = find_in(&dir.path().join("missing")).unwrap_err();
+    assert!(error.contains("gld join"), "{error}");
+    let error = find_in(dir.path()).unwrap_err();
+    assert!(error.contains("gld join"), "{error}");
+
+    // 未完成的配对、锁和日志都不算一份配置。
+    for sidecar in ["a.json.pending", "a.json.lock", "a.json.log"] {
+        fs::write(dir.path().join(sidecar), "").unwrap();
+    }
+    assert!(find_in(dir.path()).is_err());
+
+    let first = dir.path().join("a.json");
+    fs::write(&first, "{}").unwrap();
+    assert_eq!(find_in(dir.path()).unwrap(), first);
+
+    fs::write(dir.path().join("b.json"), "{}").unwrap();
+    let error = find_in(dir.path()).unwrap_err();
+    assert!(error.contains("--config"), "{error}");
+    assert!(
+        error.contains("a.json") && error.contains("b.json"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_explicit_path_is_used_as_given() {
+    let path = Path::new("somewhere/node.json");
+    assert_eq!(find(Some(path)).unwrap(), path);
+}

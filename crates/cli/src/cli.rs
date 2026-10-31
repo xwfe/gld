@@ -390,9 +390,9 @@ pub enum NodeCmd {
     },
     /// 查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
     Shares {
-        /// 仅本账号可读的节点 JSON 配置；运行中也可查看
+        /// 节点配置；只加入过一个 Hub 时可省略。运行中也可查看
         #[arg(long)]
-        config: PathBuf,
+        config: Option<PathBuf>,
         /// 新的完整共享名单，接受项目完整 ID 或唯一名称；可重复，至少保留一个项目；省略则只查看
         #[arg(long = "share")]
         workspaces: Vec<String>,
@@ -405,9 +405,9 @@ pub enum NodeCmd {
     },
     /// 在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
     Run {
-        /// 仅本账号可读的节点 JSON 配置；格式见 docs/concepts.md
+        /// 节点配置；只加入过一个 Hub 时可省略。格式见 docs/concepts.md
         #[arg(long)]
-        config: PathBuf,
+        config: Option<PathBuf>,
     },
 }
 
@@ -415,9 +415,9 @@ pub enum NodeCmd {
 
 #[derive(Debug, Args)]
 pub struct LeaveArgs {
-    /// 要删除的节点配置；节点须已停止
+    /// 要删除的节点配置，只加入过一个 Hub 时可省略；节点须已停止
     #[arg(long)]
-    pub config: PathBuf,
+    pub config: Option<PathBuf>,
     /// 确认删除，供非交互调用使用
     #[arg(long)]
     pub yes: bool,
@@ -428,10 +428,10 @@ pub struct JoinArgs {
     /// Hub 的 HTTPS 基地址，保留 /hub 等路径前缀
     #[arg(long)]
     pub hub: String,
-    /// 要创建的私有节点配置；已有文件不会被覆盖
+    /// 要创建的私有节点配置，已有文件不会被覆盖；默认放在数据目录的 nodes 下
     #[arg(long)]
-    pub config: PathBuf,
-    /// 明确共享的已登记本机项目名称或完整 ID；可重复指定
+    pub config: Option<PathBuf>,
+    /// 要共享的目录，或已登记项目的名称、完整 ID；可重复。没登记过的目录会先登记
     #[arg(long, required = true)]
     pub share: Vec<String>,
     /// 允许文件写入的项目名称或完整 ID，须同时在 --share 中；可重复；默认只读，不授权命令或管理工具

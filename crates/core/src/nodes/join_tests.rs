@@ -45,7 +45,7 @@ fn projects(root: &std::path::Path) -> Vec<SharedProject> {
 fn options(root: &std::path::Path, hub_url: String) -> JoinOptions {
     JoinOptions {
         hub_url,
-        config_path: root.join("node.json"),
+        config_path: Some(root.join("node.json")),
         workspaces: vec!["api".into()],
         writable_workspaces: Vec::new(),
         runnable_workspaces: Vec::new(),
@@ -192,7 +192,7 @@ fn pending_pairing_cannot_gain_command_permission_by_retrying() {
     assert!(PreparedJoin::prepare_with_projects(changed, token(), projects(root.path())).is_err());
 
     let mut fresh = options(root.path(), url.into());
-    fresh.config_path = root.path().join("fresh.json");
+    fresh.config_path = Some(root.path().join("fresh.json"));
     fresh.runnable_workspaces = vec!["api".into()];
     let prepared =
         PreparedJoin::prepare_with_projects(fresh, token(), projects(root.path())).unwrap();
@@ -224,7 +224,7 @@ fn pairing_refuses_private_configuration_inside_any_shared_project_before_persis
     for writable in [false, true] {
         let selected = projects(root.path());
         let mut settings = options(root.path(), "https://example.invalid/hub".into());
-        settings.config_path = PathBuf::from(&selected[0].path).join("node.json");
+        settings.config_path = Some(PathBuf::from(&selected[0].path).join("node.json"));
         if writable {
             settings.writable_workspaces = vec!["api".into()];
         }

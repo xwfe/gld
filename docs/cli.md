@@ -920,15 +920,15 @@ Options:
 ```text
 用一次性邀请配对，生成目标机的私有节点配置
 
-Usage: gld join [OPTIONS] --hub <HUB> --config <CONFIG> --share <SHARE> --invite-stdin
+Usage: gld join [OPTIONS] --hub <HUB> --share <SHARE> --invite-stdin
 
 Options:
       --hub <HUB>                        Hub 的 HTTPS 基地址，保留 /hub 等路径前缀
   -w, --workspace <WS>                   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
-      --config <CONFIG>                  要创建的私有节点配置；已有文件不会被覆盖
+      --config <CONFIG>                  要创建的私有节点配置，已有文件不会被覆盖；默认放在数据目录的 nodes 下
       --json                             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart                     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
-      --share <SHARE>                    明确共享的已登记本机项目名称或完整 ID；可重复指定
+      --share <SHARE>                    要共享的目录，或已登记项目的名称、完整 ID；可重复。没登记过的目录会先登记
       --timeout <SECS>                   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --write <PROJECT>                  允许文件写入的项目名称或完整 ID，须同时在 --share 中；可重复；默认只读，不授权命令或管理工具
       --home <DIR>                       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
@@ -1059,10 +1059,10 @@ Options:
 ```text
 查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
 
-Usage: gld node shares [OPTIONS] --config <CONFIG>
+Usage: gld node shares [OPTIONS]
 
 Options:
-      --config <CONFIG>     仅本账号可读的节点 JSON 配置；运行中也可查看
+      --config <CONFIG>     节点配置；只加入过一个 Hub 时可省略。运行中也可查看
   -w, --workspace <WS>      目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json                以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --share <WORKSPACES>  新的完整共享名单，接受项目完整 ID 或唯一名称；可重复，至少保留一个项目；省略则只查看
@@ -1081,10 +1081,10 @@ Options:
 ```text
 在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
 
-Usage: gld node run [OPTIONS] --config <CONFIG>
+Usage: gld node run [OPTIONS]
 
 Options:
-      --config <CONFIG>  仅本账号可读的节点 JSON 配置；格式见 docs/concepts.md
+      --config <CONFIG>  节点配置；只加入过一个 Hub 时可省略。格式见 docs/concepts.md
   -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
