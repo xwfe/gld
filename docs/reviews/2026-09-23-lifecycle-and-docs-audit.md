@@ -4317,3 +4317,25 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 **没验证的：**这个账号的 linger 本来就开着，所以“`enable` 替你开 linger”和开不了时的提示都没走到；没真的重启机器，开机回来靠 `enabled` 加 linger 推断；用的是调试构建，不是发布包。
 
 **过程里脚本自己的问题（不是产品）：**检查“命令拿到 `GLD_HOME`”的那条写错了，这个变量按设计不传给项目命令，改看原始回包确认 `PATH`、`LANG` 和开启时一致；清理脚本的 `pkill -f gld-smoke/` 匹配到了脚本自己，目录没删掉，之后手动删了。测试机上的单元、进程和目录都已清理，原来装的 gld 和 `~/gld-src` 没动。
+
+## 102. 发布 0.10.0（2026-11-01）
+
+用户让发新版。`v0.10.0` = `b6c799b`，升 minor：只动原生节点，但有新功能和行为变化（邀请拒绝临时入口、不支持的代理启动就报错）。工具表和守护进程协议都没变，发布说明写“连接器什么都不用做”。
+
+| 步骤 | 结果 |
+|---|---|
+| 工具表 | 相对 `v0.9.0`，`tools/registry.rs`、`hub/`、`bridge/tools.rs`、`machine_mcp/relay.rs`、`crates/daemon` 没有改动；隔离数据目录里两版都是 32 项、指纹 `9cb99c69e724c997` |
+| 新旧互连 | 新 Hub 配新节点、新 Hub 配 0.9.0 节点、0.9.0 Hub 配新节点，都能上线、读文件、跑命令 |
+| 退回 | 0.9.0 的 `gld node run --service` 报未知参数，退出码 2，所以发布说明要求先撤自启动 |
+| 发版前 | main CI 全绿；手动空跑 Release 全绿，“建 Release”skipped |
+| 发布 | tag 流水线全绿，Release 8 个文件（5 个包、`SHA256SUMS`、两个安装脚本），非草稿、非预发布。`release.yml` 附脚本这一步第一次真跑就通过 |
+| 校验和 | 5 个包 `shasum -c` 全 OK；`SHA256SUMS` 不列安装脚本，和设计一致；两个脚本和 tag 里的逐字节相同 |
+| 来源证明 | 5 个包 `gh attestation verify` 都退出 0；改一个字节的包退出 1 |
+| 安装脚本（macOS） | 官方地址装到隔离目录；不设版本时装到 0.10.0；不存在的版本报 404，原文件哈希不变；另一台 Apple 芯片的 Mac 也装上了 |
+| 安装脚本（Linux） | 没有 gld 的 amd64 Debian 12 容器：官方地址装上 musl 包，失败退出码 1 且原文件不变；接进同容器的 Hub 后读文件、跑命令、`node doctor` 都正常。Linux 服务器（Debian 13）也装上了 |
+| 其他包 | Intel 包经 Rosetta `--version` 正确；glibc 包在同样的容器里起停守护进程、读文件正常 |
+| 邀请 | `gld node invite` 打印的安装行版本是 `v0.10.0`，地址能下载 |
+
+**没做的：**Windows 只核了校验和和来源证明，下载包、计划任务、`install.ps1` 校验和不符和替换旧版都没真跑；没在完全干净的 Mac 上跑（另一台 Mac 本来就有旧版 gld，这次只装到临时目录）；linger 自动开启、真实重启、真实代理和真实 TLS 入口仍未验证。本机和另外两台的常用 gld 都没换。
+
+**撞到的事（都是测试脚本）：**`gld tool call` 的参数要写 `key=value`，第一次写错报了一条 FAIL，改正后通过；zsh 没有 `PIPESTATUS`，要查管道中间的退出码得用 bash；ECR 的 `public.ecr.aws/debian/debian` 连拉几次会报 `toomanyrequests`，换 `public.ecr.aws/docker/library/debian` 能拉到。
