@@ -4296,3 +4296,24 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 全仓 1365 项通过，clippy、fmt 通过（本机 macOS）。
 
 **推送后的 CI（同日，`18596d3`）：**全部任务通过。`install.ps1` 第一次真正运行：Windows 自带的 PowerShell 5.1 经 `Invoke-Expression` 下载 v0.9.0 发布包，装到临时目录，`gld 0.9.0 (087765a01207)` 能跑，指定不存在的版本时报错。只覆盖了这一条路径，`install.ps1` 的校验和不符、替换旧版没跑过，计划任务和自启动仍然没在 Windows 上运行过。Ubuntu 任务通过，包含用桩代替 systemd 的自启动测试，真实 systemd 仍没跑过。
+
+**真实 systemd（同日，用户让验的。Debian 13、systemd 257，`bing` 账号，隔离 `GLD_HOME`，临时用户单元，代码 `aa3ed26`，间隔那一项用 `7edf120`）：**
+
+| 场景 | 结果 |
+|---|---|
+| `join --autostart` | 单元 `enabled`、`active`，权限 600，`systemd-analyze verify` 无警告；Hub 看到在线，读文件、跑命令正常 |
+| SSH 断开后新开会话 | 节点 pid 不变，命令还在，Hub 在线 |
+| 重跑 enable | pid 换了，旧命令被停，马上重新在线 |
+| `kill -9` | `RestartSec=60` 时 60 秒才拉回，改成 10 后 10 秒（`7edf120`）。命令被 systemd 按 cgroup 一起收了，和 launchd 下不同，已写进 concepts |
+| Hub 停掉 | doctor 报拒绝连接；Hub 起来后 1 秒内重新在线 |
+| 撤销 | 进程继续跑、命令被停，日志写明 600 秒后再试，doctor 报 401 和修法 |
+| `su - bing` 里 disable（节点在跑） | `systemctl --user` 连不上总线，报 `The node is still running`，退出码 1，定义没动。§101 审查修的就是这条 |
+| 正常会话 disable | 单元没了，`inactive`，节点进程没了 |
+| `su - bing` 里 enable | 报 `no systemd user manager`，退出码 1，不留定义 |
+| 再 enable 后 leave | 先撤自启动再删配置，单元文件没了 |
+
+launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀，拉回不超过 10 秒。
+
+**没验证的：**这个账号的 linger 本来就开着，所以“`enable` 替你开 linger”和开不了时的提示都没走到；没真的重启机器，开机回来靠 `enabled` 加 linger 推断；用的是调试构建，不是发布包。
+
+**过程里脚本自己的问题（不是产品）：**检查“命令拿到 `GLD_HOME`”的那条写错了，这个变量按设计不传给项目命令，改看原始回包确认 `PATH`、`LANG` 和开启时一致；清理脚本的 `pkill -f gld-smoke/` 匹配到了脚本自己，目录没删掉，之后手动删了。测试机上的单元、进程和目录都已清理，原来装的 gld 和 `~/gld-src` 没动。
