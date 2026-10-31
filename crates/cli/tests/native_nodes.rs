@@ -10,6 +10,8 @@ mod command_tests;
 mod file_write_tests;
 #[path = "native_nodes/pairing.rs"]
 mod pairing_tests;
+#[path = "native_nodes/proxy.rs"]
+mod proxy_tests;
 #[path = "native_nodes/sharing.rs"]
 mod sharing_tests;
 
@@ -225,6 +227,12 @@ fn command(env: &Env) -> Command {
         .env_remove("GLD_WORKSPACE")
         .env_remove("TUNNEL_TOKEN")
         .env_remove("CONTROL_PLANE_API_KEY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         .current_dir(env.project.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

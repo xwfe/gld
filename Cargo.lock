@@ -608,6 +608,7 @@ dependencies = [
  "image",
  "jsonwebtoken",
  "libc",
+ "percent-encoding",
  "regex",
  "reqwest",
  "ring",

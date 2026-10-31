@@ -344,17 +344,10 @@ fn pairing_client(config: &NodeConfig) -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
     let base = reqwest::Url::parse(&config.hub_url).map_err(|_| "Invalid node Hub URL")?;
-    if base
-        .host_str()
-        .and_then(|host| {
-            host.trim_matches(['[', ']'])
-                .parse::<std::net::IpAddr>()
-                .ok()
-        })
-        .is_some_and(|ip| ip.is_loopback())
-    {
-        // HTTP 例外只用于本机；不能让环境变量里的代理把邀请和节点凭据带离回环地址。
-        builder = builder.no_proxy();
+    // 关掉 reqwest 自己的判断，只走和长连接同一份：两边不一致就会配对成功、之后连不上。
+    builder = builder.no_proxy();
+    if let Some(proxy) = super::proxy::for_hub(&base)? {
+        builder = builder.proxy(proxy.for_reqwest()?);
     }
     if let Some(path) = &config.ca_certificate {
         if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {

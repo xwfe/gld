@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, protocol::Message};
-use tokio_tungstenite::{Connector, WebSocketStream};
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::auth::{AuthContext, Grant, Principal};
 use crate::bridge::peer::PROTOCOL_VERSION;
@@ -22,6 +22,7 @@ use super::hub_key::{
     new_nonce, verify_handshake, Binding, MessageVerifier, NONCE_HEADER, PROOF_HEADER,
 };
 use super::identity::auth_from_meta;
+use super::proxy::{self, Proxy, ProxyError};
 use super::transport::{socket_config, MAX_MESSAGE_BYTES, MESSAGE_WRITE_TIMEOUT};
 
 #[path = "reconnect.rs"]
@@ -101,6 +102,8 @@ where
     credential.set_sensitive(true);
     request.headers_mut().insert("authorization", credential);
     let connector = ca_connector(&config)?;
+    let hub_url = reqwest::Url::parse(&config.hub_url).map_err(|_| "Invalid node Hub URL")?;
+    let proxy = proxy::for_hub(&hub_url)?;
     let mut backoff = Backoff::default();
     loop {
         let connect_timeout =
@@ -119,10 +122,9 @@ where
             biased;
             _ = &mut *shutdown => return Ok(()),
             result = tokio::time::timeout(connect_timeout,
-                tokio_tungstenite::connect_async_tls_with_config(
-                    attempt, Some(socket_config()), false, connector.clone())) =>
+                open_socket(attempt, proxy.as_ref(), connector.clone())) =>
                 result.map_err(|_| Failure::transient("node TLS/WebSocket connection timed out"))
-                    .and_then(|result| result.map_err(Failure::websocket)),
+                    .and_then(|result| result),
         };
         let failure = match connected {
             Err(failure) => failure,
@@ -178,6 +180,44 @@ where
             _ = tokio::time::sleep(delay) => {}
         }
     }
+}
+
+type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type HandshakeResponse = tokio_tungstenite::tungstenite::handshake::client::Response;
+
+async fn open_socket(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    proxy: Option<&Proxy>,
+    connector: Option<Connector>,
+) -> Result<(ClientSocket, HandshakeResponse), Failure> {
+    let Some(proxy) = proxy else {
+        return tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(socket_config()),
+            false,
+            connector,
+        )
+        .await
+        .map_err(Failure::websocket);
+    };
+    let uri = request.uri();
+    let host = uri.host().unwrap_or_default().to_string();
+    let port = uri.port_u16().unwrap_or(443);
+    let tunnel = proxy
+        .connect(&host, port)
+        .await
+        .map_err(|error| match error {
+            ProxyError::Unreachable(message) => Failure::transient(message),
+            ProxyError::Rejected(message) => Failure::permanent(message),
+        })?;
+    tokio_tungstenite::client_async_tls_with_config(
+        request,
+        tunnel,
+        Some(socket_config()),
+        connector,
+    )
+    .await
+    .map_err(Failure::websocket)
 }
 
 fn ca_connector(config: &NodeConfig) -> Result<Option<Connector>, String> {

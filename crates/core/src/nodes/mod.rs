@@ -10,6 +10,7 @@ pub mod identity;
 pub mod join;
 pub mod local_config;
 pub mod pairing;
+pub mod proxy;
 pub mod registry;
 pub mod sharing;
 pub mod transport;
