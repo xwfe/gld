@@ -32,6 +32,11 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld node rotate-credential](#gld-node-rotate-credential)
 - [gld node shares](#gld-node-shares)
 - [gld node run](#gld-node-run)
+- [gld node doctor](#gld-node-doctor)
+- [gld node autostart](#gld-node-autostart)
+- [gld node autostart enable](#gld-node-autostart-enable)
+- [gld node autostart disable](#gld-node-autostart-disable)
+- [gld node autostart status](#gld-node-autostart-status)
 - [gld mcp](#gld-mcp)
 - [gld mcp list](#gld-mcp-list)
 - [gld mcp on](#gld-mcp-on)
@@ -1089,6 +1094,105 @@ Usage: gld node run [OPTIONS]
 
 Options:
       --config <CONFIG>  节点配置；只加入过一个 Hub 时可省略。格式见 docs/concepts.md
+  -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
+## gld node doctor
+
+```text
+在目标机上查这台机器为什么连不上；握手一次 Hub，每项失败都给修法
+
+Usage: gld node doctor [OPTIONS]
+
+Options:
+      --config <CONFIG>  节点配置；只加入过一个 Hub 时可省略
+  -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
+## gld node autostart
+
+```text
+把节点交给系统服务管理器：开机或登录后自动连 Hub，不要管理员权限
+
+Usage: gld node autostart [OPTIONS] <COMMAND>
+
+Commands:
+  enable   配置并立刻在后台启动；已配过的重启一次，换完二进制跑它就换上新版
+  disable  停掉并删除自启动配置；节点配置和项目文件不动
+  status   查看有没有配置、节点在不在跑
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld node autostart enable
+
+```text
+配置并立刻在后台启动；已配过的重启一次，换完二进制跑它就换上新版
+
+Usage: gld node autostart enable [OPTIONS]
+
+Options:
+      --config <CONFIG>  节点配置；只加入过一个 Hub 时可省略
+  -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
+## gld node autostart disable
+
+```text
+停掉并删除自启动配置；节点配置和项目文件不动
+
+Usage: gld node autostart disable [OPTIONS]
+
+Options:
+      --config <CONFIG>  节点配置；只加入过一个 Hub 时可省略
+  -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>   等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>       数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color         关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
+## gld node autostart status
+
+```text
+查看有没有配置、节点在不在跑
+
+Usage: gld node autostart status [OPTIONS]
+
+Options:
+      --config <CONFIG>  节点配置；只加入过一个 Hub 时可省略
   -w, --workspace <WS>   目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json             以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart     守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）

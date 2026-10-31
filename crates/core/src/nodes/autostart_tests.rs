@@ -46,6 +46,8 @@ fn the_systemd_unit_quotes_everything_systemd_would_expand() {
     assert!(unit.contains("Restart=on-failure\n"));
     assert!(unit.contains("WantedBy=default.target\n"));
     assert_eq!(systemd_quote(r#"a"b\c$d"#), r#""a\"b\\c$$d""#);
+    // Environment 不展开变量，这里多转义一个 `$` 就改了值。
+    assert_eq!(systemd_environment("p=a$b%c"), r#""p=a$b%%c""#);
 }
 
 #[test]

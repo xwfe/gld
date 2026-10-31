@@ -84,9 +84,20 @@ impl SharedDirectories {
             .iter()
             .map(|selector| {
                 let absolute = super::absolutize(std::path::Path::new(selector))?;
-                // 不是目录就仍当名称或 ID 查，查不到由后面统一报错，不在这里猜用户的意思。
-                if !looks_like_directory(selector) || !absolute.is_dir() {
+                if !looks_like_directory(selector) {
                     return Ok(selector.clone());
+                }
+                if !absolute.is_dir() {
+                    // 名称里理论上也能有分隔符，先当名称查一次；都不是才是写错了目录，比如没换邀请里的示例路径。
+                    if gld_core::nodes::join::resolve_workspaces(std::slice::from_ref(selector))
+                        .is_ok()
+                    {
+                        return Ok(selector.clone());
+                    }
+                    return Err(CliError::new(format!(
+                        "目录不存在：{}，没有配对，邀请还能用。把它换成要共享的目录。",
+                        absolute.display()
+                    )));
                 }
                 let app = match &mut self.app {
                     Some(app) => app,

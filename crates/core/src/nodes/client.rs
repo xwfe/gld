@@ -108,7 +108,10 @@ pub(super) async fn stop_signal() {
             return;
         }
     }
-    let _ = tokio::signal::ctrl_c().await;
+    // 拿不到 Ctrl-C（比如服务模式已脱离控制台）不等于要停，否则节点一启动就退出。
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 #[cfg(unix)]

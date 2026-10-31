@@ -106,7 +106,9 @@ fn a_mistyped_directory_is_reported_without_consuming_the_invitation() {
         token,
     );
     assert!(!output.status.success());
-    assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("目录不存在"), "{error}");
+    assert!(!error.contains(token));
     assert_eq!(relay.connections(), 0, "nothing should reach the Hub");
 }
 

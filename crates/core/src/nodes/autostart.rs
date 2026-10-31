@@ -17,7 +17,7 @@ mod tests;
 
 /// 服务管理器给的环境几乎是空的。节点要靠这些找到数据目录、走代理、让 AI 跑的命令找得到工具，
 /// launchd 的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`。开启时记一份快照。
-const CAPTURED_ENV: [&str; 12] = [
+const CAPTURED_ENV: [&str; 11] = [
     "PATH",
     "GLD_HOME",
     "LANG",
@@ -29,7 +29,6 @@ const CAPTURED_ENV: [&str; 12] = [
     "all_proxy",
     "NO_PROXY",
     "no_proxy",
-    "SSL_CERT_FILE",
 ];
 const STOP_WAIT: Duration = Duration::from_secs(10);
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -430,14 +429,18 @@ fn systemd_unit(spec: &Spec) -> String {
     )
 }
 
-/// systemd 的引号里 `\` 和 `"` 要转义，`%` 是说明符，`$` 在 ExecStart 里会被当变量展开。
-fn systemd_quote(value: &str) -> String {
+/// systemd 的引号里 `\\` 和 `"` 要转义，`%` 是说明符。
+fn systemd_environment(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
-        .replace('%', "%%")
-        .replace('$', "$$");
+        .replace('%', "%%");
     format!("\"{escaped}\"")
+}
+
+/// ExecStart 比 Environment 多一层：`$` 会被当变量展开。
+fn systemd_quote(value: &str) -> String {
+    systemd_environment(value).replace('$', "$$")
 }
 
 // ------------------------------------------------------------------ Windows
