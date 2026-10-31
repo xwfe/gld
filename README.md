@@ -33,7 +33,7 @@ gld --version
 
 别的平台、macOS 弹窗说"无法验证开发者"、新开终端报 `command not found: gld`，都在 [install.md](docs/install.md)。
 
-下载包目前到 0.9.0，和 main 一致。
+下载包目前到 0.10.0，和 main 一致。
 
 ## 第 2 步：加项目
 

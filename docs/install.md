@@ -8,16 +8,16 @@ Git、项目构建工具、隧道程序和启用的外部 MCP server 仍需按�
 macOS、Linux（把版本号换成要装的）：
 
 ```bash
-curl -fsSL https://github.com/xwfe/gld/releases/download/v0.9.1/install.sh | GLD_VERSION=v0.9.1 sh
+curl -fsSL https://github.com/xwfe/gld/releases/download/v0.10.0/install.sh | GLD_VERSION=v0.10.0 sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:GLD_VERSION='v0.9.1'; irm https://github.com/xwfe/gld/releases/download/v0.9.1/install.ps1 | iex
+$env:GLD_VERSION='v0.10.0'; irm https://github.com/xwfe/gld/releases/download/v0.10.0/install.ps1 | iex
 ```
 
-v0.9.0 的 Release 里还没有这两个脚本，从下一版开始才有；现在要装 v0.9.0，按下面的手动步骤来。
+这两个脚本从 v0.10.0 起才有；要装更早的版本，按下面的手动步骤来。
 接入 Hub 时不用自己拼：`gld node invite` 打印的命令里版本已经填好，和 Hub 一致，见[接入一台新机器](concepts.md#接入一台新机器)。
 
 脚本识别系统和 CPU，下载固定版本的包，核对 `SHA256SUMS`，试跑一次，再原子替换。不要管理员权限，也不要 Node、Python 或编译器。
