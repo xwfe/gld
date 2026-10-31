@@ -4222,3 +4222,9 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 | 工具表 | 34 项 `f0e996d1217ba15b` → 35 项 `6022dd56440b0ea9`，变了，ChatGPT 要点 Refresh |
 
 **没验证的：**真实 ChatGPT 连接器（要用户点 Refresh 再开新对话，然后看日志里是不是原来的 `auth=oauth:hub:dcr-…`、有没有 401）；公网探测只到无凭据这一层。`gld daemon upgrade` 没在线上用过。回滚用的备份见任务表；Hub 连过开了 `--run` 的目标机之后要连数据目录一起回退（`docs/install.md`）。
+
+**真实连接器（同日 12:27–12:31）：**用户在 chatgpt.com/plugins 点了 Refresh，再开新对话贴了一段只读提示词。日志里 Refresh 那次走了 `server/discover`、`initialize`、`tools/list`，新对话里 `list_workspaces`、`server_info`、`read_file`、`prompt_manage` 四次 `tools/call` 都有对应的 completed，身份都是换装前那个 `dcr-…` 客户端，这段时间没有 401、没有 `worker_failed`。`data/oauth-clients/hub.json` 和其余配置指纹仍和换装前一致，所以确实没重新授权。调用都落在执行代 `g1`，项目 gld 绑在它名下，重启次数 0。
+
+`gld usage` 报 10 个请求、1 个错误。这个错误是 ChatGPT 发的 `server/discover`：gld 没实现这个方法，回 Method not found，回包正好 114 字节，和日志一致；换装前同样的回包有 1338 次，是老行为。所以 4 次工具调用都没报错。
+
+**只证明了这些：**只读调用经执行代走通。没有从连接器跑过命令和写入，没有覆盖切换，没有在线用过 `gld daemon upgrade`，`prompt_manage` 只列了没读内容。请求日志不记回包内容，所以这几次的 `build_commit` 等结果是用户在对话里看到的，这边没有核对。
