@@ -33,6 +33,8 @@ const CAPTURED_ENV: [&str; 11] = [
 const STOP_WAIT: Duration = Duration::from_secs(10);
 const START_WAIT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_ATTEMPTS: u32 = 5;
+/// 普通错误都在进程里重试（`service.rs`），走到这里的只有真崩溃，不用等太久。
+const RESTART_AFTER_CRASH: u32 = 10;
 
 #[derive(Debug, Serialize)]
 pub struct Status {
@@ -406,7 +408,7 @@ fn launchd_plist(spec: &Spec) -> String {
 {environment}  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>60</integer>
+  <key>ThrottleInterval</key><integer>{RESTART_AFTER_CRASH}</integer>
   <key>StandardErrorPath</key><string>{log}</string>
 </dict></plist>
 "#,
@@ -470,7 +472,7 @@ fn systemd_unit(spec: &Spec) -> String {
         })
         .collect();
     format!(
-        "[Unit]\nDescription=gld-node {label}\n\n[Service]\nExecStart={command}\n{environment}Restart=on-failure\nRestartSec=60\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=gld-node {label}\n\n[Service]\nExecStart={command}\n{environment}Restart=on-failure\nRestartSec={RESTART_AFTER_CRASH}\n\n[Install]\nWantedBy=default.target\n",
         label = spec.label,
         command = command.join(" "),
     )

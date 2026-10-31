@@ -27,7 +27,7 @@ fn the_launchd_definition_restarts_only_after_a_crash_and_escapes_paths() {
     assert!(plist.contains("<string>/home/a &amp; b/nodes/hub.json</string>"));
     assert!(plist.contains("<string>--service</string>"));
     assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
-    assert!(plist.contains("<key>ThrottleInterval</key><integer>60</integer>"));
+    assert!(plist.contains("<key>ThrottleInterval</key><integer>10</integer>"));
     assert!(plist.contains("<key>PATH</key><string>/usr/bin:/opt/my tools</string>"));
     assert!(plist.contains(
         "<key>StandardErrorPath</key><string>/home/a &amp; b/nodes/hub.json.log</string>"
@@ -43,7 +43,7 @@ fn the_systemd_unit_quotes_everything_systemd_would_expand() {
     ));
     // `%` 不转义的话 systemd 把 %40 当说明符，代理密码就错了。
     assert!(unit.contains("Environment=\"HTTPS_PROXY=http://u:p%%40ss@proxy:8080\"\n"));
-    assert!(unit.contains("Restart=on-failure\n"));
+    assert!(unit.contains("Restart=on-failure\nRestartSec=10\n"));
     assert!(unit.contains("WantedBy=default.target\n"));
     assert_eq!(systemd_quote(r#"a"b\c$d"#), r#""a\"b\\c$$d""#);
     // Environment 不展开变量，这里多转义一个 `$` 就改了值。
