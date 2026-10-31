@@ -216,14 +216,46 @@ fn tools_run_in_a_child_and_the_port_stays_with_the_host() {
 
 /// 项目命令拿不到私有通道：除了 stdio 再没有别的继承下来的描述符。
 /// 有的话它就能冒充宿主发消息，或者抢走发给执行代的消息。
+///
+/// 守护进程要从干净的环境起。测试进程自己带着外层继承来的描述符（CI 运行器的管道和 socket），
+/// 标准库起子进程不会关它们，会一路传给项目命令。那不是通道，只放宽断言又会放过真的泄漏，
+/// 所以起之前全关掉，这样还能断言恰好三根。
 #[test]
 fn project_commands_inherit_nothing_from_the_private_channel() {
-    let fixture = fixture();
+    use std::os::unix::process::CommandExt;
+
+    let env = Env::new();
+    env.ok(&["add", ".", "--name", "api"]);
+    env.ok(&["set", "api", "command-policy=all"]);
+    let mut start = Command::new(env!("CARGO_BIN_EXE_gld"));
+    start
+        .args(["daemon", "start"])
+        .env("GLD_HOME", env.home.path())
+        .env("NO_COLOR", "1")
+        .current_dir(env.project.path());
+    // SAFETY: fork 之后、exec 之前只调用 close，它是异步信号安全的。
+    unsafe {
+        start.pre_exec(|| {
+            for fd in 3..1024 {
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
+    let started = start.output().expect("起守护进程");
+    assert!(started.status.success(), "{started:?}");
+
     // -L：看描述符指向的东西是什么类型，两个平台都用 p 表示管道。
-    let run = fixture.tool(
+    let run = env.json(&[
+        "--json",
+        "-w",
+        "api",
+        "tool",
+        "call",
         "exec_command",
-        json!({ "workspace": "api", "argv": ["sh", "-c", "ls -lL /dev/fd"], "yield_time_ms": 30000 }),
-    );
+        r#"argv:=["sh","-c","ls -lL /dev/fd"]"#,
+        "yield_time_ms:=30000",
+    ]);
     let text = run["stdout"].as_str().unwrap_or_else(|| panic!("{run}"));
     let pipes = text.lines().filter(|line| line.starts_with('p')).count();
     // 就 stdin、stdout、stderr 三根。多出来的那根就是通道。
