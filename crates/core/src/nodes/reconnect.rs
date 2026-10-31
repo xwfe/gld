@@ -13,6 +13,8 @@ pub(super) enum Retry {
     Transient,
     Conflict,
     Never,
+    /// 凭据被撤销或轮换，重试多少次都一样，得重新加入。
+    Rejoin,
 }
 
 #[derive(Debug)]
@@ -41,6 +43,7 @@ impl Failure {
             Error::Http(response) => {
                 let status = response.status().as_u16();
                 let retry = match status {
+                    401 => Retry::Rejoin,
                     409 => Retry::Conflict,
                     429 | 500..=599 => Retry::Transient,
                     _ => Retry::Never,
@@ -107,7 +110,7 @@ impl Backoff {
         random: u64,
     ) -> Result<Duration, String> {
         match failure.retry {
-            Retry::Never => return Err(failure.message.clone()),
+            Retry::Never | Retry::Rejoin => return Err(failure.message.clone()),
             Retry::Conflict if !self.connected_once => {
                 return Err(format!(
                     "{}; this machine is already connected",
@@ -167,9 +170,10 @@ mod tests {
                     .into(),
             )
         };
-        for status in [400, 401, 403, 404] {
+        for status in [400, 403, 404] {
             assert_eq!(Failure::websocket(http(status)).retry, Retry::Never);
         }
+        assert_eq!(Failure::websocket(http(401)).retry, Retry::Rejoin);
         for status in [429, 500, 502, 503, 504] {
             assert_eq!(Failure::websocket(http(status)).retry, Retry::Transient);
         }

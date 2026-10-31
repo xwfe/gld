@@ -62,9 +62,12 @@ pub async fn run(cli: Cli) -> CliResult {
         return computer::run(command, out).await;
     }
     // 节点只出站，不连接/自动拉起本机守护进程；登记凭据仍走 Backend 单写入口。
-    if let Command::Node(crate::cli::NodeCmd::Run { config }) = &cli.command {
+    if let Command::Node(crate::cli::NodeCmd::Run { config, service }) = &cli.command {
         let config = find_node_config(config.as_deref())?;
-        return node::run_config(&config).await;
+        return node::run_config(&config, *service).await;
+    }
+    if let Command::Node(crate::cli::NodeCmd::Autostart(command)) = &cli.command {
+        return node::autostart(command, out);
     }
     if let Command::Node(crate::cli::NodeCmd::Shares {
         config,

@@ -408,6 +408,34 @@ pub enum NodeCmd {
         /// 节点配置；只加入过一个 Hub 时可省略。格式见 docs/concepts.md
         #[arg(long)]
         config: Option<PathBuf>,
+        /// 自启动定义里用：日志写文件，网络和证书错误隔一分钟重试，不退出
+        #[arg(long, hide = true)]
+        service: bool,
+    },
+    /// 把节点交给系统服务管理器：开机或登录后自动连 Hub，不要管理员权限
+    #[command(subcommand)]
+    Autostart(AutostartCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AutostartCmd {
+    /// 配置并立刻在后台启动；已配过的重启一次，换完二进制跑它就换上新版
+    Enable {
+        /// 节点配置；只加入过一个 Hub 时可省略
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// 停掉并删除自启动配置；节点配置和项目文件不动
+    Disable {
+        /// 节点配置；只加入过一个 Hub 时可省略
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// 查看有没有配置、节点在不在跑
+    Status {
+        /// 节点配置；只加入过一个 Hub 时可省略
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -446,6 +474,9 @@ pub struct JoinArgs {
     /// 显式信任的 DER CA 证书；仍核验 TLS 主机名
     #[arg(long)]
     pub ca_certificate: Option<PathBuf>,
+    /// 配对成功后配置开机自启并在后台连接 Hub（同 gld node autostart enable）
+    #[arg(long)]
+    pub autostart: bool,
     /// 确认所显示的 Hub、执行账号和共享项目，供非交互调用使用
     #[arg(long)]
     pub yes: bool,

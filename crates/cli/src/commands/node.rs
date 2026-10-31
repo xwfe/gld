@@ -7,7 +7,7 @@ use gld_daemon::Request;
 use serde_json::Value;
 
 use super::Ctx;
-use crate::cli::NodeCmd;
+use crate::cli::{AutostartCmd, NodeCmd};
 use crate::error::{CliError, CliResult};
 use crate::output::Output;
 
@@ -52,7 +52,7 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
             },
             "新凭据已生效，旧连接已关闭。更新目标机的私有配置后重新运行节点；机器与项目句柄保持。",
         ),
-        NodeCmd::Run { .. } | NodeCmd::Shares { .. } => {
+        NodeCmd::Run { .. } | NodeCmd::Shares { .. } | NodeCmd::Autostart(_) => {
             unreachable!("local node commands are handled before Backend")
         }
     };
@@ -90,26 +90,108 @@ fn read_credential(enabled: bool) -> Result<String, CliError> {
     Ok(credential.trim_end_matches(['\r', '\n']).to_string())
 }
 
-pub async fn run_config(path: &Path) -> CliResult {
-    let storage = gld_core::nodes::local_config::LocalConfig::lock(path).map_err(CliError::new)?;
-    let config = storage.load().map_err(CliError::new)?;
-    let projects =
-        gld_core::nodes::join::resolve_workspaces(&config.workspaces).map_err(CliError::new)?;
+pub async fn run_config(path: &Path, service: bool) -> CliResult {
+    if service {
+        gld_core::nodes::service::detach_console();
+        gld_core::nodes::service::log_to(path);
+    }
+    // 拿不到锁时退出码非 0：前台那个停了之后，服务管理器一分钟内再拉起这个就接上了。
+    let storage = gld_core::nodes::local_config::LocalConfig::lock(path).map_err(|error| {
+        if service {
+            gld_core::nodes::service::report(&error);
+        }
+        CliError::new(error)
+    })?;
+    let config = match load_config(&storage) {
+        Ok(config) => config,
+        // 配置坏了或项目被删，拉起多少次都一样。退出码 0，服务管理器不再反复拉起，原因在日志里。
+        Err(error) if service => {
+            gld_core::nodes::service::report(&format!("{error}; not starting"));
+            return Ok(());
+        }
+        Err(error) => return Err(CliError::new(error)),
+    };
+    tokio::task::spawn_blocking(move || {
+        let _configuration_lock = storage;
+        if service {
+            gld_core::nodes::service::run(config)
+        } else {
+            gld_core::nodes::client::run(config)
+        }
+    })
+    .await
+    .map_err(|_| CliError::new("节点进程异常结束。"))?
+    .map_err(CliError::new)
+}
+
+fn load_config(
+    storage: &gld_core::nodes::local_config::LocalConfig,
+) -> Result<gld_core::nodes::config::NodeConfig, String> {
+    let config = storage.load()?;
+    let projects = gld_core::nodes::join::resolve_workspaces(&config.workspaces)?;
     gld_core::nodes::local_config::validate_config_location(
         storage.path(),
         &projects
             .into_iter()
             .map(|project| project.path)
             .collect::<Vec<_>>(),
-    )
-    .map_err(CliError::new)?;
-    tokio::task::spawn_blocking(move || {
-        let _configuration_lock = storage;
-        gld_core::nodes::client::run(config)
-    })
-    .await
-    .map_err(|_| CliError::new("节点进程异常结束。"))?
-    .map_err(CliError::new)
+    )?;
+    Ok(config)
+}
+
+pub fn autostart(command: &AutostartCmd, out: Output) -> CliResult {
+    let find = |config: &Option<std::path::PathBuf>| {
+        gld_core::nodes::local_config::find(config.as_deref()).map_err(CliError::new)
+    };
+    match command {
+        AutostartCmd::Enable { config } => {
+            let status =
+                gld_core::nodes::autostart::enable(&find(config)?).map_err(CliError::new)?;
+            print_autostart(&status, out);
+        }
+        AutostartCmd::Disable { config } => {
+            let removed =
+                gld_core::nodes::autostart::disable(&find(config)?).map_err(CliError::new)?;
+            if !out.json_or(&serde_json::json!({ "removed": removed })) {
+                out.line(if removed {
+                    "已停止节点并删除自启动配置。节点配置和项目文件没动，要连 Hub 就 gld node run。"
+                } else {
+                    "这份配置没配过自启动，什么都没动。"
+                });
+            }
+        }
+        AutostartCmd::Status { config } => {
+            let status =
+                gld_core::nodes::autostart::status(&find(config)?).map_err(CliError::new)?;
+            print_autostart(&status, out);
+        }
+    }
+    Ok(())
+}
+
+pub fn print_autostart(status: &gld_core::nodes::autostart::Status, out: Output) {
+    if out.json_or(status) {
+        return;
+    }
+    out.kv(&[
+        (
+            "自启动",
+            if status.installed {
+                format!("已配置（{}）", status.manager)
+            } else {
+                "没配置".to_string()
+            },
+        ),
+        (
+            "节点进程",
+            if status.running { "在跑" } else { "没跑" }.to_string(),
+        ),
+        ("服务名", status.label.clone()),
+        ("日志", status.log.display().to_string()),
+    ]);
+    for note in &status.notes {
+        out.note(note);
+    }
 }
 
 pub fn shares(

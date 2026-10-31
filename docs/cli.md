@@ -936,6 +936,7 @@ Options:
       --invite-stdin                     从管道或文件接收一次性邀请，不将其放入 argv
       --no-color                         关闭彩色输出（也可设置环境变量 NO_COLOR）
       --ca-certificate <CA_CERTIFICATE>  显式信任的 DER CA 证书；仍核验 TLS 主机名
+      --autostart                        配对成功后配置开机自启并在后台连接 Hub（同 gld node autostart enable）
       --yes                              确认所显示的 Hub、执行账号和共享项目，供非交互调用使用
   -h, --help                             Print help
   -V, --version                          Print version
@@ -955,6 +956,7 @@ Commands:
   rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
   shares             查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
   run                在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
+  autostart          把节点交给系统服务管理器：开机或登录后自动连 Hub，不要管理员权限
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]

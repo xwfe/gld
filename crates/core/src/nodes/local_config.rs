@@ -72,6 +72,9 @@ fn find_in(dir: &Path) -> Result<PathBuf, String> {
     }
 }
 
+const IN_USE: &str =
+    "Node configuration is in use; stop the node or wait for the other configuration command";
+
 pub struct LocalConfig {
     path: PathBuf,
     pending: PathBuf,
@@ -102,7 +105,7 @@ impl LocalConfig {
             Err(_) => return Err("Cannot create node configuration lock".into()),
         };
         check_private_file(&lock)?;
-        lock.try_lock_exclusive().map_err(|_| "Node configuration is in use; stop the node or wait for the other configuration command")?;
+        lock.try_lock_exclusive().map_err(|_| IN_USE)?;
         let mut pending_name = filename.to_os_string();
         pending_name.push(".pending");
         Ok(Self {
@@ -110,6 +113,15 @@ impl LocalConfig {
             pending: parent.join(pending_name),
             _lock: lock,
         })
+    }
+
+    /// 节点进程全程持锁，所以这就是“节点在不在跑”，不管它是前台起的还是服务管理器起的。
+    pub fn in_use(path: &Path) -> Result<bool, String> {
+        match Self::lock(path) {
+            Ok(_) => Ok(false),
+            Err(error) if error == IN_USE => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn path(&self) -> &Path {

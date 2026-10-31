@@ -27,7 +27,7 @@ use super::transport::{socket_config, MAX_MESSAGE_BYTES, MESSAGE_WRITE_TIMEOUT};
 
 #[path = "reconnect.rs"]
 mod reconnect;
-use reconnect::{Backoff, Failure, Stability};
+use reconnect::{Backoff, Failure, Retry, Stability};
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
@@ -37,6 +37,37 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_CA_BYTES: u64 = 64 * 1024;
+
+/// 连接循环为什么结束。`must_rejoin` 的只有重新加入才能解决，服务模式靠它决定还要不要再试。
+#[derive(Debug)]
+pub(super) struct NodeError {
+    pub message: String,
+    pub must_rejoin: bool,
+}
+
+impl NodeError {
+    fn rejoin(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            must_rejoin: true,
+        }
+    }
+}
+
+impl From<String> for NodeError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            must_rejoin: false,
+        }
+    }
+}
+
+impl From<&str> for NodeError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
 
 /// 同步 CLI 入口。不会启动本机 MCP/OAuth/隧道，也不修改本机项目登记。
 pub fn run(config: NodeConfig) -> Result<(), String> {
@@ -49,12 +80,12 @@ pub fn run(config: NodeConfig) -> Result<(), String> {
     });
     // 不管是被停还是凭据被撤销退出，这里起的命令都没人能再读、再停了，不能留着以这个账号跑。
     crate::tools::workspace_runtime::terminate_all_sessions_everywhere();
-    outcome
+    outcome.map_err(|error| error.message)
 }
 
 /// 开机自启时系统用 SIGTERM 停进程，前台运行时关终端或 SSH 断开发 SIGHUP；没接住的话进程直接死，
 /// 命令留在后台。`nohup` 的意思就是“别因为 SIGHUP 退出”，那种情况不接：一接就把忽略覆盖掉了。
-async fn stop_signal() {
+pub(super) async fn stop_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -87,7 +118,11 @@ fn hangup_ignored() -> bool {
     queried == 0 && current.sa_sigaction == libc::SIG_IGN
 }
 
-async fn run_until<F>(config: NodeConfig, hub: Arc<Hub>, shutdown: &mut F) -> Result<(), String>
+pub(super) async fn run_until<F>(
+    config: NodeConfig,
+    hub: Arc<Hub>,
+    shutdown: &mut F,
+) -> Result<(), NodeError>
 where
     F: Future<Output = ()> + Unpin,
 {
@@ -137,15 +172,18 @@ where
                 };
                 if header("x-gld-hub-id") != Some(config.hub_id.as_str()) {
                     let _ = tokio::time::timeout(WRITE_TIMEOUT, SinkExt::close(&mut socket)).await;
-                    return Err("node endpoint returned a different Hub identity".into());
+                    return Err(NodeError::rejoin(
+                        "node endpoint returned a different Hub identity",
+                    ));
                 }
                 if !header(PROOF_HEADER)
                     .is_some_and(|proof| verify_handshake(&config.hub_public_key, &binding, proof))
                 {
                     let _ = tokio::time::timeout(WRITE_TIMEOUT, SinkExt::close(&mut socket)).await;
-                    return Err("node endpoint could not prove the pinned Hub key; it is not the paired Hub, or the Hub key changed and this machine must join again".into());
+                    return Err(NodeError::rejoin("node endpoint could not prove the pinned Hub key; it is not the paired Hub, or the Hub key changed and this machine must join again"));
                 }
                 backoff.connected();
+                super::service::note("connected to the Hub");
                 let mut stability = Stability::new();
                 let verifier = MessageVerifier::new(&config.hub_public_key, binding);
                 let result = serve_until(
@@ -167,13 +205,16 @@ where
                 }
             }
         };
+        if failure.retry == Retry::Rejoin {
+            return Err(NodeError::rejoin(failure.message));
+        }
         let random = uuid::Uuid::new_v4().as_u128() as u64;
         let delay = backoff.next(&failure, std::time::Instant::now(), random)?;
-        eprintln!(
+        super::service::report(&format!(
             "{}; retrying the connection in {:.1}s without replaying requests",
             failure.message,
             delay.as_secs_f64()
-        );
+        ));
         tokio::select! {
             biased;
             _ = &mut *shutdown => return Ok(()),

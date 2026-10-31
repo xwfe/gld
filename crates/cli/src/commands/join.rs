@@ -29,8 +29,13 @@ pub async fn run(args: &JoinArgs, out: Output) -> CliResult {
     .map_err(CliError::new)?;
     let preview = serde_json::to_string_pretty(prepared.preview())
         .map_err(|_| CliError::new("无法显示节点配对范围。"))?;
+    let autostart = if args.autostart {
+        "；配对后配置开机自启"
+    } else {
+        ""
+    };
     out.note(format!(
-        "将以当前执行账号共享以下项目；read_only 为 false 的项目允许文件写入，commands 为 true 的项目能以这个账号跑命令（不是沙箱，能调用 Hub 的人等于拿到这个账号）；管理工具和桌面访问关闭：\n{preview}"
+        "将以当前执行账号共享以下项目；read_only 为 false 的项目允许文件写入，commands 为 true 的项目能以这个账号跑命令（不是沙箱，能调用 Hub 的人等于拿到这个账号）；管理工具和桌面访问关闭{autostart}：\n{preview}"
     ));
     if !args.yes {
         confirm(
@@ -42,10 +47,27 @@ pub async fn run(args: &JoinArgs, out: Output) -> CliResult {
     let joined = prepared.execute().await.map_err(CliError::new)?;
     if !out.json_or(&joined) {
         out.line("配对成功，私有节点配置已保存。");
-        out.note(format!(
-            "配置在 {}。前台连接 Hub：gld node run --config <上面的路径>；只加入过一个 Hub 时可以不写 --config。",
-            joined.config_path.display()
-        ));
+        out.note(format!("配置在 {}。", joined.config_path.display()));
+    }
+    if !args.autostart {
+        out.note("前台连接 Hub：gld node run；要开机自动连：gld node autostart enable。接了多个 Hub 时加 --config <路径>。");
+        return Ok(());
+    }
+    // 配对已经成了，邀请也用掉了。这里失败不能报配对失败：重跑 join 只会说配置已存在。
+    match gld_core::nodes::autostart::enable(&joined.config_path) {
+        Ok(status) => {
+            out.note(if status.running {
+                "已配置开机自启，节点在后台连接 Hub。看连接情况：gld node doctor"
+            } else {
+                "已配置开机自启，节点还没起来。看原因：gld node doctor"
+            });
+            for note in &status.notes {
+                out.note(note);
+            }
+        }
+        Err(error) => out.note(format!(
+            "配对成功，但自启动没配上：{error}\n现在可以前台连接 Hub：gld node run"
+        )),
     }
     Ok(())
 }
@@ -102,6 +124,8 @@ pub fn leave(args: &LeaveArgs, out: Output) -> CliResult {
             "已取消，节点配置没动。",
         )?;
     }
+    // 不先撤掉的话，服务管理器会反复拉起一个配置已经不在的节点。配置读不出来（只剩 pending）时也没配过自启动。
+    let _ = gld_core::nodes::autostart::disable(&config);
     let left = gld_core::nodes::sharing::leave(&config).map_err(CliError::new)?;
     if !out.json_or(&left) {
         out.line("已删除节点配置和凭据，项目文件没动。");

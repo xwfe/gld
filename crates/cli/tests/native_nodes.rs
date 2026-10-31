@@ -3,6 +3,9 @@
 
 mod common;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "native_nodes/autostart.rs"]
+mod autostart_tests;
 #[cfg(unix)]
 #[path = "native_nodes/commands.rs"]
 mod command_tests;
