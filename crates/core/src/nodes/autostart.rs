@@ -33,6 +33,7 @@ const CAPTURED_ENV: [&str; 12] = [
 ];
 const STOP_WAIT: Duration = Duration::from_secs(10);
 const START_WAIT: Duration = Duration::from_secs(5);
+const BOOTSTRAP_ATTEMPTS: u32 = 5;
 
 #[derive(Debug, Serialize)]
 pub struct Status {
@@ -245,6 +246,10 @@ fn stop_service(manager: Manager, label: &str) {
             for domain in launchd_domains() {
                 let _ = tool("launchctl", &["bootout", &format!("{domain}/{label}")]);
             }
+            let deadline = Instant::now() + STOP_WAIT;
+            while launchd_loaded(label) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         Manager::Systemd => {
             let _ = tool("systemctl", &["--user", "stop", &unit_name(label)]);
@@ -286,26 +291,44 @@ fn launchd_domains() -> [String; 2] {
     [format!("gui/{uid}"), format!("user/{uid}")]
 }
 
-/// 有图形登录的用 gui 域；SSH 进来、没人登录桌面时 gui 域不存在，退到 user 域，起得来但重启后要登录才回来。
+/// 有图形登录的用 gui 域；SSH 进来、没人登录桌面时 gui 域不存在，用 user 域，起得来但重启后要登录才回来。
+/// 先看域存不存在再选，不靠失败后回退：gui 域一时失败就退到 user 域，服务会装到用户看不到的地方。
 fn start_launchd(label: &str, definition: Option<&Path>) -> Result<Vec<String>, String> {
     let plist = definition
         .ok_or("launchd needs a definition file")?
         .display()
         .to_string();
     let [gui, user] = launchd_domains();
-    let first = tool("launchctl", &["bootstrap", &gui, &plist])?;
-    if first.status.success() {
-        return Ok(Vec::new());
-    }
-    let second = tool("launchctl", &["bootstrap", &user, &plist])?;
-    if second.status.success() {
-        return Ok(vec![format!(
-            "No desktop login right now, so {label} runs in the user domain; after a reboot it returns only once this account logs in"
-        )]);
-    }
-    let error = tool_error("launchctl bootstrap", &first);
+    let desktop = tool("launchctl", &["print", &gui]).is_ok_and(|out| out.status.success());
+    let domain = if desktop { &gui } else { &user };
+    // 实测：刚 bootout 完的服务马上 bootstrap 会报 5: Input/output error，过一会儿就好。
+    let mut attempts = 0;
+    let failure = loop {
+        let output = tool("launchctl", &["bootstrap", domain, &plist])?;
+        if output.status.success() {
+            return Ok(if desktop {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "No desktop login right now, so {label} runs in the user domain; after a reboot it returns only once this account logs in"
+                )]
+            });
+        }
+        attempts += 1;
+        if attempts >= BOOTSTRAP_ATTEMPTS {
+            break output;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
     let _ = std::fs::remove_file(&plist);
-    Err(error)
+    Err(tool_error("launchctl bootstrap", &failure))
+}
+
+fn launchd_loaded(label: &str) -> bool {
+    launchd_domains().iter().any(|domain| {
+        tool("launchctl", &["print", &format!("{domain}/{label}")])
+            .is_ok_and(|output| output.status.success())
+    })
 }
 
 fn launchd_plist(spec: &Spec) -> String {

@@ -18,8 +18,11 @@ stop() {
   fi
 }
 case "$(basename "$0") $*" in
+  "launchctl bootstrap user"*) echo "the desktop domain exists, so user is the wrong one" >&2; exit 5 ;;
   "launchctl bootstrap"*) start ;;
   "launchctl bootout"*) stop ;;
+  "launchctl print gui/"*/*) [ -f "$STUB_PID" ] || exit 113 ;;
+  "launchctl print user/"*/*) exit 113 ;;
   "systemctl --user enable --now"*) start ;;
   "systemctl --user stop"*) stop ;;
   "loginctl show-user"*) echo "Linger=yes" ;;
