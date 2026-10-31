@@ -35,7 +35,7 @@ fn a_fresh_machine_joins_by_directory_and_later_commands_find_the_config_themsel
     let relay = TlsRelay::new(service.port);
     let (machine, dir, ca) = fresh_machine();
     let url = format!("https://localhost:{}", relay.port);
-    let invitation = hub.json(&["--json", "node", "invite", "fresh"]);
+    let invitation = hub.json(&["--json", "node", "invite", "fresh", "--hub", &url]);
     let token = invitation["invitation"].as_str().unwrap();
     let dir_text = dir.to_str().unwrap();
 
@@ -94,7 +94,7 @@ fn a_mistyped_directory_is_reported_without_consuming_the_invitation() {
     let relay = TlsRelay::new(service.port);
     let (machine, _dir, ca) = fresh_machine();
     let url = format!("https://localhost:{}", relay.port);
-    let invitation = hub.json(&["--json", "node", "invite", "typo"]);
+    let invitation = hub.json(&["--json", "node", "invite", "typo", "--hub", &url]);
     let token = invitation["invitation"].as_str().unwrap();
     let missing = machine.project.path().join("no-such-dir");
 
@@ -214,4 +214,67 @@ fn doctor_without_a_config_says_how_to_join() {
     let output = command(&machine).args(["node", "doctor"]).output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("gld join"));
+}
+
+#[test]
+fn an_invitation_needs_an_entry_the_target_can_keep_using() {
+    let hub = Env::new();
+    let _service = hub.serve("local", "bearer");
+    let refused = command(&hub)
+        .args(["node", "invite", "nowhere"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(error.contains("--hub"), "{error}");
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(hub.home.path().join("data/profiles.json")).unwrap())
+            .unwrap();
+    assert!(
+        saved["node_invitations"]
+            .as_array()
+            .is_none_or(|invitations| invitations.is_empty()),
+        "a refused invitation must not be stored"
+    );
+
+    let plain = command(&hub)
+        .args(["node", "invite", "plain", "--hub", "http://hub.example.com"])
+        .output()
+        .unwrap();
+    assert!(!plain.status.success());
+
+    let invited = hub.json(&[
+        "--json",
+        "node",
+        "invite",
+        "somewhere",
+        "--hub",
+        "https://hub.example.com/hub/",
+    ]);
+    assert_eq!(invited["hub_url"], "https://hub.example.com/hub");
+    let token = invited["invitation"].as_str().unwrap();
+    let join = invited["commands"]["join_unix"].as_str().unwrap();
+    assert!(join.contains(token) && join.contains("https://hub.example.com/hub"));
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(invited["commands"]["install_unix"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("/v{version}/install.sh")));
+
+    let text = command(&hub)
+        .args([
+            "node",
+            "invite",
+            "readable",
+            "--hub",
+            "https://hub.example.com",
+        ])
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let shown = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        shown.contains("macOS / Linux") && shown.contains("Windows PowerShell"),
+        "{shown}"
+    );
 }

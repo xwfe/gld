@@ -359,10 +359,13 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeCmd {
-    /// 生成十分钟有效的一次性邀请；替换同名未使用邀请，只在本机输出
+    /// 生成十分钟有效的一次性邀请和目标机要跑的命令；替换同名未使用邀请，只在本机输出
     Invite {
         /// 配对成功后使用的机器展示名称
         name: String,
+        /// 目标机连 Hub 用的 HTTPS 基地址；默认用服务的固定公网入口，没有或是临时地址时必须给
+        #[arg(long, value_name = "URL")]
+        hub: Option<String>,
     },
     /// 在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、Hub 公钥、机器 ID 和名称
     Register {

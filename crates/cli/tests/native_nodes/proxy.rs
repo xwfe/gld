@@ -93,7 +93,7 @@ fn a_machine_behind_a_connect_proxy_pairs_and_stays_connected() {
     std::fs::write(&ca, decode(CA)).unwrap();
     let config = machine.home.path().join("proxied.json");
     let url = format!("https://localhost:{}", relay.port);
-    let invitation = hub.json(&["--json", "node", "invite", "proxied"]);
+    let invitation = hub.json(&["--json", "node", "invite", "proxied", "--hub", &url]);
 
     let mut join = command(&machine);
     join.env("HTTPS_PROXY", proxy.url())

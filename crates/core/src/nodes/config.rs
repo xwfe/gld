@@ -206,31 +206,36 @@ impl NodeConfig {
     }
 
     fn parsed_url(&self) -> Result<reqwest::Url, String> {
-        let url = reqwest::Url::parse(&self.hub_url).map_err(|_| "Invalid node Hub URL")?;
-        if url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
+        parse_hub_url(&self.hub_url)
+    }
+}
+
+/// 节点能接受的 Hub 地址。发邀请时也查一遍：等到目标机上才报错，邀请和时间都白费了。
+pub fn parse_hub_url(hub_url: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(hub_url).map_err(|_| "Invalid node Hub URL")?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("Node Hub URL must have a host and no credentials, query or fragment".into());
+    }
+    match url.scheme() {
+        "https" | "wss" => {}
+        "http" | "ws"
+            if url
+                .host_str()
+                .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+                .is_some_and(|ip| ip.is_loopback()) => {}
+        _ => {
             return Err(
-                "Node Hub URL must have a host and no credentials, query or fragment".into(),
-            );
-        }
-        match url.scheme() {
-            "https" | "wss" => {}
-            "http" | "ws"
-                if url
-                    .host_str()
-                    .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
-                    .is_some_and(|ip| ip.is_loopback()) => {}
-            _ => return Err(
                 "Nodes require HTTPS/WSS; plain HTTP/WS is allowed only on a literal loopback IP"
                     .into(),
-            ),
+            )
         }
-        Ok(url)
     }
+    Ok(url)
 }
 
 pub fn valid_id(id: &str) -> bool {

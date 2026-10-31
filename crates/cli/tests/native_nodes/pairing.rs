@@ -97,6 +97,8 @@ fn cli_join_pairs_only_selected_projects_through_tls_and_preserves_confirmation_
     let config = machine.home.path().join("paired.json");
     let pending = machine.home.path().join("paired.json.pending");
     let invitation = hub.json(&["--json", "node", "invite", "paired-node"]);
+    // 全局入口就是这个 Hub 的固定入口，邀请不用再问地址。
+    assert_eq!(invitation["hub_url"], "https://gateway.example.com/hub");
     let token = invitation["invitation"].as_str().unwrap();
     assert_eq!(
         node_data(&hub)["node_invitations"]
@@ -347,11 +349,11 @@ fn cli_join_recovers_a_lost_success_response_without_changing_the_pending_identi
     let relay = LostFirstReply::new(service.port);
     let machine = Env::new();
     let ids = projects(&machine, "recovered-node");
-    let invitation = hub.json(&["--json", "node", "invite", "recovered-node"]);
+    let url = format!("http://127.0.0.1:{}", relay.port);
+    let invitation = hub.json(&["--json", "node", "invite", "recovered-node", "--hub", &url]);
     let token = invitation["invitation"].as_str().unwrap();
     let config = machine.home.path().join("recover.json");
     let pending_path = machine.home.path().join("recover.json.pending");
-    let url = format!("http://127.0.0.1:{}", relay.port);
     let attempt = || {
         let mut command = join_command(&machine, &url, &config, None, true);
         for name in [

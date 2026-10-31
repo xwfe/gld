@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 
+use gld_core::app::HubStatusDto;
 use gld_daemon::Request;
 use serde_json::Value;
 
@@ -13,16 +14,29 @@ use crate::output::Output;
 
 pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
     let (request, note) = match command {
-        NodeCmd::Invite { name } => {
-            let result: Value = ctx.backend.call_typed(Request::NodeInvite { name }).await?;
+        NodeCmd::Invite { name, hub } => {
+            let entry = match hub {
+                Some(url) => checked_entry(&url)?,
+                None => {
+                    let status: HubStatusDto = ctx.backend.call_typed(Request::HubStatus).await?;
+                    hub_entry(&status)?
+                }
+            };
+            let mut result: Value = ctx.backend.call_typed(Request::NodeInvite { name }).await?;
+            let invitation = result["invitation"].as_str().unwrap_or("").to_string();
+            let commands = JoinCommands::new(&entry, &invitation, env!("CARGO_PKG_VERSION"));
+            result["hub_url"] = entry.clone().into();
+            result["commands"] = serde_json::to_value(&commands).unwrap_or_default();
             if !ctx.out.json_or(&result) {
                 ctx.out.line(format!(
-                    "Hub ID：{}\n机器名称：{}\n邀请：{}\n有效期：十分钟",
-                    result["hub_id"].as_str().unwrap_or(""),
+                    "Hub 入口：{entry}\n机器名称：{}\n邀请：{invitation}\n有效期：十分钟，只能用一次；用过或过期后留在命令历史里也没用\n",
                     result["name"].as_str().unwrap_or(""),
-                    result["invitation"].as_str().unwrap_or(""),
                 ));
-                ctx.out.note("在目标机用 gld join --invite-stdin 接收邀请；通过终端确认共享项目。相同名称的新邀请会使旧邀请失效。");
+                ctx.out.line(format!(
+                    "到目标机执行。把示例路径换成要共享的目录，可以写多个 --share；默认只读，允许改文件加 --write <目录>，允许跑命令加 --run <目录>。\n\nmacOS / Linux：\n{}\n{}\n\nWindows PowerShell：\n{}\n{}\n",
+                    commands.install_unix, commands.join_unix, commands.install_windows, commands.join_windows,
+                ));
+                ctx.out.note("已经装了 gld 的机器跳过第一行，第二行开头换成 gld。目标机会显示要共享的项目，确认后才配对。相同名称的新邀请会使旧邀请失效。");
             }
             return Ok(());
         }
@@ -71,6 +85,70 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
         ctx.out.note(note);
     }
     Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct JoinCommands {
+    install_unix: String,
+    join_unix: String,
+    install_windows: String,
+    join_windows: String,
+}
+
+impl JoinCommands {
+    /// 安装版本跟 Hub 走，目标机和 Hub 是同一版。安装脚本放在 Release 里，和包同一个地方、同一个版本。
+    fn new(entry: &str, invitation: &str, version: &str) -> Self {
+        let release = format!("https://github.com/xwfe/gld/releases/download/v{version}");
+        let unix = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+        let windows = |text: &str| format!("'{}'", text.replace('\'', "''"));
+        Self {
+            install_unix: format!("curl -fsSL {release}/install.sh | GLD_VERSION=v{version} sh"),
+            join_unix: format!(
+                "printf %s {} | \"$HOME/.local/bin/gld\" join --hub {} --share /path/to/project --invite-stdin --autostart",
+                unix(invitation),
+                unix(entry),
+            ),
+            install_windows: format!(
+                "$env:GLD_VERSION='v{version}'; irm {release}/install.ps1 | iex"
+            ),
+            join_windows: format!(
+                "{} | & \"$env:LOCALAPPDATA\\Programs\\gld\\gld.exe\" join --hub {} --share C:\\path\\to\\project --invite-stdin --autostart",
+                windows(invitation),
+                windows(entry),
+            ),
+        }
+    }
+}
+
+fn checked_entry(url: &str) -> Result<String, CliError> {
+    gld_core::nodes::config::parse_hub_url(url)
+        .map_err(|error| CliError::new(format!("--hub 的地址目标机用不了：{error}")))?;
+    Ok(url.trim_end_matches('/').to_string())
+}
+
+/// 目标机把这个地址存进配置，之后一直连它。所以必须是固定的，临时地址和 OpenAI 隧道都得在这里拦下：
+/// 放过去配对可能还能成，等 Hub 一重启全部节点掉线，而且看不出原因。
+fn hub_entry(status: &HubStatusDto) -> Result<String, CliError> {
+    const FIXED: &str = "给 Hub 配固定入口：gld share --tunnel cf:<域名>、frp:<配置名> 或 https://<已有反代的地址>；同一内网、VPN 或已有其他入口时，用 --hub <HTTPS 地址> 指定。";
+    let config = &status.config;
+    if config.tunnel_type == "openai" {
+        return Err(CliError::new(format!(
+            "这个服务走 OpenAI 隧道，它没有目标机能连的地址。{FIXED}"
+        )));
+    }
+    if config.tunnel_type == "cloudflare" && config.cloudflare_mode != "named" {
+        return Err(CliError::new(format!(
+            "Cloudflare 临时地址每次重启 Hub 都会变，目标机存的还是旧地址，之后全部掉线。{FIXED}"
+        )));
+    }
+    let entry = status.public_endpoint.trim_end_matches('/');
+    let entry = entry.strip_suffix("/mcp").unwrap_or(entry);
+    if entry.is_empty() {
+        return Err(CliError::new(format!(
+            "这个服务还没有公网入口，目标机连不上。{FIXED}"
+        )));
+    }
+    checked_entry(entry)
 }
 
 fn read_credential(enabled: bool) -> Result<String, CliError> {
@@ -256,4 +334,128 @@ pub fn shares(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gld_core::settings::HubConfig;
+
+    fn status(tunnel: &str, mode: &str, endpoint: &str) -> HubStatusDto {
+        HubStatusDto {
+            state: "running".into(),
+            detail: String::new(),
+            config: HubConfig {
+                tunnel_type: tunnel.into(),
+                cloudflare_mode: mode.into(),
+                ..HubConfig::default()
+            },
+            local_endpoint: "http://127.0.0.1:1/mcp".into(),
+            public_endpoint: endpoint.into(),
+            tunnel_label: String::new(),
+            tunnel_error: String::new(),
+            members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_fixed_entry_is_used_with_its_path_prefix_and_without_mcp() {
+        for (tunnel, mode, endpoint, expected) in [
+            (
+                "none",
+                "",
+                "https://hub.example.com/mcp",
+                "https://hub.example.com",
+            ),
+            (
+                "none",
+                "",
+                "https://gw.example.com/hub/mcp",
+                "https://gw.example.com/hub",
+            ),
+            (
+                "cloudflare",
+                "named",
+                "https://mcp.example.com/mcp",
+                "https://mcp.example.com",
+            ),
+            (
+                "frp",
+                "",
+                "https://sub.frp.example.com/mcp",
+                "https://sub.frp.example.com",
+            ),
+        ] {
+            assert_eq!(
+                hub_entry(&status(tunnel, mode, endpoint)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn entries_a_target_cannot_keep_using_are_refused_with_the_way_out() {
+        for (tunnel, mode, endpoint, reason) in [
+            (
+                "cloudflare",
+                "quick",
+                "https://a-b.trycloudflare.com/mcp",
+                "临时地址",
+            ),
+            ("openai", "", "", "OpenAI"),
+            ("none", "", "", "没有公网入口"),
+            ("none", "", "http://hub.example.com/mcp", "用不了"),
+        ] {
+            let error = hub_entry(&status(tunnel, mode, endpoint))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+            if reason != "用不了" {
+                assert!(error.contains("--hub"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_explicit_entry_must_be_usable_by_a_node() {
+        assert_eq!(
+            checked_entry("https://hub.example.com/hub/").unwrap(),
+            "https://hub.example.com/hub"
+        );
+        assert_eq!(
+            checked_entry("http://127.0.0.1:8080").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        for url in [
+            "http://hub.example.com",
+            "not a url",
+            "https://u:p@hub.example.com",
+        ] {
+            assert!(checked_entry(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_printed_commands_quote_values_and_pin_the_version() {
+        let commands = JoinCommands::new("https://hub.example.com/it's", "abc.def", "1.2.3");
+        assert_eq!(
+            commands.install_unix,
+            "curl -fsSL https://github.com/xwfe/gld/releases/download/v1.2.3/install.sh | GLD_VERSION=v1.2.3 sh"
+        );
+        assert!(commands.join_unix.starts_with("printf %s 'abc.def' | "));
+        assert!(commands
+            .join_unix
+            .contains("--hub 'https://hub.example.com/it'\\''s'"));
+        assert!(commands.join_unix.contains("--autostart"));
+        assert!(commands
+            .install_windows
+            .contains("$env:GLD_VERSION='v1.2.3'"));
+        assert!(commands
+            .install_windows
+            .contains("/v1.2.3/install.ps1 | iex"));
+        assert!(commands.join_windows.starts_with("'abc.def' | & "));
+        assert!(commands
+            .join_windows
+            .contains("--hub 'https://hub.example.com/it''s'"));
+    }
 }
