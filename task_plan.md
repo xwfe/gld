@@ -22,7 +22,7 @@
   临时项目 `delegation-test`（`~/xdw/gld-delegation-test`，`agent-delegation=ask`，测试时临时开过 `command-policy=all`、`agent-approval=self`，
   §62 测完已改回 guarded / all；工作区里故意留着前几轮委派没提交的改动）还挂在服务上，不要了就 `gld rm delegation-test`。
   回滚用 `~/.local/opt/gld-7959dfc-20261031-1220`（换之前那版，协议 10）和 `gld-config-20261031-1220.tgz`（0600，有明文凭据）；
-  另有更早的 `gld-baf8e32-…`（协议 10）、`gld-a4993f0-…`（协议 9）、`gld-3dc98e4-…`（协议 8）、`gld-b81b144-…`（协议 7）、`gld-b052102-…`、`gld-2022624-…`、`gld-2f50e09-…`、`gld-c99c8cd-…`、`gld-59f40ad-…`、`gld-a8f9993-…`、`gld-6268bb0-…`（协议 6）、`gld-fba39d0-…`、官方 0.8.3 包和几份旧数据备份，要清的话说一声。
+  另有官方 0.8.3 包 `gld-0.8.3-20261009-2336`。更早的二进制和数据备份 2026-10-31 按用户要求删了，要那些版本得从 tag 或提交重新构建。
 - 另一台 Mac、Linux 服务器的普通账号和 root：还是 `fba39d0`，`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）；
   只装了命令行，没起守护进程（审查 §33）。
 - 全仓：CI 上 Linux 1309、macOS 1310 passed / 0 failed（`2715b13`，§98）；Linux 服务器 989 是 `fba39d0` 那次的（差一条只在 macOS 编译的）。
