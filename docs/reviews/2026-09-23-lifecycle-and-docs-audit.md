@@ -4228,3 +4228,23 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 `gld usage` 报 10 个请求、1 个错误。这个错误是 ChatGPT 发的 `server/discover`：gld 没实现这个方法，回 Method not found，回包正好 114 字节，和日志一致；换装前同样的回包有 1338 次，是老行为。所以 4 次工具调用都没报错。
 
 **只证明了这些：**只读调用经执行代走通。没有从连接器跑过命令和写入，没有覆盖切换，没有在线用过 `gld daemon upgrade`，`prompt_manage` 只列了没读内容。请求日志不记回包内容，所以这几次的 `build_commit` 等结果是用户在对话里看到的，这边没有核对。
+
+## 100. 发布 0.9.0（2026-10-31）
+
+用户让发新版。`v0.9.0` = `087765a`，从 0.8.3 起 240 多个提交，协议 5 到 16，所以升 minor。发布说明的“从上一版升上来”写明 ChatGPT 要点 Refresh，相对 v0.8.3 工具只增不减（新增 `agent_manage`、`prompt_manage`）。
+
+| 步骤 | 结果 |
+|---|---|
+| 本机打包 | `gld 0.9.0 (087765a01207)`。隔离 `GLD_HOME` 起服务、无凭据 401、bearer 读文件、`prepare` + `switch`、停止后没有残留执行代 |
+| 退回 0.8.3 | 真实 0.8.3 二进制接同一数据目录能起服务、读文件，再升回来也行。只测了 bearer，没带节点和 OAuth |
+| 发版前 | main CI 全绿；手动空跑 Release 全绿，“建 Release”skipped（只在 tag 上跑） |
+| 发布 | tag 流水线全绿，Release 6 个文件，非草稿、非预发布 |
+| 校验和 | 5 个包 `shasum -c` 全 OK |
+| 来源证明 | 5 个包 `gh attestation verify` 都退出 0；改一个字节的包退出 1 |
+| macOS | 下载的 Apple 芯片包和 Intel 包（Rosetta）`--version` 都对；没用下载包起过服务 |
+| Linux | 下载的 gnu、musl 包在 amd64 Debian 12 容器里：起守护进程，能看到执行代进程，读文件正常，停止后执行代没了 |
+| Windows | 只核了校验和和来源证明，**没跑**。CI 里 9 条生命周期测试跑的是构建产物 |
+
+**没做的：**没有代码签名；本机没换成发布包，还是 `fef936d`（代码只差版本号）。另外两台机器没换，还是 `fba39d0`。
+
+**撞到的事：**`gh release download` 在临时目录里没有仓库上下文，要加 `--repo`；`gh run watch` 有一次提前退出 1，当时流水线还在跑，改成看 `gh run view` 的最终结论。

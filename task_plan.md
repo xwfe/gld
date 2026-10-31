@@ -7,8 +7,8 @@
 
 ## 当前基线
 
-最新发布 0.8.3（`v0.8.3` = `a4efa44`，下载包校验和、来源证明、macOS 与 Linux 实跑见审查 §21；改了什么见
-[发布说明](docs/releases/v0.8.3.md)）。main 上未发版的：`87eba6b` 补丁失败留下原因（审查 §22）；`98a4ef7`–`778fdd3`
+最新发布 0.9.0（`v0.9.0` = `087765a`，下载包校验和、来源证明、macOS 与 Linux 实跑见审查 §100；改了什么见
+[发布说明](docs/releases/v0.9.0.md)）。0.8.3 之后进这一版的：`87eba6b` 补丁失败留下原因（审查 §22）；`98a4ef7`–`778fdd3`
 通知回 202、OAuth 动态注册写盘保护、`gld grant browser`（SuperAssistant 接 DeepSeek 网页）、升级文档（审查 §23–§25）；
 `e8f7f36`–`f9400f7` 点名说明在 compact 下也注入、收尾可重试、命令回显有界、§28 复核出的经 gld 开发的摩擦（审查 §26–§31），
 `gld --version` 带构建提交（§35）；`02e1afb`–`fba39d0` 认 Claude Code 开着的插件带的 skill、扫描时市场清单只读一次（§37、§38）；
@@ -16,7 +16,7 @@
 `825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40）；`e265ca6` `gld remote add <项目名>` 精简、默认 coding；
 `0324602`–`267cdf9` Agent 委派 D1：`agent_manage`、`gld agent`、项目开关 `agent-delegation`（§42）。
 **守护进程协议从 7 起**（`85804aa`），工具表多了 `agent_manage`。
-- 本机：`fef936d`，守护进程 2026-10-31 12:20 换上（审查 §99），工具已经在执行代子进程里跑。**协议 16**；工具表 35 项、指纹 `6022dd56440b0ea9`（之前 34 项 `f0e996d1217ba15b`），ChatGPT 已 Refresh，真实连接器调工具走通（§99）。
+- 本机：`fef936d`（比 `v0.9.0` 只差版本号，所以 `gld --version` 还报 0.8.3），守护进程 2026-10-31 12:20 换上（审查 §99），工具已经在执行代子进程里跑。**协议 16**；工具表 35 项、指纹 `6022dd56440b0ea9`（之前 34 项 `f0e996d1217ba15b`），ChatGPT 已 Refresh，真实连接器调工具走通（§99）。
   下面队列里写着“未部署”的 D15、D10-W0/W1、D16-M0/M1 都写在这次之前，代码已随这次换上；默认关的功能仍然是关的，没有真机验证的仍然没验证。
   守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`。本机现在没有 grant（§69 测试用的 `deleg-grant` 已撤销）。
   临时项目 `delegation-test`（`~/xdw/gld-delegation-test`，`agent-delegation=ask`，测试时临时开过 `command-policy=all`、`agent-approval=self`，
