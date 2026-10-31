@@ -52,7 +52,10 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
             },
             "新凭据已生效，旧连接已关闭。更新目标机的私有配置后重新运行节点；机器与项目句柄保持。",
         ),
-        NodeCmd::Run { .. } | NodeCmd::Shares { .. } | NodeCmd::Autostart(_) => {
+        NodeCmd::Run { .. }
+        | NodeCmd::Shares { .. }
+        | NodeCmd::Doctor { .. }
+        | NodeCmd::Autostart(_) => {
             unreachable!("local node commands are handled before Backend")
         }
     };

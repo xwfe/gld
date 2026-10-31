@@ -109,3 +109,109 @@ fn a_mistyped_directory_is_reported_without_consuming_the_invitation() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
     assert_eq!(relay.connections(), 0, "nothing should reach the Hub");
 }
+
+fn doctor(env: &Env, config: &Path) -> (bool, Vec<Value>, String) {
+    let output = command(env)
+        .args(["--json", "node", "doctor", "--config"])
+        .arg(config)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let parsed: Value = serde_json::from_str(&text).unwrap();
+    (
+        output.status.success(),
+        parsed["checks"].as_array().unwrap().clone(),
+        text,
+    )
+}
+
+fn check<'a>(checks: &'a [Value], label: &str) -> &'a Value {
+    checks
+        .iter()
+        .find(|check| check["label"] == label)
+        .unwrap_or_else(|| panic!("no {label}: {checks:?}"))
+}
+
+#[test]
+fn doctor_tells_apart_stopped_online_revoked_untrusted_and_unreachable() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine = Env::new();
+    let ids = projects(&machine, "checked");
+    let registration = register(&hub, "checked", TOKEN_A);
+    let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
+    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    let path = write_config(&machine, "checked.json", &value);
+
+    // 配置好、节点没跑：能握手，提醒没在跑，不算失败。
+    let (healthy, checks, text) = doctor(&machine, &path);
+    assert!(healthy, "{text}");
+    assert_eq!(check(&checks, "Hub 握手")["level"], "ok", "{text}");
+    assert_eq!(check(&checks, "节点进程")["level"], "warn", "{text}");
+    assert_eq!(check(&checks, "代理")["detail"], "直连", "{text}");
+    assert!(!text.contains(TOKEN_A), "doctor output must be shareable");
+    // 探测用完就断，节点随后能正常接上。
+    let mut node = NodeProcess::start(&machine, &path);
+    wait_inventory(&service, 2, 2);
+
+    let (healthy, checks, text) = doctor(&machine, &path);
+    assert!(healthy, "{text}");
+    assert!(
+        check(&checks, "Hub 握手")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("已在线"),
+        "{text}"
+    );
+    node.stop();
+    wait_inventory(&service, 0, 2);
+
+    // 证书不受信：不配 CA。
+    let mut untrusted = value.clone();
+    untrusted.as_object_mut().unwrap().remove("ca_certificate");
+    let untrusted = write_config(&machine, "untrusted.json", &untrusted);
+    let (healthy, checks, text) = doctor(&machine, &untrusted);
+    assert!(!healthy, "{text}");
+    assert!(
+        check(&checks, "Hub 握手")["fix"]
+            .as_str()
+            .unwrap()
+            .contains("--ca-certificate"),
+        "{text}"
+    );
+
+    // 端口上没有东西在听。
+    let mut closed = value.clone();
+    closed["hub_url"] = json!(format!("https://localhost:{}", free_port()));
+    let closed = write_config(&machine, "closed.json", &closed);
+    let (healthy, checks, text) = doctor(&machine, &closed);
+    assert!(!healthy, "{text}");
+    assert_eq!(check(&checks, "网络")["level"], "fail", "{text}");
+
+    // Hub 撤销凭据。
+    hub.ok(&[
+        "node",
+        "revoke",
+        registration["machine_id"].as_str().unwrap(),
+    ]);
+    let (healthy, checks, text) = doctor(&machine, &path);
+    assert!(!healthy, "{text}");
+    let handshake = check(&checks, "Hub 握手");
+    assert!(
+        handshake["detail"].as_str().unwrap().contains("401"),
+        "{text}"
+    );
+    assert!(
+        handshake["fix"].as_str().unwrap().contains("gld leave"),
+        "{text}"
+    );
+}
+
+#[test]
+fn doctor_without_a_config_says_how_to_join() {
+    let machine = Env::new();
+    let output = command(&machine).args(["node", "doctor"]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("gld join"));
+}

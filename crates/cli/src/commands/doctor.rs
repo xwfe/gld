@@ -9,6 +9,7 @@ use gld_daemon::Request;
 
 use super::Ctx;
 use crate::error::{CliError, CliResult};
+use crate::output::Output;
 
 pub async fn run(ctx: &mut Ctx, probe: bool) -> CliResult {
     let mut diagnosis: Diagnosis = ctx.backend.call_typed(Request::Doctor).await?;
@@ -30,14 +31,40 @@ pub async fn run(ctx: &mut Ctx, probe: bool) -> CliResult {
                 fix: if item.ok { String::new() } else { item.hint },
             }));
     }
-    if ctx.out.json_or(&diagnosis) {
-        return if diagnosis.is_healthy() {
-            Ok(())
-        } else {
-            Err(CliError::new(""))
-        };
+    if probe {
+        return report(ctx.out, &diagnosis);
     }
+    if ctx.out.json_or(&diagnosis) {
+        return exit_status(&diagnosis);
+    }
+    print_checks(ctx.out, &diagnosis);
+    ctx.out.line("");
+    // 体检不发网络请求，所以"公网地址此刻通不通"它答不了——尤其是自建反代
+    // 那种 gld 看不到的链路。把这句话放在这里，而不是等用户去翻文档。
+    ctx.out
+        .line(ctx.out.dim("公网那一头此刻通不通：gld doctor --probe"));
+    summary(ctx.out, &diagnosis)
+}
 
+/// 输出一份体检结果；有 ✗ 时退出码为 1。`gld node doctor` 也走这里。
+pub fn report(out: Output, diagnosis: &Diagnosis) -> CliResult {
+    if out.json_or(diagnosis) {
+        return exit_status(diagnosis);
+    }
+    print_checks(out, diagnosis);
+    out.line("");
+    summary(out, diagnosis)
+}
+
+fn exit_status(diagnosis: &Diagnosis) -> CliResult {
+    if diagnosis.is_healthy() {
+        Ok(())
+    } else {
+        Err(CliError::new(""))
+    }
+}
+
+fn print_checks(out: Output, diagnosis: &Diagnosis) {
     // 同一个归属的检查来自好几轮（配置一轮、端口一轮），按第一次出现的顺序归到一起，
     // 不然"MCP 服务"会在输出里出现两段。
     let mut scopes: Vec<&str> = Vec::new();
@@ -59,40 +86,34 @@ pub async fn run(ctx: &mut Ctx, probe: bool) -> CliResult {
     for check in ordered {
         if check.scope != current_scope {
             if !current_scope.is_empty() {
-                ctx.out.line("");
+                out.line("");
             }
-            ctx.out.line(ctx.out.bold(&check.scope));
+            out.line(out.bold(&check.scope));
             current_scope = check.scope.clone();
         }
         let mark = match check.level {
-            DoctorLevel::Ok => ctx.out.green("✓"),
-            DoctorLevel::Warn => ctx.out.yellow("!"),
-            DoctorLevel::Fail => ctx.out.red("✗"),
+            DoctorLevel::Ok => out.green("✓"),
+            DoctorLevel::Warn => out.yellow("!"),
+            DoctorLevel::Fail => out.red("✗"),
         };
-        ctx.out
-            .line(format!("  {mark} {}  {}", check.label, check.detail));
+        out.line(format!("  {mark} {}  {}", check.label, check.detail));
         if !check.fix.is_empty() {
-            ctx.out.line(format!("      {}", ctx.out.dim(&check.fix)));
+            out.line(format!("      {}", out.dim(&check.fix)));
         }
     }
+}
 
+fn summary(out: Output, diagnosis: &Diagnosis) -> CliResult {
     let failures = diagnosis.count(DoctorLevel::Fail);
     let warnings = diagnosis.count(DoctorLevel::Warn);
-    ctx.out.line("");
-    if !probe {
-        // 体检不发网络请求，所以"公网地址此刻通不通"它答不了——尤其是自建反代
-        // 那种 gld 看不到的链路。把这句话放在这里，而不是等用户去翻文档。
-        ctx.out
-            .line(ctx.out.dim("公网那一头此刻通不通：gld doctor --probe"));
-    }
     if failures == 0 && warnings == 0 {
-        ctx.out.line(ctx.out.green("全部正常。"));
+        out.line(out.green("全部正常。"));
         return Ok(());
     }
-    ctx.out.line(format!(
+    out.line(format!(
         "{} 项需要处理，{} 项提醒。",
         if failures > 0 {
-            ctx.out.red(&failures.to_string())
+            out.red(&failures.to_string())
         } else {
             "0".into()
         },

@@ -5,6 +5,7 @@ pub mod autostart;
 pub mod client;
 pub mod config;
 pub mod connection;
+pub mod doctor;
 pub mod endpoint;
 pub mod hub_key;
 pub mod identity;

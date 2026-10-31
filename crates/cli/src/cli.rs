@@ -412,6 +412,12 @@ pub enum NodeCmd {
         #[arg(long, hide = true)]
         service: bool,
     },
+    /// 在目标机上查这台机器为什么连不上；握手一次 Hub，每项失败都给修法
+    Doctor {
+        /// 节点配置；只加入过一个 Hub 时可省略
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// 把节点交给系统服务管理器：开机或登录后自动连 Hub，不要管理员权限
     #[command(subcommand)]
     Autostart(AutostartCmd),

@@ -17,10 +17,20 @@ pub(super) enum Retry {
     Rejoin,
 }
 
+/// 诊断要分清是哪一层出的错，光看 `retry` 分不出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Layer {
+    Http(u16),
+    Tls,
+    Proxy,
+    Other,
+}
+
 #[derive(Debug)]
 pub(super) struct Failure {
     pub retry: Retry,
     pub message: String,
+    pub layer: Layer,
 }
 
 impl Failure {
@@ -28,6 +38,7 @@ impl Failure {
         Self {
             retry: Retry::Transient,
             message: message.into(),
+            layer: Layer::Other,
         }
     }
 
@@ -35,7 +46,18 @@ impl Failure {
         Self {
             retry: Retry::Never,
             message: message.into(),
+            layer: Layer::Other,
         }
+    }
+
+    fn at(mut self, layer: Layer) -> Self {
+        self.layer = layer;
+        self
+    }
+
+    pub fn proxy(mut self) -> Self {
+        self.layer = Layer::Proxy;
+        self
     }
 
     pub fn websocket(error: Error) -> Self {
@@ -48,14 +70,14 @@ impl Failure {
                     429 | 500..=599 => Retry::Transient,
                     _ => Retry::Never,
                 };
-                Self { retry, message: format!("node admission failed with HTTP {status}") }
+                Self { retry, message: format!("node admission failed with HTTP {status}"), layer: Layer::Http(status) }
             }
             // tokio-tungstenite 0.29 的 rustls 握手失败包装为 Io；不能只检查 Tls。
             Error::Io(error) if error.get_ref().is_some_and(|inner|
                 inner.is::<tokio_rustls::rustls::Error>()) =>
-                Self::permanent("node TLS verification failed; check the endpoint and trusted CA"),
+                Self::permanent("node TLS verification failed; check the endpoint and trusted CA").at(Layer::Tls),
             Error::Tls(_) =>
-                Self::permanent("node TLS verification failed; check the endpoint and trusted CA"),
+                Self::permanent("node TLS verification failed; check the endpoint and trusted CA").at(Layer::Tls),
             Error::Io(error) if matches!(error.kind(),
                 io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
                 | io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported) =>
@@ -236,6 +258,7 @@ mod tests {
     fn initial_duplicate_exits_and_recovery_conflict_has_a_deadline() {
         let failure = Failure {
             retry: Retry::Conflict,
+            layer: Layer::Http(409),
             message: "HTTP 409".into(),
         };
         let now = Instant::now();
@@ -263,6 +286,7 @@ mod tests {
     fn network_failure_releases_the_conflict_deadline_without_resetting_backoff() {
         let conflict = Failure {
             retry: Retry::Conflict,
+            layer: Layer::Http(409),
             message: "HTTP 409".into(),
         };
         let network = Failure::transient("connection refused");

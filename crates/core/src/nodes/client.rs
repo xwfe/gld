@@ -27,7 +27,7 @@ use super::transport::{socket_config, MAX_MESSAGE_BYTES, MESSAGE_WRITE_TIMEOUT};
 
 #[path = "reconnect.rs"]
 mod reconnect;
-use reconnect::{Backoff, Failure, Retry, Stability};
+use reconnect::{Backoff, Failure, Layer, Retry, Stability};
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
@@ -118,14 +118,9 @@ fn hangup_ignored() -> bool {
     queried == 0 && current.sa_sigaction == libc::SIG_IGN
 }
 
-pub(super) async fn run_until<F>(
-    config: NodeConfig,
-    hub: Arc<Hub>,
-    shutdown: &mut F,
-) -> Result<(), NodeError>
-where
-    F: Future<Output = ()> + Unpin,
-{
+fn node_request(
+    config: &NodeConfig,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
     let mut request = config
         .websocket_url()?
         .into_client_request()
@@ -136,6 +131,80 @@ where
             .map_err(|_| "invalid node credential header".to_string())?;
     credential.set_sensitive(true);
     request.headers_mut().insert("authorization", credential);
+    Ok(request)
+}
+
+/// 和节点连接走同一条路（同样的代理、证书和身份校验）握手一次就断开，只回答通不通。
+#[derive(Debug)]
+pub(super) enum HubProbe {
+    Connected,
+    /// HTTP 409：Hub 上这台机器已有一条连接。
+    Busy,
+    Rejected(u16),
+    WrongHub,
+    Tls,
+    Proxy(String),
+    Timeout,
+    Failed(String),
+}
+
+pub(super) async fn probe(config: &NodeConfig) -> HubProbe {
+    let attempt = async {
+        let mut request = node_request(config).map_err(Failure::permanent)?;
+        let binding = Binding::new(
+            &config.hub_id,
+            &config.machine_id,
+            &new_nonce().map_err(Failure::permanent)?,
+        )
+        .map_err(Failure::permanent)?;
+        request.headers_mut().insert(
+            NONCE_HEADER,
+            binding
+                .nonce()
+                .parse()
+                .map_err(|_| Failure::permanent("invalid node nonce header"))?,
+        );
+        let hub_url = reqwest::Url::parse(&config.hub_url)
+            .map_err(|_| Failure::permanent("Invalid node Hub URL"))?;
+        let proxy = proxy::for_hub(&hub_url).map_err(Failure::permanent)?;
+        let connector = ca_connector(config).map_err(Failure::permanent)?;
+        let (mut socket, response) = open_socket(request, proxy.as_ref(), connector).await?;
+        let proved = response
+            .headers()
+            .get(PROOF_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|proof| verify_handshake(&config.hub_public_key, &binding, proof));
+        let same_hub = response
+            .headers()
+            .get("x-gld-hub-id")
+            .and_then(|value| value.to_str().ok())
+            == Some(config.hub_id.as_str());
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, SinkExt::close(&mut socket)).await;
+        Ok::<_, Failure>(proved && same_hub)
+    };
+    match tokio::time::timeout(CONNECT_TIMEOUT, attempt).await {
+        Err(_) => HubProbe::Timeout,
+        Ok(Ok(true)) => HubProbe::Connected,
+        Ok(Ok(false)) => HubProbe::WrongHub,
+        Ok(Err(failure)) => match failure.layer {
+            Layer::Http(409) => HubProbe::Busy,
+            Layer::Http(status) => HubProbe::Rejected(status),
+            Layer::Tls => HubProbe::Tls,
+            Layer::Proxy => HubProbe::Proxy(failure.message),
+            Layer::Other => HubProbe::Failed(failure.message),
+        },
+    }
+}
+
+pub(super) async fn run_until<F>(
+    config: NodeConfig,
+    hub: Arc<Hub>,
+    shutdown: &mut F,
+) -> Result<(), NodeError>
+where
+    F: Future<Output = ()> + Unpin,
+{
+    let request = node_request(&config)?;
     let connector = ca_connector(&config)?;
     let hub_url = reqwest::Url::parse(&config.hub_url).map_err(|_| "Invalid node Hub URL")?;
     let proxy = proxy::for_hub(&hub_url)?;
@@ -248,8 +317,8 @@ async fn open_socket(
         .connect(&host, port)
         .await
         .map_err(|error| match error {
-            ProxyError::Unreachable(message) => Failure::transient(message),
-            ProxyError::Rejected(message) => Failure::permanent(message),
+            ProxyError::Unreachable(message) => Failure::transient(message).proxy(),
+            ProxyError::Rejected(message) => Failure::permanent(message).proxy(),
         })?;
     tokio_tungstenite::client_async_tls_with_config(
         request,

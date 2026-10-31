@@ -66,6 +66,11 @@ pub async fn run(cli: Cli) -> CliResult {
         let config = find_node_config(config.as_deref())?;
         return node::run_config(&config, *service).await;
     }
+    if let Command::Node(crate::cli::NodeCmd::Doctor { config }) = &cli.command {
+        let config = find_node_config(config.as_deref())?;
+        let diagnosis = gld_core::nodes::doctor::diagnose(&config).await;
+        return doctor::report(out, &diagnosis);
+    }
     if let Command::Node(crate::cli::NodeCmd::Autostart(command)) = &cli.command {
         return node::autostart(command, out);
     }
