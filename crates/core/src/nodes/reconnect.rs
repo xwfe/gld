@@ -91,13 +91,22 @@ impl Failure {
 }
 
 #[derive(Default)]
-pub(super) struct Backoff {
+pub(in crate::nodes) struct Backoff {
     attempt: u32,
     connected_once: bool,
     conflict_since: Option<Instant>,
 }
 
 impl Backoff {
+    /// 前台第一次连接就遇到 409，多半是开了第二个进程，退出才能让人看见。服务管理器刚重启的进程不一样：
+    /// 那多半是 Hub 还没发现上一个进程已经没了，几秒后就好，按断线后的规矩重试。
+    pub fn expecting_old_connection() -> Self {
+        Self {
+            connected_once: true,
+            ..Self::default()
+        }
+    }
+
     pub fn connected(&mut self) {
         self.connected_once = true;
         self.conflict_since = None;
@@ -280,6 +289,21 @@ mod tests {
         assert!(backoff.next(&failure, now + CONFLICT_WINDOW, 0).is_err());
         backoff.connected();
         assert!(backoff.next(&failure, now + CONFLICT_WINDOW, 0).is_ok());
+    }
+
+    #[test]
+    fn only_a_restarted_service_retries_a_first_conflict() {
+        let conflict = || Failure {
+            retry: Retry::Conflict,
+            layer: Layer::Http(409),
+            message: "HTTP 409".into(),
+        };
+        let now = Instant::now();
+        assert!(Backoff::default().next(&conflict(), now, 0).is_err());
+        let mut service = Backoff::expecting_old_connection();
+        assert!(service.next(&conflict(), now, 0).is_ok());
+        // 一分钟还没好就不是旧连接了，交给服务模式的长间隔重试。
+        assert!(service.next(&conflict(), now + CONFLICT_WINDOW, 0).is_err());
     }
 
     #[test]

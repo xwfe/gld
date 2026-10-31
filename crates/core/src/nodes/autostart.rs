@@ -103,7 +103,7 @@ fn spec_for(config_path: &Path) -> Result<Spec, String> {
     let config = read_config(config_path)?;
     let exe = std::env::current_exe()
         .and_then(|path| path.canonicalize())
-        .map_err(|_| "Cannot locate the gld executable for autostart")?;
+        .map_err(|_| "Cannot locate this program for autostart")?;
     Ok(Spec {
         label: label(&config.machine_id),
         exe,
@@ -379,7 +379,7 @@ fn start_systemd(label: &str) -> Result<Vec<String>, String> {
     let reload = tool("systemctl", &["--user", "daemon-reload"])?;
     if !reload.status.success() {
         return Err(format!(
-            "{}. This session has no systemd user manager (common over su, in containers, or without systemd); run gld node run in the foreground instead",
+            "{}. This session has no systemd user manager (common over su, in containers, or without systemd); run `gld node run` in a terminal instead",
             tool_error("systemctl --user", &reload)
         ));
     }
@@ -423,7 +423,7 @@ fn systemd_unit(spec: &Spec) -> String {
         })
         .collect();
     format!(
-        "[Unit]\nDescription=gld node {label}\n\n[Service]\nExecStart={command}\n{environment}Restart=on-failure\nRestartSec=60\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=gld-node {label}\n\n[Service]\nExecStart={command}\n{environment}Restart=on-failure\nRestartSec=60\n\n[Install]\nWantedBy=default.target\n",
         label = spec.label,
         command = command.join(" "),
     )
@@ -509,7 +509,7 @@ fn task_xml(spec: &Spec, user: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>gld node {label}</Description></RegistrationInfo>
+  <RegistrationInfo><Description>gld-node {label}</Description></RegistrationInfo>
   <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
@@ -576,7 +576,7 @@ fn tool(program: &str, arguments: &[&str]) -> Result<Output, String> {
         .output()
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                format!("{program} was not found; this machine cannot use autostart, run gld node run in the foreground instead")
+                format!("{program} was not found; this machine cannot use autostart, run `gld node run` in a terminal instead")
             } else {
                 format!("Cannot run {program}")
             }

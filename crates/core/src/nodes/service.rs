@@ -53,7 +53,14 @@ pub fn run(config: NodeConfig) -> Result<(), String> {
         let shutdown = client::stop_signal();
         tokio::pin!(shutdown);
         loop {
-            match client::run_until(config.clone(), hub.clone(), &mut shutdown).await {
+            match client::run_until(
+                config.clone(),
+                hub.clone(),
+                &mut shutdown,
+                client::Backoff::expecting_old_connection(),
+            )
+            .await
+            {
                 Ok(()) => {
                     report("stopped by the service manager");
                     break;

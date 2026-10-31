@@ -27,7 +27,8 @@ use super::transport::{socket_config, MAX_MESSAGE_BYTES, MESSAGE_WRITE_TIMEOUT};
 
 #[path = "reconnect.rs"]
 mod reconnect;
-use reconnect::{Backoff, Failure, Layer, Retry, Stability};
+pub(super) use reconnect::Backoff;
+use reconnect::{Failure, Layer, Retry, Stability};
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
@@ -76,7 +77,7 @@ pub fn run(config: NodeConfig) -> Result<(), String> {
     let outcome = crate::async_rt::block_on(async move {
         let shutdown = stop_signal();
         tokio::pin!(shutdown);
-        run_until(config, hub, &mut shutdown).await
+        run_until(config, hub, &mut shutdown, Backoff::default()).await
     });
     // 不管是被停还是凭据被撤销退出，这里起的命令都没人能再读、再停了，不能留着以这个账号跑。
     crate::tools::workspace_runtime::terminate_all_sessions_everywhere();
@@ -203,6 +204,7 @@ pub(super) async fn run_until<F>(
     config: NodeConfig,
     hub: Arc<Hub>,
     shutdown: &mut F,
+    mut backoff: Backoff,
 ) -> Result<(), NodeError>
 where
     F: Future<Output = ()> + Unpin,
@@ -211,7 +213,6 @@ where
     let connector = ca_connector(&config)?;
     let hub_url = reqwest::Url::parse(&config.hub_url).map_err(|_| "Invalid node Hub URL")?;
     let proxy = proxy::for_hub(&hub_url)?;
-    let mut backoff = Backoff::default();
     loop {
         let connect_timeout =
             backoff.connection_timeout(std::time::Instant::now(), CONNECT_TIMEOUT)?;
