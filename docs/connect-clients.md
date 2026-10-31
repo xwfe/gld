@@ -77,7 +77,7 @@ DeepSeek 网页自己没有 MCP 连接器，靠 Chrome 扩展
 同一批项目，不另起服务，也不用装扩展里提示的 `npx @srbhptl39/mcp-superassistant-proxy`；ChatGPT 等已经连好的
 连接器不受影响。
 
-> 要 2026-10-17 之后的构建才有 `gld grant browser`，0.8.3 发布包里没有。换二进制按[安装 · 升级](install.md#升级)走，
+> 要 0.9.0 或更新的版本才有 `gld grant browser`。换二进制按[安装 · 升级](install.md#升级)走，
 > 命令行和守护进程都要是新的：只换命令行、守护进程还是旧的，会报版本不一致（退出码 4）。
 
 **为什么要单独发一个地址**：SuperAssistant 的连接设置只有 Connection Type 和 Server URI 两栏，填不了请求头，

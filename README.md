@@ -33,7 +33,7 @@ gld --version
 
 别的平台、macOS 弹窗说"无法验证开发者"、新开终端报 `command not found: gld`，都在 [install.md](docs/install.md)。
 
-下载包目前到 0.8.3。按项目全部放行命令、把活交给本机 Agent、DeepSeek 网页、Claude Code 插件带的 skill 还没发版，要用得[从源码装](docs/install.md#从源码装)。
+下载包目前到 0.9.0，和 main 一致。
 
 ## 第 2 步：加项目
 

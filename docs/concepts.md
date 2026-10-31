@@ -1841,7 +1841,7 @@ grep -ho '"reason_code":"[a-z0-9_]*"' ~/.config/gld/harness/workspaces/*/operati
 `reasons` 是每个对不上的地方一条，用逗号隔开：冒号前是原因码（`reason_code`），冒号后是"差在哪"
 （`near_miss`，算了的才有）。补丁本身就坏了、没走到逐段比对的，只有一个原因码。
 
-0.8.3 的发行包还没有这些，之后的构建才记；更早的补丁失败在 operations 里只有 `error_code`。
+0.9.0 起才记；更早的补丁失败在 operations 里只有 `error_code`。
 
 ### 原因码和下一步
 
