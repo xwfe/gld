@@ -124,6 +124,11 @@ jobs:
       - name: 生成校验和
         run: scripts/package.sh --checksums
 
+      # 邀请命令从这里下载安装脚本：和包同一个地方、同一个版本，能下到包就能下到脚本。
+      # 放在校验和之后，SHA256SUMS 只列安装包；脚本本身靠 HTTPS，由它来核对包。
+      - name: 附上安装脚本
+        run: cp scripts/install.sh scripts/install.ps1 dist/
+
       # 用 gh CLI 而不是第三方 action：它是 runner 自带的，少一层供应链依赖。
       #
       # 有 docs/releases/<tag>.md 就用它当发布说明。这个仓库直接往 main 提交、不走 PR，

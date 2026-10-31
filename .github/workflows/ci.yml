@@ -92,6 +92,21 @@ jobs:
       # 跑的是这次 checkout 编出来的 target/debug/gld，**不是下载包验收**：发布包的
       # 打包、解压、Defender/SmartScreen、PATH 安装这些都不在这里。
       #
+      # 用已发布的包，和目标机执行的 `irm ... | iex` 同一种跑法。只有这一步真正执行 install.ps1，
+      # 本地和其他任务都没有 PowerShell。Windows 自带的 5.1 才是用户手里的版本，所以不用 pwsh。
+      - name: 安装脚本走通真实发布包
+        shell: powershell
+        run: |
+          $env:GLD_VERSION = 'v0.9.0'
+          $env:GLD_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'gld-install-test'
+          Get-Content -Raw scripts/install.ps1 | Invoke-Expression
+          & "$env:GLD_INSTALL_DIR\gld.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed gld did not run' }
+          $env:GLD_VERSION = 'v0.0.0-missing'
+          $failed = $false
+          try { Get-Content -Raw scripts/install.ps1 | Invoke-Expression } catch { $failed = $true }
+          if (-not $failed) { throw 'a missing version should fail' }
+
       # 选的这 9 条在 daemon_lifecycle.rs 里，各验一件 Windows 上另有实现的事：命名管道
       # 上的守护进程起停、daemon.lock 的单实例锁（LockFileEx）、按映像路径认 pid、
       # 经守护进程跑命令拿退出码和输出、taskkill 停命令不留孤儿、运行记录里的
