@@ -4339,3 +4339,5 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 **没做的：**Windows 只核了校验和和来源证明，下载包、计划任务、`install.ps1` 校验和不符和替换旧版都没真跑；没在完全干净的 Mac 上跑（另一台 Mac 本来就有旧版 gld，这次只装到临时目录）；linger 自动开启、真实重启、真实代理和真实 TLS 入口仍未验证。本机和另外两台的常用 gld 都没换。
 
 **撞到的事（都是测试脚本）：**`gld tool call` 的参数要写 `key=value`，第一次写错报了一条 FAIL，改正后通过；zsh 没有 `PIPESTATUS`，要查管道中间的退出码得用 bash；ECR 的 `public.ecr.aws/debian/debian` 连拉几次会报 `toomanyrequests`，换 `public.ecr.aws/docker/library/debian` 能拉到。
+
+**推送后的 CI（同日，`37e65cd`）：**全部任务通过。Windows 任务用自带的 PowerShell 5.1 跑 `install.ps1`，装上 v0.10.0 的包，`--version` 打 `gld 0.10.0 (b6c799bee0d2)`；不存在的版本按预期报错。这是下载包第一次在 Windows 上运行，但只跑了 `--version`，起服务、接节点、计划任务仍没跑。推送时本机磁盘写满，远端已更新，本地的 `origin/main` 没更新，腾出空间后 `git fetch` 补上了。
