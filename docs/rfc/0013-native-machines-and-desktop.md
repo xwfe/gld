@@ -103,6 +103,7 @@ TLS 在托管反代终止时，反代运营方处于信任边界内；本方案�
 （`*.trycloudflare.com`）每次重启 Hub 都换地址，节点配置里存的仍是旧地址、全部掉线；`--tunnel openai`
 则没有任何节点能连的地址。邀请输出应直接给出 Hub 当前固定入口的基地址；入口是临时隧道或只有
 OpenAI 隧道时拒绝生成邀请，并说明改用固定域名、FRP 或已有反代。
+**已按此实现（M2）：**另加 `--hub` 显式指定，用于同一内网、VPN 或 gld 看不到的入口。
 
 ## 4. 复用社区组件，但不引入另一套产品
 
@@ -280,11 +281,13 @@ M0 起就能调到。现在 `tools/call` 超限时回一条 `NODE_RESPONSE_TOO_L
 先向代理发 HTTP `CONNECT`，再把这条 TCP 交给 `client_async_tls_with_config` 做 TLS 和 WebSocket 握手。
 CONNECT 隧道里 TLS 仍是端到端的，代理看不到节点凭据；回环地址照旧不走代理。
 暂不支持的代理（SOCKS、PAC）要明确报错，不能落成笼统的超时。
+**已按此实现（M2）：**配对也改走同一份判断，不再用 reqwest 自己的，见 `nodes/proxy.rs`。HTTPS 代理（到代理这一段也走 TLS）同样报错，等有人需要再做。
 
 证书根现在只有随包的 webpki 根证书（Mozilla 那一批），不读系统证书库；配了 `ca_certificate`
 时配对和长连接都改为只信这一张 DER 证书。自签 Hub 这样够用。公司在系统里装了自己的根证书、
 对出网 HTTPS 做解密检查时，节点会校验失败，要用户自己导出 DER 再配置。建议同时接受 PEM，
 并在报错里点明“证书不受信、怎么配 `ca_certificate`”；不加 `--insecure`。
+**M2 只做了后半句：**`gld node doctor` 点明了怎么配，PEM 还不接受。
 
 ## 8. 基础桌面：库封装，不做桌面运行平台
 

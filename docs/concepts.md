@@ -251,54 +251,63 @@ Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并�
 ### 原生 gld 节点：项目读写与凭据管理
 
 目标机可以主动连回同一个 Hub，Hub 再用已有的项目工具读写目标机文件。
-共享项目默认只读；文件写入须由目标机本地操作员逐项目明确开启。
-操作员现在可用一次性邀请生成节点配置；已有预置凭据也可继续使用。
-自动安装与后台自启动属于 M2，顺序见
-[RFC-0013](rfc/0013-native-machines-and-desktop.md)。
+共享项目默认只读；文件写入和跑命令须由目标机本地操作员逐项目明确开启。
+已有预置凭据也可继续使用。设计见 [RFC-0013](rfc/0013-native-machines-and-desktop.md)。
 
-#### 用一次性邀请配对
+#### 接入一台新机器
 
-先在目标机用 `gld add` 登记要共享的目录并明确命名，例如 `api`、`web`；项目须开启 `confine-reads`。
 在 Hub 的本机终端生成邀请：
 
 ```bash
 gld node invite build-machine
 ```
 
-命令显示 Hub ID、机器名称和邀请。邀请最后一段是 Hub 公钥，目标机配对时存进配置，之后每次连接和 Hub 发来的
-每条消息都用它核验，原理见 [security.md](security.md#原生节点目标机认-hub-靠钉住的公钥不只靠证书)。邀请默认十分钟有效，只能建立一个节点；相同名称的新邀请
+它打印 Hub 入口、邀请，以及目标机要跑的两行命令（macOS / Linux 和 Windows PowerShell 各一份）。到目标机粘贴，
+把示例路径换成要共享的目录。第一行装 gld，已经装了的跳过；第二行长这样：
+
+```bash
+printf %s '<邀请>' | "$HOME/.local/bin/gld" join --hub https://hub.example.com/hub --share /path/to/project --invite-stdin --autostart
+```
+
+它显示 Hub ID、执行账号、共享目录和逐项目权限，终端确认一次后配对，配上开机自启，节点就在后台连上了。
+要确认连上了，跑 `gld node doctor`。第一行的安装脚本见[安装](install.md#一条命令安装)。
+
+**邀请里的地址从哪来。** 目标机把这个地址存进配置，之后一直连它，所以必须是固定的。默认用服务的公网入口；
+Cloudflare 临时地址、OpenAI 隧道和没有入口都会报错，不生成邀请：临时地址下配对能成，Hub 一重启全部节点掉线，
+OpenAI 隧道则根本没有节点能连的地址。配固定入口（`gld share --tunnel cf:<域名>`、`frp:<配置名>`、`https://<已有反代的地址>`），
+或者用 `gld node invite <名称> --hub <地址>` 直接指定。地址要是 HTTPS；只有回环 IP 能用明文 HTTP。
+
+**邀请。** 邀请最后一段是 Hub 公钥，目标机配对时存进配置，之后每次连接和 Hub 发来的
+每条消息都用它核验，原理见 [security.md](security.md#原生节点目标机认-hub-靠钉住的公钥不只靠证书)。邀请十分钟有效，只能建立一个节点；相同名称的新邀请
 替换尚未使用的旧邀请，已经登记的机器应使用原配置或轮换凭据。Hub 只存邀请摘要，
 最多保留64个待配对邀请，每个邀请在八次错误秘密尝试后失效；重新生成可恢复配对。
 邀请只能交给要加入的目标机，不作为 MCP、OAuth 或节点长连接的凭据。
 
-把邀请经可信渠道传到目标机，在所有共享项目之外准备一个由执行账号管理的私有目录。
-以下命令在这个目录中执行，`node.json` 和仅当前账号可读的 `invitation.txt` 都放在这里；
-邀请文件中只有邀请值。下面共享 `api`、`web`，只允许修改 `api` 的文件：
+**`gld join` 的参数。**
 
-```bash
-gld join --hub https://hub.example.com/hub --config node.json --share api --share web --write api --invite-stdin < invitation.txt
-```
+- `--share` 可重复，写目录或已登记项目的名称、完整 ID。没登记过的目录会先登记，这一步只写本机记录、不拉起守护进程，
+  配对取消也不撤销。项目须开启 `confine-reads`，新登记的默认就是开的。写 `--share ~/code/x/src` 而 `~/code/x` 已登记时，共享的是
+  `~/code/x`，确认时显示的路径才算数。
+- `--write`、`--run` 可重复，选中的项目必须同时在 `--share` 里。省略时全部只读。本机项目的工具档须允许写入或命令，否则报错，不会代改项目配置。
+  文件写入授权不包含命令执行或配置管理权限。
+- `--config` 默认放在数据目录的 `nodes/<Hub ID>.json`。这台机器只接了一个 Hub 时，后面的 `gld node run`、`gld node shares`、`gld node doctor`、
+  `gld node autostart`、`gld leave` 都不用写它；接了多个 Hub 时不写会报错并列出路径。配置不能放进共享项目。
+- `--autostart` 配对后配上开机自启。自启动配不上时（比如容器里没有 systemd）配对照样算成功，改用 `gld node run`。
+- `--yes` 用于非交互调用，代替终端确认。`read_only=false` 表示允许文件写入，`commands=true` 表示能跑命令（见下面[让目标机跑命令](#让目标机跑命令)）。
+- `--ca-certificate <DER文件>` 用于私有 CA，TLS 主机名仍需匹配。
 
-`--share`、`--write` 都可重复指定，接受已登记本机项目的完整 ID 或唯一名称；
-`--write` 选中的项目必须同时在完整 `--share` 名单中。省略 `--write` 时全部只读。
-本机项目的工具档须允许文件写入，否则 `--write` 会报错，不会代改项目配置。
-命令先显示 Hub ID、执行账号、共享目录和逐项目权限，`read_only=false` 表示允许文件写入，
-`commands=true` 表示能跑命令（见下面[让目标机跑命令](#让目标机跑命令)），
-再从终端取得一次确认；非交互使用显式 `--yes`。文件写入授权不包含命令执行或配置管理权限。
-确认前不会发送邀请或创建含凭据的配对状态。配对只生成配置，随后用
-`gld node run --config node.json` 在前台连接；目标端不会为配对启动本机 daemon。
-私有 CA 使用 `--ca-certificate <DER文件>`，TLS 主机名仍需匹配。
+确认前不会发送邀请或创建含凭据的配对状态。目标端不会为配对启动本机 daemon。
 
 目标机在第一次请求前将随机机器 ID、独立节点凭据和共享设置保存到同目录的
 `node.json.pending`，成功后发布为 `node.json`。Hub 把登记和消费邀请一起保存；
-响应丢失时，用相同配置路径、Hub、共享和文件写入设置及邀请重跑原命令，会恢复同一登记。
+响应丢失时，用相同配置路径、Hub、共享和权限设置及邀请重跑原命令，会恢复同一登记。
 已消费或过期邀请无法登记第二台机器；恢复还须原节点凭据有效、未撤销且未轮换。
 参数变化、已有正式配置或配对身份不符会报错并保留原文件；不自动覆盖另一绑定。
 若正式配置已经发布，只因清理 pending 失败而报错，配置仍可用于 `node run`。
 
 配对使用基地址下 `/nodes/v1/pair`，反代须同时转发这条 HTTP 路由和下面的 WebSocket 路由；
 旧 `/hub` 前缀通过现有网关转发。HTTP 请求限十秒、响应限16 KiB，拒绝重定向；
-仅用于本机测试的明文回环 IP 会绕过环境代理。失败保留 pending，命令不回显永久凭据。
+失败保留 pending，命令不回显永久凭据。
 配置与 pending 在 Unix 使用属主检查及私有权限；Windows 创建时指定当前账号独占的受保护 DACL，
 读取时核对同一文件句柄，无法确认 ACL 的卷拒绝保存。配置操作以稳定文件锁互斥，
 文件在私有写入后无覆盖发布。`node.json` 及同目录的 pending、锁文件须一直保留在共享项目之外。
@@ -311,7 +320,7 @@ gld join --hub https://hub.example.com/hub --config node.json --share api --shar
 gld node shares --config node.json
 ```
 
-要修改权限，先在节点前台进程按 Ctrl-C 结束，再列出要保留的全部共享项目和全部可写项目。
+要修改权限，先结束节点（前台按 Ctrl-C；配了自启动的跑 `gld node autostart disable`，改完再 `enable`），再列出要保留的全部共享项目和全部可写项目。
 例如保留 `api`、`web`，只允许修改 `api`：
 
 ```bash
@@ -336,17 +345,69 @@ gld node shares --config node.json --share api --share web
 
 #### 让目标机退出 Hub
 
-先结束节点进程，再在目标机执行：
+在目标机执行：
 
 ```bash
-gld leave --config node.json
+gld leave
 ```
 
-它删掉 `node.json` 和没配对完的 `node.json.pending`，凭据随之消失，这台机器之后连不上 Hub，要回来得重新邀请和配对。
-项目文件和运行记录不动，空的 `node.json.lock` 留着。节点还在跑时报 `Node configuration is in use`，什么都不删。
+它先撤掉自启动（配过的话，撤不掉就报错，什么都不删），再删掉节点配置和没配对完的 `.pending` 文件，凭据随之消失，这台机器之后连不上 Hub，要回来得重新邀请和配对。
+项目文件和运行记录不动，空的 `.lock` 文件留着。节点在前台跑时报 `Node configuration is in use`，先按 Ctrl-C。
 
 Hub 上的登记不会跟着消失，显示离线：节点凭据只能用来连接，不能调 Hub 的管理操作。
 不再用这台机器就在 Hub 上执行 `gld node revoke <机器 ID>`，机器 ID 在 `gld leave` 的输出里。
+
+#### 让节点一直在线
+
+```bash
+gld node autostart enable
+```
+
+它把节点交给系统的服务管理器并立刻在后台启动，不要管理员权限。前台 `gld node run` 还开着时会报错，先按 Ctrl-C。
+`gld node autostart status` 查看，`gld node autostart disable` 停掉并删除，节点配置不动。
+
+| 系统 | 用的是什么 | 什么时候回来 |
+| --- | --- | --- |
+| macOS | `~/Library/LaunchAgents/dev.gld.node.<机器 ID 前 12 位>.plist` | 这个账号登录后。SSH 进来配、没人登录桌面时也能起，但重启后要有人登录才回来 |
+| Linux | `~/.config/systemd/user/dev.gld.node.<…>.service`，同时开 `loginctl enable-linger` | 开机后，不用登录。linger 开不了时会提示，那样退出登录节点就停 |
+| Windows | 当前账号的登录计划任务 `dev.gld.node.<…>`（没在 Windows 真机跑过） | 这个账号登录后 |
+
+- **换了二进制重跑一次 `enable`** 就换上新版，它会先停旧的。
+- **环境是开启时的快照：** `PATH`、`GLD_HOME`、语言和代理变量记进服务定义。服务管理器给的 PATH 很短（launchd 只有 `/usr/bin:/bin:/usr/sbin:/sbin`），
+  不记的话 AI 跑命令会报 `Program not found on PATH`。装了新工具或换了代理，重跑 `enable`。Windows 的计划任务记不了环境，`GLD_HOME`、代理和 PATH 都用账号自己的环境变量。
+- **日志在配置旁边：** `<配置>.log`，超过 4 MiB 轮转一次，只保留一代。`gld node doctor` 会带上最后 5 行。
+- **出错时和前台不一样：** 前台遇到证书失败、入口 404 这类错误会退出让人看；自启动下没人看，每隔 60 秒重试，
+  否则笔记本遇到公共 Wi-Fi 的认证页面就会一直离线。启动时项目目录还没挂载、数据文件读不了也一样等着。
+  - 收到 401（凭据被撤销，或入口的反代加了自己的认证，节点分不清）：停掉它起的命令，每 10 分钟再试一次。真被撤销的话要重新加入。
+  - Hub 身份对不上：退出，退出码 0，服务管理器不再拉起。节点凭据在对方证明身份之前就发出去了，不能反复送给可能的冒充者。
+  - 配置文件没了：同样退出。
+- **崩溃或断电后：** 进程由服务管理器拉回。macOS 上启动不满 60 秒就崩的，要等满 60 秒才拉。Hub 那边的旧连接还没释放的话，
+  新进程收到 409，退避重试，正常几秒内接上；一分钟还不行就改成每分钟试一次，日志里会写，这时多半是别处在用同一份配置。
+- **命令照样跟着节点走：** `autostart disable` 或重跑 `enable` 都会停掉这个节点起的命令，见下面[让目标机跑命令](#让目标机跑命令)。
+- **`disable` 只在节点真停下后才算成功。** 从 `su` 切来的会话连不上用户服务时会报错，定义留着，换正常登录的会话再跑。
+
+#### 连不上时查什么
+
+```bash
+gld node doctor
+```
+
+它用和节点相同的代理、证书和身份校验握手一次 Hub 就断开，把配置、共享项目、节点进程、代理、网络和握手结果逐项列出来，
+每项失败都给修法，有 ✗ 时退出码 1。输出不含凭据和代理密码，可以直接发给别人看。常见结果见[排错](troubleshooting.md#目标机节点)。
+
+#### 只能经代理出网的机器
+
+设好环境变量就行，配对和长连接用同一份判断：
+
+```bash
+export HTTPS_PROXY=http://proxy.example.com:8080
+```
+
+- 按 `HTTPS_PROXY`、`https_proxy`、`ALL_PROXY`、`all_proxy` 的顺序取第一个非空的。`NO_PROXY`、`no_proxy` 列的不走代理（逗号分隔，支持 `*`、域名后缀、IP、CIDR）。
+- 只支持 HTTP CONNECT 代理。写成 `socks5://`、`https://` 时启动就报错，不会落成连接超时。账号密码写进地址：`http://用户:密码@host:port`。
+- Hub 是回环 IP 时不走代理。`localhost` 不算，要直连就写进 `NO_PROXY`。
+- CONNECT 隧道里 TLS 仍是端到端的，代理看不到节点凭据。代理本身解密 HTTPS 时证书校验会失败，导出它的根证书（DER 格式）用 `--ca-certificate` 加入。
+- 自启动不继承终端的环境，改了代理要重跑 `gld node autostart enable`。
 
 #### 让目标机跑命令
 
@@ -373,7 +434,7 @@ gld node run --config node.json
 - **断线不重跑：**连接断了命令继续跑，重连后用 `read_output` 或 `list_runs` 看结果。
   调用时断线会收到 `NODE_OUTCOME_UNKNOWN`，这时命令可能已经起来了，先 `list_runs` 查，别直接再发一次。
 - **节点退出命令就停：**按 Ctrl-C、系统发 SIGTERM、关终端或 SSH 断开（SIGHUP，用 `nohup` 起的不算）、
-  机器被 `gld node revoke` 撤销导致节点退出，它起的命令都会被停掉，`list_runs` 里记 `interrupted`。
+  机器被 `gld node revoke` 撤销（前台节点退出，自启动的节点不退出但一样停命令），它起的命令都会被停掉，`list_runs` 里记 `interrupted`。
   项目从目标机移除后，它上面的命令也会停。节点进程被 `kill -9` 或崩溃时没人收，命令会继续跑（`timeout_ms` 也是节点在管，节点没了就不生效），
   得到目标机上手动停；节点再起来后记录显示 `unknown`。
 - **等命令时机器是忙的：**`exec_command` 的 `yield_time_ms` 等多久，这台机器的连接就占多久（最多 30 秒），

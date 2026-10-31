@@ -90,6 +90,29 @@ gld tool call exec_command cmd='cargo test'
 4. 对上了之后再做一次实际调用：`check_command` 做只读预检，然后在一个无关紧要的项目里打一个
    补丁、起一条后台命令用 `read_output` 续读到结束。工具名和指纹对上只说明看得见，能调通才算数。
 
+## 目标机节点
+
+先在目标机跑 `gld node doctor`，它会把下面这些情况分开。
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `gld node invite` 报“Cloudflare 临时地址…”“OpenAI 隧道…”“还没有公网入口” | 目标机把地址存进配置，这些地址要么会变，要么节点连不上 | 配固定入口，或 `--hub <HTTPS 地址>` 指定，见[邀请里的地址从哪来](concepts.md#接入一台新机器) |
+| `gld join` 报 `目录不存在` | 没把邀请命令里的示例路径换成要共享的目录 | 换掉重跑，邀请没用掉 |
+| `This machine has not joined a Hub` | 这个账号、这个数据目录下没有节点配置 | 先加入。用 `--config` 放在别处的，把路径带上 |
+| `This machine has 2 node configurations` | 接了多个 Hub，不写路径不知道用哪个 | 按报错里列的路径加 `--config` |
+| doctor 说 `节点凭据被撤销或换过（HTTP 401）` | Hub 上跑过 `gld node revoke` 或 `rotate-credential`；也可能是入口的反代加了自己的认证 | 在 Hub 上重新邀请，这里 `gld leave` 后重新加入。反代的问题修好后，自启动的节点 10 分钟内自己回来 |
+| doctor 说 `入口通了，但没有节点路由（HTTP 404）` | 反代只放行了 `/mcp`，或 Hub 地址的路径前缀不对 | 反代同时转发 `/nodes/v1/` 下的 HTTP 和 WebSocket |
+| doctor 说 `入口在，但后面的 Hub 没响应（HTTP 502/503/530）` | 隧道或反代还在，Hub 没起来 | 在 Hub 上 `gld status`。节点自己会重连，修好了不用动这边 |
+| doctor 说 `TLS 校验失败` | Hub 用自签证书、公司网络解密 HTTPS，或公共 Wi-Fi 认证页劫持 | 先确认能正常上网；导出根证书（DER 格式），`gld leave` 后加 `--ca-certificate` 重新加入 |
+| doctor 说 `这个地址背后不是配对时的 Hub` | Hub 重装换了密钥，或地址指向了别的服务 | 重新邀请和加入。不是这两种情况就要当心有人冒充 |
+| doctor 说 `Hub 认为这台机器已在线，但本机没有节点在跑` | 刚断的旧连接还没超时，或别处在用同一份配置 | 等一分钟；一直这样就去停掉另一处 |
+| 启动报 `nodes only support HTTP CONNECT proxies` | 代理变量写成了 `socks5://` 或 `https://` | 改成 `http://host:port`。节点不支持 SOCKS |
+| `gld node autostart enable` 报 `A node is already running` | 前台的节点还开着 | 按 Ctrl-C 再跑 |
+| `Failed to connect to bus` 或 `no systemd user manager` | 用 `su` 切的账号、容器里，或没有 systemd | 用 `ssh 用户@机器` 直接登录再跑；容器里用 `gld node run` |
+| AI 经节点跑命令报 `Program not found on PATH`，登录后手动跑正常 | 自启动的环境是开启时的快照 | 在 PATH 正常的终端里重跑 `gld node autostart enable` |
+| 改了共享名单报 `Node configuration is in use` | 节点在跑，配置被锁着 | `gld node autostart disable`，改完再 `enable` |
+| `autostart disable` 报 `The node is still running` | 节点在前台开着，或者当前会话（比如 `su`）连不上用户服务 | 前台的按 Ctrl-C；否则换 `ssh 用户@机器` 直接登录再跑。定义没动 |
+
 ## 隧道
 
 | 现象 | 原因 | 处理 |

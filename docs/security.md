@@ -93,6 +93,9 @@ Hub 有一把节点专用的 Ed25519 私钥；公钥写在邀请令牌最后一�
   可如果这个仓库的 Git 配置本来就指向仓库里的脚本（`core.fsmonitor`、filter、textconv），改了那个脚本，下一次 `git_status`、`git_diff` 就会执行它。这种仓库别给 `--write`。
 - **开了 `--run` 就是把账号交出去。** 能跑命令的项目，命令以目标机这个账号执行，读得到它的 `node.json`、数据目录里的凭据和它能碰的一切。
   签名只保证调用确实来自 Hub，不限制 Hub 上的人能干什么。默认不开，要隔离就给节点单独开一个系统账号（[怎么开](concepts.md#让目标机跑命令)）。
+- **邀请会留在命令历史里。** `gld node invite` 打印的命令带着邀请，粘贴后留在 shell 历史。它只能用一次、十分钟失效，用过或过期后留着没用；没用掉之前等于能以这个名字加入 Hub，别发到公开的地方。
+- **自启动定义里可能有代理密码。** `gld node autostart enable` 把代理变量记进 launchd、systemd 的定义文件，权限 0600。账号下的其他程序读得到，和 `node.json` 一样。
+- **安装脚本靠 HTTPS 和 GitHub。** `install.sh`、`install.ps1` 会核对发布包的 `SHA256SUMS`，但校验和和脚本来自同一个 Release，证明的是下载完整，证明不了来源。要核对来源用 [`gh attestation verify`](install.md#下载现成的不需要装-rust)。
 
 ### 读文件的范围：0.3.0 改了默认值
 

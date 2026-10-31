@@ -3,6 +3,49 @@
 `gld` 主程序是单个可执行文件，不需要 Node 或 Tauri 运行时。
 Git、项目构建工具、隧道程序和启用的外部 MCP server 仍需按实际用途另行安装。
 
+## 一条命令安装
+
+macOS、Linux（把版本号换成要装的）：
+
+```bash
+curl -fsSL https://github.com/xwfe/gld/releases/download/v0.9.1/install.sh | GLD_VERSION=v0.9.1 sh
+```
+
+Windows PowerShell：
+
+```powershell
+$env:GLD_VERSION='v0.9.1'; irm https://github.com/xwfe/gld/releases/download/v0.9.1/install.ps1 | iex
+```
+
+v0.9.0 的 Release 里还没有这两个脚本，从下一版开始才有；现在要装 v0.9.0，按下面的手动步骤来。
+接入 Hub 时不用自己拼：`gld node invite` 打印的命令里版本已经填好，和 Hub 一致，见[接入一台新机器](concepts.md#接入一台新机器)。
+
+脚本识别系统和 CPU，下载固定版本的包，核对 `SHA256SUMS`，试跑一次，再原子替换。不要管理员权限，也不要 Node、Python 或编译器。
+**任何一步失败都不动原来的 gld。** 它只碰一个文件，不碰数据目录和节点配置。
+
+| | 装到哪 | PATH | 用的包 |
+| --- | --- | --- | --- |
+| macOS | `~/.local/bin/gld` | 不改 shell 配置，打印要加的那行 | 按芯片；Rosetta 终端里也选 Apple 芯片的包 |
+| Linux | `~/.local/bin/gld` | 同上 | x86_64 的静态 `musl` 包，不挑发行版；其他 CPU 没有包，会报错 |
+| Windows | `%LOCALAPPDATA%\Programs\gld\gld.exe` | 加进用户 Path，当前窗口也生效 | x86_64，ARM 版 Windows 靠系统转译 |
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `GLD_VERSION` | 要装的版本，不设就是最新发布 |
+| `GLD_INSTALL_DIR` | 换安装目录 |
+| `GLD_BASE_URL` | 换下载地址前缀，比如内网镜像；那里要有包和 `SHA256SUMS` |
+
+| 报错 | 意思 |
+| --- | --- |
+| `下载不了 …` | 版本不存在，或这台机器到不了 GitHub。经代理出网的设 `HTTPS_PROXY`，curl 和 PowerShell 都认 |
+| `校验和对不上` | 下载被改过或没下完，没有安装，重跑一次 |
+| `下载的 gld 在这台机器上跑不起来` | 包和系统不匹配，原来的 gld 还在 |
+| `没有 … 的发布包` | 这个系统或 CPU 没有预编译包，只能[从源码装](#从源码装) |
+
+已经在后台跑节点的机器，重装后跑 `gld node autostart enable` 换上新版。
+
+`install.ps1` 只在 CI 的 Windows 任务里跑过，没在 Windows 真机跑过。
+
 ## 下载现成的（不需要装 Rust）
 
 到 [Releases](https://github.com/xwfe/gld/releases) 拿对应平台的包：
@@ -239,7 +282,9 @@ Windows 上守护进程走的是命名管道，和 Unix domain socket 是两套�
 
 ## 卸载
 
-配过[开机自启](daemon.md#开机自启)的先撤掉，不然删了二进制之后系统还会反复去拉一个不存在的程序：macOS 跑
+接过 Hub 的机器先跑 `gld leave`，它撤掉节点自启动并删除节点配置；不想退出 Hub 只想停，就 `gld node autostart disable`。
+
+配过守护进程[开机自启](daemon.md#开机自启)的先撤掉，不然删了二进制之后系统还会反复去拉一个不存在的程序：macOS 跑
 `launchctl bootout gui/$(id -u)/dev.gld.daemon && rm ~/Library/LaunchAgents/dev.gld.daemon.plist`，
 Linux 跑 `systemctl --user disable --now gld`。然后：
 

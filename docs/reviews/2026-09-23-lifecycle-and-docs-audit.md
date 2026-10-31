@@ -4248,3 +4248,49 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 **没做的：**没有代码签名；本机没换成发布包，还是 `fef936d`（代码只差版本号）。另外两台机器没换，还是 `fba39d0`。
 
 **撞到的事：**`gh release download` 在临时目录里没有仓库上下文，要加 `--repo`；`gh run watch` 有一次提前退出 1，当时流水线还在跑，改成看 `gh run view` 的最终结论。
+
+## 101. D16-M2 不依赖真机的部分：邀请、安装脚本、自启动、诊断、代理（2026-10-31）
+
+用户让开始 M2。`8cdf294`–`b9d4f5a` 共 11 个提交，用法在 [concepts](../concepts.md#接入一台新机器)、[install](../install.md#一条命令安装) 和[排错](../troubleshooting.md#目标机节点)，不再抄。没换装、没推送、没发版。
+
+| 项目 | 做了什么 | 怎么验的 |
+|---|---|---|
+| 代理 | 配对和长连接共用 `nodes/proxy.rs`，只认环境变量和 HTTP CONNECT | 真实 CLI、假 CONNECT 代理、TLS 中转走通配对和长连接；`NO_PROXY` 直连；SOCKS 启动就报错且不露密码 |
+| 配置位置 | `--share` 能写目录，配置默认 `nodes/<Hub ID>.json`，只有一份时后续命令不写路径 | 集成测试走完 join、run、shares、leave，全程没起守护进程 |
+| 自启动 | `gld node autostart`，launchd、systemd 用户单元、登录计划任务；`--service` 运行模式 | 桩代替管理器的集成测试；**真实 launchd** 见下 |
+| 诊断 | `gld node doctor` 握手一次，每项失败给修法 | 集成测试覆盖没跑、在线、证书不受信、端口不通、撤销、Hub 读不了数据 |
+| 邀请 | 默认用固定入口，临时地址、OpenAI 隧道、没有入口都拒绝，`--hub` 可指定；输出三个系统的命令 | 单测和集成测试；被拒的邀请不落盘 |
+| 安装脚本 | `install.sh`、`install.ps1`，Release 附带 | `install.sh` 6 种失败路径（`sh` 和 `dash`）；v0.9.0 真实发布包在本机装通。`install.ps1` 只进了 CI，还没跑过 |
+
+**真实 launchd（本机，隔离 `GLD_HOME`，临时 LaunchAgent，测完已删，`~/Library/LaunchAgents` 里没留）：**join 带 `--autostart` 后 `state = running`，`plutil -lint` OK，plist 权限 `-rw-------`；连续三次重跑 enable 都成功，重启后约 2 秒重新接上；运行超过 60 秒后 `kill -9`，1 秒拉回，启动不满 60 秒就被杀的要等 58 秒（`ThrottleInterval`）；撤销后进程继续跑，日志写明已停命令、600 秒后再试；disable 后 launchd 里没有这个服务。
+
+**真实环境和全量测试才抓到的（桩和单测都放过了）：**
+
+- 刚 bootout 马上 bootstrap 报 `Bootstrap failed: 5: Input/output error`，定义文件还被删了（`0a203c8`）。这是升级路径。
+- 重跑 enable 时 Hub 还没释放旧连接，新进程收到 409 后等 60 秒（`155a49c`）。全量并行跑时才出现。
+
+**独立审查（只读，不带结论）的结果，全部核对过代码：**
+
+| 严重度 | 缺陷 | 处理 |
+|---|---|---|
+| 高 | Hub 读不了数据文件时回 401，服务节点收到就退出码 0 永久离线，修好 Hub 也回不来 | 改回 503。服务模式 401 不再退出：响应没签名，可能来自反代的认证，所以先停命令、每 10 分钟再试。只有 Hub 身份对不上才停，因为节点凭据在证明身份前就发出去了 |
+| 中 | 外置盘没挂载等启动错误走“配置坏了”分支，退出后要等下次开机 | 留在进程里等，不靠服务管理器 |
+| 中 | disable 不看停没停下，`su` 会话里定义删了、节点还连着，却说已停止 | 真停下才算成功，否则报错并保留定义 |
+| 中 | leave 吞掉 disable 的错误；前台节点开着时自启动被静默删除 | 撤不掉就报错，什么都不删 |
+| 中 | systemd、Windows 启动失败留下定义，下次登录自己起来，代理密码也留在盘上 | 失败时统一删除 |
+| 低 | join 在进程内直接写数据文件，和运行中的守护进程没有跨进程锁（`store.rs` 的锁是进程内 Mutex） | 改走 Backend，和 `gld add` 同一入口 |
+| 低 | 只剩 pending 时 `gld leave` 找不到；代理响应头非 UTF-8 被判无效；相对路径的 `GLD_HOME` 进定义后指错；控制字符能写进定义；Windows 上 `.old` 删不掉时升级中止；`%VAR%` 被压平；noexec `/tmp` 报错误导 | 逐条修了 |
+| 不确定 | Windows 任务子文件夹可能要管理员、`\\?\` 路径别的程序未必认 | 没法验证，直接换成更稳的写法：任务放根目录，路径还原 |
+
+**没修的：**`ExecStart` 第一个参数含 `$` 时的转义没核实，路径含 `$` 很少见；Windows 上 `schtasks /End` 等同强杀，命令可能留下；不接受 PEM 证书和 HTTPS 代理。
+
+**我自己的错：**`155a49c` 带着 clippy 错误提交了，`89d1a77` 补。当时的写法是 `set -euo pipefail` 加 `cargo clippy … | tail -1` 再 `git commit`。实测这里的 Bash 工具跑 zsh，`false | cat` 之后脚本照样往下走，所以之前记的“开头写 `set -euo pipefail` 就够”是错的。之后一律 `if 检查 > 日志; then 提交; fi`。
+
+**没验证的：**
+
+- **v0.9.0 的 Release 里没有安装脚本**，当前版本号也还是 0.9.0，所以现在 `gld node invite` 打印的第一行会 404，第二行报找不到 gld。要等下一版发布，`release.yml` 新增的那一步也要到那时才第一次跑。
+- 真实 systemd 没跑，只有桩。Linux 服务器有 systemd，但在上面起服务要用户点头。
+- Windows：`install.ps1`、计划任务、`FreeConsole` 都没运行过。CI 新增的那一步推送后才跑，自启动的测试不在 Windows 上跑。
+- 干净的 Mac、Windows、Linux 各走一遍生成的命令，是 M2 剩下的验收。真实代理、真实 TLS 入口同样没走过。
+
+全仓 1365 项通过，clippy、fmt 通过（本机 macOS）。
