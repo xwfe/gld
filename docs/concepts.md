@@ -253,7 +253,7 @@ Windows 启动变量，不继承用户 API 密钥或现有执行器配置，并�
 目标机可以主动连回同一个 Hub，Hub 再用已有的项目工具读写目标机文件。
 共享项目默认只读；文件写入须由目标机本地操作员逐项目明确开启。
 操作员现在可用一次性邀请生成节点配置；已有预置凭据也可继续使用。
-命令运行、查询和停止接续 M1，自动安装与后台自启动属于 M2，顺序见
+自动安装与后台自启动属于 M2，顺序见
 [RFC-0013](rfc/0013-native-machines-and-desktop.md)。
 
 #### 用一次性邀请配对
@@ -377,7 +377,7 @@ gld node run --config node.json
   项目从目标机移除后，它上面的命令也会停。节点进程被 `kill -9` 或崩溃时没人收，命令会继续跑（`timeout_ms` 也是节点在管，节点没了就不生效），
   得到目标机上手动停；节点再起来后记录显示 `unknown`。
 - **等命令时机器是忙的：**`exec_command` 的 `yield_time_ms` 等多久，这台机器的连接就占多久（最多 30 秒），
-  别的调用（包括 `kill_session`）这段时间收到 `MACHINE_BUSY`，再调一次就行。长命令传 `yield_time_ms: 0` 或一个小值，
+  别的调用（包括 `kill_session`）等 5 秒还轮不到就收到 `MACHINE_BUSY`，再调一次就行。长命令传 `yield_time_ms: 0` 或一个小值，
   再用 `read_output` 查，别让它占着。
 
 `--json` 输出 `hub_url`、`hub_id`、`machine_id`、`config_path` 和 `workspaces`，不输出凭据或 CA 路径。
@@ -515,7 +515,8 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 | `MACHINE_ALREADY_CONNECTED`（HTTP 409） | 这台机器已有连接，先关闭原节点；不会把原连接挤掉 |
 | `MACHINE_OFFLINE` | 没有可用连接，本次未发送；不会改用 Hub 本机或另一个同名项目 |
 | `MACHINE_REVOKED` | 该机器的专用凭据已撤销，本次未发送；须由操作员轮换为新凭据后恢复 |
-| `MACHINE_BUSY` | 这台机器的连接正忙，本次未发送；稍后显式再调 |
+| `MACHINE_BUSY` | 这台机器的连接忙了 5 秒还没空出来，本次未发送；稍后显式再调 |
+| `NODE_PROJECT_READ_ONLY` | 这个项目是只读共享，本次未发送；要写文件得目标机操作员用 `--write` 打开 |
 | `NODE_COMMANDS_NOT_ALLOWED` | 目标机没给这个项目开命令，什么都没跑；要开见[让目标机跑命令](#让目标机跑命令) |
 | `NODE_TOOL_UNSUPPORTED` | 节点握手工具表没有该工具，本次未发送；核对节点版本与文件写入授权 |
 | `NODE_ARGUMENT_UNSUPPORTED` | 节点不接受某个参数，本次未发送；核对参数后再调 |
@@ -529,8 +530,8 @@ Hub 句柄，并在 `_meta["gld/workspace"]` 标注机器路由；目标机路�
 
 Hub 等一次回包最多 60 秒（工具自己最多等 30 秒，回包在路上再给 30 秒），调用一回包就返回。超过 60 秒才算超时，
 这时连接会被关、节点自动重连，调用方拿到 `NODE_OUTCOME_UNKNOWN`。单条消息写出去最多 30 秒，发满 8 MiB 至少要约 2.2 Mbps 的上行，
-再慢就同样断线。一次调用占着这台机器的连接，它没回完时，
-别的调用会立刻收到 `MACHINE_BUSY`，不排队。
+再慢就同样断线。一次调用占着这台机器的连接，它没回完时，别的调用最多等 5 秒，
+所以并行发几个读请求没问题；等不到才收到 `MACHINE_BUSY`。
 
 撤销或轮换这台机器的凭据、停服务时，在途调用最多再等 2 秒，之后被切断，调用方拿到 `NODE_OUTCOME_UNKNOWN`，
 所以 `gld daemon stop` 不会被卡住的调用拖过它 20 秒的等待。

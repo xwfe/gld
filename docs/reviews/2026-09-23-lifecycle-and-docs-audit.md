@@ -4117,6 +4117,44 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 **CI：**用户让推，main 推到 `dabb233`。Linux、macOS 测试和 MSRV 都过，Windows job 红在 `computer/probe/state.rs` 的 unused-mut（`17ea95b` 留下的，Windows 开了 `-D warnings`，这是它第一次上 CI）。
 本机交叉检查走不通：`ring` 缺 Windows 头文件。`00406e5` 修完后 8 个 job 全过，这轮节点代码在 Windows 上编译通过；Windows 上只真跑了补丁落盘和写锁那组测试，节点和命令相关的没跑过。
 
+## 97. 节点第一次跨机器跑通：真机冒烟（2026-10-31）
+
+**范围与基线：**用户同意“写 M2 之前先真机冒烟”。基线 `a3b73c0`。节点到这之前只在同一台机器上测过。
+
+**怎么搭的：**本机用隔离数据目录起临时 Hub，Linux 服务器（Debian 13）的普通账号用隔离数据目录和临时项目当目标机，二进制在它的临时目录现场构建。
+目标机经 SSH 反向隧道连 Hub 的回环地址，用真实的 `gld node invite`、`gld join`、`gld node run`；客户端是一个直接发 MCP 请求的脚本。没有开公网地址。
+
+**没覆盖的：**TLS 和反代：隧道里走的是明文回环，WSS 证书校验没在真机走过。Windows、ChatGPT 真实连接器、经代理出网都没测。
+
+| 场景 | 结果 |
+| --- | --- |
+| 配对、三级权限 | `--run`、`--write`、只读三个项目权限正确；只写和只读项目跑命令都报 `NODE_COMMANDS_NOT_ALLOWED`；guarded 下 `sh` 报 `POLICY_REJECTED`；写 `sub/.git/config` 被拒 |
+| 延迟和大回包 | 读文件 10 次平均约 30 ms；1 MiB 读取 0.6 秒；3 MB 图片 0.9 秒 |
+| 长等待 | `yield_time_ms=30000` 30.1 秒正常返回，同一连接继续可用 |
+| 硬断（杀隧道） | Hub 0.5 秒发现离线；离线调用报 `MACHINE_OFFLINE`；命令照跑；恢复后 4.8 秒重连，命令只跑了一次，句柄不变 |
+| 黑洞（冻住隧道进程，两端都收不到断开） | Hub 39 秒发现离线（20 秒 Ping 加 20 秒等 Pong）；命令照跑、只跑一次；解冻后自动恢复，仍只有一条连接 |
+| SIGTERM | 节点退出，命令停，重启后记 `interrupted` |
+| 真的断开前台 SSH | 节点退出，命令停 |
+| `gld node revoke` | 调用报 `MACHINE_REVOKED`；节点 2 秒内因 401 退出，命令停 |
+| `gld leave` | 配置删除，项目文件不动 |
+| Hub 重启 | 节点自动连回，配对不用重做 |
+
+**发现并修复（`b7bc92e`）：**
+
+- **并行调用直接被拒。**一个调用在途时别的立刻 `MACHINE_BUSY`。RFC 原来判断“首版接受”，真机量出来 8 个并行读 6 个失败、16 个 11 个失败，而客户端确实常这样发。
+  现在最多等 5 秒，真机上 8 个、16 个全部成功，最慢约 370 ms。真正卡住的调用后面的人等满 5 秒还是 BUSY，不无限排队（测试让中继压住回包 9 秒验证）。没做连接内并发，这个小改动够了。
+- **只读项目写文件报错看不懂。**原来只有 `NODE_REQUEST_REJECTED`“节点拒绝了请求”，现在 Hub 提前报 `NODE_PROJECT_READ_ONLY` 并说怎么开。权限仍由节点判定。
+
+**过程里我自己的错（都不是产品问题）：**
+- 经 SSH 切到测试账号起后台脚本的那条命令不退出，我结束它之后被卡住的脚本才开始跑，和重跑的一份抢连接，出了几条假 FAIL。也正因为这样才注意到并行被拒。
+- 脚本里几条 FAIL 是预期写错：`read_file` 单次上限 1 MiB、`exec_command` 回包没有 `running` 字段、`timeout_ms` 上限 60 万。
+
+**还是 M2 要做的：**`gld node invite` 不给 Hub 地址，`--hub` 要自己拼；目标机加入要自己把命令写全；`gld node run` 只能前台跑，退出登录就没了。
+
+**清理：**两端临时进程和目录都删了；Linux 上原装的 gld 仍是 `fba39d0`；开始时本机线上守护进程本来就没在跑，这轮没启动它，它的数据目录也没动。
+
+隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1279 passed / 0 failed；Clippy `-D warnings`、fmt --check 通过。协议仍15，工具表未改，未推送。
+
 ## 98. RFC-0008 稳定宿主基础：工具进子进程（2026-10-31）
 
 用户 2026-10-30 决定开始做。分支 `claude/continuous-upgrade-091095`，没推送、没换装、没重启任何在跑的服务；测试一律隔离 `GLD_HOME`。**不是零中断**，§6 逐条状态写在 RFC §5，这里不抄。
