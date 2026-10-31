@@ -9,7 +9,7 @@ const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 const CONFLICT_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Retry {
+pub(in crate::nodes) enum Retry {
     Transient,
     Conflict,
     Never,
@@ -19,7 +19,7 @@ pub(super) enum Retry {
 
 /// 诊断要分清是哪一层出的错，光看 `retry` 分不出来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Layer {
+pub(in crate::nodes) enum Layer {
     Http(u16),
     Tls,
     Proxy,
@@ -27,7 +27,7 @@ pub(super) enum Layer {
 }
 
 #[derive(Debug)]
-pub(super) struct Failure {
+pub(in crate::nodes) struct Failure {
     pub retry: Retry,
     pub message: String,
     pub layer: Layer,
