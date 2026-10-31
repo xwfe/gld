@@ -4294,3 +4294,5 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 - 干净的 Mac、Windows、Linux 各走一遍生成的命令，是 M2 剩下的验收。真实代理、真实 TLS 入口同样没走过。
 
 全仓 1365 项通过，clippy、fmt 通过（本机 macOS）。
+
+**推送后的 CI（同日，`18596d3`）：**全部任务通过。`install.ps1` 第一次真正运行：Windows 自带的 PowerShell 5.1 经 `Invoke-Expression` 下载 v0.9.0 发布包，装到临时目录，`gld 0.9.0 (087765a01207)` 能跑，指定不存在的版本时报错。只覆盖了这一条路径，`install.ps1` 的校验和不符、替换旧版没跑过，计划任务和自启动仍然没在 Windows 上运行过。Ubuntu 任务通过，包含用桩代替 systemd 的自启动测试，真实 systemd 仍没跑过。
