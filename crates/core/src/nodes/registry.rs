@@ -38,12 +38,16 @@ pub struct NativeMember {
 }
 
 impl NativeMember {
+    fn read_only(&self) -> bool {
+        !matches!(self.tool_profile.as_str(), "file-write" | "commands")
+    }
+
     pub fn listed(&self) -> Value {
         json!({
             "id": self.id, "name": self.name, "kind": "node",
             "machine_id": self.machine_id, "online": self.online, "revoked": self.revoked,
             "tool_profile": self.tool_profile,
-            "read_only": !matches!(self.tool_profile.as_str(), "file-write" | "commands"),
+            "read_only": self.read_only(),
             "commands": self.tool_profile == "commands",
         })
     }
@@ -218,6 +222,13 @@ impl Nodes {
                 false,
             );
         }
+        if matches!(name, "apply_patch" | "patch_check") && member.read_only() {
+            return failure(
+                "NODE_PROJECT_READ_ONLY",
+                "This project is shared read-only; nothing was sent. The operator of this machine allows file writes with `gld node shares --write`.",
+                false,
+            );
+        }
         let Some(arguments) = args.as_object_mut() else {
             return failure(
                 "INVALID_ARGUMENT",
@@ -239,11 +250,11 @@ impl Nodes {
                 )
             }
         };
-        match connection.try_with_peer(|peer| peer.call_tool_with_meta(name, args, meta, CALL)) {
+        match connection.with_peer(|peer| peer.call_tool_with_meta(name, args, meta, CALL)) {
             Ok(result) => tag_result(result, member),
             Err(ConnectionError::Busy) => failure(
                 "MACHINE_BUSY",
-                "This machine connection is busy; this request was not sent.",
+                "This machine connection stayed busy for 5 seconds; this request was not sent. Another call is still running: retry later, or use a smaller yield_time_ms for long commands.",
                 true,
             ),
             Err(ConnectionError::Closed) => failure(
@@ -355,7 +366,7 @@ impl Nodes {
         let discovery = AuthContext::new(Principal::SharedSecret, "node-inventory");
         let meta = forwarded_meta(&discovery, &authenticated.hub_id)?;
         let (offered, projects) = connection
-            .try_with_peer(|peer| {
+            .with_peer(|peer| {
                 peer.initialize("gld-hub", HANDSHAKE)?;
                 let tools = peer.list_tools(HANDSHAKE)?;
                 let offered = Offered::from_handshake(&tools, peer.server_info());

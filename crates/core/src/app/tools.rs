@@ -11,7 +11,6 @@ use serde_json::Value;
 
 use super::App;
 use crate::error::{AppError, AppResult};
-use crate::tools::registry::{canonical_tool_name, exposed_tool_names};
 use crate::tools::{call_tool, list_tools_for_profile, ToolContext};
 use crate::usage::ServiceUsage;
 
@@ -28,18 +27,13 @@ impl App {
     /// 别名（如 `grep` → `grep_text`）与 MCP 侧用同一张映射表。
     pub fn call_tool(&self, id: &str, name: &str, args: Value) -> AppResult<Value> {
         let profile = self.profile_by_id(id)?;
-        let canonical = canonical_tool_name(name);
-        let exposed = exposed_tool_names(&profile.runtime.tool_profile);
-        if !exposed.contains(&canonical) {
-            return Err(AppError::Message(format!(
-                "当前工具集「{}」没有暴露工具「{name}」。`gld tool list` 查看可用工具，\
-                 或用 `gld set <项目> tool-profile=advanced` 换一个工具集。",
-                profile.runtime.tool_profile
-            )));
+        // 守护进程里命令会话在执行代那边，在这里跑就是另起一套，写入序号也对不上。
+        if let Some(router) = crate::generation::router() {
+            return router
+                .local_tool(id, std::path::Path::new(&profile.path), name, &args)
+                .map_err(|error| AppError::Message(error.to_string()));
         }
-        if !args.is_object() {
-            return Err(AppError::Message("工具参数必须是 JSON 对象".into()));
-        }
+        let canonical = crate::generation::child::check_tool_call(&profile, name, &args)?;
         let ctx = self.tool_context(id)?;
         Ok(call_tool(&ctx, canonical, &args))
     }

@@ -560,6 +560,11 @@ fn native_nodes_route_real_projects_through_authenticated_wss_and_global_gateway
     assert_eq!(unknown["error"]["code"], "NODE_ARGUMENT_UNSUPPORTED");
     let write = service.call_raw("exec_command", json!({"workspace":a_api,"argv":["pwd"]}));
     assert_eq!(write["error"]["code"], "NODE_COMMANDS_NOT_ALLOWED");
+    let patch = service.call_raw(
+        "apply_patch",
+        json!({"workspace":a_api,"patch":"--- a/README.md\n+++ b/README.md\n@@\n-x\n+y\n"}),
+    );
+    assert_eq!(patch["error"]["code"], "NODE_PROJECT_READ_ONLY", "{patch}");
     let escape = service.call_raw(
         "read_file",
         json!({"workspace":a_api,"path":"../web/README.md"}),
@@ -867,6 +872,52 @@ fn stopping_the_daemon_is_not_held_up_by_a_stuck_call() {
             String::from_utf8_lossy(&stopped.stderr)
         );
         assert!(started.elapsed() < Duration::from_secs(15));
+    });
+}
+
+/// 客户端常把几个读请求并行发出来。立刻报 BUSY 的话 8 个里有 6 个失败（真机测过）。
+#[test]
+fn parallel_reads_wait_for_the_connection_instead_of_failing() {
+    let (_hub, service, _relay, machine, _, path) = stuck_call_fixture();
+    let _node = NodeProcess::start(&machine, &path);
+    let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
+    std::thread::scope(|scope| {
+        let calls: Vec<_> = (0..16)
+            .map(|_| scope.spawn(|| read(&service, &api)))
+            .collect();
+        for call in calls {
+            let result = call.join().unwrap();
+            assert_eq!(result["content"], "machine-a/api\n", "{result}");
+        }
+    });
+}
+
+/// 真卡住的调用不能让别人无限排队：等 5 秒还是报 BUSY，而且什么都没发。
+#[test]
+fn a_call_blocked_behind_a_stuck_one_gets_busy_after_a_short_wait() {
+    let (_hub, service, relay, machine, _, path) = stuck_call_fixture();
+    let _node = NodeProcess::start(&machine, &path);
+    let api = find(&wait_inventory(&service, 2, 2), "machine-a/api");
+    relay.hold_node_bytes(Duration::from_secs(9));
+    std::thread::scope(|scope| {
+        let stuck = scope.spawn(|| {
+            service.rpc_waiting(
+                "tools/call",
+                json!({"name":"read_file","arguments":{"workspace":api,"path":"README.md"}}),
+                Duration::from_secs(20),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        let busy = read(&service, &api);
+        assert_eq!(busy["error"]["code"], "MACHINE_BUSY", "{busy}");
+        assert!(started.elapsed() >= Duration::from_secs(4));
+        assert!(started.elapsed() < Duration::from_secs(8));
+        let reply = stuck.join().unwrap().json();
+        assert_eq!(
+            reply["result"]["structuredContent"]["content"], "machine-a/api\n",
+            "the stuck call still finishes: {reply}"
+        );
     });
 }
 

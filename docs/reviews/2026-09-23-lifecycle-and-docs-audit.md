@@ -4114,3 +4114,94 @@ SIGHUP 被忽略（`nohup`）时节点继续在线。第一版先装处理函数
 **提交顺序的问题：**提交这一节时，改文档的脚本因为字符串没对上而失败，同一条命令后面的 `git commit` 照跑（换行不算门控）。全量是提交前跑过的，代码没坏，
 但 `2f8b7ee` 没带上它的测试，测试落在 `35dff90`；任务表和 RFC 的更新也漏了，由后一个提交补上。没有改写历史。
 
+**CI：**用户让推，main 推到 `dabb233`。Linux、macOS 测试和 MSRV 都过，Windows job 红在 `computer/probe/state.rs` 的 unused-mut（`17ea95b` 留下的，Windows 开了 `-D warnings`，这是它第一次上 CI）。
+本机交叉检查走不通：`ring` 缺 Windows 头文件。`00406e5` 修完后 8 个 job 全过，这轮节点代码在 Windows 上编译通过；Windows 上只真跑了补丁落盘和写锁那组测试，节点和命令相关的没跑过。
+
+## 97. 节点第一次跨机器跑通：真机冒烟（2026-10-31）
+
+**范围与基线：**用户同意“写 M2 之前先真机冒烟”。基线 `a3b73c0`。节点到这之前只在同一台机器上测过。
+
+**怎么搭的：**本机用隔离数据目录起临时 Hub，Linux 服务器（Debian 13）的普通账号用隔离数据目录和临时项目当目标机，二进制在它的临时目录现场构建。
+目标机经 SSH 反向隧道连 Hub 的回环地址，用真实的 `gld node invite`、`gld join`、`gld node run`；客户端是一个直接发 MCP 请求的脚本。没有开公网地址。
+
+**没覆盖的：**TLS 和反代：隧道里走的是明文回环，WSS 证书校验没在真机走过。Windows、ChatGPT 真实连接器、经代理出网都没测。
+
+| 场景 | 结果 |
+| --- | --- |
+| 配对、三级权限 | `--run`、`--write`、只读三个项目权限正确；只写和只读项目跑命令都报 `NODE_COMMANDS_NOT_ALLOWED`；guarded 下 `sh` 报 `POLICY_REJECTED`；写 `sub/.git/config` 被拒 |
+| 延迟和大回包 | 读文件 10 次平均约 30 ms；1 MiB 读取 0.6 秒；3 MB 图片 0.9 秒 |
+| 长等待 | `yield_time_ms=30000` 30.1 秒正常返回，同一连接继续可用 |
+| 硬断（杀隧道） | Hub 0.5 秒发现离线；离线调用报 `MACHINE_OFFLINE`；命令照跑；恢复后 4.8 秒重连，命令只跑了一次，句柄不变 |
+| 黑洞（冻住隧道进程，两端都收不到断开） | Hub 39 秒发现离线（20 秒 Ping 加 20 秒等 Pong）；命令照跑、只跑一次；解冻后自动恢复，仍只有一条连接 |
+| SIGTERM | 节点退出，命令停，重启后记 `interrupted` |
+| 真的断开前台 SSH | 节点退出，命令停 |
+| `gld node revoke` | 调用报 `MACHINE_REVOKED`；节点 2 秒内因 401 退出，命令停 |
+| `gld leave` | 配置删除，项目文件不动 |
+| Hub 重启 | 节点自动连回，配对不用重做 |
+
+**发现并修复（`b7bc92e`）：**
+
+- **并行调用直接被拒。**一个调用在途时别的立刻 `MACHINE_BUSY`。RFC 原来判断“首版接受”，真机量出来 8 个并行读 6 个失败、16 个 11 个失败，而客户端确实常这样发。
+  现在最多等 5 秒，真机上 8 个、16 个全部成功，最慢约 370 ms。真正卡住的调用后面的人等满 5 秒还是 BUSY，不无限排队（测试让中继压住回包 9 秒验证）。没做连接内并发，这个小改动够了。
+- **只读项目写文件报错看不懂。**原来只有 `NODE_REQUEST_REJECTED`“节点拒绝了请求”，现在 Hub 提前报 `NODE_PROJECT_READ_ONLY` 并说怎么开。权限仍由节点判定。
+
+**过程里我自己的错（都不是产品问题）：**
+- 经 SSH 切到测试账号起后台脚本的那条命令不退出，我结束它之后被卡住的脚本才开始跑，和重跑的一份抢连接，出了几条假 FAIL。也正因为这样才注意到并行被拒。
+- 脚本里几条 FAIL 是预期写错：`read_file` 单次上限 1 MiB、`exec_command` 回包没有 `running` 字段、`timeout_ms` 上限 60 万。
+
+**还是 M2 要做的：**`gld node invite` 不给 Hub 地址，`--hub` 要自己拼；目标机加入要自己把命令写全；`gld node run` 只能前台跑，退出登录就没了。
+
+**清理：**两端临时进程和目录都删了；Linux 上原装的 gld 仍是 `fba39d0`；开始时本机线上守护进程本来就没在跑，这轮没启动它，它的数据目录也没动。
+
+隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：60个测试目标 1279 passed / 0 failed；Clippy `-D warnings`、fmt --check 通过。协议仍15，工具表未改，未推送。
+
+## 98. RFC-0008 稳定宿主基础：工具进子进程（2026-10-31）
+
+用户 2026-10-30 决定开始做。分支 `claude/continuous-upgrade-091095`，没推送、没换装、没重启任何在跑的服务；测试一律隔离 `GLD_HOME`。**不是零中断**，§6 逐条状态写在 RFC §5，这里不抄。
+
+**做了什么：**`gld daemon run` 变成宿主（端口、隧道、OAuth、节点 WSS、配置写入），工具和命令进子进程 `gld daemon generation`，走子进程的匿名管道（RFC §3.4）。新增 `gld daemon upgrade status / prepare / switch / abort`。协议 16。
+
+**用户能感觉到的行为变化，就这几条：**
+
+- 执行代被杀时服务不再整个没了，正在执行的调用收到 `generation_lost`，下一条接着用。
+- 只杀守护进程（`kill -9`）时，命令不再成孤儿：执行代读到管道关闭，收好再退，记录是 `interrupted`。原来的测试 `a_command_whose_daemon_was_killed_is_on_record_as_unknown` 改成连执行代一起杀，`unknown` 的语义还在。
+- `gld daemon restart` 查在跑的命令时多看 `daemon.json` 里的 `generation_pids`，提示和 `--force` 不变。
+- 多一个进程。`gld start`、连接器的 client_id 和授权都不动。
+
+**验证：**隔离 GLD_HOME 全仓 `cargo test --workspace --all-targets --locked --no-fail-fast`：61 个测试目标 1308 passed / 0 failed，清掉工作区三个包的缓存之后跑的；Clippy `-D warnings`、fmt --check 通过。都是 macOS，Linux 和 Windows 没跑（Windows 路径本机也编译不了）。其中 `crates/cli/tests/generation_boundary.rs` 21 条真进程测试（见 RFC §5 那张表）。手工实测：`~/.local/opt` 里真实的 0.8.3 守护进程配新命令行，隔离 `GLD_HOME`，`upgrade` 四条命令都报"协议 5"退出 1，守护进程日志只有 7 次 `daemon_info`，进程还活着。
+
+**独立审查（子代理，只读，没跑代码）发现的问题，都先复现再修：**
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| 高 | 嵌套 126–127 层的请求让调用永远挂着：帧多包两层，超过 `serde_json` 的 128 层上限，执行代拿不到 id，只打一行日志；在途计数不归零，Actions 一直占写锁；回包方向一条就杀掉整代 | 测试先红（请求超时）后绿。内容再编码成文本，读不懂就按 id 回错误 |
+| 中 | 工具跑完后回包超限或 panic，Actions 却报可重试，MCP 提示 Retry the request | 只有确定没发出去的才可重试 |
+| 中 | 崩溃替换覆盖已经完成的切换，`switch` 报成功、新项目却进旧版本 | 测试先红（`current` 被抢成 g3）后绿 |
+| 中 | 宿主和执行代各读一次配置，看法不一致时同一个目录两代写 | 执行代核对，回 `WORKSPACE_ROUTE_CHANGED`，单元测试 |
+| 中 | 项目移除后旧代收不到调用，命令没人收，旧代也退不了 | 有旧代时每 5 秒对一次成员名单，真进程测试 |
+| 低 | 编出来的 work_session id 能撑大路由表；信号和 EOF 同时来收尾被截断；退出中还接新调用；崩溃后计数减错；kill 可能打到已回收的 pid；工具核对漏了服务自己的工具 | 都修了 |
+
+没修的几条写在 RFC §5。子代理查过没发现问题的：身份在通道两端不变（含 browser 标记）、没有自动重放、`link.call` 都在 State 锁外、关停顺序、老守护进程拒绝。这是读代码的结论，不是实测。
+
+**撞到的事：**
+
+- 拆提交时写了一个多余的 `cp /dev/null /dev/null`，`set -e` 拦下，当时什么都没提交。
+- **`c8f184c` 单独编译不过：**按 hunk 暂存用了 `--unidiff-zero`，有的 hunk 落错了位置，当时的编译检查和提交串在同一条命令里，检查在提交之后才跑。下一个提交 `4cb3a72` 补齐；按规矩没 amend，二分时跳过它。
+- `pgrep -f` 写死字样时匹配到了跑测试的 shell 脚本本身（命令文本里带这段字），报了不存在的孤儿，现在用每次运行唯一的 sleep 时长。
+- 测试自己写错过两处：`cmd=true` 被命令行解析成布尔；`pwd` 跑完 `list_runs` 查不到（换成 `sleep 0.1` 就有，没再查原因）。
+- 拆提交后全量红了一条 `version_names_the_build_commit_when_it_is_known`：我把历史提交导出到临时目录、复用同一个 `target` 做编译检查，那份没有 `.git`，编出的 `gld-core` 不带提交号，cargo 算出的哈希又一样，留在了缓存里。`cargo clean -p gld-core -p gld-daemon -p gld` 后重跑就过了，代码没问题。以后这种检查别复用 `target`。
+- main 在这期间多了 `b7bc92e`、`f263e4c`（节点 BUSY 短等、真机冒烟，审查 §97），这个分支是从 `a3b73c0` 拉的，合并时审查和任务表要手工接一下。`nodes/` 内部没动。
+
+**接上 main（2026-10-31）：**用户定先不把分支合回 main。把 main 的 `b7bc92e`、`f263e4c` 合进这个分支，只有审查和任务表的文字冲突，§97、§98 都留。节点忙时短等 5 秒发生在宿主进程，执行代问宿主的上限是 75 秒，比节点调用的 60 秒加 5 秒长，时限不冲突。合并后隔离 GLD_HOME 全仓 61 个测试目标 1310 passed / 0 failed，Clippy `-D warnings`、fmt --check 通过，只在 macOS 跑过。
+
+合并提交的说明第一次写错了：提交用的 heredoc 少了结束符，后面的脚本文本被当成了说明。用户点头后重建了这个提交和它后面的文档提交，只换说明和这一句，代码内容没动；当时都没推送过。
+
+**推分支之前改了一次历史（2026-10-31）：**`git diff` 查出 §97 有一行写着主机别名和账号名，仓库是公开的。用户点头后重建了那个提交（原 `5913f37`，现 `f263e4c`），只换那一行，本地 main 同步移过去，分支的合并也接到新提交上；这些都还没推送过。`origin/main` 的旧节里还有两处主机别名，已经公开，没动。
+
+**CI（2026-10-31）：**用户让推分支跑 CI，开了草稿 PR（xwfe/gld#1），没合。第一轮 `31b12f7`：8 个 job 过 6 个，Linux、macOS 测试都红在 `project_commands_inherit_nothing_from_the_private_channel`。多出来的管道和 socket 是 CI 运行器经 cargo、测试进程一路传下来的，时间戳早于守护进程启动，不是内部通道。没放宽断言，改成起守护进程前关掉所有继承来的描述符（`2715b13`），断言还是恰好三根；验过：临时去掉 close-on-exec 时红（5 根），还原后绿。
+
+第二轮 `2715b13`：8 个 job 全过。Linux 61 个目标 1309 passed / 0 failed，macOS 61 个目标 1310 passed / 0 failed。Windows 编译通过，`daemon_lifecycle.rs` 9 条用新架构跑过；`generation_boundary.rs` 只在 Unix 编译，所以 Windows 上换代、杀执行代、通道隔离都没跑过。这些都是 CI 上的隔离环境，不是真实连接器，也没有换装。
+
+**顺带发现、没改的旧行为：**gld 不关启动时继承来的描述符，会一路传给项目命令，这次拆分之前就这样。从 shell 正常启动时基本碰不到；要是把 gld 嵌进别的程序里拉起，那个程序没设 close-on-exec 的描述符项目命令都能拿到。
+
+**合回 main（2026-10-31）：**用户让合。用合并提交，提交哈希不变，审查里引用的那些都还对得上；`c8f184c` 单独编译不过这件事也留在了历史里，二分时跳过。合之前最新一轮 CI 还在跑，那一轮的提交相对全绿的 `2715b13` 只改文档，本地文档门禁通过，所以没等。还没换装：本机用上要重启一次，要用户另外点头（RFC §4）。

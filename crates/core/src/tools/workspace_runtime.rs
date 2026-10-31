@@ -626,6 +626,25 @@ fn terminate_sessions_everywhere(matches: impl Fn(&Caller) -> bool + Copy, reaso
         .sum()
 }
 
+/// 每个目录上在跑几条命令，没有命令的不列。升级状态报告用：只有数量，不带命令内容。
+///
+/// 要挨个问子进程死没死（内部 `block_on`），不能在 tokio 异步 worker 线程里调。
+pub fn running_session_counts() -> Vec<(PathBuf, usize)> {
+    let runtimes: Vec<(PathBuf, Arc<WorkspaceRuntime>)> = RUNTIMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .map(|(root, runtime)| (root.clone(), Arc::clone(runtime)))
+        .collect();
+    runtimes
+        .into_iter()
+        .filter_map(|(root, runtime)| {
+            let count = runtime.running_commands(&Caller::local()).total();
+            (count > 0).then_some((root, count))
+        })
+        .collect()
+}
+
 /// 拿这个目录的执行资源；没有就建一个。
 ///
 /// 同一个目录不管经过几个入口、换过几次 `ToolContext`，拿到的都是同一个

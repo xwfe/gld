@@ -230,6 +230,38 @@ pub struct Routed {
     pub context: Option<SharedToolContext>,
 }
 
+/// 本机 MCP server 转发在路由表里的名字，见 [`Hub::execution_route`]。
+const MACHINE_MCP_ROUTE: &str = "machine-mcp";
+
+/// 执行代摸不到节点连接（归宿主，RFC-0008 §3.4），要用就经这个接口问。
+pub trait NodeBridge: Send + Sync {
+    fn members(&self) -> Result<Vec<NativeMember>, String>;
+    fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value;
+}
+
+/// 一条请求在执行代之间该怎么走，见 [`Hub::execution_route`]。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExecutionRoute {
+    /// 工具表这类发现请求：走最老的一代。
+    Discovery,
+    /// 不碰工作区状态（`list_workspaces`、节点调用、选不中成员的报错）：走当前代。
+    Unbound,
+    /// 碰这个工作区：走它的主人，没主人就绑给当前代。
+    Owned(String),
+}
+
+/// 经宿主问节点失败时给模型的回包。等不到回复时节点可能已经执行了，所以不能叫它直接重试。
+pub(crate) fn node_bridge_failure(message: &str) -> Value {
+    plain_result(tool_err(WorkspaceError::Tool {
+        code: "NODE_RESULT_UNKNOWN",
+        message: format!(
+            "Did not get a result from the node; the call may already have run there: {message}"
+        ),
+        category: "runtime",
+        retryable: false,
+    }))
+}
+
 pub struct Hub {
     members: Members,
     tool_profile: String,
@@ -240,6 +272,8 @@ pub struct Hub {
     /// 远端成员的 bridge 连接。本地成员一条都用不到。
     connections: Connections,
     nodes: Arc<Nodes>,
+    /// 在执行代里跑时才有：节点调用经它交给宿主，[`Self::nodes`] 那张表此时是空的。
+    node_bridge: Option<Arc<dyn NodeBridge>>,
     /// 转发本机装好的 MCP server（`gld mcp on` 开了才有东西）。
     relay: Relay,
     /// 测试用：不读这台机器的 `~/.claude.json`，用给定的一份；也不真起进程。
@@ -287,6 +321,7 @@ impl Hub {
             contexts: Mutex::new(HashMap::new()),
             connections,
             nodes: Arc::new(Nodes::new()),
+            node_bridge: None,
             relay: Relay::new(),
             #[cfg(test)]
             installed: None,
@@ -295,6 +330,101 @@ impl Hub {
             #[cfg(test)]
             managed_home: None,
         }
+    }
+
+    pub fn with_node_bridge(mut self, bridge: Arc<dyn NodeBridge>) -> Self {
+        self.node_bridge = Some(bridge);
+        self
+    }
+
+    fn node_members(&self) -> Result<Vec<NativeMember>, String> {
+        match &self.node_bridge {
+            Some(bridge) => bridge.members(),
+            None => self.nodes.members(),
+        }
+    }
+
+    fn node_call(
+        &self,
+        auth: &AuthContext,
+        member: &NativeMember,
+        tool: &str,
+        args: Value,
+    ) -> Value {
+        match &self.node_bridge {
+            Some(bridge) => bridge.call(auth, member, tool, args),
+            None => self.nodes.call(auth, member, tool, args),
+        }
+    }
+
+    /// 这条请求的工作区归属。宿主在转发前调，只看不执行；解析规则和 [`Self::call`] 共用。
+    ///
+    /// 选不中成员（名字错了、grant 看不到）按 `Unbound` 走：错误由执行代按原来的样子报，
+    /// 这里只决定路由，不提前拒绝，也不因此记下一个不存在的工作区。
+    pub fn execution_route(&self, auth: &AuthContext, body: &Value) -> ExecutionRoute {
+        if body.get("method").and_then(Value::as_str) != Some("tools/call") {
+            return ExecutionRoute::Discovery;
+        }
+        let params = body.get("params").cloned().unwrap_or(Value::Null);
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return ExecutionRoute::Unbound;
+        };
+        let canonical = canonical_tool_name(name);
+        // 本机 MCP server 的进程不分工作区，但有连接和会话，整个算一个“工作区”。
+        if machine_mcp::is_tool(canonical) {
+            return ExecutionRoute::Owned(MACHINE_MCP_ROUTE.into());
+        }
+        let args = crate::mcp::tool_arguments(name, &params);
+        let Some(selector) = args
+            .get("workspace")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return ExecutionRoute::Unbound;
+        };
+        if crate::managed_workspaces::is_id(selector) {
+            // 只认登记着的：不然谁都能编一个 id，让路由表记下一堆不存在的工作区，这一代也就退不了。
+            let live = self
+                .work_store()
+                .ok()
+                .and_then(|store| store.live().ok())
+                .is_some_and(|records| records.iter().any(|record| record.id == selector));
+            return if live {
+                ExecutionRoute::Owned(selector.to_string())
+            } else {
+                ExecutionRoute::Unbound
+            };
+        }
+        let Ok((members, _)) = self.snapshot() else {
+            return ExecutionRoute::Unbound;
+        };
+        let members = visible_for(members, auth);
+        match resolve_member(&members, selector) {
+            Ok(member) => member_route(member),
+            Err(_) => ExecutionRoute::Unbound,
+        }
+    }
+
+    /// 按现在的成员名单收掉已经离开的成员。平时每次工具调用顺手做；切换后旧代可能再也收不到调用，
+    /// 宿主定期叫它做一次，不然被 `gld rm` 的项目在旧代里起的命令就没人收了。
+    pub fn reconcile(&self) -> Result<(), String> {
+        let (members, _) = self.snapshot()?;
+        self.forget_departed(&members)
+            .map_err(|error| error.message())
+    }
+
+    /// 执行代处理宿主路由过来的请求：宿主和这边看到的归属对不上就不执行。
+    ///
+    /// 两边各读一次配置，中间可能隔着改名、新增、一次读失败。宿主按“没有主人”送到当前代，
+    /// 这边却认出了一个已经归旧代的工作区，照跑的话同一个目录就有两代在写，写入序号会漏记。
+    pub fn handle_routed(
+        &self,
+        auth: &AuthContext,
+        body: &Value,
+        route: &ExecutionRoute,
+    ) -> (Value, Option<Routed>) {
+        self.handle(auth, body, Some(route))
     }
 
     /// 测试用：换成内存里的 MCP server，装了哪些也由测试给。
@@ -401,6 +531,15 @@ impl Hub {
     /// `auth` 是监听器验完鉴权之后的主体。远端成员的 bridge 按它分：同一个
     /// 工作区、两个不同的主体，拿到的是两条连接（RFC-0002 5.3）。
     pub fn handle_request(&self, auth: &AuthContext, body: &Value) -> (Value, Option<Routed>) {
+        self.handle(auth, body, None)
+    }
+
+    fn handle(
+        &self,
+        auth: &AuthContext,
+        body: &Value,
+        route: Option<&ExecutionRoute>,
+    ) -> (Value, Option<Routed>) {
         let method = body.get("method").and_then(Value::as_str).unwrap_or("");
         let id = body.get("id").cloned().unwrap_or(Value::Null);
         let params = body.get("params").cloned().unwrap_or(Value::Null);
@@ -414,7 +553,7 @@ impl Hub {
             "initialize" => Ok(self.initialize_result(auth)),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": self.list_tools_for(auth.grant()) })),
-            "tools/call" => self.call(auth, &params, &mut routed),
+            "tools/call" => self.call(auth, &params, &mut routed, route),
             _ => Err(json!({
                 "code": -32601,
                 "message": format!("Method not found: {method}")
@@ -587,6 +726,7 @@ impl Hub {
         auth: &AuthContext,
         params: &Value,
         routed: &mut Option<Routed>,
+        route: Option<&ExecutionRoute>,
     ) -> Result<Value, Value> {
         let name = params
             .get("name")
@@ -656,6 +796,9 @@ impl Hub {
             return Ok(plain_result(workspace_required(canonical, &members)));
         };
         if crate::managed_workspaces::is_id(selector) {
+            if route.is_some_and(|route| *route != ExecutionRoute::Owned(selector.to_string())) {
+                return Ok(plain_result(route_changed(selector)));
+            }
             return self
                 .call_managed_workspace(auth, canonical, selector, &args, &settings, routed);
         }
@@ -663,6 +806,9 @@ impl Hub {
             Ok(member) => member,
             Err(error) => return Ok(plain_result(error)),
         };
+        if route.is_some_and(|route| *route != member_route(member)) {
+            return Ok(plain_result(route_changed(selector)));
+        }
 
         // 会话工具（begin/end）也是远端的，先分出去。
         if remote_tools::is_session_tool(canonical) {
@@ -698,7 +844,7 @@ impl Hub {
                         category: "validation", retryable: false,
                     })));
                 }
-                let result = self.nodes.call(auth, native, canonical, args.clone());
+                let result = self.node_call(auth, native, canonical, args.clone());
                 if canonical == "server_info" && result["structuredContent"]["ok"] == true {
                     // 工具在节点执行，但 connection 描述的是客户端当前连接的 Hub。
                     let structured = self.with_connection_surface(result["structuredContent"].clone(), auth.grant());
@@ -1041,7 +1187,7 @@ impl Hub {
             })
             .collect();
         if matches!(self.members, Members::DataFile) {
-            members.extend(self.nodes.members()?.into_iter().map(Member::Native));
+            members.extend(self.node_members()?.into_iter().map(Member::Native));
         }
         Ok((members, settings))
     }
@@ -1190,7 +1336,7 @@ impl Hub {
 /// 和 [`build_tool_context`] 读的字段一一对应：那边多读一个字段而这里没加，
 /// 改了那个配置 hub 就会一直用旧的。不直接拿整份设置比，是因为里面有密钥、
 /// hub 成员列表这些常变但无关的东西，每次变都重建会把正在跑的命令一起杀掉。
-fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> String {
+pub(crate) fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> String {
     serde_json::to_string(&(
         &member.path,
         &member.name,
@@ -1204,6 +1350,54 @@ fn context_fingerprint(member: &WorkspaceProfile, settings: &AppSettings) -> Str
         &settings.global_hidden_skills,
     ))
     .unwrap_or_default()
+}
+
+/// 现在还算数的工作区归属键。不在里面的说明项目已经删了、work_session 已经收尾，
+/// 不用再占着旧代。读不出来时报错，宁可多留也不能误判。
+pub fn known_owner_keys() -> Result<std::collections::HashSet<String>, String> {
+    let (mut keys, _) = DataStore::read_file(|data| {
+        let mut keys = std::collections::HashSet::new();
+        for profile in &data.profiles {
+            keys.insert(crate::generation::router::root_key(std::path::Path::new(
+                &profile.path,
+            )));
+        }
+        for remote in &data.ccnm_members {
+            keys.insert(remote.id.clone());
+        }
+        Ok((keys, ()))
+    })
+    .map_err(|error| error.to_string())?;
+    keys.insert(MACHINE_MCP_ROUTE.to_string());
+    let home = crate::home::data_home().map_err(|error| error.to_string())?;
+    let live = crate::managed_workspaces::Store::new(home)
+        .live()
+        .map_err(|error| error.message())?;
+    keys.extend(live.into_iter().map(|record| record.id));
+    Ok(keys)
+}
+
+/// 这个成员的工作区状态归谁管。节点上的状态在节点那台机器上，这边哪一代转发都一样。
+fn member_route(member: &Member) -> ExecutionRoute {
+    match member {
+        Member::Local(profile) => ExecutionRoute::Owned(crate::generation::router::root_key(
+            std::path::Path::new(&profile.path),
+        )),
+        Member::Remote(remote) => ExecutionRoute::Owned(remote.id.clone()),
+        Member::Native(_) => ExecutionRoute::Unbound,
+    }
+}
+
+/// 没执行，重试一次就对了：重试时两边读到的是同一份配置。
+fn route_changed(selector: &str) -> Value {
+    tool_err(WorkspaceError::Tool {
+        code: "WORKSPACE_ROUTE_CHANGED",
+        message: format!(
+            "The workspace list changed while routing this call to {selector}. Nothing ran; call again."
+        ),
+        category: "runtime",
+        retryable: true,
+    })
 }
 
 /// 这把凭据看得到的成员（RFC-0007）。范围外的当成不存在：不列、不进任何报错的候选，
@@ -1646,6 +1840,48 @@ mod tests {
         let root = dir.path().canonicalize().expect("canonical root");
         let profile = WorkspaceProfile::new(root.display().to_string(), Some(name.into()));
         (dir, profile)
+    }
+
+    /// 宿主和执行代对这条请求的归属看法不一致时不执行，免得同一个目录有两代在写。
+    #[test]
+    fn a_routed_call_only_runs_when_both_sides_agree_on_the_owner() {
+        let f = fixture();
+        let body = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "read_file", "arguments": { "workspace": "api", "path": "only-api.txt" } }
+        });
+        let auth = caller();
+        let right = f.hub.execution_route(&auth, &body);
+        assert!(matches!(right, ExecutionRoute::Owned(_)), "{right:?}");
+        let (reply, _) = f.hub.handle_routed(&auth, &body, &right);
+        assert!(reply.to_string().contains("api secret"), "{reply}");
+
+        for wrong in [
+            ExecutionRoute::Unbound,
+            ExecutionRoute::Owned("/somewhere/else".into()),
+        ] {
+            let (reply, routed) = f.hub.handle_routed(&auth, &body, &wrong);
+            let text = reply.to_string();
+            assert!(text.contains("WORKSPACE_ROUTE_CHANGED"), "{text}");
+            assert!(!text.contains("api secret"), "{text}");
+            assert!(routed.is_none(), "没执行就不该记在成员头上");
+        }
+    }
+
+    /// 编出来的 work_session id 不进路由表，否则谁都能把它撑大、让旧代永远退不了。
+    #[test]
+    fn a_made_up_managed_id_is_not_an_owned_workspace() {
+        let f = fixture();
+        let body = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "read_file", "arguments": {
+                "workspace": format!("work-{}", "a".repeat(32)), "path": "x"
+            } }
+        });
+        assert_eq!(
+            f.hub.execution_route(&caller(), &body),
+            ExecutionRoute::Unbound
+        );
     }
 
     /// 两个成员 api / web，外加一个登记了但没加进 hub 的 outsider。

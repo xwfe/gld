@@ -1,6 +1,6 @@
 # RFC-0008：保持现有连接的连续升级
 
-日期：2026-10-17。状态：**草案，未实现。**
+日期：2026-10-17，2026-10-30 按当前源码修订。状态：**稳定宿主基础已实现（§5），还没有零中断，还没部署。**
 
 现在的升级做法是换二进制 + `gld daemon restart`：服务断开零点几秒，在跑的命令被停掉，连接器、授权、地址都不动
 （[安装 · 升级](../install.md#升级)）。本文讨论的是怎样连这点中断都没有：在跑的命令、在途请求、进行中的授权跨版本都不断。
@@ -8,7 +8,7 @@
 实现和验证事实追加到[生命周期审查](../reviews/2026-09-23-lifecycle-and-docs-audit.md)。
 
 写作时的源码基线是 `54bacbf` 加浏览器 grant 等改动（daemon 协议 6），在线构建是 `eea05359c42b`（0.8.3，协议 5）。
-下述旧代边界已对照这两版的 Hub 与 App 生命周期代码。
+§2 那张表 2026-10-30 对照 `a3b73c0`（协议 15，多了原生节点、work_session、Agent 委派）重新核过，有变化的行已改。
 
 ## 1. 结论与承诺边界
 
@@ -28,19 +28,22 @@
 | 资源/行为 | 当前所有者及源码证据 | 对升级的直接影响 |
 |---|---|---|
 | daemon 单实例与 IPC | `crates/daemon/src/lifecycle.rs`：`daemon.lock` 的跨进程排他锁；`server.rs`：进程内 App 与 IPC accept loop | 同一 `GLD_HOME` 不能直接并排启动两个普通 daemon；绕开锁不是交接协议 |
-| restart | `crates/cli/src/commands/daemon.rs`：`Restart` 调用 `stop` 后再 `start` | 不是滚动切换；原入口存在停服窗口 |
-| Hub 的端口与 tunnel | `crates/core/src/hub/runtime.rs`：`HubRuntime` 持有监听任务、shutdown sender、Hub、tunnel；`start` 先停止旧 runtime；`stop_runtime` 关闭监听、停止 tunnel、调用 Hub shutdown | 对外连接及隧道不独立于 daemon 存活；重启不能保持原连接 |
-| 进程退出与命令 | `crates/core/src/app/runtime.rs`：`shutdown_all` 在停止服务前、后都调用 `terminate_all_sessions_everywhere` | 正常退出也会终止运行中命令；不只是 `--force` 才有影响 |
+| restart | `crates/cli/src/commands/daemon.rs`：`Restart` 先看盘上运行记录，有命令在跑就不重启（`--force` 跳过），之后 `stop` 再 `start` | 不是滚动切换；原入口存在停服窗口 |
+| Hub 的端口与 tunnel | `crates/core/src/hub/runtime.rs`：`HubRuntime` 持有监听任务、shutdown sender、Hub、work_session 启动检查、tunnel；`start` 先停止旧 runtime；`stop_runtime` 关闭监听、停止 tunnel、调用 Hub shutdown | 对外连接及隧道不独立于 daemon 存活；重启不能保持原连接 |
+| 进程退出与命令 | `crates/core/src/app/runtime.rs`：`shutdown_all` 在停止服务前、后都调用 `terminate_all_sessions_everywhere`，中间还 `agents::interrupt_all` 停委派的 Agent | 正常退出也会终止运行中命令和 Agent；不只是 `--force` 才有影响 |
 | graceful shutdown | `crates/core/src/runtime/port.rs`：监听任务等待约 3 秒，超时后 `abort` | 只是有截止时间的退出等待，不能证明长请求完整结束 |
-| Hub 内部连接 | `crates/core/src/hub/mod.rs`：`Hub::shutdown` 终止 Hub scope 会话，并关闭远端连接及 machine relay | 等待 HTTP 监听退出不足以保持其他 Hub 会话 |
-| MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；没有升级用的在途请求登记及 admission gate | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
+| Hub 内部连接 | `crates/core/src/hub/mod.rs`：`Hub::shutdown` 终止 Hub scope 会话，并关闭 ccnm 远端连接、原生节点连接及 machine relay | 等待 HTTP 监听退出不足以保持其他 Hub 会话 |
+| MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；Actions 监听器（`actions/listener.rs`）、`gld tool call`（`dispatch.rs` → `App::call_tool`）是另外两条进同一批工具的入口；没有升级用的在途请求登记及 admission gate | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
 | OAuth 身份 | `crates/core/src/auth/oauth_flow.rs` 与 `client_registry.rs`：签名 secret、client registry 等可持久化；授权码 pending map 是 OAuthRuntime 内存状态 | 复用密钥有利于保留已签发 token，但进行中的授权流程仍可能丢失 |
+| 原生节点 | `crates/core/src/nodes/registry.rs`：`Nodes` 持有每台机器唯一的一条 WSS；连接从 Hub 监听器的 `/nodes/v1/connect/{machine_id}`（或全局入口）进来，`Hub` 经 `nodes.call` 转发 | 连接挂在公网入口上，不能跟着执行代走；换代断连接等于每台机器都要重连 |
+| 委派的 Agent | `crates/core/src/agents/run.rs`：`LIVE` 表和子进程都在起它的进程里，`agent_manage start` 和 `gld agent approve/stop` 都能起或停；任务记录和 owner 锁在盘上 | 属于工作区执行状态；停和放行必须到起它的进程里做，看记录不用 |
+| 通用任务空间 | `crates/core/src/hub/work_sessions.rs` 与 `managed_workspaces/`：登记在数据目录自己的存储里，不走 `DataStore`；启动检查由 `HubRuntime` 拉起，碰 `workspace_runtime` | 跟执行状态走，不跟监听器走 |
 | exec 会话 | `crates/core/src/tools/session.rs`：ExecSession 持有进程 Child、ChildStdin、输出 reader task、内存状态；run record 另行落盘 | 持久化日志不等于接管进程和 stdin；重启后读取历史不能算命令连续运行与交互能力保留 |
 | workspace 执行状态 | `crates/core/src/tools/workspace_runtime.rs`：SessionStore、workspace 写入序号与运行归属均在进程内；文件写锁通过同一 `GLD_HOME` 下的 fs2 锁协调 | 只把 session ID 路由回旧代仍不足够；新旧代并行写同一 workspace 会漏记对方的写入序号 |
-| 配置存储 | `crates/core/src/data/store.rs`：整个数据文件读改写以进程内 Mutex 串行；正常架构依赖单 daemon 单写者 | 两代普通 App 共同写配置可能覆盖彼此修改；不能只取消 daemon 单实例锁 |
+| 配置存储 | `crates/core/src/data/store.rs`：整个数据文件读改写以进程内 Mutex 串行；正常架构依赖单 daemon 单写者。工具路径（`tools/`、`hub/`、`agents/`、`managed_workspaces/`、`machine_mcp/`、`bridge/`）现在只读不写它，写入都在 `App`、`nodes::config`、`nodes::pairing`、`secret/`、`global_gateway.rs` | 两代普通 App 共同写配置可能覆盖彼此修改；不能只取消 daemon 单实例锁 |
 | 现有 global gateway | `crates/core/src/global_gateway.rs`：有流式 HTTP 转发实现，但其 runtime 和 tunnel 也归同一 daemon，且被 `App::shutdown_all` 停止 | 转发代码可以复用；现有生命周期本身不提供升级隔离 |
 
-另一个容易误用的接口是 SIGHUP：当前 `server.rs` 将其作为退出信号处理，没有原地热加载含义。`restore_runtime_state` 只根据保存的配置重新启动服务，不恢复原进程的连接、授权 pending map、stdin 管道或运行时任务。
+另一个容易误用的接口是 SIGHUP：当前 `server.rs` 将其作为退出信号处理，没有原地热加载含义（节点进程 `nodes/client.rs` 也一样）。`restore_runtime_state` 只根据保存的配置重新启动服务，不恢复原进程的连接、授权 pending map、stdin 管道或运行时任务。
 
 ## 3. 最小可落地的运行时所有权方案
 
@@ -79,6 +82,33 @@
 
 可复用 `global_gateway.rs` 的请求和响应流转发代码，但必须将它的监听及 tunnel 生命周期移出会被替换的执行代。仅原样保留当前 `App::shutdown_all` 调用关系无法达到上述效果。
 
+### 3.4 第一版怎么落地（2026-10-30 按当前源码定的）
+
+本节写实现上定下来的做法，上面三节仍是设计依据。这里“执行代”的代码在 `crates/core/src/generation/`。
+
+**进程关系。**`gld daemon run` 这个进程就是宿主，它起一个子进程 `gld daemon generation`（隐藏子命令，不给人直接敲）当执行代。
+
+**私有通道是子进程的 stdin/stdout 这对匿名管道，一行一条 JSON，消息内容再编码成文本（否则深层嵌套的请求会超过 `serde_json` 的递归上限，帧都解析不了）。**不开 socket、不开端口，不进文件系统，所以没有第二个入口，也没有路径可以让客户端或项目命令连上来。执行代一启动就把这对管道 `dup` 成带 close-on-exec 的新描述符，再把 0 指向 `/dev/null`、1 指向 stderr：项目命令继承不到它们，哪段代码误 `println!` 也不会写进通道。Windows 上用 `stop_std_handles_being_inherited` 关继承（没有真机验证）。代价是通道不能交接：宿主一退，执行代就读到 EOF，按正常退出收掉命令后自己退。“稳定宿主更替”那一期要换成可重新连接的通道，这是已知的债。
+
+**身份只来自宿主。**宿主验完鉴权，把 caller（principal、scope、grant 含 browser 标记）作为通道上的字段发给执行代。这些字段由宿主从 `AuthContext` 生成，不从 HTTP 请求里读任何东西，客户端写什么请求头或 JSON 字段都影响不到。
+
+**谁持有什么：**
+
+| 宿主 | 执行代 |
+|---|---|
+| 对外监听（Hub、单项目 MCP、Actions、全局入口）、隧道、OAuth 与 client registry、原生节点 WSS、配置与密钥的写入、`gld` 的 IPC socket | `ToolContext`、`SessionStore` 与命令进程、写入序号、委派的 Agent、ccnm 远端连接、本机 MCP 转发、work_session 启动检查 |
+
+- **原生节点连接归宿主。**WSS 从公网入口进来，换代时断开就等于每台机器都要重连。执行代要调节点时经通道反过来问宿主（列成员、转发一次调用）。节点上的命令在节点进程里，不属于这边任何一代。`nodes/` 内部逻辑没动，只把 `Hub` 对 `Nodes` 的两处调用接到一个小接口上。节点进程 `gld node run` 自己仍是单体，升级节点仍是重启它，不在本期范围。
+- **配置单写者靠硬约束。**执行代启动时关掉本进程的 `DataStore` 写入，写就返回错误；工具路径本来就不写，这是防以后有人不小心加上。
+- **Planning 的状态文件不算执行状态。**`gld` 的 plan/goal 操作本来就按文件协调（直连模式也这么走），留在宿主；只有切 plan 模式时“停掉工作区里的命令”这一步发给执行代。
+- **工作区所有权。**键是规范化后的项目根目录（远端成员、work_session 用各自的 id）。第一次调用把它绑到当前执行代，之后一直走那一代。判断所有权和计数在同一把锁里，切换也拿这把锁，所以不存在“查完是空的、切的时候已经有新请求”的窗口。宿主和执行代各读一次配置，看法不一致时执行代不执行，回 `WORKSPACE_ROUTE_CHANGED`。旧代还会定期收掉已经被移除的成员，工作区不存在了就从它名下摘掉。
+- **在途计数是实数。**请求进入执行代前加一、拿到回包才减一，客户端中途断开不减。按代和按工作区各记一份。
+- **发现类请求（`initialize`、`tools/list`）走最老的那一代。**这样不会先发布新工具，再把调用送给不认识它的旧代。准备新代时要求它的工具表包含当前代的全部工具，少一个就拒绝。
+
+**用户怎么操作。**`gld start`、`gld daemon restart` 照旧。多了四条：`gld daemon upgrade status`（只读）、`prepare <二进制路径>`（起新代、验证，不动路由）、`switch`（切过去）、`abort`（放弃新代）。`prepare` 不复制二进制，直接从给的路径起，所以路径要是一份版本化的副本（比如 `~/.local/opt/gld-<版本>/gld`）。
+
+**执行代挂了怎么办。**宿主留在原端口。正在执行的请求收到 JSON-RPC 错误 `generation_lost`，说明结果未知、不会自动重放；宿主退避重启一个新执行代，配置和认证都不受影响。挂掉的那代起的命令成孤儿（和现在 `kill -9` 守护进程一样），记录判成 `unknown`。
+
 ## 4. 旧 0.8.3 的首次迁移硬限制
 
 在线旧构建 `eea0535` 是单体 daemon。在当前 macOS 运行方式下，它没有预先提供监听句柄交接、存量请求登记与交接、tunnel 接管、OAuth pending 导出、exec 子进程与 stdin 管道移交协议。新二进制无法单方面补上旧进程未实现的交接能力。
@@ -115,6 +145,33 @@ OAuth 注册表的本轮必要修复是：同一实例内持锁保存成功才�
 定义宿主和执行代 IPC、构建身份及兼容范围；迁出入口/tunnel/认证/单写者状态所有权；实现真实的请求计数、workspace 所有权和执行代状态。此时可以增加只读的升级能力/状态报告，用于解释哪个 workspace 仍留在旧代、等待的资源是什么。报告只含计数和标识，不输出 secret、token URL 或工具参数。
 
 同时完成候选启动、严格就绪验证、可中止的激活流程和不破坏在线状态的失败处理。首次上线此架构仍受上一节限制。
+
+**做到哪了（2026-10-31，分支上，没部署）。**边界、构建身份、在途计数、工作区所有权、只读报告、新代的准备、验证、切换、放弃都实现了，具体做法见 §3.4。§6 逐条对照：
+
+| §6 场景 | 状态 | 依据和缺口 |
+|---|---|---|
+| 持续 connector 请求覆盖切换 | 部分达到 | `requests_keep_succeeding_across_prepare_and_switch`：连续两次切换，同端口同 token 全部成功。只测了本机回环和 bearer；延迟预算没定也没测；没用真实 ChatGPT 连接器验；已绑定的工作区这一期不换代，“工作区换到新代那一下”不存在，要到下一期才测得到 |
+| 切换时有长工具请求 | 已达到 | `switching_keeps_running_work_...`：原请求在原代跑完、拿到原响应 |
+| 切换时有带副作用的调用 | 已达到 | `a_call_with_side_effects_runs_once_...`：切换加一次失败的准备，文件只写一行。执行代崩溃时结果未知，如实报 `generation_lost`，不重放 |
+| 切换时有交互 exec | 已达到（切换范围内） | 同一个测试：session ID、进程、stdin、stdout、退出码都在。靠的是工作区留在旧代。执行代被杀时命令成孤儿、stdin 断，这不在承诺内 |
+| 活动命令和新写入 | 已达到（靠不交接） | 同一个测试：`workspace_writes_since_start` 正确。跨代交接后的新鲜度判断是下一期的事 |
+| OAuth 流程覆盖切换 | 已达到（执行代更替范围内） | `oauth_state_survives_losing_the_generation`：切换加杀当前代，access、refresh、client_id、进行中的授权码都有效，密钥没变。宿主更替不在内 |
+| tunnel 与入口连续性 | 已达到（用假隧道） | `the_tunnel_process_and_public_address_stay_...`、`killing_the_generation_keeps_the_port_and_the_auth`：端口所有者、隧道 pid、公开地址不变。真实 Cloudflare、FRP、OpenAI 隧道没验 |
+| 候选失败、协议或状态格式不兼容 | 已达到 | `a_bad_new_version_fails_before_...`：八种坏法（退出、乱输出、挂住、自己拒绝、协议错、状态格式错、不应答、少工具），路由和旧代都没动 |
+| 长期运行命令阻止回收 | 已达到 | 旧代留着并报 `blocked_by`；`the_generation_limit_refuses_...`：到 3 代拒绝，不杀 |
+| 旧 protocol 5 首次激活 | 已达到 | `an_old_monolithic_daemon_is_refused_...` 加一次手工实测：真实 0.8.3 守护进程（隔离 `GLD_HOME`），四条命令都拒绝，日志里只有 `daemon_info`，它照常运行 |
+| 稳定宿主升级 | **未达到，也没开始** | `upgrade status` 明确报 `host_handoff: false`、`zero_interruption: false`。改到监听、OAuth、隧道、宿主 IPC 的版本只能重启 |
+
+**还不能说零中断的原因：**一是用过的项目不换代，要用新代码还得重启；二是宿主本身换不了；三是第一次上线这个架构要重启一次（§4）。
+
+**这一期已知但没修的（都写清影响，不算遗漏）：**
+
+- 切换后，新代工作区的 `server_info` 说的工具表是新代的，而 `tools/list` 还由最老一代回答，两边可能对不上，模型可能被提示去刷新连接器。只在新版本多了工具时出现。
+- 服务重启和新代上线撞在同一刻时，迟到的旧配置可能盖掉新配置（要在 `prepare` 窗口内连着重启两次服务）。
+- 执行代卡死（比如 `SIGSTOP`）没有看门狗，工具调用会一直等。和单进程时一样，但宿主现在本可以替换它。
+- 崩溃替换只核对协议和状态格式，不比工具表：盘上的二进制换成了少工具的兼容版本时查不出来。
+- 宿主被 `kill -9` 后立刻起新守护进程，会和正在收尾的旧执行代并存最多约 15 秒，这期间只有跨进程写锁兜底。
+- Windows 上 CI 编译通过，并用新架构跑过 `daemon_lifecycle.rs` 的 9 条（起停、重启、命令中断记录）。换代相关的都没跑：`gld daemon upgrade`、杀执行代、通道隔离那 21 条只在 Unix 跑。已知差异：stdout 没有重定向、`Link::kill` 不杀进程树。
 
 ### 再下一阶段：执行代连续更替
 

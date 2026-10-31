@@ -94,6 +94,10 @@ pub struct DaemonRecord {
     /// 0.6.0 之前的记录没有这个字段，读到的是 `None`，见 [`record_owns_pid`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exe: Option<PathBuf>,
+    /// 执行代的 pid：工具、命令都是它们起的，运行记录里的 owner 是它们不是 `pid`。
+    /// 写在盘上是因为换完二进制之后，新命令行可能和旧守护进程说不通话，却还要查有没有命令在跑。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generation_pids: Vec<u32>,
 }
 
 impl DaemonRecord {
@@ -102,7 +106,10 @@ impl DaemonRecord {
             std::fs::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, format!("{text}\n"))?;
+        // 换代时运行中会重写：读的人看到的要么是旧的一整份，要么是新的一整份。
+        let temp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        std::fs::write(&temp, format!("{text}\n"))?;
+        std::fs::rename(&temp, path)?;
         Ok(())
     }
 

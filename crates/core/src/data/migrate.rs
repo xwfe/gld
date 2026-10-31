@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
@@ -88,7 +89,20 @@ fn corrupt_data_file(path: &Path, error: &serde_json::Error) -> AppError {
     ))
 }
 
+/// 这个进程不许写数据文件。执行代启动时调（RFC-0008 §3.4）：配置只有宿主一个写者，
+/// 两个进程各自读改写整份文件，后写的会悄悄冲掉先写的，丢的可能是密钥。
+static WRITES_FORBIDDEN: AtomicBool = AtomicBool::new(false);
+
+pub fn forbid_writes() {
+    WRITES_FORBIDDEN.store(true, Ordering::SeqCst);
+}
+
 pub fn save(data: &AppData) -> AppResult<()> {
+    if WRITES_FORBIDDEN.load(Ordering::SeqCst) {
+        return Err(AppError::Message(
+            "执行代不能写配置，配置变更要经过守护进程".into(),
+        ));
+    }
     let path = data_file_path()?;
     write_data(&path, data)
 }

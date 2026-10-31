@@ -29,4 +29,6 @@ pub mod server;
 
 pub use client::{Client, ClientError};
 pub use lifecycle::{DaemonPaths, DaemonProbe, DaemonRecord};
-pub use protocol::{DaemonInfo, Request, Response, RpcError, PROTOCOL_VERSION};
+pub use protocol::{
+    DaemonInfo, Request, Response, RpcError, FIRST_PROTOCOL_WITH_GENERATIONS, PROTOCOL_VERSION,
+};

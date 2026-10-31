@@ -5,7 +5,7 @@
 //! 1. 拿 `daemon.lock` 排他锁（同一数据目录只允许一个实例）；
 //! 2. 清掉上次残留的 socket 文件，绑定新的；
 //! 3. 加载 [`App`]（读 `data/profiles.json`）；
-//! 4. 写 `daemon.json`；
+//! 4. 起第一个执行代（工具在它里面跑，RFC-0008），写 `daemon.json`；
 //! 5. 若设置了“启动时恢复”，把上次运行的 MCP / Actions 拉起来；
 //! 6. 进入 accept 循环，每个连接一个任务；
 //! 7. 收到 `shutdown` 请求或 SIGTERM / SIGINT 后：停掉所有服务、隧道、全局入口，
@@ -48,6 +48,8 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     ipc::cleanup(&paths.socket);
 
     let app = Arc::new(App::load()?);
+    // 配置先就位再起执行代：它要读数据文件，第一次运行时文件是上面 App::load 建的。
+    let router = start_generations(&paths)?;
     let listener = ipc::bind(&paths.socket).map_err(|error| {
         AppError::Message(format!("绑定 {} 失败：{error}", paths.socket.display()))
     })?;
@@ -63,6 +65,7 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
         // 留下自己的可执行文件路径：以后要按 pid 停它、杀它之前，先对一次这个，
         // 免得 pid 被回收后动到别人头上（`lifecycle::record_owns_pid`）。
         exe: std::env::current_exe().ok(),
+        generation_pids: router.generation_pids(),
     };
     record.write(&paths.record)?;
     logging::info(format!(
@@ -153,6 +156,31 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     let _ = std::fs::remove_file(&paths.record);
     logging::info("daemon exited cleanly");
     Ok(())
+}
+
+/// 起第一个执行代，之后每次代数变化把 pid 写回 `daemon.json`。
+fn start_generations(paths: &DaemonPaths) -> AppResult<Arc<gld_core::generation::Router>> {
+    let exe = std::env::current_exe()
+        .map_err(|error| AppError::Message(format!("找不到自己的可执行文件：{error}")))?;
+    let record_path = paths.record.clone();
+    // 一把锁：两次变化并发时，后写的必须是更新的那份。
+    let writing = std::sync::Mutex::new(());
+    let router = gld_core::generation::Router::start(
+        exe,
+        Box::new(move |router| {
+            let _guard = writing.lock().unwrap_or_else(|e| e.into_inner());
+            // 第一次调用时文件还没写，紧接着 run 里那次写会带上 pid。
+            if let Some(mut record) = DaemonRecord::read(&record_path) {
+                record.generation_pids = router.generation_pids();
+                if let Err(error) = record.write(&record_path) {
+                    logging::warn(format!("更新 daemon.json 失败：{error}"));
+                }
+            }
+        }),
+    )
+    .map_err(AppError::Message)?;
+    gld_core::generation::install(Arc::clone(&router));
+    Ok(router)
 }
 
 async fn handle_connection(app: Arc<App>, context: Arc<DaemonContext>, mut stream: ipc::Stream) {

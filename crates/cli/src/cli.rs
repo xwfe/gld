@@ -606,6 +606,30 @@ pub enum DaemonCmd {
         #[arg(short = 'f', long)]
         follow: bool,
     },
+    /// 不重启守护进程换工具实现（还不是零中断，见 docs/rfc/0008-continuous-upgrades.md）
+    #[command(subcommand)]
+    Upgrade(DaemonUpgradeCmd),
+    /// 内部用：执行代进程，由守护进程拉起，通过管道和它说话
+    #[command(hide = true)]
+    Generation,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonUpgradeCmd {
+    /// 只读：现在有几代、谁是当前代、在途请求和命令数、旧代为什么还不能退
+    Status,
+    /// 起新版本并验证它能用，不动在线服务；失败时旧服务不受影响
+    Prepare {
+        /// 新版本的 gld 二进制（放在按版本命名的目录里，别指向会被覆盖的路径）
+        exe: std::path::PathBuf,
+        /// 等它就绪的秒数
+        #[arg(long, default_value_t = 15, value_name = "SECS")]
+        timeout: u64,
+    },
+    /// 切到准备好的新版本：之后第一次用到的项目进新版本，已经用过的留在原来那一代
+    Switch,
+    /// 放弃准备好的新版本，在线服务不受影响
+    Abort,
 }
 
 // ------------------------------------------------------------- workspace

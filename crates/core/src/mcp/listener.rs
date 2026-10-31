@@ -26,13 +26,14 @@ use crate::auth::{
     ClientRegistrationRequest, ClientRegistry, GrantBook, NoGrants, OAuthRuntime, Principal,
     StoredGrants, TokenForm,
 };
+use crate::generation::CallError;
 use crate::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER};
 use crate::local_network;
 use crate::logs::append_profile_log;
 use crate::mcp::server::{handle_request, SharedState};
 use crate::secret::SecretStore;
 use crate::settings::AppSettings;
-use crate::tools::{build_tool_context, Caller, SharedToolContext};
+use crate::tools::{build_tool_context, Caller};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, RuntimeConfig};
 
@@ -53,8 +54,8 @@ enum Endpoint {
 /// 一条请求处理完的结果。
 struct Handled {
     response: Value,
-    /// 这次实际用到的工具上下文，取上下文审计用；hub 没路由到成员时为 None。
-    context: Option<SharedToolContext>,
+    /// 这次实际用到的工具上下文的审计摘要；hub 没路由到成员时为 Null。
+    audit: Value,
     /// hub 请求落到的成员 id。工作区自己的监听器永远是 None。
     member: Option<String>,
 }
@@ -79,24 +80,102 @@ impl Endpoint {
     /// 两支都要 `auth`：它是这次调用的主体，命令会话按它分表。不传的话，
     /// 这个入口上所有连接共用一张表，谁都能拿别人的 `session_id` 去读
     /// （见 [`crate::tools::caller`]）。
-    fn handle(&self, auth: &AuthContext, body: &Value) -> Handled {
+    fn handle(&self, scope: &str, auth: &AuthContext, body: &Value) -> Handled {
+        // 宿主进程里工具不在本进程跑，鉴权已经验完，发给执行代。
+        if let Some(router) = crate::generation::router() {
+            return self.handle_routed(&router, scope, auth, body);
+        }
         match self {
-            Self::Workspace(context) => Handled {
-                response: handle_request(context, &Caller::from_auth(auth), body),
-                context: Some(context.clone()),
-                member: None,
-            },
+            Self::Workspace(context) => {
+                let response = handle_request(context, &Caller::from_auth(auth), body);
+                Handled {
+                    response,
+                    audit: context.context_audit_snapshot(),
+                    member: None,
+                }
+            }
             Self::Hub(hub) => {
                 let (response, routed) = hub.handle_request(auth, body);
                 Handled {
                     response,
                     member: routed.as_ref().map(|routed| routed.workspace_id.clone()),
                     // 远端成员没有本机工具上下文，取上下文审计这一段跳过。
-                    context: routed.and_then(|routed| routed.context),
+                    audit: routed
+                        .and_then(|routed| routed.context)
+                        .map(|context| context.context_audit_snapshot())
+                        .unwrap_or(Value::Null),
                 }
             }
         }
     }
+
+    fn handle_routed(
+        &self,
+        router: &crate::generation::Router,
+        scope: &str,
+        auth: &AuthContext,
+        body: &Value,
+    ) -> Handled {
+        let routed = match self {
+            Self::Workspace(context) => {
+                router.workspace_mcp(scope, context.workspace.root(), auth, body)
+            }
+            Self::Hub(hub) => router.hub_mcp(hub, auth, body),
+        };
+        match routed {
+            Ok(reply) => Handled {
+                response: reply.response,
+                audit: reply.audit,
+                member: reply.member,
+            },
+            Err(error) => Handled {
+                response: generation_failure(body, &error),
+                audit: Value::Null,
+                member: None,
+            },
+        }
+    }
+}
+
+/// 执行代不可用或中途退出时给客户端的回包。
+///
+/// 还是 HTTP 200 的 JSON-RPC 错误：入口和认证都好好的，错的只是这一次调用，回 5xx 的话
+/// 客户端（和隧道那头）会以为整个服务挂了。`Lost` 必须说清结果未知：调用可能已经产生了副作用，
+/// 所以这边绝不替它重放，由调用方查过再决定。
+fn generation_failure(body: &Value, error: &CallError) -> Value {
+    let id = body.get("id").cloned().unwrap_or(Value::Null);
+    if id.is_null() {
+        // 通知没有回包可言。
+        return Value::Null;
+    }
+    let (reason, suggestion) = match error {
+        CallError::Lost => (
+            "generation_lost",
+            "The tool process exited while handling this call, so the outcome is unknown and it may already have taken effect. It was not retried. Check the current state (for example with list_runs) before calling again.",
+        ),
+        CallError::Unavailable(_) => (
+            "generation_unavailable",
+            "The call was not executed. The tool process is restarting; retry shortly.",
+        ),
+        CallError::Refused(_) | CallError::TimedOut => (
+            "worker_failed",
+            "The call failed inside the tool process and may already have taken effect. Check the current state before calling again; if it keeps failing, restart the service with gld daemon restart.",
+        ),
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32603,
+            "message": "Exec RPC worker failed",
+            "data": {
+                "stage": "generation",
+                "reason": reason,
+                "retryable": error.surely_not_executed(),
+                "suggestion": suggestion,
+            }
+        }
+    })
 }
 
 /// 一条请求的日志往哪儿写。
@@ -603,7 +682,8 @@ async fn dispatch_mcp(state: ListenerState, auth: AuthContext, body: Value) -> R
     );
 
     let endpoint = state.endpoint.clone();
-    let result = tokio::task::spawn_blocking(move || endpoint.handle(&auth, &body)).await;
+    let scope = state.scope.clone();
+    let result = tokio::task::spawn_blocking(move || endpoint.handle(&scope, &auth, &body)).await;
     match result {
         Ok(handled) => {
             let response = handled.response;
@@ -626,11 +706,7 @@ async fn dispatch_mcp(state: ListenerState, auth: AuthContext, body: Value) -> R
                 method == "tools/call",
                 is_error,
             );
-            let audit = handled
-                .context
-                .as_ref()
-                .map(|context| context.context_audit_snapshot())
-                .unwrap_or(Value::Null);
+            let audit = handled.audit;
             let repeated_bytes = audit
                 .get("repeated_bytes")
                 .and_then(Value::as_u64)

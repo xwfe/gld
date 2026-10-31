@@ -187,16 +187,9 @@ impl App {
         // 先收命令，记成 interrupted。后面停服务那几步也会停经它们起的命令，但记的是 killed
         // ——那条路 `gld stop` 也在用，那时确实是有人要停。守护进程退出不是谁要停这条命令，
         // 重启之后读运行记录的人要分得清（审查 D09）。停命令要等子进程收尾，放到阻塞线程里。
-        let _ = tokio::task::spawn_blocking(
-            crate::tools::workspace_runtime::terminate_all_sessions_everywhere,
-        )
-        .await;
         // 委派出去的 Agent 也一样，记成 interrupted。停的时候按档案先发信号、等它收尾，
-        // 每个最多十来秒，所以也放阻塞线程。
-        let _ = tokio::task::spawn_blocking(|| {
-            crate::agents::interrupt_all(std::time::Duration::from_secs(15))
-        })
-        .await;
+        // 每个最多十来秒。
+        let _ = tokio::task::spawn_blocking(crate::generation::exec::interrupt_everything).await;
         for service in self.running_services().unwrap_or_default() {
             if let Err(error) = self.stop_inner(&service.workspace_id, service.kind).await {
                 eprintln!(
@@ -211,10 +204,13 @@ impl App {
         if let Err(error) = global_gateway::stop().await {
             eprintln!("停止全局入口失败：{error}");
         }
-        // 最后再收一遍：停服务的这段时间里可能又有请求起了命令。
-        let _ = tokio::task::spawn_blocking(
-            crate::tools::workspace_runtime::terminate_all_sessions_everywhere,
-        )
+        // 最后再收一遍：停服务的这段时间里可能又有请求起了命令。执行代这时也一起退了。
+        let _ = tokio::task::spawn_blocking(|| match crate::generation::router() {
+            Some(router) => router.shutdown(),
+            None => {
+                crate::tools::workspace_runtime::terminate_all_sessions_everywhere();
+            }
+        })
         .await;
     }
 

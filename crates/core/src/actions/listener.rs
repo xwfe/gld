@@ -31,6 +31,8 @@ pub type ShutdownSender = oneshot::Sender<()>;
 
 #[derive(Clone)]
 struct AppState {
+    /// 工具发给执行代时要说清是哪个项目。
+    workspace_id: String,
     ctx: Arc<ToolContext>,
     openapi: Arc<RwLock<Value>>,
     auth: Arc<AuthConfig>,
@@ -190,6 +192,7 @@ async fn serve(
     ));
 
     let state = AppState {
+        workspace_id: profile_id.to_string(),
         workspace_path: ctx.workspace_path(),
         ctx,
         openapi: Arc::new(RwLock::new(openapi_doc)),
@@ -380,14 +383,9 @@ async fn execute_action(
     body: Option<Json<Value>>,
 ) -> Response {
     // 鉴权中间件验完挂上的身份；万一没挂（路由没经过它），按匿名算，绝不落到本机主体。
-    let caller = auth.map_or_else(
-        || {
-            tools::Caller::from_auth(&AuthContext::new(
-                Principal::Anonymous,
-                super::auth::ACTIONS_SCOPE,
-            ))
-        },
-        |Extension(auth)| tools::Caller::from_auth(&auth),
+    let auth = auth.map_or_else(
+        || AuthContext::new(Principal::Anonymous, super::auth::ACTIONS_SCOPE),
+        |Extension(auth)| auth,
     );
     let arguments = match body {
         Some(Json(value)) if value.is_object() || value.is_null() => {
@@ -425,7 +423,31 @@ async fn execute_action(
     let run = {
         let ctx = Arc::clone(&state.ctx);
         let name = tool_name.clone();
-        move || tools::call_tool_as(ctx.as_ref(), &caller, &name, &arguments)
+        let workspace_id = state.workspace_id.clone();
+        move || match crate::generation::router() {
+            Some(router) => router
+                .actions_call(
+                    &workspace_id,
+                    ctx.workspace.root(),
+                    &auth,
+                    &name,
+                    &arguments,
+                )
+                .unwrap_or_else(|error| {
+                    tools::workspace::tool_err(tools::workspace::WorkspaceError::Tool {
+                        code: "GENERATION_UNAVAILABLE",
+                        message: error.to_string(),
+                        category: "runtime",
+                        retryable: error.surely_not_executed(),
+                    })
+                }),
+            None => tools::call_tool_as(
+                ctx.as_ref(),
+                &tools::Caller::from_auth(&auth),
+                &name,
+                &arguments,
+            ),
+        }
     };
     let joined = if tools::registry::MUTATING_TOOLS.contains(&tool_name.as_str()) {
         let _guard = state.write_lock.lock().await;
