@@ -97,7 +97,7 @@ jobs:
       - name: 安装脚本走通真实发布包
         shell: powershell
         run: |
-          $env:GLD_VERSION = 'v0.9.0'
+          $env:GLD_VERSION = 'v0.10.0'
           $env:GLD_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'gld-install-test'
           Get-Content -Raw scripts/install.ps1 | Invoke-Expression
           & "$env:GLD_INSTALL_DIR\gld.exe" --version
