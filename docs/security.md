@@ -192,8 +192,22 @@ guarded 命令检查和 confined 文件读写继续生效，但任意子进程�
 子进程那一层更保守：命令文本里出现删除或递归清空 `.git` / `.github` 一律拒，
 因为从命令文本里分不清"改一行 workflow"和"把 `.github` 删掉"。
 
+**经命令写 `.git`、`.github` 也拒**，报 `PROTECTED_REPOSITORY_ASSET`。`.git` 用 `git` 命令改，`.github` 下的文件用 `apply_patch`。
+
+| 拒 | 不算写，照常放行 |
+| --- | --- |
+| `open('.git/hooks/x','w')`、`Path('.git/config').write_text(…)` | `open('.git/HEAD').read()` |
+| `shutil.copy('a','.git/hooks/x')`、`os.symlink('a','.git/hooks/x')` | `shutil.copy('.git/config','b')`：拷出来是读 |
+| `fs.writeFileSync('.git/hooks/x',…)`、`fs.cpSync` | `.gitignore`、`.gitattributes` 这些只是名字像的文件 |
+| 你放行之后的 `cp a .git/hooks/x`、`sed -i … .git/config` | `cp .git/config b`、`--exclude=.git`、写进文件的内容里提到 `.git` |
+| `workdir=.git/hooks` 再写文件 | `git commit -m '…'`、`grep` 这类，参数只是文字 |
+
+从文本里分不清哪段是写入目标，所以拿不准的会误拒，比如 `require('fs').copyFileSync('.git/config','a')`（实际是读）、`print(x, '.git')` 和写文件出现在同一行。读文件用 `read_file`。
+
+**会让 git 跑别的程序的配置不能经命令设置**，同样报这个错：`git config core.hooksPath h`、`git -c core.fsmonitor=./x status`、`git clone -c …`，还有 `core.sshCommand`、`hook.*.command`、`diff.external`、`include.path`、`!` 开头的 `alias.*` 等。它们和往 `.git/hooks` 写脚本是一回事，而且白名单收窄到 `only:git` 也挡不住。读（`git config core.hooksPath`、`--get`、`--list`）、`--unset`、关掉它们的值（`git -c core.pager=cat log`、`-c credential.helper=`）不算。确实要配的，你自己在终端里配。
+
 解释器往 Workspace 外面写也拦一道：命令文本像在写文件（`open(…, 'w')` 和 `'a'`、`'x'`、`'r+'` 模式、`write_text`、
-`os.rename`、`shutil.copy` / `rmtree`、`Path(…).touch()`、`fs.writeFileSync` / `appendFileSync` 这类），又带着外面的路径——`../`、`~/`、不在 Workspace 里的
+`os.rename`、`os.symlink`、`shutil.copy` / `rmtree`、`Path(…).touch()`、`Path(…).copy()`、`fs.writeFileSync` / `appendFileSync` / `cpSync` 这类），又带着外面的路径——`../`、`~/`、不在 Workspace 里的
 绝对路径——就报 `WORKSPACE_PATH_PROTECTED`。Workspace 里面的绝对路径照常放行（比如测试用的
 `<仓库>/target/test-home`）；绝对路径经过 Workspace 里的软链指到外面的，算外面。
 
@@ -265,7 +279,7 @@ SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 
 - **凭据给了谁，谁就有这些能力。**接到公网的服务（ChatGPT、DeepSeek 网页、浏览器 grant 地址）尤其要想清楚。
 - **只对你自己的、不碰外来内容的项目开。**拉别人的 PR、跑不认识的依赖、让 AI 读网页的项目别开。
 - **AI 会被告知，但它的转告不是保险。**gld 让 AI 进项目时跟你说一声、绕过关卡时把跑了什么告诉你；它不照做，gld 拦不住。
-- 删 `.git` / `.github` 仍然拦，这是防手滑，不是安全边界：写个脚本文件再跑就绕过去了。
+- 删 `.git` / `.github` 仍然拦（`rm -rf`、`rm -fr`、`rmdir`、`find -delete`、`fs.rmSync` 这类），这是防手滑，不是安全边界：写个脚本文件再跑就绕过去了。经命令写 `.git`、设置会跑程序的 git 配置，这个模式下放行。
 
 ## 怎么收紧
 
@@ -448,7 +462,8 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
 
 - **静态策略 ≠ 沙箱。** `exec_command` 允许 `python`，`python` 能做的它都能做。
   `mcp.confine-reads` 只管文件类工具，管不住子进程。
-- **`.git` 保护只挡文件工具和明显的命令模式**（`rm -rf .git` 这类）。绕过方式存在。
+- **`.git` 保护只挡文件工具和明显的命令模式。**绕过方式存在：脚本存成文件再跑、`os.system('cp …')`、`subprocess.run([…])`、`'.'+'git'` 这样拼路径，都看不见。
+- **`only:git` 不等于只能跑 git。**配置那条挡的是常见的键，`git rebase --exec`、`git fetch --upload-pack=…`、`git bisect run` 这些参数没拦，它们一样能跑程序。真要隔离用系统账号或容器。
 - **老的全局入口不做认证。** 它只转发，`/hub` 由服务自己认证（挂公网的服务改不成
   `noauth`），`/w/<id>/actions` 由那个项目的 GPT Actions 认证。
 - **公网地址是靠请求头推断的**（服务没配公网入口时）。这是给"你自己架
