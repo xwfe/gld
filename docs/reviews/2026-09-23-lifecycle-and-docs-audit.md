@@ -4399,3 +4399,19 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 | 名称长得像另一台的 ID | 完整 ID 优先，不会删错 |
 
 全仓 1369 项通过，clippy、fmt 通过。第一次全量红在别名门禁：`remove` 命令必须有 `rm` 别名，补上了。
+
+## 106. 发布 0.10.1，换到本机，删掉 `m3-local`（2026-11-01）
+
+用户让发版并换到本机。`v0.10.1` = `15a7bb1`，只多了 `gld node remove`，协议 16 到 17，工具表没变。
+
+| 步骤 | 结果 |
+|---|---|
+| 本机打包 | `gld 0.10.1 (15a7bb1ed638)`；§103 那套隔离验收 75 项通过，这次 Hub 是 0.10.1、节点是 0.10.0，混用正常；真实命令的拒绝和删除符合预期 |
+| 发版前 | main CI 全绿；手动空跑 Release 全绿，“建 Release”skipped |
+| 发布 | tag 流水线全绿，Release 8 个文件，非草稿、非预发布 |
+| 校验和、来源证明 | 5 个包全过，改一个字节的包退出 1；两个安装脚本和 tag 里的逐字节相同 |
+| 运行 | 不设版本时 `install.sh` 装到 0.10.1；Intel 包经 Rosetta、glibc 和 musl 包在 amd64 Debian 12 容器里 `--version` 都对 |
+| 换到本机 | 换之前没有命令在跑；重启后服务是 `15a7bb1`、协议 17；工具表 35 项、指纹 `6022dd56440b0ea9`，`gld ls`、`profiles.json`、`oauth-clients/hub.json` 都没变；`gld health` 全 ✓，两个进程没带 `CLAUDE*` 变量 |
+| 删 `m3-local` | 真实 Hub 上 `gld node remove m3-local` 成功，机器表清空；`profiles.json` 其余内容的摘要前后一致，再删报不存在且退出码 1 |
+
+**没做的：**Windows 包只核了校验和和来源证明，没运行；ChatGPT 没在这次换装后再调一次，连接器相关的指纹都没变；Linux 服务器和另一台 Mac 的常用 gld 没换。
