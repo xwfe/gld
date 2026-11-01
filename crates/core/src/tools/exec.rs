@@ -321,6 +321,17 @@ pub fn check_command(ctx: &ToolContext, args: &Value) -> Result<Value, Workspace
         .unwrap_or_default();
     let builtin = native_builtin(&parts);
     let program = probe_program(ctx, &parts, &probe_cwd, builtin);
+    let (resolved_by, config_command) = match &policy_error {
+        Some(error) => crate::tools::policy::denial_resolution(
+            error.reason,
+            args,
+            &ctx.policy,
+            Some(&ctx.workspace),
+            parts.first().map(String::as_str),
+            &ctx.workspace_name,
+        ),
+        None => ("other", None),
+    };
 
     let (decision, stage, rule, code, message, suggestion) = match (&policy_error, workdir_problem)
     {
@@ -389,6 +400,8 @@ pub fn check_command(ctx: &ToolContext, args: &Value) -> Result<Value, Workspace
             object.insert("code".into(), json!(code));
             object.insert("message".into(), json!(message));
             object.insert("suggestion".into(), json!(suggestion));
+            // 语义不动：它说的是"得用户出面"，白名单这类也确实得用户改配置；改成 false，只读它的
+            // 调用方会以为不用问用户了。confirm 解不解得开，看 resolved_by（审查 §108）。
             object.insert(
                 "needs_user_authorization".into(),
                 json!(
@@ -397,6 +410,10 @@ pub fn check_command(ctx: &ToolContext, args: &Value) -> Result<Value, Workspace
                         || rule == "network_blocked"
                 ),
             );
+            object.insert("resolved_by".into(), json!(resolved_by));
+            if let Some(command) = config_command {
+                object.insert("config_command".into(), json!(command));
+            }
             let alternatives = alternatives_for(&parts);
             if !alternatives.is_empty() {
                 object.insert("alternatives".into(), json!(alternatives));

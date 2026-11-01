@@ -1104,6 +1104,129 @@ fn gh_is_not_enabled_by_default() {
     assert_eq!(checked["needs_user_authorization"], json!(true));
 }
 
+/// `resolved_by=confirm` 必须真的带 confirm 就过（审查 §108）。
+#[test]
+fn a_denial_that_confirm_lifts_says_so_and_confirm_really_lifts_it() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+
+    let checked = invoke(&ctx, "check_command", json!({ "cmd": "git reset --hard" }));
+    assert_eq!(checked["decision"], "needs_approval", "{checked}");
+    assert_eq!(checked["resolved_by"], "confirm", "{checked}");
+    assert_eq!(checked["needs_user_authorization"], json!(true));
+    assert!(checked.get("config_command").is_none(), "{checked}");
+
+    let confirmed = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": "git reset --hard", "confirm": true }),
+    );
+    assert_eq!(confirmed["decision"], "allow", "{confirmed}");
+}
+
+/// `resolved_by=config_change` 必须 confirm 解不开、照给的配置改了才解得开。
+/// 白名单和联网两条都走一遍，后者是实测确认过的（只有 permission-mode 管它）。
+#[test]
+fn a_denial_only_config_lifts_says_so_and_confirm_really_does_not_lift_it() {
+    let fx = tiny_js_fixture();
+
+    // 白名单。
+    let only_pwd = ctx_with_allowed_commands(&fx.root, "only:pwd");
+    let args = json!({ "cmd": format!("{TEST_PYTHON} --version") });
+    let checked = invoke(&only_pwd, "check_command", args.clone());
+    assert_eq!(checked["decision"], "deny", "{checked}");
+    assert_eq!(checked["resolved_by"], "config_change", "{checked}");
+    // 旧字段语义不变：只读它的调用方照旧知道这得找用户。
+    assert_eq!(checked["needs_user_authorization"], json!(true));
+    assert_eq!(
+        checked["config_command"],
+        format!("gld set <项目> actions.allowed-commands=only:{TEST_PYTHON}"),
+        "{checked}"
+    );
+    let confirmed = invoke(
+        &only_pwd,
+        "check_command",
+        json!({ "cmd": format!("{TEST_PYTHON} --version"), "confirm": true }),
+    );
+    assert_eq!(confirmed["decision"], "deny", "{confirmed}");
+    let fixed = ctx_with_allowed_commands(&fx.root, &format!("only:{TEST_PYTHON}"));
+    let rechecked = invoke(&fixed, "check_command", args);
+    assert_eq!(rechecked["decision"], "allow", "{rechecked}");
+
+    // 联网。
+    let safe = |permission_mode: &str| {
+        ctx_with_policy(
+            &fx.root,
+            gld_core::tools::policy::PolicySettings {
+                permission_mode: permission_mode.into(),
+                ..Default::default()
+            },
+        )
+        .with_workspace_name("api")
+    };
+    let cmd = "git clone https://example.com/a.git";
+    let checked = invoke(&safe("safe"), "check_command", json!({ "cmd": cmd }));
+    assert_eq!(checked["rule"], "network_blocked", "{checked}");
+    assert_eq!(checked["resolved_by"], "config_change", "{checked}");
+    assert_eq!(checked["needs_user_authorization"], json!(true));
+    assert_eq!(
+        checked["config_command"],
+        "gld set api permission-mode=trusted"
+    );
+    let confirmed = invoke(
+        &safe("safe"),
+        "check_command",
+        json!({ "cmd": cmd, "confirm": true }),
+    );
+    assert_eq!(confirmed["decision"], "deny", "{confirmed}");
+    let rechecked = invoke(&safe("trusted"), "check_command", json!({ "cmd": cmd }));
+    assert_eq!(rechecked["decision"], "allow", "{rechecked}");
+
+    // 一个命令挡两道：只改 permission-mode 还会撞白名单，命令要一次给全。
+    let checked = invoke(
+        &safe("safe"),
+        "check_command",
+        json!({ "cmd": "curl https://example.com" }),
+    );
+    assert_eq!(
+        checked["config_command"], "gld set api permission-mode=trusted allowed-commands=curl",
+        "{checked}"
+    );
+}
+
+/// 规则名看着像改配置能解、其实解不开的，不能给命令。
+#[test]
+fn resolved_by_is_what_lifts_the_denial_not_what_the_rule_name_suggests() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let resolve = |args: Value| invoke(&ctx, "check_command", args);
+
+    // 问了用户也白问：带 confirm 还会撞白名单，先改配置。
+    let rm = resolve(json!({ "cmd": "rm -rf build" }));
+    assert_eq!(rm["decision"], "needs_approval", "{rm}");
+    assert_eq!(rm["resolved_by"], "config_change", "{rm}");
+    assert_eq!(rm["config_command"], "gld set <项目> allowed-commands=rm");
+
+    // 加进白名单也只开只读诊断，merge 还是过不去。
+    let merge = resolve(json!({ "cmd": "gh pr merge 1" }));
+    assert_eq!(merge["rule"], "command_not_allowlisted", "{merge}");
+    assert_eq!(merge["resolved_by"], "other", "{merge}");
+    assert!(merge.get("config_command").is_none(), "{merge}");
+
+    // 程序名是调用方给的，不能把 $(...) 拼进给用户复制的命令。
+    let hostile = resolve(json!({ "argv": ["evil$(touch pwned)", "x"] }));
+    assert_eq!(hostile["rule"], "command_not_allowlisted", "{hostile}");
+    assert_eq!(hostile["resolved_by"], "other", "{hostile}");
+    assert!(hostile.get("config_command").is_none(), "{hostile}");
+
+    // 不是策略拒的，也没什么配置可改。
+    let shell = resolve(json!({ "cmd": "echo hi && echo there" }));
+    assert_eq!(shell["resolved_by"], "other", "{shell}");
+    let missing = resolve(json!({ "cmd": "pwd", "workdir": "no-such-dir" }));
+    assert_eq!(missing["denied_stage"], "workdir", "{missing}");
+    assert_eq!(missing["resolved_by"], "other", "{missing}");
+}
+
 /// 直连远端的命令有自己的说法，不跟"不在白名单"混成一句。
 #[test]
 fn ssh_points_at_the_hub_instead_of_a_generic_denial() {
