@@ -11,7 +11,7 @@ gld daemon status
 ```text
 状态          运行中
 pid           9363
-版本          0.10.0（协议 16）
+版本          0.10.1（协议 17）
 运行时长      2h 13m
 运行中的服务  1
 数据目录      /Users/you/.config/gld

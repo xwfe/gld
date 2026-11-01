@@ -8,13 +8,13 @@ Git、项目构建工具、隧道程序和启用的外部 MCP server 仍需按�
 macOS、Linux（把版本号换成要装的）：
 
 ```bash
-curl -fsSL https://github.com/xwfe/gld/releases/download/v0.10.0/install.sh | GLD_VERSION=v0.10.0 sh
+curl -fsSL https://github.com/xwfe/gld/releases/download/v0.10.1/install.sh | GLD_VERSION=v0.10.1 sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:GLD_VERSION='v0.10.0'; irm https://github.com/xwfe/gld/releases/download/v0.10.0/install.ps1 | iex
+$env:GLD_VERSION='v0.10.1'; irm https://github.com/xwfe/gld/releases/download/v0.10.1/install.ps1 | iex
 ```
 
 这两个脚本从 v0.10.0 起才有；要装更早的版本，按下面的手动步骤来。
