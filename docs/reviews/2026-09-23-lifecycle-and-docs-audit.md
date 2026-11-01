@@ -4587,3 +4587,41 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 - 替换了正在运行的宿主文件、但还没重启时授权算不算；远端节点；锁屏时的报错（文案按同一句写的，没实测）。
 
 **没解决：**每次换宿主二进制都要重新授权。根治要稳定的签名身份，比如 Developer ID，要用户决定。
+
+## 112. 经命令写 `.git`、`.github` 和会跑程序的 git 配置（2026-11-02）
+
+**起因：**§110 发现解释器能写 `.git/hooks`。这层是防手滑（`docs/security.md`），目标是把明显写法和 `apply_patch` 的规矩对齐，不是堵死。
+
+**改之前实测（默认策略，`check_command`）：**
+
+| 写法 | 结果 |
+| --- | --- |
+| `open`、`shutil.copy`、`os.symlink`、`os.link`、`Path.copy`、`Path.replace`、`symlink_to`、`fs.writeFileSync`、`fs.cpSync`、`fs.copyFileSync` 写 `.git/hooks`；`open`、`shutil.copy` 写 `.github/workflows` | 12 种全放行 |
+| `Path('.git/config').write_text` | 拒，已有规则只认这几个方法名 |
+| `git config core.hooksPath h`、`git -c core.hooksPath=h status`、`git config core.fsmonitor ./x` | 放行 |
+| `Path('.gitattributes').write_text('x')` | **误拒**，判断用的子串匹配 |
+
+**改了什么：**
+
+- `mentions_repository_asset` 按路径段认 `.git`、`.github`，取代子串匹配，`.gitignore` 这类不再误伤。
+- 解释器和用户放行的文件命令（`cp`、`mv`、`ln`、`tee`、`sed -i` 等）写到这两处就拒，`workdir` 落在里面也拒。拷贝的读取源、写进文件的内容、排除规则先抠掉再判断。
+- `git config`、`git -c`、`git clone -c` 解析参数，设置会跑程序的键就拒。键后面没有值是读，关掉它们的值（`false`、`cat`、空）放行。
+- `command-policy=all`：写和配置放行；删除保护补上 `rm -fr`、`rm -r`、`rmdir`、`find -delete`、`fs.rmSync`，以前 `docs/security.md` 说“仍然拦”，实际只认 `-rf`。
+
+**独立审查（约 230 条命令对比改动前后）报的，已修：**
+
+| 级别 | 问题 | 修法 |
+| --- | --- | --- |
+| 高 | `git config core.hooksPath` 不带值是读，被拒 | 没有值算读 |
+| 高 | `Path('/etc/hosts').read_text().replace('a','b')` 被当写 | 正则只认 `Path(…)` 紧跟 `.replace(` |
+| 高 | `hook.*.command` 漏了，实测提交时脚本真跑 | 加进列表 |
+| 中 | `include.path`、`protocol.allow`、`tar.*.command`、`trailer.*.cmd`、`difftool.*.cmd`、`remote.*.uploadpack`、`git clone -c` 实测能跑脚本 | 加进列表，解析 `clone` |
+| 中 | `workdir=.git/hooks` 真写进去了 | 看 `workdir` |
+| 中 | `open('.gitignore','a').write('.git/')`、`ignore_patterns('.git')`、`--exclude=.git`、`git commit -m '…'`、`grep` 被拒 | 抠内容；`git`、`gh`、`grep` 系的参数只算文字 |
+| 中 | `git -c core.pager=cat log`、`git config alias.st status` 被拒 | 看值 |
+| 低 | `.github.`、`.git::$INDEX_ALLOCATION`、`-Path:.git` 的删除改动后漏了 | 边界加 `:` 和尾点 |
+| 低 | `--attr-source`、`-t` 解析不到；`rb+`、`w+b` 模式、`sed -Ei`、`--in-place` 漏了 | 补上 |
+
+**没修、写进文档的：**`os.system`、`subprocess.run`、拼接路径、`git rebase --exec`、`git fetch --upload-pack` 这些参数，追不完。`require('fs').copyFileSync('.git/config','a')`、`Path('.git/config').copy('b')` 是读但被拒，安全方向。
+
+**验证：**全量 66 个测试目标 1408 passed / 0 failed，clippy `-D warnings`、fmt 通过，只在 macOS 跑过。新增 `command_repository_assets.rs` 9 条。隔离守护进程真跑 `exec_command`：`workdir=.git/hooks` 写文件、写 `.git/hooks/pc`、`git -c core.fsmonitor=./x status` 都报 `PROTECTED_REPOSITORY_ASSET`，`.git/hooks` 里没多文件；读 `.git/HEAD` 退出码 0。审查的 236 条本机历史命令回放只有 1 条判定变化，发生在修这批误拒之前；修完没有重放。Windows 和 PowerShell 只看了策略判定，没实跑。
