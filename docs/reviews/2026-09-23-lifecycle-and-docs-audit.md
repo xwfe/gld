@@ -4485,3 +4485,34 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 
 **本轮摩擦：**连接器的 compact 档案没有 `git_commit`，本节落盘后只能留在工作区等用户提交，没法按仓库规矩当场提交。审查本身用的是只读工具（`read_file`、`search_text`、`git_log`、`server_info`），没动本机服务和配置。
 
+## 109. 核对 §108：`setsid` 不是原因，还漏了授权失效这一层；加 `gld doctor --desktop`（2026-11-01）
+
+**结论：§108 的现象和引用都属实，根因说错一半。**它说 `setsid` 把守护进程弄进了 `Background` 会话，图形会话里就能截。实测是：`setsid` 不改会话类型；图形会话里照样截不了，因为授权也失效了。
+
+| 对照（都在这台 macOS 26.6 上） | 会话类型 | `screencapture` |
+| --- | --- | --- |
+| 后台工具的 shell（线上服务就是从这里起的，经它实测也是 `Background`） | `Background` | 退出码 1，`could not create image from display` |
+| 同上，`setsid` 之后 | `Background` | 未单独测 |
+| 临时 LaunchAgent（图形会话域）里的 `/bin/sh` | `Aqua` | 退出码 1，同一句 |
+| 同上，`setsid` 之后 | `Aqua` | 未单独测 |
+| 隔离守护进程，0.10.1，`daemon start` 从后台工具起 | `Background` | 退出码 1，同一句 |
+| 隔离守护进程，0.10.1，LaunchAgent 起 | `Aqua` | 退出码 1，同一句 |
+
+**逐条对 §108：**
+
+- **“`setsid` 拉起所以落在 `Background`”不对。**`setsid` 换的是 POSIX 会话，登录会话类型继承自拉起它的进程，上表 `setsid` 前后都不变。这次是因为守护进程从后台工具里起的；从图形终端起的应该不会这样（没有实测，本机的图形终端这次没动）。
+- **“不管录屏权限开没开都报这句”只说对了一半，同一句话还有别的原因。**`Aqua` 里没有有效授权也是这句。§108 给出的修法“LaunchAgent 在图形会话里”单靠它不够，上表第 6 行就是。
+- **漏了授权失效。**系统权限库里 gld 那条是 2026-11-01 13:20 写的，绑定的是 `cdhash 951da954…`；17:52 换成 0.10.1 后这个文件的 `CDHash` 是 `5261aac9…`。发布包是 ad-hoc 签名，`codesign -dv` 显示 `Signature=adhoc`，所以授权跟文件内容走，不跟路径走。设置里开关看着还亮着，对现在的二进制应该已经不算数。
+- **其余属实：**`lifecycle.rs`、`daemon.md:135`、`exec.rs:392-398`、`command_paths.rs:16-22` 的引用和实际一致，§108 的提交也都在仓库里；LaunchAgent 确实在 `Aqua`。
+
+**这次改了什么：**
+
+- `gld doctor --desktop`：在守护进程里真截 1×1 像素，失败时按会话类型给不同修法。不放进默认体检，没授权时一试可能弹系统授权框，不用桌面的人不该碰到。协议号 17 → 18。
+- 命令结果：stderr 带 `could not create image from` 时多一条警告，说清两种原因、别重试、让用户跑上面那条。
+- `docs/daemon.md` 加“让 AI 能截屏”一节，`docs/troubleshooting.md` 加对照条目。
+
+**实测（调试版，隔离数据目录）：**后台起的报 `Background` 和“开录屏权限也没用”，LaunchAgent 起的报 `Aqua` 和“重新授权”，没起守护进程时只报“查不了”、不自动拉起；经 `gld tool call` 跑 `screencapture` 回包带上那条警告。
+
+**没验证：**还没有过“图形会话 + 有效授权”截成功的实测，所以“三层都通就能截”目前是推断。这一步要用户在系统设置里授权一次。
+
+**没做：**§108 的另外两处策略问题（`needs_user_authorization` 误导、路径扫描不分源和目标）；桌面工具 D10-L0；授权跨升级不失效（要稳定的签名身份，比如 Developer ID，需要用户决定）。
