@@ -4516,3 +4516,42 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 **没验证：**还没有过“图形会话 + 有效授权”截成功的实测，所以“三层都通就能截”目前是推断。这一步要用户在系统设置里授权一次。
 
 **没做：**§108 的另外两处策略问题（`needs_user_authorization` 误导、路径扫描不分源和目标）；桌面工具 D10-L0；授权跨升级不失效（要稳定的签名身份，比如 Developer ID，需要用户决定）。
+
+## 110. 路径保护分开拷贝的源和目标（2026-11-01）
+
+**起因：**§108 根因第 4 条。`shutil.copy` 把工作区外的文件拷进工作区，被 `WORKSPACE_PATH_PROTECTED` 拒。
+
+**和 §108 建议不一样的地方：**§108 建议 `shutil.copy` / `move`、`os.rename` / `replace`、`fs.copyFile` 都只查目标。实测（Python 3.12）`shutil.move`、`os.rename`、`os.replace` 跑完源文件都不在原位置了，等于改了工作区外面，所以这几个的源继续查，只放开纯拷贝。
+
+**改了什么：**`command_contains_external_path` 先把拷贝调用的源路径从文本里抠掉，再走原来的判断。
+
+| 写法 | 结果 |
+| --- | --- |
+| `shutil.copy` / `copy2` / `copyfile` / `copytree`、`fs.copyFile` / `copyFileSync`，源和目标都是字符串字面量，目标在里面 | 放行 |
+| 同上，目标在外面（绝对路径、`../`、`~/`、指向外面的软链） | 拒 |
+| `shutil.move`、`os.rename` / `renames` / `replace`、`Path(…).rename`、`fs.renameSync`，源在外面 | 拒 |
+| 目标是变量、拼接或 `f'…'`；源是变量、拼接、`f'…'` 或关键字参数 | 拒 |
+| Python 这几个函数目标后面还有参数，比如 `follow_symlinks=False`、`symlinks=True` | 拒。实测 `follow_symlinks=False` 拷软链，工作区里多一个指向 `/etc/hosts` 的软链 |
+| `shutil.rmtree("/")`、`shutil.rmtree('/etc')`、`os.remove('/etc/hosts')` | 拒 |
+
+只抠源那一处文本：`shutil.copy('/etc/hosts', 'a'); open('/etc/hosts', 'w')` 后半段照样拒。
+
+**验证：**
+
+| 检查 | 结果 |
+| --- | --- |
+| `crates/core/tests/command_write_paths.rs` 新增 6 条 | 旧代码上 2 条放行用例失败、其余 4 条通过（钉的是"仍然拒"）；新代码全过，含一条真跑 `exec_command` 拷进来、源文件还在 |
+| `command_paths.rs` 新增 2 条单测 | 通过。`'…'`、`"…"`、`\"…\"`、`'\''…'\''` 四种引号都覆盖，这个文件在 Windows 上也编译 |
+| `cargo test --workspace --all-targets --locked --no-fail-fast`（隔离 `GLD_HOME`） | 62 个测试二进制，1392 passed / 0 failed / 0 ignored |
+| clippy `-D warnings`、`fmt --check` | 通过 |
+
+**没验证：**没在 Windows 上跑过（Windows 编译和运行要看 CI）；`fs.copyFile` 只查了策略判断，没真跑 Node。
+
+**还会误拒的（安全方向，`docs/security.md` 写了）：**源写成 `expanduser(…)` 或 `Path(…)`；`copytree(…, dirs_exist_ok=True)`；Windows 上带反斜杠的源路径。
+
+**新发现、没改：**
+
+- 解释器能往 `.git/` 里写。新版调试版 `check_command` 实测，`shutil.copy('a', '.git/hooks/pre-commit')`、`open('.git/hooks/pre-commit', 'w').write('x')`、`shutil.copy('/etc/hosts', '.git/hooks/pre-commit')` 三条都放行。前两条没有外部路径，本节的改动碰不到，按代码推断旧版也放行（旧版没实跑）；第三条旧版只是因为源在外面才被拒，这一条是本节改动带来的变化，现在和前两条一致。`command_targets_protected_repository_asset` 只拦删除和改名类操作，写和拷贝没算。
+- 读 `interpreter_mutation_pattern` 的正则（没实跑）：`fs.cp` / `cpSync`、`Path(…).replace`、`Path(…).copy`、`os.symlink`、`os.link` 都不算写文件，路径判断轮不到它们。
+
+**没做：**没部署，没推送。§108 另一处策略问题（`needs_user_authorization` 误导）不在这一轮。
