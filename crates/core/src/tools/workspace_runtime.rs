@@ -74,7 +74,7 @@
 //!   跟，因为 gld 目前没有并行 worktree 的编排。要加的时候是"工作树文件"和
 //!   "共享 Git 元数据"两级协调，不是把键一换了事。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,6 +82,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 
 use crate::tools::caller::Caller;
 use crate::tools::session::SessionStore;
@@ -124,6 +125,14 @@ pub struct WorkspaceRuntime {
     /// "我跑的这段时间里工作区被改过几次"——后台命令期间没有写互斥，这个数是
     /// 事后判断命令结果可不可信的唯一依据。
     writes: Arc<AtomicU64>,
+    /// 计数器接着哪些进程数下来的：实例 id → 它把计数交出来的时刻（毫秒）。工作区换代时这份
+    /// 和 `writes` 一起带过来，那些进程留下的运行记录才算得出"起跑到现在写过几次"，
+    /// 见 [`WorkspaceHandoff`] 和 `SessionStore::writes_since_start`。
+    counted_by: Arc<Mutex<HashMap<String, u64>>>,
+    /// 交接带过来、接过来的 `writes` 值。收到过同一份之后再收一次（上次等回复超时）不算冲突。
+    adopted_writes: Mutex<Option<u64>>,
+    /// 交接带过来、还没被上下文取走的默认目录，键是入口（`mcp`、`local` 这些）。
+    adopted_cwds: Mutex<BTreeMap<String, PathBuf>>,
     /// 跨进程那一层的锁文件。
     ///
     /// `None` 表示建不出来（数据目录不可写之类）。那时只剩进程内互斥，
@@ -137,9 +146,29 @@ pub struct WorkspaceRuntime {
 }
 
 /// 同一个调用方经 gld 接连写同一个文件留下的版本，旧的在前，最后一个是现在磁盘上的。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OwnWrites {
-    writer: Caller,
+    /// [`Caller::key`]。存标识不存 `Caller`，这张表要跟着工作区换代，而 `Grant` 有不落盘的字段。
+    writer: String,
     versions: Vec<String>,
+}
+
+/// 工作区从一代搬到下一代时带走的状态（RFC-0008 §3.4）。
+///
+/// 只有不带走就会答错的东西才在这里：落盘计数（任务验收靠它判断结果还作不作数）、
+/// 自己写过的版本（补丁靠它放行没人动过的旧版本号）、默认目录（丢了命令会跑错地方）。
+/// 跑完的命令在运行记录里，任务和计划本来就在盘上，都不用带。
+///
+/// 两代可能不是同一个版本，**加字段要带 `serde(default)`**；不兼容的改动要加
+/// [`crate::generation::STATE_FORMAT`]，否则新代读不懂就留在旧代，这个工作区再也换不过去。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct WorkspaceHandoff {
+    writes: u64,
+    counted_by: HashMap<String, u64>,
+    #[serde(default)]
+    own_writes: HashMap<String, OwnWrites>,
+    #[serde(default)]
+    default_cwds: BTreeMap<String, PathBuf>,
 }
 
 /// 一个文件最多记多少个版本。够一轮对话里改同一个文件几十次。
@@ -314,13 +343,13 @@ impl WorkspaceRuntime {
             return;
         };
         let continues = writes.get(path).is_some_and(|known| {
-            &known.writer == caller && known.versions.last().map(String::as_str) == before
+            known.writer == caller.key() && known.versions.last().map(String::as_str) == before
         });
         if !continues {
             writes.insert(
                 path.to_string(),
                 OwnWrites {
-                    writer: caller.clone(),
+                    writer: caller.key().to_string(),
                     versions: before.into_iter().map(str::to_string).collect(),
                 },
             );
@@ -345,7 +374,7 @@ impl WorkspaceRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         writes.get(path).is_some_and(|known| {
-            &known.writer == caller
+            known.writer == caller.key()
                 && known.versions.last().map(String::as_str) == Some(now)
                 && known.versions[..known.versions.len() - 1]
                     .iter()
@@ -422,10 +451,111 @@ impl WorkspaceRuntime {
                 Some((root, project)) => SessionStore::with_runs(
                     crate::tools::runs::RunLog::new(root.clone(), project, caller.key()),
                     Arc::clone(&self.writes),
-                ),
+                )
+                .counted_by(Arc::clone(&self.counted_by)),
                 None => SessionStore::new(),
             })
         }))
+    }
+
+    /// 这个工作区现在为什么还不能换代；空的就是能换。
+    ///
+    /// 调的时候宿主已经挡住了发给它的新请求，也确认过没有在途调用（`Router::hand_off`），
+    /// 所以这里查到空，之后也不会有新命令或新写入。内部要问子进程，不能在异步 worker 线程里调。
+    pub fn handoff_blockers(&self, root: &Path) -> Vec<&'static str> {
+        let stores: Vec<Arc<SessionStore>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        let mut blockers = Vec::new();
+        if stores.iter().any(|store| !store.running().is_empty()) {
+            blockers.push("running_commands");
+        } else if stores.iter().any(|store| store.has_unsettled_output()) {
+            blockers.push("unsettled_output");
+        }
+        if crate::agents::running_in(root).is_some() {
+            blockers.push("running_agents");
+        }
+        if matches!(
+            self.commit_lock.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            blockers.push("write_in_progress");
+        }
+        blockers
+    }
+
+    /// 把要带走的状态抄一份。只读：下一代没接住时这个工作区照旧归这一代。
+    pub fn handoff_state(&self, default_cwds: BTreeMap<String, PathBuf>) -> WorkspaceHandoff {
+        let mut counted_by = self
+            .counted_by
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        counted_by.insert(
+            crate::tools::runs::instance_id().to_string(),
+            crate::tools::runs::now_ms(),
+        );
+        WorkspaceHandoff {
+            writes: self.writes.load(Ordering::Acquire),
+            counted_by,
+            own_writes: self
+                .own_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+            default_cwds,
+        }
+    }
+
+    /// 接住上一代带来的状态。这一代已经在这个目录上干过活就拒绝：它的计数和带来的对不上，
+    /// 硬接的话验收会拿错的数判断结果还作不作数。
+    pub fn adopt_handoff(&self, state: WorkspaceHandoff) -> Result<(), String> {
+        let tables_in_use = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .any(|store| !store.is_empty());
+        let mut adopted = self
+            .adopted_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let expected = adopted.unwrap_or(0);
+        if tables_in_use || self.writes.load(Ordering::Acquire) != expected {
+            return Err("这一代已经在这个目录上干过活，不能接手".to_string());
+        }
+        // 上次等回复超时、之后又发了新的，两条到的顺序可能反过来。计数不能倒退。
+        if state.writes < expected {
+            return Err("这是一份过期的交接".to_string());
+        }
+        self.writes.store(state.writes, Ordering::Release);
+        *adopted = Some(state.writes);
+        drop(adopted);
+        self.counted_by
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(state.counted_by);
+        *self
+            .own_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state.own_writes;
+        *self
+            .adopted_cwds
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state.default_cwds;
+        Ok(())
+    }
+
+    /// 这个入口的上下文要不要从交接带来的默认目录开始。取一次就没了：之后以上下文自己的为准。
+    pub fn take_adopted_cwd(&self, entry: &str) -> Option<PathBuf> {
+        self.adopted_cwds
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(entry)
     }
 
     /// 还留着的会话表张数（顺手清掉空的）。测试用。
@@ -645,6 +775,26 @@ pub fn running_session_counts() -> Vec<(PathBuf, usize)> {
         .collect()
 }
 
+/// 这个进程里还有没有退出就会弄坏的输出，见 [`SessionStore::has_unsettled_output`]。
+pub fn any_unsettled_output() -> bool {
+    let runtimes: Vec<Arc<WorkspaceRuntime>> = RUNTIMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    runtimes.iter().any(|runtime| {
+        let stores: Vec<Arc<SessionStore>> = runtime
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        stores.iter().any(|store| store.has_unsettled_output())
+    })
+}
+
 /// 拿这个目录的执行资源；没有就建一个。
 ///
 /// 同一个目录不管经过几个入口、换过几次 `ToolContext`，拿到的都是同一个
@@ -664,6 +814,9 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
             commit_lock: Mutex::new(()),
             sessions: Mutex::new(HashMap::new()),
             writes: Arc::new(AtomicU64::new(0)),
+            counted_by: Arc::new(Mutex::new(HashMap::new())),
+            adopted_writes: Mutex::new(None),
+            adopted_cwds: Mutex::new(BTreeMap::new()),
             lock_file: lock_path_for(key),
             runs: crate::home::data_home()
                 .ok()
@@ -957,6 +1110,61 @@ mod tests {
                 .is_some(),
             "放开之后还是拿不到"
         );
+    }
+
+    /// 带过来的计数接着往下数；带来的版本表认原来那个调用方，换个人不认。
+    #[test]
+    fn adopting_a_handoff_continues_the_counter_and_the_own_writes() {
+        let (old_dir, new_dir) = (tempdir().expect("old"), tempdir().expect("new"));
+        let old = runtime_for(&old_dir.path().canonicalize().expect("canonical"));
+        let new = runtime_for(&new_dir.path().canonicalize().expect("canonical"));
+        let who = caller("alpha");
+        old.record_write();
+        old.record_write();
+        old.record_own_write(&who, "a.txt", Some("v1"), Some("v2"));
+
+        let cwds = BTreeMap::from([("mcp".to_string(), PathBuf::from("/somewhere"))]);
+        new.adopt_handoff(old.handoff_state(cwds)).expect("接手");
+
+        assert_eq!(new.write_counter().load(Ordering::Acquire), 2);
+        assert!(new
+            .counted_by
+            .lock()
+            .expect("lock")
+            .contains_key(crate::tools::runs::instance_id()));
+        assert!(new.wrote_since(&who, "a.txt", "v1", "v2"));
+        assert!(!new.wrote_since(&caller("beta"), "a.txt", "v1", "v2"));
+        assert_eq!(
+            new.take_adopted_cwd("mcp"),
+            Some(PathBuf::from("/somewhere"))
+        );
+        assert_eq!(new.take_adopted_cwd("mcp"), None, "只该取到一次");
+    }
+
+    /// 自己写过的目录不能再接手，否则计数被盖掉，之前的命令就显得"期间没写过"。
+    /// 上次等回复超时、其实接住了的那一份可以再接一次。
+    #[test]
+    fn a_runtime_that_did_its_own_work_refuses_a_handoff() {
+        let dir = tempdir().expect("dir");
+        let runtime = runtime_for(&dir.path().canonicalize().expect("canonical"));
+        let state = || WorkspaceHandoff {
+            writes: 5,
+            ..WorkspaceHandoff::default()
+        };
+        runtime.adopt_handoff(state()).expect("第一次");
+        runtime.adopt_handoff(state()).expect("超时重来");
+        assert!(
+            runtime
+                .adopt_handoff(WorkspaceHandoff {
+                    writes: 3,
+                    ..WorkspaceHandoff::default()
+                })
+                .is_err(),
+            "迟到的旧交接不能让计数倒退"
+        );
+        runtime.record_write();
+        assert!(runtime.adopt_handoff(state()).is_err());
+        assert_eq!(runtime.write_counter().load(Ordering::Acquire), 6);
     }
 
     /// 两个不同的目录各有各的锁文件，不会互相挡。

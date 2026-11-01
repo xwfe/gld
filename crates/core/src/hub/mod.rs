@@ -406,6 +406,15 @@ impl Hub {
         }
     }
 
+    /// 这个归属键（远端成员、本机 MCP 转发）还开着连接吗。开着就不换代：连接上的状态带不走，
+    /// 用户开着的浏览器页面、远端的后台命令不能因为升级没了。
+    pub fn holds_connection(&self, key: &str) -> bool {
+        if key == MACHINE_MCP_ROUTE {
+            return self.relay.holds_state();
+        }
+        self.connections.holds_member(key)
+    }
+
     /// 按现在的成员名单收掉已经离开的成员。平时每次工具调用顺手做；切换后旧代可能再也收不到调用，
     /// 宿主定期叫它做一次，不然被 `gld rm` 的项目在旧代里起的命令就没人收了。
     pub fn reconcile(&self) -> Result<(), String> {

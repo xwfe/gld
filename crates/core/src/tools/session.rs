@@ -50,6 +50,11 @@ pub struct SessionStore {
     /// 这个项目的落盘计数器（和会话里拿的是同一个）。从记录读结果时拿它现算"起跑到现在
     /// gld 写过几次"，见 [`SessionStore::writes_since_start`]。
     workspace_writes: Option<Arc<AtomicU64>>,
+    /// 上面那个计数器是接着哪些进程数下来的，见 [`Self::writes_since_start`]。
+    counted_by: Option<Arc<Mutex<HashMap<String, u64>>>>,
+    /// 过了保留期、从表里摘掉，但留下的进程还占着输出管道的命令。这一代退出时管道就断了，
+    /// 那些进程下次写输出会被 SIGPIPE 带走，所以还得记着，见 [`Self::has_unsettled_output`]。
+    left_behind: Mutex<Vec<Arc<ExecSession>>>,
 }
 
 impl Default for SessionStore {
@@ -60,6 +65,8 @@ impl Default for SessionStore {
             retention: SESSION_RETENTION,
             runs: None,
             workspace_writes: None,
+            counted_by: None,
+            left_behind: Mutex::new(Vec::new()),
         }
     }
 }
@@ -85,6 +92,12 @@ impl SessionStore {
         }
     }
 
+    /// 工作区换代时计数器是接着上一代数的，上一代起的命令也算得出来。
+    pub fn counted_by(mut self, processes: Arc<Mutex<HashMap<String, u64>>>) -> Self {
+        self.counted_by = Some(processes);
+        self
+    }
+
     /// 从记录读到的命令，起跑之后 gld 往工作区写过几次。算不出来是 `None`。
     ///
     /// **不能用记录里结束那一刻的数**：命令跑完之后 gld 再改源文件，那个数还是 0，
@@ -92,12 +105,22 @@ impl SessionStore {
     /// 发现）。所以按起跑时的计数器现算；那个计数器只在内存里，换了进程（gld 重启过）
     /// 就算不出来，给 `None`——任务验收会拒收，要求重跑。
     fn writes_since_start(&self, record: &RunRecord) -> Option<u64> {
-        if record.owner != crate::tools::runs::instance_id() {
+        // 上一代的命令只有交接之前起的才算数。之后起的说明这次交接其实没成（等回复超时、
+        // 工作区留在了那一代），它期间的写入这个计数器没数到。
+        let same_count = record.owner == crate::tools::runs::instance_id()
+            || self.counted_by.as_ref().is_some_and(|processes| {
+                processes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&record.owner)
+                    .is_some_and(|exported_at| record.started_at_ms <= *exported_at)
+            });
+        if !same_count {
             return None;
         }
         let at_start = record.writes_at_start?;
         let now = self.workspace_writes.as_ref()?.load(Ordering::Acquire);
-        Some(now.saturating_sub(at_start))
+        now.checked_sub(at_start)
     }
 
     pub fn runs(&self) -> Option<&RunLog> {
@@ -146,7 +169,9 @@ impl SessionStore {
             }
         }
         for (id, reason) in expired {
-            sessions.remove(&id);
+            if let Some(session) = sessions.remove(&id) {
+                self.keep_if_left_behind(session);
+            }
             self.bury(&id, reason);
         }
     }
@@ -294,7 +319,8 @@ impl SessionStore {
             .lock()
             .expect("sessions lock")
             .remove(session_id);
-        if removed.is_some() {
+        if let Some(session) = removed {
+            self.keep_if_left_behind(session);
             self.bury(session_id, reason);
         }
     }
@@ -323,7 +349,22 @@ impl SessionStore {
     /// [`crate::tools::workspace_runtime`] 拿它清理空表：主体按 OAuth
     /// `client_id` 分，跑几天的守护进程会攒下一堆没人再来读的空壳。
     pub fn is_empty(&self) -> bool {
-        self.sessions.lock().expect("sessions lock").is_empty()
+        self.sessions.lock().expect("sessions lock").is_empty() && !self.has_left_behind()
+    }
+
+    fn keep_if_left_behind(&self, session: Arc<ExecSession>) {
+        if session.readers_alive() {
+            self.left_behind
+                .lock()
+                .expect("left_behind lock")
+                .push(session);
+        }
+    }
+
+    fn has_left_behind(&self) -> bool {
+        let mut left_behind = self.left_behind.lock().expect("left_behind lock");
+        left_behind.retain(|session| session.readers_alive());
+        !left_behind.is_empty()
     }
 
     /// 表里还在跑的命令。
@@ -350,6 +391,26 @@ impl SessionStore {
                 !session.has_exited()
             })
             .collect()
+    }
+
+    /// 这一代现在退出会不会弄坏什么。
+    ///
+    /// - 命令退了，它留下的进程还占着输出管道（`npm run dev &`）：这边一退管道就断，那个进程下次
+    ///   写输出被 SIGPIPE 带走。过了保留期也一样，所以一直算到它自己退出。重定向走了的
+    ///   （`nohup … > log &`）不占管道，读任务已经收尾，不算。
+    /// - 没有运行记录（盘满时）：输出只在内存里，换代就读不到了。保留期一过内存里也没了，就不算了。
+    pub fn has_unsettled_output(&self) -> bool {
+        let sessions: Vec<Arc<ExecSession>> = self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .values()
+            .cloned()
+            .collect();
+        sessions
+            .iter()
+            .any(|session| session.run.is_none() || session.readers_alive())
+            || self.has_left_behind()
     }
 
     fn session_ids(&self) -> Vec<String> {
@@ -424,6 +485,8 @@ pub struct ExecSession {
     finished_at: Mutex<Option<Instant>>,
     termination_reason: Mutex<Option<String>>,
     reader_tasks: AsyncMutex<Vec<crate::async_rt::JoinHandle<()>>>,
+    /// 等过一轮还没读完的。不再等它们，但要知道它们还在，见 [`SessionStore::has_unsettled_output`]。
+    slow_readers: Mutex<Vec<crate::async_rt::JoinHandle<()>>>,
 }
 
 impl ExecSession {
@@ -465,6 +528,7 @@ impl ExecSession {
             finished_at: Mutex::new(None),
             termination_reason: Mutex::new(None),
             reader_tasks: AsyncMutex::new(Vec::new()),
+            slow_readers: Mutex::new(Vec::new()),
         }
     }
 
@@ -499,10 +563,33 @@ impl ExecSession {
         }
     }
 
+    /// 输出还有人在读。管道的写端全关了读任务才结束，所以它也说明还有进程占着管道。
+    /// 同步函数：表里摘会话时可能在异步线程上。拿不到锁算还在读，多留一会儿没有坏处。
+    fn readers_alive(&self) -> bool {
+        let pending = self
+            .reader_tasks
+            .try_lock()
+            .map_or(true, |tasks| tasks.iter().any(|task| !task.is_finished()));
+        pending
+            || self
+                .slow_readers
+                .lock()
+                .expect("slow_readers lock")
+                .iter()
+                .any(|task| !task.is_finished())
+    }
+
     pub async fn wait_for_readers(&self) {
         let mut tasks = self.reader_tasks.lock().await;
-        while let Some(task) = tasks.pop() {
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), task).await;
+        while let Some(mut task) = tasks.pop() {
+            let waited =
+                tokio::time::timeout(std::time::Duration::from_millis(500), &mut task).await;
+            if waited.is_err() {
+                self.slow_readers
+                    .lock()
+                    .expect("slow_readers lock")
+                    .push(task);
+            }
         }
     }
 
@@ -1850,6 +1937,44 @@ mod tests {
         let other = read_output(&store, &args).expect("read_output");
         assert_eq!(other["termination_reason"], "exited", "{other}");
         assert!(other["workspace_writes_since_start"].is_null(), "{other}");
+    }
+
+    /// 工作区换代之后，上一代起的命令算得出之后写过几次；但只认交接之前起的：之后起的说明
+    /// 交接没成，它期间的写入这边没数到。计数倒退（乱序的交接）也不能算成"没写过"。
+    #[test]
+    fn a_command_from_the_previous_generation_counts_only_if_it_started_before_the_handoff() {
+        let home = tempfile::tempdir().expect("home");
+        let runs = RunLog::new(home.path().join("runs"), "p", "local");
+        let counter = Arc::new(AtomicU64::new(5));
+        let exported = Arc::new(Mutex::new(HashMap::new()));
+        let store = SessionStore::with_runs(runs.clone(), Arc::clone(&counter))
+            .counted_by(Arc::clone(&exported));
+        let id = Uuid::new_v4().to_string();
+        runs.start(&id, "true", None, 5, None)
+            .expect("建记录")
+            .finish("exited", Some(0), 0);
+        crate::tools::runs::orphan_record(&runs, &id);
+        let record = runs.load_detached(&id).expect("读记录");
+
+        assert_eq!(store.writes_since_start(&record), None, "名单外的进程不算");
+        exported
+            .lock()
+            .expect("lock")
+            .insert(record.owner.clone(), record.started_at_ms - 1);
+        assert_eq!(store.writes_since_start(&record), None, "交接之后起的不算");
+        exported
+            .lock()
+            .expect("lock")
+            .insert(record.owner.clone(), record.started_at_ms);
+        assert_eq!(store.writes_since_start(&record), Some(0));
+        counter.fetch_add(2, Ordering::AcqRel);
+        assert_eq!(store.writes_since_start(&record), Some(2));
+        counter.store(1, Ordering::Release);
+        assert_eq!(
+            store.writes_since_start(&record),
+            None,
+            "计数倒退不能算成没写过"
+        );
     }
 
     /// 本进程起的、记录停在 running、内存里却没有：不是真在跑（结束时没记下来），按 unknown

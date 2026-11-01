@@ -93,6 +93,7 @@ pub fn offered<'a>(on: &[String], installed: &'a Installed) -> Vec<&'a Server> {
 pub struct Relay {
     pool: Arc<Pool>,
     results: Kept,
+    last_call: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Default for Relay {
@@ -116,6 +117,7 @@ impl Relay {
                 max_item: MAX_KEPT_BYTES,
                 max_total: KEEP_TOTAL_BYTES,
             }),
+            last_call: std::sync::Mutex::new(None),
         }
     }
 
@@ -209,6 +211,13 @@ impl Relay {
 
     /// 处理一次调用，返回整个 MCP `tools/call` 结果。
     pub fn call(&self, tool: &str, args: &Value, scope: &Scope) -> Value {
+        // 不带 server 的列表只读配置，不起进程也不留结果，不算用过。
+        if tool != LIST || args.get("server").is_some() {
+            *self
+                .last_call
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+        }
         self.pool.retain(scope.on);
         let outcome = match tool {
             LIST => self.list(args, scope),
@@ -226,6 +235,15 @@ impl Relay {
 
     pub fn close_all(&self) {
         self.pool.close_all();
+    }
+
+    /// 这里还留着什么换代就会丢的东西吗。server 闲着会被收、留存的结果 [`KEEP_FOR`] 后过期，
+    /// 两个都过了才算干净；浏览器开着的页面这类状态只有这时才确定已经没了。
+    pub fn holds_state(&self) -> bool {
+        self.last_call
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some_and(|at| at.elapsed() < KEEP_FOR)
     }
 
     /// 只留开着的 server 的连接。服务每次请求都调，所以 `gld mcp off` 之后
@@ -798,6 +816,17 @@ pub(crate) mod tests {
 
     fn relay() -> Relay {
         Relay::with_pool(Pool::new())
+    }
+
+    /// 没用过的转发什么都没留，换代不用等；刚用过的可能开着浏览器页面、留着结果。
+    #[test]
+    fn a_relay_holds_state_only_after_it_was_used() {
+        let relay = relay();
+        assert!(!relay.holds_state());
+        let _ = call(&relay, LIST, json!({}));
+        assert!(!relay.holds_state(), "看一眼有哪些 server 不算用过");
+        let _ = call(&relay, CALL, json!({ "server": "none", "tool": "none" }));
+        assert!(relay.holds_state());
     }
 
     fn code(result: &Value) -> &str {

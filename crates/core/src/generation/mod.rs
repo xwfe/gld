@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 pub use router::{CallError, McpReply, Router};
 
 /// 宿主和执行代之间消息的版本。形状有不兼容改动时加一；同时要决定 [`GENERATION_PROTOCOL_MIN`]。
+/// 只加新操作不用加一：老二进制读不懂时回错误，不会执行，调用的一方自己要接得住（比如工作区搬不走就留着）。
 pub const GENERATION_PROTOCOL: u32 = 1;
 /// 这个宿主还能带的最老执行代协议。范围之外的二进制一律不让上线，失败发生在动路由之前。
 pub const GENERATION_PROTOCOL_MIN: u32 = 1;

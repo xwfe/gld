@@ -305,6 +305,23 @@ impl ToolContext {
         *self.default_cwd.lock().expect("cwd lock") = path;
     }
 
+    /// 这个工作区刚从上一代搬过来时，接上这个入口原来的默认目录。目录已经没了就从根开始。
+    pub fn restore_adopted_cwd(&self, entry: &str) {
+        let Some(path) = self.runtime.take_adopted_cwd(entry) else {
+            return;
+        };
+        match self.workspace.resolve_existing(&path.display().to_string()) {
+            Ok(resolved) if resolved.path.is_dir() => self.set_default_cwd(resolved.path),
+            _ => {}
+        }
+    }
+
+    /// 默认目录不是工作区根时才给（相对工作区根，`resolve_existing` 不收绝对路径），换代时带走。
+    pub fn moved_default_cwd(&self) -> Option<PathBuf> {
+        (self.default_cwd_path() != self.workspace.root())
+            .then(|| PathBuf::from(self.default_cwd_display()))
+    }
+
     pub fn default_cwd_path(&self) -> PathBuf {
         self.default_cwd.lock().expect("cwd lock").clone()
     }

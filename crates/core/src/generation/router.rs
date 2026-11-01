@@ -29,6 +29,17 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 /// 有旧代时，多久叫它们对一次成员名单。每次要读配置和跨进程问一轮，不用每条请求都做。
 const RECONCILE_EVERY: Duration = Duration::from_secs(5);
+/// 有旧代时，多久再试一次把闲下来的工作区搬走。试一次只是问一下有没有命令在跑，不贵；
+/// 间隔决定命令跑完之后多久才用上新版本。
+const HANDOFF_EVERY: Duration = Duration::from_secs(2);
+/// 搬之前等在途调用收尾多久，这段时间发给这个工作区的新请求排队。不等的话，连着来请求的
+/// 工作区每次看都有在途调用，永远搬不走。太长又会让新请求被一条长调用拖住，所以等不到就先放行、下一轮再试。
+const HANDOFF_QUIESCE: Duration = Duration::from_millis(300);
+/// 问旧代、交给新代各等多久。这期间请求在排队，两步加上等在途调用要短于 [`ADMIT_WAIT`]，
+/// 不然旧代卡住时排队的请求会先超时。
+const HANDOFF_STEP_TIMEOUT: Duration = Duration::from_secs(4);
+/// `switch` 当场搬多久，剩下的交给后台线程。旧代卡住时不能让命令行等到超时、误以为没切成。
+const SWITCH_HANDOFF_BUDGET: Duration = Duration::from_secs(10);
 const RESTART_BACKOFF: [Duration; 5] = [
     Duration::from_millis(200),
     Duration::from_secs(1),
@@ -79,6 +90,10 @@ pub struct McpReply {
 struct OwnedWorkspace {
     generation: u64,
     in_flight: usize,
+    /// 正在搬到新代。这段时间发给它的请求先等着（[`pick`]），否则两代会同时碰这个目录。
+    moving: bool,
+    /// 上一次没搬成的原因，给 `gld daemon upgrade status` 看。
+    blocked: Vec<String>,
 }
 
 struct State {
@@ -90,6 +105,8 @@ struct State {
     preparing: bool,
     /// 正在替挂掉的当前代找替代。只开一个线程，第二次丢失不再多开。
     replacing: bool,
+    /// 搬工作区的线程在不在跑。只开一个。
+    handing_off: bool,
     owners: HashMap<String, OwnedWorkspace>,
     /// 服务在跑时的配置。新起的代按它建 Hub，起不来也不丢。
     hub_config: Option<HubConfig>,
@@ -129,6 +146,8 @@ impl Drop for Admission {
                     owned.in_flight = owned.in_flight.saturating_sub(1);
                 }
             }
+            drop(state);
+            self.router.changed.notify_all();
         }
         self.router.retire_idle();
     }
@@ -147,6 +166,7 @@ impl Router {
                 prepared: None,
                 preparing: false,
                 replacing: false,
+                handing_off: false,
                 owners: HashMap::new(),
                 hub_config: None,
                 next_id: 1,
@@ -236,10 +256,18 @@ impl Router {
             }
             let now = Instant::now();
             if now >= deadline {
-                let reason = state
-                    .last_failure
-                    .clone()
-                    .unwrap_or_else(|| "正在重启".to_string());
+                let moving = key
+                    .as_deref()
+                    .and_then(|key| state.owners.get(key))
+                    .is_some_and(|owned| owned.moving);
+                let reason = if moving {
+                    "这个项目正在换到新版本".to_string()
+                } else {
+                    state
+                        .last_failure
+                        .clone()
+                        .unwrap_or_else(|| "正在重启".to_string())
+                };
                 return Err(CallError::Unavailable(reason));
             }
             let (next, _) = self
@@ -275,9 +303,7 @@ impl Router {
             body: body.clone(),
             route,
         };
-        let reply = self.forward(key, discovery, &op);
-        self.reconcile_draining();
-        mcp_reply(reply?)
+        mcp_reply(self.forward(key, discovery, &op)?)
     }
 
     /// 单项目监听器上的一次 MCP 请求。
@@ -406,7 +432,7 @@ impl Router {
     }
 
     /// 平时每次工具调用都会顺手收掉离开的成员，可切换之后旧代可能再也收不到调用。
-    /// 所以有旧代时由这边定期叫它做，收完把已经不存在的工作区从它名下摘掉，它才退得了。
+    /// 所以有旧代时由 [`Self::keep_handing_off`] 定期叫它做，收完把已经不存在的工作区从它名下摘掉，它才退得了。
     fn reconcile_draining(&self) {
         let draining: Vec<Arc<Link>> = {
             let mut state = self.lock();
@@ -458,6 +484,7 @@ impl Router {
         self.lock().owners.retain(|key, owned| {
             owned.generation != link.id
                 || owned.in_flight > 0
+                || owned.moving
                 || known.contains(key)
                 || busy.contains(key)
         });
@@ -606,7 +633,7 @@ impl Router {
             if state.generations.len() >= MAX_LIVE_GENERATIONS {
                 return Err(format!(
                     "已经有 {} 代在跑（上限 {MAX_LIVE_GENERATIONS}），旧代还占着工作区或命令。\
-                     不会为了腾位置杀掉它们；工作区交接还没做，全换成新版本只能 gld daemon restart，\
+                     它们闲下来就会自己退，不会为了腾位置杀掉。等不及就 gld daemon restart，\
                      现状看 gld daemon upgrade status",
                     state.generations.len()
                 ));
@@ -737,7 +764,7 @@ impl Router {
         }
     }
 
-    /// 切过去：之后没绑过的工作区进新代，已经绑过的还留在原来那一代。
+    /// 切过去：之后没绑过的工作区进新代；已经绑过的闲着就马上搬过去，忙着的等它闲下来。
     pub fn switch(&self) -> Result<Value, String> {
         let prepared = self
             .lock()
@@ -762,11 +789,167 @@ impl Router {
             state.current.replace(Arc::clone(&prepared))
         };
         self.changed.notify_all();
+        let moved = self.hand_off_idle(Some(SWITCH_HANDOFF_BUDGET));
+        let stayed = self
+            .lock()
+            .owners
+            .values()
+            .filter(|owned| owned.generation != prepared.id)
+            .count();
         self.retire_idle();
+        self.keep_handing_off();
         Ok(json!({
             "current": format!("g{}", prepared.id),
             "previous": previous.map(|link| format!("g{}", link.id)),
+            "moved_workspaces": moved,
+            "waiting_workspaces": stayed,
         }))
+    }
+
+    /// 把旧代手里闲着的工作区都搬到当前代，返回搬了几个。`budget` 用完就先停，下一轮接着搬。
+    fn hand_off_idle(&self, budget: Option<Duration>) -> usize {
+        let started = Instant::now();
+        let keys: Vec<String> = {
+            let state = self.lock();
+            let Some(current) = state.current.as_ref().map(|link| link.id) else {
+                return 0;
+            };
+            state
+                .owners
+                .iter()
+                .filter(|(_, owned)| owned.generation != current)
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        keys.iter()
+            .take_while(|_| budget.is_none_or(|budget| started.elapsed() < budget))
+            .filter(|key| self.hand_off(key))
+            .count()
+    }
+
+    /// 搬一个工作区（RFC-0008 §3.2）。
+    ///
+    /// 先在锁里标上 `moving`，从这一刻起 [`pick`] 不再放请求进来，再等在途调用归零，
+    /// 所以旧代答“这里没有命令、没有写入”之后不可能再冒出新的。判断和切换是同一个受保护过程，
+    /// 不是“查完是空的、过一会儿再切”。任何一步失败都留在原来那一代，工作区状态没动过。
+    fn hand_off(&self, key: &str) -> bool {
+        let (from, to) = {
+            let mut state = self.lock();
+            let Some(to) = state.current.clone() else {
+                return false;
+            };
+            let Some((generation, moving)) = state
+                .owners
+                .get(key)
+                .map(|owned| (owned.generation, owned.moving))
+            else {
+                return false;
+            };
+            if generation == to.id || moving {
+                return false;
+            }
+            let Some(from) = state.link_by_id(generation) else {
+                return false;
+            };
+            let Some(owned) = state.owners.get_mut(key) else {
+                return false;
+            };
+            owned.moving = true;
+            let deadline = Instant::now() + HANDOFF_QUIESCE;
+            loop {
+                let Some(owned) = state.owners.get_mut(key) else {
+                    return false; // 旧代这期间挂了。
+                };
+                if owned.generation != generation {
+                    return false;
+                }
+                if owned.in_flight == 0 {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    owned.moving = false;
+                    owned.blocked = vec!["in_flight_calls".to_string()];
+                    drop(state);
+                    self.changed.notify_all();
+                    return false;
+                }
+                let (next, _) = self
+                    .changed
+                    .wait_timeout(state, deadline - now)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state = next;
+            }
+            (from, to)
+        };
+        let outcome = move_workspace(key, &from, &to);
+        let moved = {
+            let mut state = self.lock();
+            let to_is_current = state.is_current(to.id);
+            match state.owners.get_mut(key) {
+                // 这期间旧代挂了的话，这一条已经被 `on_lost` 摘掉，什么都不用做。
+                Some(owned) if owned.generation == from.id => {
+                    owned.moving = false;
+                    match outcome {
+                        Ok(()) if to_is_current => {
+                            owned.generation = to.id;
+                            owned.blocked.clear();
+                            true
+                        }
+                        Ok(()) => false,
+                        Err(blocked) => {
+                            if blocked != owned.blocked {
+                                eprintln!(
+                                    "工作区 {key} 还留在 g{}：{}",
+                                    from.id,
+                                    blocked.join("、")
+                                );
+                            }
+                            owned.blocked = blocked;
+                            false
+                        }
+                    }
+                }
+                _ => false,
+            }
+        };
+        self.changed.notify_all();
+        moved
+    }
+
+    /// 有旧代就一直试着搬、收离开的成员、让闲下来的退，直到没有旧代。
+    fn keep_handing_off(&self) {
+        {
+            let mut state = self.lock();
+            if state.handing_off {
+                return;
+            }
+            state.handing_off = true;
+        }
+        let router = self.arc();
+        let spawned = std::thread::Builder::new()
+            .name("gld-gen-handoff".into())
+            .spawn(move || loop {
+                std::thread::sleep(HANDOFF_EVERY);
+                {
+                    let mut state = router.lock();
+                    let draining = state
+                        .generations
+                        .iter()
+                        .any(|link| !state.is_current(link.id) && !state.is_prepared(link.id));
+                    if state.shutting_down || !draining {
+                        state.handing_off = false;
+                        return;
+                    }
+                }
+                router.hand_off_idle(None);
+                router.reconcile_draining();
+                router.retire_idle();
+            });
+        if let Err(error) = spawned {
+            eprintln!("起不了搬工作区的线程：{error}");
+            self.lock().handing_off = false;
+        }
     }
 
     /// 放弃准备好的新代。路由本来就没指向它，什么也不用恢复。
@@ -798,10 +981,8 @@ impl Router {
         self.lock().generations.retain(|link| link.id != id);
     }
 
-    /// 旧代没有在途调用、没有工作区、没有命令，才让它走。
-    ///
-    /// 工作区交接是下一期（RFC-0008 §5）：这一期旧代只要被绑过工作区就一直留着，
-    /// 这不是漏了，是不能在没做受保护交接时把工作区挪走（写入序号会漏记）。
+    /// 旧代没有在途调用、没有工作区、没有命令，才让它走。工作区要搬走了才算没有，
+    /// 见 [`Self::hand_off`]：搬不走的（命令还在跑）旧代就一直留着，不杀。
     fn retire_idle(&self) {
         let idle: Vec<Arc<Link>> = {
             let state = self.lock();
@@ -834,9 +1015,12 @@ impl Router {
         // 问状态不拿锁；问完在锁里再确认一次，这中间不会有新路由指向它，
         // 因为它既不是当前代、也不再拥有工作区——只有发现类请求可能挑中它，所以还要看在途数。
         let status = link.call(&Op::Status, Some(CONTROL_TIMEOUT));
+        // 留下的进程还占着输出管道时也不退：一退管道就断，它会被 SIGPIPE 带走。
+        // 老二进制不报这个字段，当作没有。
         let quiet = status.is_ok_and(|status| {
             status["active_commands"].as_u64() == Some(0)
                 && status["active_agents"].as_u64() == Some(0)
+                && status["unsettled_output"] != json!(true)
         });
         if !quiet {
             return;
@@ -986,7 +1170,14 @@ impl Router {
                 state
                     .owners
                     .iter()
-                    .map(|(key, owned)| (key.clone(), owned.generation, owned.in_flight))
+                    .map(|(key, owned)| {
+                        (
+                            key.clone(),
+                            owned.generation,
+                            owned.in_flight,
+                            owned.blocked.clone(),
+                        )
+                    })
                     .collect::<Vec<_>>(),
                 state.current.as_ref().map(|link| link.id),
                 state.prepared.as_ref().map(|link| link.id),
@@ -1009,8 +1200,14 @@ impl Router {
                 let mut row = generation_row(link, role);
                 let mut workspaces: Vec<Value> = owners
                     .iter()
-                    .filter(|(_, generation, _)| *generation == link.id)
-                    .map(|(key, _, in_flight)| json!({ "workspace": key, "in_flight": in_flight }))
+                    .filter(|(_, generation, _, _)| *generation == link.id)
+                    .map(|(key, _, in_flight, blocked)| {
+                        json!({
+                            "workspace": key,
+                            "in_flight": in_flight,
+                            "handoff_blocked_by": blocked,
+                        })
+                    })
                     .collect();
                 workspaces.sort_by_key(|row| row["workspace"].as_str().map(str::to_string));
                 // 问不到不算错误：报告本身不能因为一代卡住而卡住。
@@ -1018,6 +1215,7 @@ impl Router {
                     Ok(status) => {
                         row["active_commands"] = status["active_commands"].clone();
                         row["active_agents"] = status["active_agents"].clone();
+                        row["unsettled_output"] = status["unsettled_output"].clone();
                         row["commands_by_workspace"] = status["commands_by_workspace"].clone();
                     }
                     Err(error) => row["status_error"] = json!(error.to_string()),
@@ -1033,8 +1231,8 @@ impl Router {
                 "generation_protocol": GENERATION_PROTOCOL,
                 "state_format": STATE_FORMAT,
                 "max_generations": MAX_LIVE_GENERATIONS,
-                // 下面这几个是这一期还没做到的，别让人从“能切换”推出“零中断”（RFC-0008 §5）。
-                "workspace_handoff": false,
+                "workspace_handoff": true,
+                // 下面这两个还没做到，别让人从“能切换”推出“零中断”（RFC-0008 §5）。
                 "host_handoff": false,
                 "zero_interruption": false,
             },
@@ -1085,12 +1283,13 @@ fn pick(state: &mut State, key: Option<&str>, discovery: bool) -> Option<Arc<Lin
     let Some(key) = key else {
         return current;
     };
-    if let Some(link) = state
-        .owners
-        .get(key)
-        .and_then(|owned| state.link_by_id(owned.generation))
-    {
-        return Some(link);
+    if let Some(owned) = state.owners.get(key) {
+        if owned.moving {
+            return None;
+        }
+        if let Some(link) = state.link_by_id(owned.generation) {
+            return Some(link);
+        }
     }
     let current = current?;
     state.owners.insert(
@@ -1098,9 +1297,38 @@ fn pick(state: &mut State, key: Option<&str>, discovery: bool) -> Option<Arc<Lin
         OwnedWorkspace {
             generation: current.id,
             in_flight: 0,
+            moving: false,
+            blocked: Vec::new(),
         },
     );
     Some(current)
+}
+
+/// 问旧代、交给新代。没搬成时给出原因。
+fn move_workspace(key: &str, from: &Link, to: &Link) -> Result<(), Vec<String>> {
+    let released = from
+        .call(
+            &Op::ReleaseWorkspace {
+                key: key.to_string(),
+            },
+            Some(HANDOFF_STEP_TIMEOUT),
+        )
+        .map_err(|error| vec![format!("release_failed: {error}")])?;
+    if let Some(blocked) = released["blocked"].as_array() {
+        return Err(blocked
+            .iter()
+            .filter_map(|reason| reason.as_str().map(str::to_string))
+            .collect());
+    }
+    to.call(
+        &Op::AdoptWorkspace {
+            key: key.to_string(),
+            state: released["state"].clone(),
+        },
+        Some(HANDOFF_STEP_TIMEOUT),
+    )
+    .map_err(|error| vec![format!("adopt_failed: {error}")])?;
+    Ok(())
 }
 
 /// 工作区所有权的键：和 [`crate::tools::workspace_runtime::runtime_for`] 一样规范化路径，
@@ -1174,6 +1402,9 @@ fn blocked_by(role: &str, row: &Value, workspaces: &[Value]) -> Vec<String> {
     }
     if row["active_agents"].as_u64().unwrap_or(0) > 0 {
         reasons.push("running_agents".to_string());
+    }
+    if row["unsettled_output"] == json!(true) {
+        reasons.push("unsettled_output".to_string());
     }
     reasons
 }

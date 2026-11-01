@@ -672,7 +672,7 @@ pub enum DaemonUpgradeCmd {
         #[arg(long, default_value_t = 15, value_name = "SECS")]
         timeout: u64,
     },
-    /// 切到准备好的新版本：之后第一次用到的项目进新版本，已经用过的留在原来那一代
+    /// 切到准备好的新版本：闲着的项目马上搬过去，在跑命令的等跑完再搬，命令不会被停
     Switch,
     /// 放弃准备好的新版本，在线服务不受影响
     Abort,

@@ -115,6 +115,11 @@ fn structured(reply: &Reply) -> Value {
     serde_json::from_str(text).expect("工具结果是 JSON")
 }
 
+fn structured_list(reply: &Reply) -> Value {
+    let body: Value = serde_json::from_str(&reply.body).expect("JSON-RPC");
+    body["result"]["tools"].clone()
+}
+
 fn generation_pids(status: &Value) -> Vec<u32> {
     status["generations"]
         .as_array()
@@ -723,10 +728,347 @@ fn switching_keeps_running_work_with_its_generation_and_sends_new_workspaces_to_
     );
     assert_eq!(snapshot["exit_code"], 7, "{snapshot}");
 
-    // 老的还留着：它有工作区，这一期没有交接，不能杀。
+    // 命令跑完、没有在途调用了：项目自己搬到新代，旧代退出。跑完的结果换了一代还读得到。
+    wait_gone(g1);
+    assert_eq!(fixture.runner_of("api"), g2);
+    let read = fixture.tool(
+        "read_output",
+        json!({ "workspace": "api", "output_ref": format!("session:{session}:stdout") }),
+    );
+    assert_eq!(read["exit_code"], 7, "{read}");
+    assert!(
+        read["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("got-after-switch")),
+        "{read}"
+    );
+}
+
+/// 闲着的项目切过去就搬走，旧代退出；写入序号和自己写过的版本接着算，不用重新验证。
+#[test]
+fn an_idle_workspace_moves_at_the_switch_and_keeps_what_it_knew() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    env.write("note.txt", "one\n");
+    let g1 = fixture.runner_of("api");
+    let done = fixture.tool(
+        "exec_command",
+        json!({ "workspace": "api", "argv": ["sh", "-c", "echo before-move"], "yield_time_ms": 30000 }),
+    );
+    assert_eq!(done["exit_code"], 0, "{done}");
+    let listed = fixture.tool("list_runs", json!({ "workspace": "api", "limit": 1 }));
+    let session = listed["runs"][0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = fixture.tool(
+        "read_file",
+        json!({ "workspace": "api", "path": "note.txt" }),
+    );
+    let version = first["version"].as_str().unwrap().to_string();
+    let patched = fixture.tool(
+        "apply_patch",
+        json!({
+            "workspace": "api",
+            "patch": "*** Begin Patch\n*** Update File: note.txt\n@@\n-one\n+two\n*** End Patch\n",
+        }),
+    );
+    assert_eq!(patched["ok"], true, "{patched}");
+
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    let switched = env.json(&["--json", "daemon", "upgrade", "switch"]);
+    assert_eq!(switched["moved_workspaces"], 1, "{switched}");
+    assert_eq!(switched["waiting_workspaces"], 0, "{switched}");
+    wait_gone(g1);
     let status = fixture.status();
+    assert_eq!(status["retired"], 1, "{status}");
+    assert_eq!(status["capability"]["workspace_handoff"], true);
+    assert_eq!(generation_pids(&status).len(), 1, "{status}");
+
+    // 还拿着改之前的版本号：中间都是自己写的，换了一代也放行。
+    let again = fixture.tool(
+        "apply_patch",
+        json!({
+            "workspace": "api",
+            "patch": "*** Begin Patch\n*** Update File: note.txt\n@@\n-two\n+three\n*** End Patch\n",
+            "expected_versions": { "note.txt": version },
+        }),
+    );
+    assert_eq!(again["ok"], true, "{again}");
+    // 旧代起的命令，算得出之后写过几次：搬之前一次，搬之后一次。
+    let read = fixture.tool(
+        "read_output",
+        json!({ "workspace": "api", "output_ref": format!("session:{session}:stdout") }),
+    );
+    assert_eq!(read["source"], "run_record", "{read}");
+    assert_eq!(read["workspace_writes_since_start"], 2, "{read}");
+    assert!(
+        read["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("before-move")),
+        "{read}"
+    );
+}
+
+/// 默认目录丢了的话，下一条命令不报错，只是悄悄跑到项目根。
+#[test]
+fn the_default_directory_moves_with_the_workspace() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    std::fs::create_dir(env.project.path().join("sub")).unwrap();
+    let g1 = fixture.runner_of("api");
+    // 经 Hub 改不了默认目录（工具藏起来了），命令行这个入口改得了。
+    let set = env.json(&["--json", "tool", "call", "set_default_cwd", "path=sub"]);
+    assert_eq!(set["ok"], true, "{set}");
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    env.ok(&["daemon", "upgrade", "switch"]);
+    wait_gone(g1);
+    let run = env.json(&["--json", "tool", "call", "exec_command", "cmd=pwd"]);
+    assert!(
+        run["resolved_cwd"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("/sub")),
+        "{run}"
+    );
+}
+
+/// 在跑的命令把它的项目留在旧代，别的项目照搬；命令跑完才跟过去，全程不杀。
+#[test]
+fn a_running_command_keeps_its_workspace_back_until_it_finishes() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    let g1 = fixture.runner_of("api");
+    assert_eq!(fixture.runner_of("web"), g1);
+    let started = fixture.tool(
+        "exec_command",
+        json!({
+            "workspace": "api",
+            "argv": ["sh", "-c", "read line; echo slow-done"],
+            "stdin_mode": "interactive",
+            "yield_time_ms": 0,
+            "timeout_ms": 120000,
+        }),
+    );
+    let session = started["session_id"].as_str().unwrap().to_string();
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    let switched = env.json(&["--json", "daemon", "upgrade", "switch"]);
+    assert_eq!(switched["moved_workspaces"], 1, "{switched}");
+    assert_eq!(switched["waiting_workspaces"], 1, "{switched}");
+
+    let status = fixture.status();
+    let g2 = generation(&status, "g2")["pid"].as_u64().unwrap() as u32;
+    let old = generation(&status, "g1");
+    assert_eq!(old["role"], "draining", "{status}");
+    assert_eq!(old["workspaces"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(
+        old["workspaces"][0]["handoff_blocked_by"],
+        json!(["running_commands"]),
+        "{status}"
+    );
+    assert_eq!(fixture.runner_of("web"), g2);
+    assert_eq!(fixture.runner_of("api"), g1);
+
+    let finished = fixture.tool(
+        "write_stdin",
+        json!({ "workspace": "api", "session_id": session, "chars": "go\n", "yield_time_ms": 10000 }),
+    );
+    assert_eq!(finished["exit_code"], 0, "{finished}");
+    wait_gone(g1);
+    assert_eq!(fixture.runner_of("api"), g2);
+    let read = fixture.tool(
+        "read_output",
+        json!({ "workspace": "api", "output_ref": format!("session:{session}:stdout") }),
+    );
+    assert_eq!(read["exit_code"], 0, "命令被停了：{read}");
+    assert!(
+        read["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("slow-done")),
+        "{read}"
+    );
+}
+
+/// 命令退了，留下的进程还占着输出管道：旧代一退管道就断，那个进程下次写输出就没了。
+/// 所以项目留在旧代，直到它自己退出；一点都不杀。重定向走了的不占管道，不用等。
+#[test]
+fn a_process_left_holding_the_output_keeps_the_old_generation_alive() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    let g1 = fixture.runner_of("api");
+    let holding = fixture.tool(
+        "exec_command",
+        json!({
+            "workspace": "api",
+            "argv": ["sh", "-c", "(while true; do echo tick; sleep 0.2; done) & echo $!; exit 0"],
+            "yield_time_ms": 30000,
+        }),
+    );
+    assert_eq!(holding["exit_code"], 0, "{holding}");
+    let holder: u32 = holding["stdout"]
+        .as_str()
+        .and_then(|text| text.lines().next())
+        .and_then(|line| line.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{holding}"));
+    let redirected = fixture.tool(
+        "exec_command",
+        json!({
+            "workspace": "web",
+            "argv": ["sh", "-c", "(while true; do echo tick; sleep 0.2; done) > /dev/null 2>&1 < /dev/null & echo $!; exit 0"],
+            "yield_time_ms": 30000,
+        }),
+    );
+    let free: u32 = redirected["stdout"]
+        .as_str()
+        .and_then(|text| text.lines().next())
+        .and_then(|line| line.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{redirected}"));
+
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    let switched = env.json(&["--json", "daemon", "upgrade", "switch"]);
+    assert_eq!(
+        switched["moved_workspaces"], 1,
+        "只有重定向走的那个能搬：{switched}"
+    );
+    assert_eq!(switched["waiting_workspaces"], 1, "{switched}");
+
+    // 等过两轮：旧代不能退，占着输出的进程也一直活着。
+    std::thread::sleep(Duration::from_secs(5));
+    let status = fixture.status();
+    let old = generation(&status, "g1");
+    assert_eq!(
+        old["workspaces"][0]["handoff_blocked_by"],
+        json!(["unsettled_output"]),
+        "{status}"
+    );
     assert!(alive(g1), "{status}");
-    assert_eq!(generation(&status, "g1")["role"], "draining");
+    assert!(alive(holder), "占着输出的进程被带走了");
+    assert!(alive(free), "重定向走的进程被带走了");
+
+    // 它自己没了，项目才搬走，旧代才退。
+    Command::new("kill")
+        .arg(holder.to_string())
+        .status()
+        .expect("kill");
+    wait_gone(g1);
+    assert_eq!(fixture.status()["retired"], 1);
+    assert!(alive(free), "旧代退出带走了重定向走的进程");
+    Command::new("kill")
+        .arg(free.to_string())
+        .status()
+        .expect("kill");
+}
+
+/// 一边不停地写、一边连着换两代：每次写都成功且只算一次，换代那一下不漏记。
+#[test]
+fn writes_going_on_through_two_handoffs_are_each_counted_once() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    fixture.tool(
+        "exec_command",
+        json!({ "workspace": "api", "cmd": "true", "yield_time_ms": 30000 }),
+    );
+    let listed = fixture.tool("list_runs", json!({ "workspace": "api", "limit": 1 }));
+    let session = listed["runs"][0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (port, token, stop) = (fixture.port, fixture.token.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut count = 0u32;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let patch = format!(
+                    "*** Begin Patch\n*** Add File: written-{count}.txt\n+{count}\n*** End Patch\n"
+                );
+                let body = call_body("apply_patch", json!({ "workspace": "api", "patch": patch }));
+                let reply = post_json(port, "/mcp", &body, Some(&token));
+                assert_eq!(reply.status, 200, "{}", reply.body);
+                assert_eq!(structured(&reply)["ok"], true, "{}", reply.body);
+                count += 1;
+            }
+            count
+        })
+    };
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(300));
+        env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+        env.ok(&["daemon", "upgrade", "switch"]);
+        wait_for("工作区搬走", || {
+            let status = fixture.status();
+            generation_pids(&status).len() == 1
+        });
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let count = writer.join().expect("写入线程没有报错");
+    assert!(count > 10, "这段时间只写了 {count} 次，没覆盖到换代");
+
+    let status = fixture.status();
+    assert_eq!(status["retired"], 2, "{status}");
+    for index in 0..count {
+        let written = env.project.path().join(format!("written-{index}.txt"));
+        assert!(written.exists(), "第 {index} 次写报了成功，文件却不在");
+    }
+    let read = fixture.tool(
+        "read_output",
+        json!({ "workspace": "api", "output_ref": format!("session:{session}:stdout") }),
+    );
+    assert_eq!(read["workspace_writes_since_start"], count, "{read}");
+}
+
+/// 新代接不住（比如是回退用的老版本）：项目留在原地接着服务，状态报告说得出原因。
+#[test]
+fn a_new_generation_that_cannot_adopt_leaves_the_workspace_where_it_was() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    let g1 = fixture.runner_of("api");
+    let mut names: Vec<String> = gld_core::tools::list_tools()
+        .iter()
+        .chain(
+            structured_list(&fixture.post(&rpc_body("tools/list", json!({}))))
+                .as_array()
+                .unwrap(),
+        )
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names.dedup();
+    let listed = serde_json::to_string(&json!({ "tools": names })).unwrap();
+    let listed = listed.replace('"', "\\\\\"");
+    let script = format!(
+        r#"read hello
+{}
+while read line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *adopt_workspace*) printf '{{"frame":"reply","id":%s,"ok":false,"value":"读不懂这条操作"}}\n' "$id" ;;
+    *ping*) printf '{{"frame":"reply","id":%s,"ok":true,"value":"{{\\"identity\\":{{\\"pid\\":%s}}}}"}}\n' "$id" "$$" ;;
+    *tool_names*) printf '{{"frame":"reply","id":%s,"ok":true,"value":"{listed}"}}\n' "$id" ;;
+    *) printf '{{"frame":"reply","id":%s,"ok":true,"value":"{{}}"}}\n' "$id" ;;
+  esac
+done"#,
+        ready_frame(
+            gld_core::generation::GENERATION_PROTOCOL,
+            gld_core::generation::STATE_FORMAT
+        )
+    );
+    let exe = fake_candidate(env, "cannot-adopt", &script);
+    env.ok(&["daemon", "upgrade", "prepare", exe.to_str().unwrap()]);
+    let switched = env.json(&["--json", "daemon", "upgrade", "switch"]);
+    assert_eq!(switched["moved_workspaces"], 0, "{switched}");
+
+    assert_eq!(fixture.runner_of("api"), g1, "项目不该离开还在服务的那一代");
+    let status = fixture.status();
+    let old = generation(&status, "g1");
+    assert!(
+        old["workspaces"][0]["handoff_blocked_by"][0]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("adopt_failed")),
+        "{status}"
+    );
+    assert!(alive(g1), "{status}");
 }
 
 /// 切换前后一直有请求：同一个端口、同一个 token，没有一条因为切换报错。延迟预算没有验。
@@ -759,7 +1101,10 @@ fn requests_keep_succeeding_across_prepare_and_switch() {
             .ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
         fixture.env.ok(&["daemon", "upgrade", "switch"]);
     }
-    std::thread::sleep(Duration::from_millis(200));
+    // 请求一直不停也要搬得走：这时几乎任何一刻看，这个项目都有在途调用。
+    wait_for("旧代都退出", || {
+        generation_pids(&fixture.status()).len() == 1
+    });
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let count = client.join().expect("请求线程没有报错");
     assert!(count > 10, "这段时间只发出去 {count} 条，没覆盖到切换");
@@ -863,10 +1208,20 @@ fn the_generation_limit_refuses_new_ones_and_kills_nothing() {
     let env = &fixture.env;
     let exe = env!("CARGO_BIN_EXE_gld");
     let g1 = fixture.runner_of("api");
+    // 项目闲下来就会搬走，留一条命令才占得住旧代。
+    let hold = |workspace: &str| {
+        let started = fixture.tool(
+            "exec_command",
+            json!({ "workspace": workspace, "cmd": unique_sleep(), "yield_time_ms": 0, "timeout_ms": 120000 }),
+        );
+        assert_eq!(started["status"], "running", "{started}");
+    };
+    hold("api");
     env.ok(&["daemon", "upgrade", "prepare", exe]);
     env.ok(&["daemon", "upgrade", "switch"]);
     let g2 = fixture.runner_of("web");
     assert_ne!(g2, g1);
+    hold("web");
     env.ok(&["daemon", "upgrade", "prepare", exe]);
     env.ok(&["daemon", "upgrade", "switch"]);
     assert_eq!(generation_pids(&fixture.status()).len(), 3);
@@ -908,10 +1263,10 @@ fn the_status_report_carries_no_secret_or_tool_argument() {
         !report.contains(started["session_id"].as_str().unwrap()),
         "报告里有 session id：{report}"
     );
-    // 能力如实标着还没做到的，别让人从“能切换”推出“零中断”。
+    // 能力如实标着还没做到的，别让人从“能换代”推出“零中断”。
     let status = fixture.status();
     assert_eq!(status["capability"]["zero_interruption"], false);
-    assert_eq!(status["capability"]["workspace_handoff"], false);
+    assert_eq!(status["capability"]["workspace_handoff"], true);
     assert_eq!(status["capability"]["host_handoff"], false);
     let _ = fixture.tool(
         "kill_session",

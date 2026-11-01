@@ -2,10 +2,10 @@
 //!
 //! 只听宿主的。不绑端口、不写配置、不看 HTTP 头，鉴权结果由宿主放在消息里给过来。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -27,7 +27,7 @@ use crate::mcp::handle_request;
 use crate::nodes::registry::NativeMember;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{canonical_tool_name, exposed_tool_names};
-use crate::tools::workspace_runtime;
+use crate::tools::workspace_runtime::{self, WorkspaceHandoff};
 use crate::tools::{self, build_tool_context, Caller, SharedToolContext, ToolContext};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, WorkspaceProfile};
@@ -341,6 +341,15 @@ impl Generation {
                 let task = agents::stop(&home, &task_id).map_err(agent_failure)?;
                 serde_json::to_value(task).map_err(|e| e.to_string())
             }
+            Op::ReleaseWorkspace { key } => self.release_workspace(&key),
+            Op::AdoptWorkspace { key, state } => {
+                if let Some(root) = handoff_root(&key)? {
+                    let state: WorkspaceHandoff =
+                        serde_json::from_value(state).map_err(|error| error.to_string())?;
+                    workspace_runtime::runtime_for(&root).adopt_handoff(state)?;
+                }
+                Ok(json!({}))
+            }
             Op::InterruptAll => {
                 interrupt_everything();
                 Ok(json!({}))
@@ -362,6 +371,44 @@ impl Generation {
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect()
+    }
+
+    /// 只看、只抄，所以下一代没接住时什么都不用恢复。唯一动的是闲着的只读远端连接，下次用会重开。
+    fn release_workspace(&self, key: &str) -> Result<Value, String> {
+        let Some(root) = handoff_root(key)? else {
+            let holds = self
+                .current_hub()
+                .is_ok_and(|hub| hub.holds_connection(key));
+            return Ok(if holds {
+                json!({ "blocked": ["open_connection"] })
+            } else {
+                json!({ "state": WorkspaceHandoff::default() })
+            });
+        };
+        let runtime = workspace_runtime::runtime_for(&root);
+        let blockers = runtime.handoff_blockers(&root);
+        if !blockers.is_empty() {
+            return Ok(json!({ "blocked": blockers }));
+        }
+        // Hub 不提供改默认目录的工具（`HIDDEN_TOOLS`），只有这几个入口的上下文会变。
+        let mut cwds = BTreeMap::new();
+        for (key, (_, context)) in self
+            .contexts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+        {
+            if let (Some((entry, _)), true, Some(cwd)) = (
+                key.split_once(':'),
+                Arc::ptr_eq(&context.runtime, &runtime),
+                context.moved_default_cwd(),
+            ) {
+                cwds.insert(entry.to_string(), cwd);
+            }
+        }
+        serde_json::to_value(runtime.handoff_state(cwds))
+            .map(|state| json!({ "state": state }))
+            .map_err(|error| error.to_string())
     }
 
     fn current_hub(&self) -> Result<Arc<Hub>, String> {
@@ -429,10 +476,12 @@ impl Generation {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some((cached, context)) = contexts.get(&key) {
             if *cached == fingerprint {
+                context.restore_adopted_cwd(kind.label());
                 return Ok(Arc::clone(context));
             }
         }
         let context = Arc::new(kind.build(&profile, &settings)?);
+        context.restore_adopted_cwd(kind.label());
         contexts.insert(key, (fingerprint, Arc::clone(&context)));
         Ok(context)
     }
@@ -459,6 +508,24 @@ impl Generation {
     fn exit_now(&self) {
         std::process::exit(0);
     }
+}
+
+/// 归属键对应的目录。远端成员、本机 MCP 转发没有目录，它们的状态在连接上。
+fn handoff_root(key: &str) -> Result<Option<PathBuf>, String> {
+    if Path::new(key).is_absolute() {
+        return Ok(Some(PathBuf::from(key)));
+    }
+    if !crate::managed_workspaces::is_id(key) {
+        return Ok(None);
+    }
+    let home = crate::home::data_home().map_err(|error| error.to_string())?;
+    let live = crate::managed_workspaces::Store::new(home)
+        .live()
+        .map_err(|error| error.message())?;
+    Ok(live
+        .into_iter()
+        .find(|record| record.id == key)
+        .map(|record| record.root))
 }
 
 fn interrupt_everything() {
@@ -511,6 +578,7 @@ fn status() -> Value {
         "identity": BuildIdentity::current(),
         "active_commands": total,
         "active_agents": agents::live_count(),
+        "unsettled_output": workspace_runtime::any_unsettled_output(),
         "commands_by_workspace": commands,
     })
 }

@@ -788,6 +788,40 @@ impl Connections {
         drop(dropped);
     }
 
+    /// 工作区要换代时问：这个成员还有带不走的连接吗。
+    ///
+    /// **写会话的连接一律不收**，闲多久都不收：ccnm 连接一断，上面的命令全停，而用
+    /// `exec_command` 转到后台的命令这边数不到（[`background_change`] 只看 `run_in_background`），
+    /// 看着闲不等于没活。平时的回收只在别的成员来请求时才发生，换代这个循环每 2 秒问一次，
+    /// 用同样的判断等于保证把它们杀掉。只读连接没有状态，闲够了收掉，下次用再开。
+    /// 关连接要等子进程（最长 [`CLOSE_GRACE`]），放到别的线程，这里还卡着排队的请求。
+    pub fn holds_member(&self, member_id: &str) -> bool {
+        let (detached, remaining): (Vec<Slot>, bool) = {
+            let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
+            let idle: Vec<Key> = live
+                .iter()
+                .filter(|(key, slot)| {
+                    key.0 == member_id
+                        && key.1 == Mode::Read
+                        && slot.is_idle(self.idle_for(key.1), self.idle_with_background())
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            let detached = idle.iter().filter_map(|key| live.remove(key)).collect();
+            (detached, live.keys().any(|(id, _)| id == member_id))
+        };
+        if !detached.is_empty() {
+            std::thread::spawn(move || drop(detached));
+        }
+        remaining
+            || self
+                .leases
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .values()
+                .any(|lease| lease.member_id == member_id)
+    }
+
     /// hub 停掉时收掉全部连接。
     pub fn close_all(&self) {
         self.retain(&[]);
@@ -1193,6 +1227,38 @@ mod tests {
         pool.call("oauth:hub:claude", &m, "read_file", json!({}))
             .expect("同一个主体");
         assert_eq!(recorder.opens(), 2);
+    }
+
+    /// 工作区换代前只收闲够了的只读连接。写会话闲多久都不收：上面可能有转到后台的命令，一断就停。
+    #[test]
+    fn asking_before_a_handoff_closes_only_idle_read_connections() {
+        let recorder = Recording::new();
+        let quick = connections(&recorder).with_budgets(Duration::ZERO, Duration::from_secs(5));
+        let (a, b) = (member("a"), member("b"));
+        quick.call(ANYONE, &a, "read_file", json!({})).expect("读");
+        assert!(!quick.holds_member("b"), "b 没开过连接");
+        assert_eq!(recorder.closes(), 0, "问 b 不该收 a");
+        assert!(!quick.holds_member("a"), "只读连接闲够了就不算占着");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while recorder.closes() == 0 {
+            assert!(Instant::now() < deadline, "闲着的只读连接没被收掉");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let patient = connections(&recorder);
+        patient
+            .call(ANYONE, &b, "read_file", json!({}))
+            .expect("读");
+        assert!(patient.holds_member("b"), "刚用过，不算闲");
+
+        let closes = recorder.closes();
+        let mut writer = member("w");
+        writer.max_mode = Mode::Coding;
+        let coding = connections(&recorder).with_budgets(Duration::ZERO, Duration::from_secs(5));
+        coding.begin_coding(ANYONE, &writer).expect("开写会话");
+        assert!(coding.holds_member("w"), "写会话不能因为换代被收");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(recorder.closes(), closes, "写会话被关了");
     }
 
     /// read 和 coding 是**两条**连接，不是一条换模式。

@@ -115,11 +115,21 @@ async fn upgrade(paths: &DaemonPaths, command: &DaemonUpgradeCmd, out: Output) -
             ));
         }
         DaemonUpgradeCmd::Switch => {
-            out.line(format!(
-                "已切到 {}。之后第一次用到的项目进新版本；已经用过的项目留在 {}，要等工作区交接做出来或者 gld daemon restart。",
-                reply["current"].as_str().unwrap_or("?"),
-                reply["previous"].as_str().unwrap_or("旧代"),
-            ));
+            // 命令行先换了、守护进程还是老的：它不会搬，也不报这两个数。
+            if reply["moved_workspaces"].is_null() {
+                out.line(format!(
+                    "已切到 {}。之后第一次用到的项目进新版本；已经用过的留在 {}。这个守护进程不会搬项目，要全换就 gld daemon restart。",
+                    reply["current"].as_str().unwrap_or("?"),
+                    reply["previous"].as_str().unwrap_or("旧代"),
+                ));
+            } else {
+                out.line(format!(
+                    "已切到 {}。{} 个闲着的项目已经搬过去，{} 个还留在旧版本，闲下来会自动搬（原因看 gld daemon upgrade status）。",
+                    reply["current"].as_str().unwrap_or("?"),
+                    reply["moved_workspaces"],
+                    reply["waiting_workspaces"],
+                ));
+            }
         }
         DaemonUpgradeCmd::Abort => {
             out.line(format!(
@@ -142,7 +152,14 @@ fn print_upgrade_status(status: &serde_json::Value, out: Output) {
             status["prepared"].as_str().unwrap_or("无").to_string(),
         ),
         ("意外重启次数", status["restarts"].to_string()),
-        ("零中断", "还没有：工作区交接和宿主更替没做".to_string()),
+        (
+            "零中断",
+            if status["capability"]["workspace_handoff"] == true {
+                "还没有：宿主更替没做".to_string()
+            } else {
+                "还没有：这个守护进程不会搬项目，gld daemon restart 换上新版本".to_string()
+            },
+        ),
     ]);
     if let Some(failure) = status["last_failure"].as_str() {
         out.line(out.yellow(&format!("上次失败：{failure}")));
@@ -168,6 +185,21 @@ fn print_upgrade_status(status: &serde_json::Value, out: Output) {
             .collect();
         if !blocked.is_empty() {
             out.line(format!("  还不能退：{}", blocked.join("、")));
+        }
+        for workspace in row["workspaces"].as_array().into_iter().flatten() {
+            let reasons: Vec<&str> = workspace["handoff_blocked_by"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|reason| reason.as_str())
+                .collect();
+            if !reasons.is_empty() {
+                out.line(format!(
+                    "  {} 搬不走：{}",
+                    workspace["workspace"].as_str().unwrap_or("?"),
+                    reasons.join("、")
+                ));
+            }
         }
     }
 }

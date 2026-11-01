@@ -110,6 +110,16 @@ pub enum Op {
     StopAgent {
         task_id: String,
     },
+    /// 这个工作区能搬走吗：能就回 `{"state": …}`，不能回 `{"blocked": [原因]}`。只读，
+    /// 新代没接住时它还归这一代。比这个操作老的二进制读不懂，回错误，工作区就留在原地。
+    ReleaseWorkspace {
+        key: String,
+    },
+    /// 接住上一代 `ReleaseWorkspace` 给的状态。
+    AdoptWorkspace {
+        key: String,
+        state: Value,
+    },
     /// 宿主要退了：先停命令和 Agent，记成 `interrupted`，但人还留着等最后一步。
     InterruptAll,
     Shutdown,
