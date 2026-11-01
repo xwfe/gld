@@ -4449,3 +4449,39 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 
 **低优先级下测试：**`taskpolicy -b` 跑 `generation_boundary` 失败 6 条，全是超时类（HTTP 读超时、2 秒内没就绪、`daemon start` 失败）。同样跑改动之前的 `4a206ac` 是 21 条里失败 8 条，报错同类，不是这次引入的。其中一条新测试靠 `sleep 4` 卡时序，在低优先级下命令先跑完了，改成等 stdin。
 
+## 108. 桌面截图实测：守护进程在后台会话里截不到屏，另有两处策略问题（2026-11-01）
+
+**范围与实际条件：**用户在本机经 Muse 的 `custom.gld` 连接器（用户自建、OAuth、compact 工具档案，本项目命令策略 `guarded`）让 AI 打开 ChatGPT 网页和应用，随后要求截一张全屏图并发回。这次的调用方不是 ChatGPT 连接器。审查时基线 `main@44dac24`、工作树干净，`server_info` 报服务构建提交 `fef936d3f781`、工具 35 项。本节只审查和记录，没有改代码；修复建议未排期，等用户定。
+
+**实测过程：**
+
+| 步骤 | 结果 |
+|---|---|
+| `open https://chatgpt.com`、`open -a ChatGPT` | 都退出码 0（399 ms、108 ms）；`open -a` 第一次经公网入口回 502、结果未知，读 `list_workspaces` 确认服务在答后重试成功 |
+| `check_command` 查 `screencapture -x muse-fullscreen.png` | `deny`、规则 `command_not_allowlisted`，回包带 `needs_user_authorization: true`；带 `confirm: true` 复查仍是 `deny` |
+| 经 `python3` 子进程跑 `/usr/sbin/screencapture` | 策略 `allow`，运行退出码 1，stderr 是 `could not create image from display`（389 ms），没有生成文件 |
+| 显示器诊断 | Apple M1 Pro 内建屏，3024 × 1964，`Online: Yes`、`Main Display: Yes`，不是没接显示器 |
+| 用户在系统设置里开好录屏权限后重跑 | 仍是退出码 1、同一句报错（206 ms） |
+| 进程诊断 | 执行命令的进程祖先是 `gld`（pid 69220），父进程是 launchd；`launchctl managername` 报 `Background`，控制台用户是用户本人 |
+| `launchctl asuser <uid> screencapture` 想切进图形会话 | 退出码 1，`Could not switch to audit session 0x186b8: 1: Operation not permitted` |
+| `python3` 里 `shutil.copy` 把桌面截图拷进工作区 | 被拒，`WORKSPACE_PATH_PROTECTED`（源在工作区外、目标在工作区内） |
+| 绕行：`osascript` 让 System Events 按 ⌘⇧3 | 系统在桌面生成 `Screenshot 2026-11-01 at 13.22.25.png`（本机时钟是 +09 区）；再经 `sips` 缩成长边 2000 的 JPEG 放进工作区，`view_image` 取回并交付用户；工作区里的临时图已删，桌面原图是系统截图的正常产物，保留 |
+
+**根因：**
+
+1. **守护进程不在图形会话里，这是截不到屏的根因。**`crates/daemon/src/lifecycle.rs:210、243-251` 用 `setsid` 拉起守护进程，`docs/daemon.md:135` 只写了这样做的好处（关终端、断 SSH 不带走它），没写代价：进程落在 launchd 的 `Background` 会话，拿不到窗口服务器，所以不管录屏权限开没开，`screencapture` 都只能报 `could not create image from display`。而且能力跟启动方式有关：按 `docs/daemon.md` 的开机自启一节用 LaunchAgent 跑 `gld daemon run` 是在图形会话里的；同一个服务两种起法能力不同，现在又没有任何地方报告当前会话类型（审查时全仓搜 `managername`、录屏、图形会话，在服务代码和排错文档里都是 0 处）。
+2. **桌面截图没有一等路径。**审查时全仓搜 `screencapture` 是 0 处，默认命令白名单里也没有它；桌面方向只有 `gld computer probe` 这个 Cua 研究预检，`docs/concepts.md` 写明 `desktop_verified` 始终为 false、公开的桌面工具未提供，本机也没有装 cua-driver（§82）。任务表里 D10-L0（轻量桌面观察与打开）排在多机 M3 之后、未实施。仓库里现成的截图能力只有 Playwright 的 `browser_take_screenshot`，截的是网页，不是桌面。
+3. **`needs_user_authorization` 会误导调用方。**`crates/core/src/tools/exec.rs:392-398` 把 `command_not_allowlisted` 也标成 `needs_user_authorization: true`，但这类拒绝靠 `confirm` 解不开，只有改配置（加白名单或改命令策略）能解。本轮 AI 据此多跑了一轮无用的复查；别的客户端也会把“等用户点头”当成可行的下一步。
+4. **路径保护不分读取源和写入目标，而且是同类复发。**`crates/core/src/tools/command_paths.rs:16-22` 的判定是：命令带写文件模式（正则在 `crates/core/src/tools/policy.rs:800` 附近）时，文本里任何一个不在工作区里的路径都算外部路径，不看它是 `shutil.copy` 的第一个参数还是第二个。测试 `crates/core/tests/command_write_paths.rs:194` 只钉了“目标在外面要拒”，反方向没有用例。仓库 `AGENTS.md` 记着 §28 有过一次同类误判、当时只绕没报；这次是“从外面读进来”方向的同类问题。
+
+**修复建议（未排期）：**
+
+- P0，给 `gld doctor` 或 `server_info` 加桌面能力探针：报告当前会话类型（图形会话还是 `Background`）、显示器是否在线、录屏授权预检、白名单里有没有截图命令；`docs/troubleshooting.md` 给 `could not create image from display` 加对照条目，把会话不对、没授权、锁屏三种原因分开报。
+- P0，把 `needs_user_authorization` 拆开：`confirm` 能解的才叫需要批准；白名单这类回明确的“需要改配置”信号，并附确切命令，如 `gld set <项目> allowed-commands=screencapture`。
+- P0，路径扫描按参数位置区分源和目标：已知的双路径函数（`shutil.copy` / `move`、`os.rename` / `replace`、`fs.copyFile` 等）只查目标路径；补三条回归用例：拷进工作区放行、拷出工作区仍拒、`shutil.rmtree("/")` 这类仍拒。
+- P1，把 RFC-0013 的 D10-L0 提前一个 macOS 本机最小版：只做 `desktop` 工具的 `status` / `screenshot` 两个动作。关键不在截图库，而在执行位置必须落在图形会话里：随包一个极小的图形会话助手（LaunchAgent、图形会话域、独立签名身份供系统录屏授权识别），守护进程经本地 socket 交请求给它，结果按 RFC-0013 §8 直接回 MCP 图片。在助手就位之前，守护进程发现自己在后台会话时应直接回明确的会话不可用错误，不要再把系统的含糊报错漏给用户。
+- P1，`screencapture` 不进默认命令白名单：它读的是整个屏幕，和构建命令不是一类，应走桌面工具自己的本地开关（RFC-0013 §8 的目标机本地桌面开关），只读 grant 默认不带截图。
+- P2，在 concepts 里写清“AI 现在能看什么”：能看的是网页截图，不能看的是桌面全屏（等 L0）。不写清，每个 AI 都会重新发明一遍这次这种靠模拟按键的绕路；它这次能成依赖辅助功能权限和系统截图的落盘位置，不可维护。
+
+**本轮摩擦：**连接器的 compact 档案没有 `git_commit`，本节落盘后只能留在工作区等用户提交，没法按仓库规矩当场提交。审查本身用的是只读工具（`read_file`、`search_text`、`git_log`、`server_info`），没动本机服务和配置。
+
