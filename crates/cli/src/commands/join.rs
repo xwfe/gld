@@ -143,7 +143,7 @@ pub fn leave(args: &LeaveArgs, out: Output) -> CliResult {
     if !out.json_or(&left) {
         out.line("已删除节点配置和凭据，项目文件没动。");
         out.note(format!(
-            "Hub 上的登记还在，显示离线。不再用的话，在 Hub 上执行 gld node revoke {}",
+            "Hub 上的登记还在，显示离线。不再用的话，在 Hub 上执行 gld node revoke {0}，再 gld node remove {0}",
             left.machine_id
         ));
     }

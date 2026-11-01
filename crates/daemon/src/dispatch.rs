@@ -42,6 +42,7 @@ pub async fn dispatch(
             ok(&registered)
         }
         R::NodeRevoke { machine_id } => change_node_credential(machine_id, None).await,
+        R::NodeRemove { machine } => remove_node(machine).await,
         R::NodeRotateCredential {
             machine_id,
             credential,
@@ -454,14 +455,32 @@ async fn change_node_credential(
     .await
     .map_err(|_| RpcError::internal("节点凭据更新任务失败"))?
     .map_err(RpcError::app)?;
+    close_stale_connection(changed.machine_id.clone(), "节点凭据已更新").await?;
+    ok(&changed)
+}
+
+async fn remove_node(machine: String) -> Result<Value, RpcError> {
+    let removed =
+        tokio::task::spawn_blocking(move || gld_core::nodes::config::remove_machine(&machine))
+            .await
+            .map_err(|_| RpcError::internal("节点登记删除任务失败"))?
+            .map_err(RpcError::app)?;
+    // 撤销时收连接失败、当时没管的话，连接还挂在这台机器上，这是最后的机会。
+    close_stale_connection(removed.machine_id.clone(), "节点登记已删除").await?;
+    let mut result = ok(&removed)?;
+    result["removed"] = true.into();
+    Ok(result)
+}
+
+/// 登记已经落盘之后才调，所以失败时要说清楚变更本身已经生效。
+async fn close_stale_connection(machine_id: String, done: &str) -> Result<(), RpcError> {
     if let Some(nodes) = gld_core::hub::runtime::nodes().await {
-        let machine_id = changed.machine_id.clone();
         tokio::task::spawn_blocking(move || nodes.close_stale(&machine_id))
             .await
-            .map_err(|_| RpcError::internal("节点凭据已更新，但旧连接收回任务失败"))?
-            .map_err(|error| RpcError::app(format!("节点凭据已更新，但旧连接收回失败：{error}")))?;
+            .map_err(|_| RpcError::internal(format!("{done}，但旧连接收回任务失败")))?
+            .map_err(|error| RpcError::app(format!("{done}，但旧连接收回失败：{error}")))?;
     }
-    ok(&changed)
+    Ok(())
 }
 
 fn resolve(app: &App, target: &WorkspaceTarget) -> Result<WorkspaceProfile, RpcError> {

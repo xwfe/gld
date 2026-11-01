@@ -485,6 +485,46 @@ fn revoke_in(data: &mut AppData, machine_id: &str) -> Result<RegisteredMachine, 
     })
 }
 
+/// 删掉一条已撤销的登记，名称可以再用。`selector` 是完整机器 ID 或名称：操作员手里常常只有名称。
+///
+/// 只删已撤销的。撤销才会停掉目标机上的命令、让 AI 手里的句柄报 `MACHINE_REVOKED`，
+/// 直接删这些都没有交代。删掉后旧凭据也连不上：握手按机器 ID 查，查不到就是 401。
+pub fn remove_machine(selector: &str) -> Result<RegisteredMachine, String> {
+    DataStore::update_file(|data| remove_in(data, selector).map_err(AppError::Message))
+        .map_err(|error| error.to_string())
+}
+
+fn remove_in(data: &mut AppData, selector: &str) -> Result<RegisteredMachine, String> {
+    validate_registry(data)?;
+    let selector = selector.trim();
+    let machines = &data.node_machines;
+    // 名称可以长得像 ID，ID 优先才不会删错。
+    let index = machines
+        .iter()
+        .position(|machine| machine.id == selector)
+        .or_else(|| {
+            machines
+                .iter()
+                .position(|machine| machine.name.eq_ignore_ascii_case(selector))
+        })
+        .ok_or("Node registration does not exist")?;
+    if !machines[index].revoked {
+        return Err(format!(
+            "Node {} is still active; run gld node revoke {} first",
+            machines[index].name, machines[index].id
+        ));
+    }
+    let hub_public_key = ensure_hub_identity(data)?;
+    let machine = data.node_machines.remove(index);
+    Ok(RegisteredMachine {
+        hub_id: data.node_hub_id.clone(),
+        hub_public_key,
+        machine_id: machine.id,
+        name: machine.name,
+        revoked: true,
+    })
+}
+
 /// 原子更换专用凭据并恢复接入；稳定身份和项目目录保持不变。
 pub fn rotate_credential(machine_id: &str, credential: &str) -> Result<RegisteredMachine, String> {
     DataStore::update_file(|data| {

@@ -50,7 +50,8 @@ use serde_json::Value;
 /// 15：新增 node_invite，一次性邀请由本机操作员经配置写入口生成。
 /// 16：新增 upgrade_status、upgrade_prepare、upgrade_switch、upgrade_abort（`gld daemon upgrade`，RFC-0008）。
 ///    旧守护进程没有执行代，不能接这几个，见 [`FIRST_PROTOCOL_WITH_GENERATIONS`]。
-pub const PROTOCOL_VERSION: u32 = 16;
+/// 17：新增 node_remove（`gld node remove`）。
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// 从这个协议起守护进程才有执行代。更老的一律当作不支持：提前拒绝，不发任何会动在线状态的请求。
 pub const FIRST_PROTOCOL_WITH_GENERATIONS: u32 = 16;
@@ -91,6 +92,9 @@ pub enum Request {
     NodeRotateCredential {
         machine_id: String,
         credential: String,
+    },
+    NodeRemove {
+        machine: String,
     },
 
     // ---- 工作区 ----
@@ -497,6 +501,7 @@ impl Request {
                 // 持久变更后给该节点的在途调用一点时间收尾，再关闭实际连接。
                 | Request::NodeRevoke { .. }
                 | Request::NodeRotateCredential { .. }
+                | Request::NodeRemove { .. }
                 // 要算目录大小、删整棵目录，日志攒久了有几百 MB。
                 | Request::Prune { .. }
                 // 新代就绪最多等 15 秒，放弃时还要等它收尾。
@@ -630,6 +635,10 @@ mod tests {
         assert!(Request::NodeRotateCredential {
             machine_id: "a".repeat(32),
             credential: "synthetic-node-credential".into()
+        }
+        .is_slow());
+        assert!(Request::NodeRemove {
+            machine: "node".into()
         }
         .is_slow());
         assert!(!Request::NodeRegister {

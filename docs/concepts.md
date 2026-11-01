@@ -355,7 +355,7 @@ gld leave
 项目文件和运行记录不动，空的 `.lock` 文件留着。节点在前台跑时报 `Node configuration is in use`，先按 Ctrl-C。
 
 Hub 上的登记不会跟着消失，显示离线：节点凭据只能用来连接，不能调 Hub 的管理操作。
-不再用这台机器就在 Hub 上执行 `gld node revoke <机器 ID>`，机器 ID 在 `gld leave` 的输出里。
+不再用这台机器就在 Hub 上执行 `gld node revoke <机器 ID>`，再 `gld node remove <机器 ID>`，机器 ID 在 `gld leave` 的输出里。
 
 #### 让节点一直在线
 
@@ -471,7 +471,17 @@ gld --json node revoke <machine_id>
 
 撤销会先保存失效状态，再关闭旧连接；成功返回时旧连接已收回，其他节点照常服务。
 已有调用可在原期限内完成，撤销不会回滚已经执行的动作；后续调用返回 `MACHINE_REVOKED`。
-机器身份和项目目录保留，重复撤销返回相同状态。要更换凭据或恢复已撤销的机器：
+机器身份和项目目录保留，重复撤销返回相同状态，所以它还会以离线、`revoked` 的样子出现在 `list_workspaces` 里。确定不要了就删掉：
+
+```bash
+gld node remove <机器 ID 或名称>
+```
+
+只能删已撤销的机器，没撤销的会报 `Node ... is still active`，什么都不改。删除后 AI 手里这台机器的旧句柄报 `WORKSPACE_NOT_IN_HUB`，名称可以给新机器用；
+要恢复只能重新邀请，会得到新的机器 ID 和项目句柄。Hub 自己的身份不变，其他目标机不受影响。
+目标机上的配置和文件没动，它还在跑的话会继续收到 401，到那边跑 `gld leave` 清掉。
+
+要更换凭据或恢复已撤销的机器：
 
 ```bash
 gld --json node rotate-credential <machine_id> --credential-stdin < new-node-credential.txt

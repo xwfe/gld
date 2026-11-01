@@ -45,7 +45,7 @@ COMMANDS=(
   "start" "stop" "restart" "status" "list" "add" "remove" "prune" "set" "fields" "share" "upgrade"
   "remote" "remote add" "remote remove"
   "join"
-  "node" "node invite" "node register" "node revoke" "node rotate-credential" "node shares" "node run" "node doctor" "node autostart" "node autostart enable" "node autostart disable" "node autostart status"
+  "node" "node invite" "node register" "node revoke" "node remove" "node rotate-credential" "node shares" "node run" "node doctor" "node autostart" "node autostart enable" "node autostart disable" "node autostart status"
   "mcp" "mcp list" "mcp on" "mcp off" "mcp test"
   "computer" "computer probe"
   "grant" "grant add" "grant browser" "grant list" "grant remove"

@@ -383,6 +383,12 @@ pub enum NodeCmd {
         /// 登记返回的完整机器 ID
         machine_id: String,
     },
+    /// 删除已撤销机器在 Hub 上的登记和项目目录，名称可以再用；还没撤销的会拒绝
+    #[command(alias = "rm")]
+    Remove {
+        /// 完整机器 ID 或机器名称
+        machine: String,
+    },
     /// 更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
     RotateCredential {
         /// 登记返回的完整机器 ID

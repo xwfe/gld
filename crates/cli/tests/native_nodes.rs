@@ -946,6 +946,58 @@ fn node_registration_does_not_truncate_an_overlong_credential() {
 }
 
 #[test]
+fn removing_a_revoked_machine_clears_it_from_the_hub_and_frees_its_name() {
+    let hub = Env::new();
+    let service = hub.serve("local", "bearer");
+    let relay = TlsRelay::new(service.port);
+    let machine_a = Env::new();
+    let machine_b = Env::new();
+    let ids_a = projects(&machine_a, "machine-a");
+    let ids_b = projects(&machine_b, "machine-b");
+    let registration_a = register(&hub, "machine-a", TOKEN_A);
+    let registration_b = register(&hub, "machine-b", TOKEN_B);
+    let machine_id = registration_a["machine_id"].as_str().unwrap();
+    let mut value_a = config(&machine_a, &relay, &registration_a, TOKEN_A, &ids_a);
+    let mut value_b = config(&machine_b, &relay, &registration_b, TOKEN_B, &ids_b);
+    value_a["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    value_b["hub_url"] = value_a["hub_url"].clone();
+    let config_a = write_config(&machine_a, "node-a.json", &value_a);
+    let config_b = write_config(&machine_b, "node-b.json", &value_b);
+    let mut node_a = NodeProcess::start(&machine_a, &config_a);
+    let _node_b = NodeProcess::start(&machine_b, &config_b);
+    let before = wait_inventory(&service, 4, 4);
+    let a_api = find(&before, "machine-a/api");
+    let b_api = find(&before, "machine-b/api");
+
+    let refused = hub.gld(&["node", "remove", "machine-a"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains(machine_id));
+    assert_eq!(read(&service, &a_api)["content"], "machine-a/api\n");
+
+    hub.json(&["--json", "node", "revoke", machine_id]);
+    node_a.wait_stopped();
+    let removed = hub.json(&["--json", "node", "remove", "MACHINE-A"]);
+    assert_eq!(removed["removed"], true);
+    assert_eq!(removed["machine_id"], machine_id);
+    assert!(!removed.to_string().contains(TOKEN_A));
+
+    wait_inventory(&service, 2, 2);
+    assert_eq!(
+        read(&service, &a_api)["error"]["code"],
+        "WORKSPACE_NOT_IN_HUB"
+    );
+    assert_eq!(read(&service, &b_api)["content"], "machine-b/api\n");
+    assert!(NodeProcess::start(&machine_a, &config_a)
+        .rejected()
+        .contains("401"));
+    assert!(!hub.gld(&["node", "remove", machine_id]).status.success());
+
+    let again = register(&hub, "machine-a", "synthetic-node-credential-re-registered");
+    assert_ne!(again["machine_id"], machine_id);
+    assert_eq!(again["hub_id"], registration_a["hub_id"]);
+}
+
+#[test]
 fn node_credentials_revoke_and_rotate_active_connections_without_changing_routes() {
     let hub = Env::new();
     let service = hub.serve("local", "bearer");

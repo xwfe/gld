@@ -29,6 +29,7 @@ RFC-0004 之前的命令（`ws`、`destroy`、`hub`、`ps`、`tunnel`、`gateway
 - [gld node invite](#gld-node-invite)
 - [gld node register](#gld-node-register)
 - [gld node revoke](#gld-node-revoke)
+- [gld node remove](#gld-node-remove)
 - [gld node rotate-credential](#gld-node-rotate-credential)
 - [gld node shares](#gld-node-shares)
 - [gld node run](#gld-node-run)
@@ -958,6 +959,7 @@ Commands:
   invite             生成十分钟有效的一次性邀请和目标机要跑的命令；替换同名未使用邀请，只在本机输出
   register           在 Hub 登记预置节点凭据；从 stdin 读取，输出 Hub ID、Hub 公钥、机器 ID 和名称
   revoke             撤销节点凭据并关闭其连接；保留机器身份和项目目录
+  remove             删除已撤销机器在 Hub 上的登记和项目目录，名称可以再用；还没撤销的会拒绝
   rotate-credential  更换专用凭据并关闭旧连接；恢复已撤销节点，保留原机器与项目句柄
   shares             查看目标机共享权限；传入 --share 完整替换，修改前须停止该配置的节点进程
   run                在目标机前台运行节点；网络断线退避重连，凭据或身份校验失败退出
@@ -1029,6 +1031,27 @@ Usage: gld node revoke [OPTIONS] <MACHINE_ID>
 
 Arguments:
   <MACHINE_ID>  登记返回的完整机器 ID
+
+Options:
+  -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
+      --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
+      --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
+      --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+## gld node remove
+
+```text
+删除已撤销机器在 Hub 上的登记和项目目录，名称可以再用；还没撤销的会拒绝
+
+Usage: gld node remove [OPTIONS] <MACHINE>
+
+Arguments:
+  <MACHINE>  完整机器 ID 或机器名称
 
 Options:
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]

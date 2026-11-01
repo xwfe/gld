@@ -78,6 +78,60 @@ fn node_credentials_are_distinct_from_existing_service_credentials() {
 }
 
 #[test]
+fn only_revoked_machines_can_be_removed_and_the_refusal_changes_nothing() {
+    let mut data = AppData::default();
+    register_in(&mut data, "node", Some(MACHINE), TOKEN).unwrap();
+    let before = serde_json::to_value(&data).unwrap();
+    let error = remove_in(&mut data, MACHINE).unwrap_err();
+    assert!(
+        error.contains(&format!("gld node revoke {MACHINE}")),
+        "{error}"
+    );
+    assert_eq!(serde_json::to_value(&data).unwrap(), before);
+
+    assert!(remove_in(&mut data, "no-such-node").is_err());
+    assert_eq!(serde_json::to_value(&data).unwrap(), before);
+}
+
+#[test]
+fn removing_a_machine_keeps_the_hub_identity_and_frees_its_name() {
+    let mut data = AppData::default();
+    let registered = register_in(&mut data, "Node", Some(MACHINE), TOKEN).unwrap();
+    let hub_id = data.node_hub_id.clone();
+    let hub_key = data.node_hub_key.clone();
+    revoke_in(&mut data, MACHINE).unwrap();
+
+    let removed = remove_in(&mut data, " nODE ").unwrap();
+    assert_eq!(removed.machine_id, MACHINE);
+    assert_eq!(removed.name, "Node");
+    assert_eq!(removed.hub_public_key, registered.hub_public_key);
+    assert!(data.node_machines.is_empty());
+    // 其他目标机钉着这对身份；删最后一台也不能换。
+    assert_eq!(data.node_hub_id, hub_id);
+    assert_eq!(data.node_hub_key, hub_key);
+    validate_registry(&data).unwrap();
+
+    assert!(authenticate_in(&data, MACHINE, TOKEN).is_err());
+    assert!(remove_in(&mut data, MACHINE).is_err());
+    let again = register_in(&mut data, "node", None, OTHER_TOKEN).unwrap();
+    assert_ne!(again.machine_id, MACHINE);
+    assert_eq!(again.hub_id, hub_id);
+}
+
+#[test]
+fn removing_prefers_an_exact_machine_id_over_a_name_that_looks_like_one() {
+    let mut data = AppData::default();
+    register_in(&mut data, HUB, Some(MACHINE), TOKEN).unwrap();
+    register_in(&mut data, "other", Some(HUB), OTHER_TOKEN).unwrap();
+    revoke_in(&mut data, MACHINE).unwrap();
+    revoke_in(&mut data, HUB).unwrap();
+
+    assert_eq!(remove_in(&mut data, HUB).unwrap().name, "other");
+    assert_eq!(data.node_machines.len(), 1);
+    assert_eq!(data.node_machines[0].id, MACHINE);
+}
+
+#[test]
 fn node_urls_preserve_prefixes_and_refuse_credential_or_insecure_remote_urls() {
     assert_eq!(
         config("https://example.invalid/hub")

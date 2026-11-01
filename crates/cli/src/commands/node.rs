@@ -58,6 +58,10 @@ pub async fn run(ctx: &mut Ctx, command: NodeCmd) -> CliResult {
             Request::NodeRevoke { machine_id },
             "已撤销凭据并关闭旧连接，保留机器身份和项目目录。",
         ),
+        NodeCmd::Remove { machine } => (
+            Request::NodeRemove { machine },
+            "已删除这台机器在 Hub 上的登记和项目目录，名称可以再用。目标机上的配置和文件没动，到那边跑 gld leave 清掉；要再接入就重新邀请。",
+        ),
         NodeCmd::RotateCredential {
             machine_id,
             credential_stdin,
