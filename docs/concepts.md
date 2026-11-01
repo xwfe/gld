@@ -211,7 +211,7 @@ gld upgrade --work-max-active 128 --work-max-records 4096 --work-max-bytes 53687
 ### 桌面执行器预检：computer probe
 
 这是已经提供的 **Cua 专用研究预检**，不是使用 gld 基础功能的必经步骤。
-轻量桌面仍按 [RFC-0013](rfc/0013-native-machines-and-desktop.md) 后续实施；原生节点项目读取见下节。
+AI 现在看得到网页（[Playwright 截图](#用浏览器验页面单独配一个隔离的-playwright-mcp)），想看整个桌面只能走 macOS 的 `screencapture`，要先[办好授权](daemon.md#让-ai-能截屏macos)。轻量桌面仍按 [RFC-0013](rfc/0013-native-machines-and-desktop.md) 后续实施；原生节点项目读取见下节。
 它不要求 Cua 或 ccnm。本节保留已有命令用法，只有明确选择研究 Cua 时才在执行器所在机器运行：
 
 ```bash

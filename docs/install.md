@@ -195,6 +195,8 @@ gld daemon restart
 #    gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon
 ```
 
+**让 AI 截屏的机器，重启后再跑一次 `gld desktop authorize`：**换二进制会让录屏授权失效，设置里的开关还亮着，见[让 AI 能截屏](daemon.md#让-ai-能截屏macos)。
+
 **第 4 步报"有 N 条命令在跑……这次没重启"，就是没重启。** 它列出每条命令的项目、命令、跑了多久和 pid，
 开着的开发服务器会标"服务，端口 …"。二进制已经换好了，等这些命令跑完再敲一次 `gld daemon restart`；
 确认可以停，就 `gld daemon restart --force`，照旧连命令一起停掉。等的这段时间守护进程还跑着旧代码，
