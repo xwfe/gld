@@ -205,6 +205,29 @@ fn exec_sessions_survive_between_calls_only_through_the_daemon() {
     ]);
 }
 
+/// 没有守护进程时不能替用户拉起：从这个终端起的会话类型跟着终端，授权办好了也可能白办。
+#[cfg(target_os = "macos")]
+#[test]
+fn desktop_authorize_does_not_start_a_daemon_for_you() {
+    let env = probe_env();
+    let output = env.gld(&["desktop", "authorize", "--wait", "1"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("launchd"));
+    assert_eq!(env.gld(&["daemon", "status"]).status.code(), Some(3));
+}
+
+/// 放行的那一刻用户就在跟前，这时候不说，就要等到 AI 用的时候才发现。
+#[cfg(target_os = "macos")]
+#[test]
+fn allowing_screencapture_mentions_the_authorization_it_needs() {
+    let env = probe_env();
+    let plain = env.gld(&["set", "allowed-commands=rg"]);
+    assert!(!String::from_utf8_lossy(&plain.stderr).contains("desktop authorize"));
+    let capture = env.gld(&["set", "allowed-commands=rg,screencapture"]);
+    assert!(capture.status.success());
+    assert!(String::from_utf8_lossy(&capture.stderr).contains("desktop authorize"));
+}
+
 #[test]
 fn doctor_passes_on_a_fresh_project_and_fails_on_a_broken_tunnel() {
     let env = probe_env();

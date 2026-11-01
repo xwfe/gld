@@ -411,7 +411,11 @@ pub enum Request {
     // ---- 观察 ----
     Doctor,
     /// 守护进程自己试着截 1×1 像素。没有守护进程时没有意义，命令行不会直连发。
-    DesktopProbe,
+    /// `only_if_used`：没有项目放行 `screencapture` 就不试（回 null），免得弹授权框。
+    DesktopProbe {
+        #[serde(default)]
+        only_if_used: bool,
+    },
     Health {
         target: WorkspaceTarget,
     },

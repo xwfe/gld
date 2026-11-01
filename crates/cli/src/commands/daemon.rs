@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gld_core::app::DesktopStatus;
 use gld_core::data::DataStore;
 use gld_core::tools::runs;
 use gld_daemon::lifecycle::{self, DaemonPaths, DaemonProbe, StopOutcome};
@@ -246,8 +247,25 @@ async fn start(paths: &DaemonPaths, out: Output) -> CliResult {
                 info.running_services
             ));
         }
+        warn_if_screen_capture_broke(paths, out).await;
     }
     Ok(())
+}
+
+/// 换了二进制授权就失效，新起的守护进程也可能掉出图形会话，等 AI 用的时候才发现，人多半不在跟前。
+/// 只查放行了 `screencapture` 的机器。这一步失败不影响启动结果。
+async fn warn_if_screen_capture_broke(paths: &DaemonPaths, out: Output) {
+    let request = Request::DesktopProbe { only_if_used: true };
+    let Ok(reply) = Client::new(paths.clone()).call(&request).await else {
+        return;
+    };
+    let Ok(Some(status)) = serde_json::from_value::<Option<DesktopStatus>>(reply) else {
+        return;
+    };
+    if !status.can_capture {
+        out.line(out.yellow(&format!("  截屏用不了：{}", status.check.detail)));
+        out.line(format!("  {}", status.check.fix));
+    }
 }
 
 /// 守护进程起的命令还在跑就不重启：重启会把它们（包括开着的 dev server）一起停掉。

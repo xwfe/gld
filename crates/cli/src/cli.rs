@@ -282,6 +282,10 @@ pub enum Command {
     #[command(subcommand)]
     Computer(ComputerCmd),
 
+    /// 桌面能力的准备工作：提前办好系统授权，AI 用的时候才不会卡在没人点的弹框上
+    #[command(subcommand)]
+    Desktop(DesktopCmd),
+
     /// 查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
     // 隐藏别名：git 是 log、docker 是 logs，两边习惯的人都不该被一句
     // "unrecognized subcommand" 拦住。不用 visible_alias 是因为它只防手滑，
@@ -297,7 +301,7 @@ pub enum Command {
         /// 再实地探一次本地 / 公网端点和 OAuth 元数据（同 gld health）；不加它一个网络请求都不发
         #[arg(long)]
         probe: bool,
-        /// 再让守护进程试着截 1 个像素，查 AI 跑的命令能不能截屏（macOS）；没授权时系统可能弹授权框
+        /// 再让守护进程试着截 1 个像素，查 AI 跑的命令能不能截屏（macOS）；项目放行了 screencapture 时不加也查；没授权时系统可能弹授权框
         #[arg(long)]
         desktop: bool,
     },
@@ -1215,6 +1219,18 @@ pub struct GatewaySetArgs {
     /// 隧道是否套用全局代理
     #[arg(long, value_name = "true|false")]
     pub use_proxy: Option<bool>,
+}
+
+// --------------------------------------------------------------- desktop
+
+#[derive(Debug, Subcommand)]
+pub enum DesktopCmd {
+    /// 让守护进程申请 macOS 录屏授权，打开系统设置并等到真能截屏为止
+    Authorize {
+        /// 最多等多少秒
+        #[arg(long, default_value_t = 180)]
+        wait: u64,
+    },
 }
 
 // --------------------------------------------------------------- computer

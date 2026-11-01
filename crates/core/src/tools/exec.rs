@@ -1141,7 +1141,7 @@ fn merge_exec_result(
 /// macOS 的 `screencapture` 不管是不在图形会话还是没授权，都只报这一句，后面接 `display` 或
 /// 截区域时的 `rect`（2026-11-01 实测）。
 const SCREEN_CAPTURE_REFUSED: &str = "could not create image from ";
-const SCREEN_CAPTURE_HINT: &str = "screencapture says this for two different reasons, and retrying fixes neither: the daemon is not in a graphical login session (it inherits that from whatever started it, and Screen Recording permission does not help), or this binary has no valid Screen Recording grant (on an unsigned binary the grant stops applying when the binary is replaced, while the switch still looks on). Ask the user to run `gld doctor --desktop`, which says which one and how to fix it.";
+const SCREEN_CAPTURE_HINT: &str = "screencapture says this for two different reasons, and retrying fixes neither: the daemon is not in a graphical login session (it inherits that from whatever started it, and Screen Recording permission does not help), or this binary has no valid Screen Recording grant (on an unsigned binary the grant stops applying when the binary is replaced, while the switch still looks on). Ask the user to run `gld desktop authorize`, which finds out which one and walks them through it.";
 
 fn parse_and_resolve(
     spec: &CommandSpec,
@@ -1692,9 +1692,9 @@ mod tests {
             result["warnings"].to_string()
         };
 
-        assert!(warnings_for("could not create image from display").contains("doctor --desktop"));
-        assert!(warnings_for("could not create image from rect").contains("doctor --desktop"));
-        assert!(!warnings_for("some other failure").contains("doctor --desktop"));
+        assert!(warnings_for("could not create image from display").contains("desktop authorize"));
+        assert!(warnings_for("could not create image from rect").contains("desktop authorize"));
+        assert!(!warnings_for("some other failure").contains("desktop authorize"));
     }
 
     /// 反过来：命令还在跑的时候打补丁，补丁的结果里得说一声。

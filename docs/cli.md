@@ -133,6 +133,7 @@ Commands:
   agent        委派给本机 Agent 的任务：看、放行、拒绝、停（AI 用 agent_manage 发起）
   mcp          本机装好的 MCP server：看装了哪些、开哪几个经服务转给 AI、试着起一个
   computer     本机桌面执行器预检；不接入现有守护进程、不安装或公开控制工具
+  desktop      桌面能力的准备工作：提前办好系统授权，AI 用的时候才不会卡在没人点的弹框上
   logs         查看服务日志尾部，或用 -f 持续跟随（-w 看某个项目自己的请求日志）
   health       逐项检查本地 / 公网端点与 OAuth 元数据是否可达
   doctor       体检：检查配置是否自洽，并给出每个问题的修复命令
@@ -1788,7 +1789,7 @@ Usage: gld doctor [OPTIONS]
 Options:
       --probe           再实地探一次本地 / 公网端点和 OAuth 元数据（同 gld health）；不加它一个网络请求都不发
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
-      --desktop         再让守护进程试着截 1 个像素，查 AI 跑的命令能不能截屏（macOS）；没授权时系统可能弹授权框
+      --desktop         再让守护进程试着截 1 个像素，查 AI 跑的命令能不能截屏（macOS）；项目放行了 screencapture 时不加也查；没授权时系统可能弹授权框
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）

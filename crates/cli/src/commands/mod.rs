@@ -5,6 +5,7 @@ mod actions;
 mod agent;
 mod computer;
 mod daemon;
+mod desktop;
 mod doctor;
 mod frp;
 mod gateway;
@@ -138,6 +139,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Logs(args) => logs::logs(&mut ctx, args).await,
         Command::Health(args) => inspect::health(&mut ctx, args).await,
         Command::Doctor { probe, desktop } => doctor::run(&mut ctx, probe, desktop).await,
+        Command::Desktop(command) => desktop::run(&mut ctx, command).await,
         Command::Tool(command) => tool::run(&mut ctx, command).await,
         Command::Secret(command) => secret::run(&mut ctx, command).await,
         Command::Frp(command) => frp::run(&mut ctx, command).await,

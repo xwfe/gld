@@ -42,7 +42,10 @@ mod tunnel;
 mod workspace;
 mod workspace_fields;
 
-pub use desktop::desktop_capture_check;
+pub use desktop::{
+    allows_screen_capture, capture_check, desktop_status, DesktopStatus, DESKTOP_SCOPE,
+    GRAPHICAL_SESSION,
+};
 pub use doctor::{
     config_checks, port_check, service_checks, service_port_check, software_check, tunnel_check,
     Diagnosis, DoctorCheck, DoctorLevel, PortOccupant, SecretLookup, SERVICE_SCOPE,

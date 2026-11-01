@@ -5,8 +5,8 @@
 use std::io::{BufRead, IsTerminal, Write};
 
 use gld_core::app::{
-    workspace_field_catalog, HubMemberDto, HubMembershipChange, HubStatusDto, WorkspaceTarget,
-    WorkspaceUpdate,
+    allows_screen_capture, workspace_field_catalog, HubMemberDto, HubMembershipChange,
+    HubStatusDto, WorkspaceTarget, WorkspaceUpdate,
 };
 use gld_core::runtime::ServiceKind;
 use gld_core::workspace::WorkspaceProfile;
@@ -317,7 +317,16 @@ pub async fn set(ctx: &mut Ctx, args: SetArgs) -> CliResult {
             "没说要改什么。写法：gld set <项目> tool-profile=read-only（字段见 gld fields）",
         ));
     }
-    set_fields(ctx, target, pairs).await
+    let allows_capture = pairs.iter().any(|(key, value)| {
+        key.trim_start_matches("mcp.") == "allowed-commands" && allows_screen_capture(value)
+    });
+    set_fields(ctx, target, pairs).await?;
+    if allows_capture && cfg!(target_os = "macos") {
+        ctx.out.note(
+            "截屏还要系统录屏授权。趁你在电脑前跑：gld desktop authorize，不然 AI 用的时候会卡住。",
+        );
+    }
+    Ok(())
 }
 
 async fn set_fields(

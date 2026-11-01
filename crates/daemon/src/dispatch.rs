@@ -398,16 +398,19 @@ pub async fn dispatch(
         }
 
         // ---- 观察 ----
-        R::Doctor => ok(&app.doctor().await?),
-        R::DesktopProbe => {
-            let executable = std::env::current_exe()
-                .map_err(|error| RpcError::internal(format!("找不到自己的路径：{error}")))?;
-            let check = tokio::task::spawn_blocking(move || {
-                gld_core::app::desktop_capture_check(&executable)
-            })
-            .await
-            .map_err(|error| RpcError::internal(format!("截屏探测失败：{error}")))?;
-            ok(&check)
+        R::Doctor => {
+            let mut diagnosis = app.doctor().await?;
+            // 直连模式跑在命令行进程里，查出来的不是守护进程的会话和授权。
+            if daemon.is_some() && app.uses_screen_capture()? {
+                diagnosis.checks.push(probe_desktop().await?.check);
+            }
+            ok(&diagnosis)
+        }
+        R::DesktopProbe { only_if_used } => {
+            if only_if_used && !app.uses_screen_capture()? {
+                return ok(&Value::Null);
+            }
+            ok(&probe_desktop().await?)
         }
         R::Health { target } => {
             let profile = resolve(app, &target)?;
@@ -452,6 +455,14 @@ async fn upgrade(
         .await
         .map_err(|error| RpcError::internal(format!("升级操作失败：{error}")))?
         .map_err(RpcError::app)
+}
+
+async fn probe_desktop() -> Result<gld_core::app::DesktopStatus, RpcError> {
+    let executable = std::env::current_exe()
+        .map_err(|error| RpcError::internal(format!("找不到自己的路径：{error}")))?;
+    tokio::task::spawn_blocking(move || gld_core::app::desktop_status(&executable))
+        .await
+        .map_err(|error| RpcError::internal(format!("截屏探测失败：{error}")))
 }
 
 async fn change_node_credential(

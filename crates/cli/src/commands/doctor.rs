@@ -3,7 +3,9 @@
 //! 输出按归属分组，每个有问题的项下面直接给出该跑的命令。
 //! 有任何 ✗ 时退出码为 1，方便 CI / 脚本判断。
 
-use gld_core::app::{Diagnosis, DoctorCheck, DoctorLevel, SERVICE_SCOPE};
+use gld_core::app::{
+    DesktopStatus, Diagnosis, DoctorCheck, DoctorLevel, DESKTOP_SCOPE, SERVICE_SCOPE,
+};
 use gld_core::health::HealthItem;
 use gld_daemon::Request;
 
@@ -13,13 +15,25 @@ use crate::output::Output;
 
 pub async fn run(ctx: &mut Ctx, probe: bool, desktop: bool) -> CliResult {
     let mut diagnosis: Diagnosis = ctx.backend.call_typed(Request::Doctor).await?;
-    if desktop {
+    // 项目放行了 screencapture 时守护进程已经查过了。
+    if desktop
+        && !diagnosis
+            .checks
+            .iter()
+            .any(|check| check.scope == DESKTOP_SCOPE)
+    {
         // 不自动拉起守护进程：从这个终端拉起的，会话类型跟着这个终端，查出来的可能不是平时那个的结果。
         diagnosis.checks.push(if ctx.backend.is_remote() {
-            ctx.backend.call_typed(Request::DesktopProbe).await?
+            let status: DesktopStatus = ctx
+                .backend
+                .call_typed(Request::DesktopProbe {
+                    only_if_used: false,
+                })
+                .await?;
+            status.check
         } else {
             DoctorCheck {
-                scope: "桌面".to_string(),
+                scope: DESKTOP_SCOPE.to_string(),
                 label: "截屏".to_string(),
                 level: DoctorLevel::Warn,
                 detail: "守护进程没在跑，查不了：AI 的命令能不能截屏要看守护进程".to_string(),
