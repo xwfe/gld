@@ -64,6 +64,8 @@ pub const ALLOW_ALL_NOTICE: &str = "The user set this workspace to allow all com
 /// 放行模式下，一条命令要是按默认关卡会被拦，回包里附这一句。
 pub const ALLOW_ALL_BYPASS_NOTE: &str = "This ran only because the user set this workspace to allow all commands (command-policy=all); the default policy would have stopped it (see code and message). Tell the user what you ran, especially if it installed or deleted something or touched files outside the workspace.";
 
+const ACTIONS_CONFIG_SOURCE: &str = "actions config (allowed_commands)";
+
 #[derive(Debug, Clone)]
 pub struct PolicySettings {
     pub allowed_commands: HashSet<String>,
@@ -144,7 +146,7 @@ impl PolicySettings {
             permission_mode: actions.permission_mode.clone(),
             confine_reads: actions.confine_reads,
             allowlist_mode: allowlist_mode(&actions.allowed_commands),
-            config_source: "actions config (allowed_commands)",
+            config_source: ACTIONS_CONFIG_SOURCE,
             // GPT Actions 是另一条线路，没有这个开关。
             command_policy: "guarded",
         }
@@ -252,10 +254,12 @@ impl PolicyReason {
             Self::ProtectedRepositoryAsset => "不要通过子进程删除或清空 .git/.github",
             Self::WorkspacePathProtected => "子进程只能写 Workspace 内的路径",
             Self::ConfirmationRequired => "让用户确认这次危险操作，再带 confirm=true 重试",
-            Self::NetworkBlocked => "safe 模式不放行联网命令；需要联网请用户改 permission-mode",
+            Self::NetworkBlocked => {
+                "safe 模式不放行联网命令，confirm=true 解不开；需要联网请用户改配置：gld set <项目> permission-mode=trusted"
+            }
             Self::InvalidSyntax => "命令的引号没有配对，按 shell 词法修好再发",
             Self::CommandNotAllowlisted => {
-                "改用已获准的命令或对应的只读工具；确需放开时，请用户把它加进工作区命令白名单"
+                "改用已获准的命令或对应的只读工具；确需放开时 confirm=true 解不开，只能请用户改配置，check_command 回包的 config_command 是现成命令"
             }
             Self::RemoteShellNotAllowed => {
                 "远端机器上的事走已登记的 hub / ccnm 远端成员；确实要从这台机器直连，得由用户把它加进白名单，那等于放开任意远端 shell，gld 不限制目标"
@@ -500,11 +504,7 @@ pub fn validate_command_for_workspace(
 
     let executable = parts[0].trim_start_matches("./");
     let base_name = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
-    let stem = base_name
-        .strip_suffix(".exe")
-        .or_else(|| base_name.strip_suffix(".cmd"))
-        .or_else(|| base_name.strip_suffix(".bat"))
-        .unwrap_or(base_name);
+    let stem = program_stem(executable);
 
     let workspace_entry_candidate = workspace_local_entry_exists(workspace, arguments, executable)
         || executable.contains(['/', '\\'])
@@ -595,6 +595,128 @@ fn confirmed(arguments: &Value) -> bool {
         .get("confirm")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// 白名单比对用的程序名：去掉目录和 Windows 可执行后缀。
+fn program_stem(program: &str) -> &str {
+    let executable = program.trim_start_matches("./");
+    let base_name = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
+    base_name
+        .strip_suffix(".exe")
+        .or_else(|| base_name.strip_suffix(".cmd"))
+        .or_else(|| base_name.strip_suffix(".bat"))
+        .unwrap_or(base_name)
+}
+
+/// 这条策略拒绝靠什么解开：`confirm`、`config_change`（第二个值是确切命令）或 `other`。
+///
+/// 不按规则名猜，而是真的改完再判一次：`rm -rf` 带了 confirm 还会撞白名单，`gh pr merge` 加进
+/// 白名单还会撞只读名单。只看规则名，就又会让人点了头、改了配置还是被拒（审查 §108）。
+/// 只判策略，程序装没装看同一份回包的 `program.found`。
+pub fn denial_resolution(
+    first: PolicyReason,
+    arguments: &Value,
+    policy: &PolicySettings,
+    workspace: Option<&Workspace>,
+    program: Option<&str>,
+    project: &str,
+) -> (&'static str, Option<String>) {
+    let mut approved = arguments.clone();
+    if let Some(object) = approved.as_object_mut() {
+        object.insert("confirm".into(), Value::Bool(true));
+    }
+    let mut reason = first;
+    if first.needs_approval() {
+        match validate_command_for_workspace(&approved, policy, workspace) {
+            Ok(()) => return ("confirm", None),
+            Err(next) => reason = next.reason,
+        }
+    }
+
+    let actions = policy.config_source == ACTIONS_CONFIG_SOURCE;
+    let mut trial = policy.clone();
+    let mut assignments = Vec::new();
+    // 最多两轮：联网、白名单各能解一次。
+    for _ in 0..2 {
+        match reason {
+            // Actions 那条线路没有可改 permission-mode 的 gld set 字段。
+            PolicyReason::NetworkBlocked if !actions => {
+                trial.permission_mode = "trusted".into();
+                assignments.push("permission-mode=trusted".to_string());
+            }
+            PolicyReason::CommandNotAllowlisted => {
+                let Some(stem) = program.map(program_stem).filter(|stem| shell_safe(stem)) else {
+                    return ("other", None);
+                };
+                let Some(value) = allowed_commands_with(policy, stem) else {
+                    return ("other", None);
+                };
+                trial.allowed_commands.insert(stem.to_string());
+                let key = if actions {
+                    "actions.allowed-commands"
+                } else {
+                    "allowed-commands"
+                };
+                assignments.push(format!("{key}={value}"));
+            }
+            _ => return ("other", None),
+        }
+        match validate_command_for_workspace(&approved, &trial, workspace) {
+            Ok(()) => {
+                let project = if shell_safe(project) {
+                    project
+                } else {
+                    "<项目>"
+                };
+                let fields = assignments.join(" ");
+                return ("config_change", Some(format!("gld set {project} {fields}")));
+            }
+            Err(next) => reason = next.reason,
+        }
+    }
+    ("other", None)
+}
+
+/// 把 `added` 加进白名单后，`allowed-commands` 该写成什么。
+///
+/// `gld set` 是整值替换，不是追加：项目配过 `rg`，只写新名字 `rg` 就没了；配过 `only:cargo`，
+/// 不带前缀还会变回默认全集，把想收紧的权限放大。所以已配的要一起写上。
+fn allowed_commands_with(policy: &PolicySettings, added: &str) -> Option<String> {
+    let only = policy.allowlist_mode == "only";
+    let implied = if only {
+        BASIC_READ_ONLY_COMMANDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        default_allowed_command_set()
+    };
+    let mut names: Vec<&str> = policy
+        .allowed_commands
+        .difference(&implied)
+        .map(String::as_str)
+        .chain([added])
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if !names.iter().all(|name| shell_safe(name)) {
+        return None;
+    }
+    let names = names.join(",");
+    Some(if only {
+        format!("{ONLY_PREFIX}{names}")
+    } else {
+        names
+    })
+}
+
+/// 能原样拼进给用户复制的命令。程序名是 AI 传进来的，不查就可能把 `$(...)` 递到用户终端里。
+fn shell_safe(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '+' | '-'))
 }
 
 /// 从这台机器直接连出去的那几个。

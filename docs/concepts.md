@@ -1494,6 +1494,20 @@ AI 跑下表里的命令时，gld 先拦下，报 `DANGEROUS_OPERATION_REQUIRES_
 加进去之后装东西照样要你点头。默认就在白名单里的 `python`、`cargo`、`go`、`npx` 不用加：`python -m pip install`、
 `cargo install` 直接就会被拦下来问你。
 
+**被拒后看 `check_command` 的 `resolved_by`，它说的是什么能解开，别看 `needs_user_authorization`：**
+
+| `resolved_by` | 怎么办 | 例子 |
+| --- | --- | --- |
+| `confirm` | 问过用户，带 `confirm=true` 重发 | `git reset --hard`、`pnpm install` |
+| `config_change` | `confirm=true` 解不开。让用户在本机跑回包 `config_command` 给的命令，再重新预检 | 不在白名单的程序；老配置留下的 `permission-mode=safe` 挡住的联网命令 |
+| `other` | 这条拒绝 gld 给不出配置解法，按 `suggestion` 换做法 | shell 语法、`gh pr merge`、`ssh`（走已登记的远端成员） |
+
+`needs_user_authorization` 只表示"得用户出面"，白名单拒绝也是 `true`，而带 `confirm=true` 复查照样是 `deny`（审查 §108 踩过）。字段没改语义，老调用方不受影响。
+
+`rm -rf` 这种可能两道都要：`rm` 默认不在白名单，所以回 `decision: needs_approval` 的同时 `resolved_by: config_change`。先改配置，再预检一次才轮到 `confirm`。
+
+`config_command` 自己拼好了已配的内容，别手写短的：`gld set` 是整值替换，项目配过 `rg` 时写 `allowed-commands=pip` 会把 `rg` 冲掉；配过 `only:cargo` 时不带前缀会退回默认全集，白名单反而放宽。
+
 **为什么要拦，而不是在回包里提醒：**2026-10-07 实测过两次，只提醒拦不住。一次 AI 照提醒没跑 `pnpm install`，可 `pnpm run test`
 自己把依赖装上了；另一次它把"按 CI 全跑一遍"当成你同意了，没问就跑了 `pnpm install`。`confirm=true` 仍是 AI 自己填的，
 服务端看不到你点没点头（见[安全](security.md)），它管的是让 AI 在动手前停下来问你。
