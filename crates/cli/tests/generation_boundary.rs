@@ -904,10 +904,10 @@ fn a_process_left_holding_the_output_keeps_the_old_generation_alive() {
         }),
     );
     assert_eq!(holding["exit_code"], 0, "{holding}");
+    // 后台循环的 tick 可能抢在 `echo $!` 前面，负载高时第一行不一定是 pid。
     let holder: u32 = holding["stdout"]
         .as_str()
-        .and_then(|text| text.lines().next())
-        .and_then(|line| line.trim().parse().ok())
+        .and_then(|text| text.lines().find_map(|line| line.trim().parse().ok()))
         .unwrap_or_else(|| panic!("{holding}"));
     let redirected = fixture.tool(
         "exec_command",
