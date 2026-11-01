@@ -4,6 +4,8 @@
 //! （`policy::validate_command_for_workspace`），脚本存成文件再跑就看不见了。
 //! 规则写在 docs/security.md「写文件」那一节。
 
+use std::cmp::Reverse;
+use std::ops::Range;
 use std::path::{Component, Path};
 
 /// 命令文本里有没有指向 Workspace 外面的路径：`../` 跳出去、`~/` 家目录、
@@ -12,13 +14,89 @@ use std::path::{Component, Path};
 /// 以前是先把 `\` 全换成 `/`、再把引号或空白后面的任何 `/` 当绝对路径，于是
 /// argv 里一个单引号（`shell_words::join` 写成 `'\''`）、`4 / 2`、Workspace 里面的
 /// 绝对路径都被拒，反而 `shutil.rmtree("/")` 放行了（审查 §29）。
+///
+/// 拷贝的读取源不算（见 [`blank_copy_sources`]）。
 pub(crate) fn command_contains_external_path(command: &str, root: Option<&Path>) -> bool {
+    let command = blank_copy_sources(command);
     if command.contains("../") || command.contains("..\\") {
         return true;
     }
-    path_like_tokens(command, cfg!(windows))
+    path_like_tokens(&command, cfg!(windows))
         .into_iter()
         .any(|token| !root.is_some_and(|root| absolute_path_inside(token, root)))
+}
+
+/// 只读第一个路径、只写第二个路径的函数；`true` 表示目标后面还能跟别的参数。
+///
+/// `shutil.move`、`os.rename`、`os.replace` 这些不能进来：它们会把源从原来的地方删掉，
+/// 源在外面就是在改外面。Python 的 `follow_symlinks=False`、`symlinks=True` 会在 Workspace
+/// 里造出指向外面的软链，所以 Python 这几个目标后面不许再有参数；Node 的第三个参数只是
+/// 拷贝模式或回调。
+const COPY_CALLS: [(&str, bool); 6] = [
+    ("shutil.copy(", false),
+    ("shutil.copy2(", false),
+    ("shutil.copyfile(", false),
+    ("shutil.copytree(", false),
+    ("fs.copyFile(", true),
+    ("fs.copyFileSync(", true),
+];
+
+/// 把拷贝调用的源路径从命令文本里抠掉，后面的判断就只看得到目标和别的路径。
+///
+/// 只抠这一处文本：同一个路径在命令别处再出现，照样按外部路径算。
+fn blank_copy_sources(command: &str) -> String {
+    let mut sources: Vec<Range<usize>> = COPY_CALLS
+        .iter()
+        .flat_map(|&(name, more_args)| {
+            command.match_indices(name).filter_map(move |(at, _)| {
+                let before = command[..at].chars().next_back();
+                if before.is_some_and(|ch| ch.is_alphanumeric() || "_.$".contains(ch)) {
+                    return None;
+                }
+                copy_source(command, at + name.len(), more_args)
+            })
+        })
+        .collect();
+    sources.sort_by_key(|source| Reverse(source.start));
+    let mut blanked = command.to_string();
+    for source in sources {
+        blanked.replace_range(source, "");
+    }
+    blanked
+}
+
+/// 参数从 `args_at` 开始的那次调用，源路径在命令里的位置。
+///
+/// 源和目标都得是单纯的字符串字面量，不然看不出到底读哪、写哪，返回 `None`，路径照常查。
+fn copy_source(command: &str, args_at: usize, more_args: bool) -> Option<Range<usize>> {
+    let args = command[args_at..].trim_start();
+    let (source, rest) = string_literal(args)?;
+    let (_, rest) = string_literal(rest.trim_start().strip_prefix(',')?.trim_start())?;
+    let rest = rest.trim_start();
+    let closed = if more_args {
+        rest.starts_with([')', ','])
+    } else {
+        rest.strip_prefix(',')
+            .unwrap_or(rest)
+            .trim_start()
+            .starts_with(')')
+    };
+    let args_at = command.len() - args.len();
+    closed.then(|| args_at + source.start..args_at + source.end)
+}
+
+/// 开头的字符串字面量：内容的范围和它后面的文本。
+///
+/// argv 经 `shell_words::join` 后单引号写成 `'\''`，`cmd` 里的双引号常写成 `\"`，都要认。
+/// 带前缀的（`f'…'` 会展开变量）、带转义的、反引号（JS 模板）都不算单纯的字面量。
+fn string_literal(text: &str) -> Option<(Range<usize>, &str)> {
+    let quote = [r"'\''", r#"\""#, "'", "\""]
+        .into_iter()
+        .find(|quote| text.starts_with(quote))?;
+    let start = quote.len();
+    let end = start + text[start..].find(['\'', '"', '`', '\\'])?;
+    let rest = text[end..].strip_prefix(quote)?;
+    Some((start..end, rest))
 }
 
 /// 挑出像路径的片段：前面是开头、空白、引号或 `(` `=` `,` `[` `{`，本身以 `/`、`~/`、
@@ -104,7 +182,46 @@ fn absolute_path_inside(token: &str, root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::path_like_tokens;
+    use super::{blank_copy_sources, path_like_tokens};
+
+    /// Windows 上 `command_write_paths` 不编译，字面量的几种引号写法在这里跨平台钉住。
+    #[test]
+    fn copy_sources_are_blanked_in_every_quoting() {
+        for (command, blanked) in [
+            ("shutil.copy('/a', 'b')", "shutil.copy('', 'b')"),
+            (r#"shutil.copy("/a", "b")"#, r#"shutil.copy("", "b")"#),
+            (
+                r#"shutil.copy(\"/a\", \"b\")"#,
+                r#"shutil.copy(\"\", \"b\")"#,
+            ),
+            (
+                r"shutil.copy('\''/a'\'', '\''b'\'')",
+                r"shutil.copy('\'''\'', '\''b'\'')",
+            ),
+            (
+                "fs.copyFile('/a', 'b', cb); shutil.copy2('/c', 'd',\n)",
+                "fs.copyFile('', 'b', cb); shutil.copy2('', 'd',\n)",
+            ),
+        ] {
+            assert_eq!(blank_copy_sources(command), blanked);
+        }
+    }
+
+    /// 带转义的路径不认（Windows 的 `C:\a` 因此还会被拒），`'a\', '` 这种也拼不出假的字面量。
+    #[test]
+    fn copy_sources_stay_when_the_call_is_not_plain() {
+        for command in [
+            r"shutil.copy('C:\a', 'b')",
+            r"shutil.copy('/a\', '/b', 'c')",
+            "shutil.copy('/a', 'b', follow_symlinks=False)",
+            "shutil.copy('/a', b)",
+            "shutil.copy('/a')",
+            "shutil.move('/a', 'b')",
+            "myshutil.copy('/a', 'b')",
+        ] {
+            assert_eq!(blank_copy_sources(command), command);
+        }
+    }
 
     #[test]
     fn unix_mode_ignores_backslashes() {
