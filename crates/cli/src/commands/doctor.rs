@@ -11,8 +11,22 @@ use super::Ctx;
 use crate::error::{CliError, CliResult};
 use crate::output::Output;
 
-pub async fn run(ctx: &mut Ctx, probe: bool) -> CliResult {
+pub async fn run(ctx: &mut Ctx, probe: bool, desktop: bool) -> CliResult {
     let mut diagnosis: Diagnosis = ctx.backend.call_typed(Request::Doctor).await?;
+    if desktop {
+        // 不自动拉起守护进程：从这个终端拉起的，会话类型跟着这个终端，查出来的可能不是平时那个的结果。
+        diagnosis.checks.push(if ctx.backend.is_remote() {
+            ctx.backend.call_typed(Request::DesktopProbe).await?
+        } else {
+            DoctorCheck {
+                scope: "桌面".to_string(),
+                label: "截屏".to_string(),
+                level: DoctorLevel::Warn,
+                detail: "守护进程没在跑，查不了：AI 的命令能不能截屏要看守护进程".to_string(),
+                fix: "gld daemon start".to_string(),
+            }
+        });
+    }
     if probe {
         // 和 `gld health` 同一个请求：探活的判断只有一处实现。体检这边只是把
         // 结果并进同一张表，好让"配置对不对"和"此刻通不通"一起看、一起算退出码。

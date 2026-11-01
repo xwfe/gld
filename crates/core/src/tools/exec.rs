@@ -1125,9 +1125,23 @@ fn merge_exec_result(
                 vec!["direct execution without shell"]
             }),
         );
+        if obj
+            .get("stderr")
+            .and_then(Value::as_str)
+            .is_some_and(|stderr| stderr.contains(SCREEN_CAPTURE_REFUSED))
+        {
+            if let Some(warnings) = obj.get_mut("warnings").and_then(Value::as_array_mut) {
+                warnings.push(json!(SCREEN_CAPTURE_HINT));
+            }
+        }
     }
     snapshot
 }
+
+/// macOS 的 `screencapture` 不管是不在图形会话还是没授权，都只报这一句，后面接 `display` 或
+/// 截区域时的 `rect`（2026-11-01 实测）。
+const SCREEN_CAPTURE_REFUSED: &str = "could not create image from ";
+const SCREEN_CAPTURE_HINT: &str = "screencapture says this for two different reasons, and retrying fixes neither: the daemon is not in a graphical login session (it inherits that from whatever started it, and Screen Recording permission does not help), or this binary has no valid Screen Recording grant (on an unsigned binary the grant stops applying when the binary is replaced, while the switch still looks on). Ask the user to run `gld doctor --desktop`, which says which one and how to fix it.";
 
 fn parse_and_resolve(
     spec: &CommandSpec,
@@ -1653,6 +1667,34 @@ mod tests {
             snapshot["workspace_writes_since_start"], 1,
             "命令跑着的时候工作区被改了，它却什么都不知道：{snapshot}"
         );
+    }
+
+    /// 系统这句话分不出原因，AI 只会重试。经别的程序（比如 python）调用时报错也是原样透出来的，
+    /// 所以看 stderr，不看命令名。
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_screen_capture_points_at_the_diagnosis() {
+        use std::os::unix::fs::PermissionsExt;
+        let (workspace, _harness, ctx) = tree_workspace();
+        let warnings_for = |stderr: &str| {
+            let script = workspace.path().join("capture");
+            std::fs::write(&script, format!("#!/bin/sh\necho '{stderr}' >&2\nexit 1\n"))
+                .expect("script");
+            let mut permissions = std::fs::metadata(&script).expect("meta").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("chmod");
+            let result = call_tool(
+                &ctx,
+                "exec_command",
+                &json!({ "cmd": "./capture", "timeout_ms": 5_000 }),
+            );
+            assert_eq!(result["exit_code"], 1, "{result}");
+            result["warnings"].to_string()
+        };
+
+        assert!(warnings_for("could not create image from display").contains("doctor --desktop"));
+        assert!(warnings_for("could not create image from rect").contains("doctor --desktop"));
+        assert!(!warnings_for("some other failure").contains("doctor --desktop"));
     }
 
     /// 反过来：命令还在跑的时候打补丁，补丁的结果里得说一声。

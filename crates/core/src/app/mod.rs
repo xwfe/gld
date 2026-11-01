@@ -23,6 +23,7 @@
 //! | [`agents`] | 委派任务：本机看、放行、拒绝、停（RFC-0009） |
 
 mod agents;
+mod desktop;
 mod doctor;
 mod gateway;
 mod grant;
@@ -41,6 +42,7 @@ mod tunnel;
 mod workspace;
 mod workspace_fields;
 
+pub use desktop::desktop_capture_check;
 pub use doctor::{
     config_checks, port_check, service_checks, service_port_check, software_check, tunnel_check,
     Diagnosis, DoctorCheck, DoctorLevel, PortOccupant, SecretLookup, SERVICE_SCOPE,

@@ -54,7 +54,7 @@ pub struct DoctorCheck {
 }
 
 impl DoctorCheck {
-    fn ok(scope: &str, label: &str, detail: impl Into<String>) -> Self {
+    pub(super) fn ok(scope: &str, label: &str, detail: impl Into<String>) -> Self {
         Self {
             scope: scope.into(),
             label: label.into(),
@@ -64,7 +64,12 @@ impl DoctorCheck {
         }
     }
 
-    fn warn(scope: &str, label: &str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+    pub(super) fn warn(
+        scope: &str,
+        label: &str,
+        detail: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Self {
         Self {
             scope: scope.into(),
             label: label.into(),

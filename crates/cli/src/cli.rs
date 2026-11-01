@@ -297,6 +297,9 @@ pub enum Command {
         /// 再实地探一次本地 / 公网端点和 OAuth 元数据（同 gld health）；不加它一个网络请求都不发
         #[arg(long)]
         probe: bool,
+        /// 再让守护进程试着截 1 个像素，查 AI 跑的命令能不能截屏（macOS）；没授权时系统可能弹授权框
+        #[arg(long)]
+        desktop: bool,
     },
 
     /// 直接调用工具内核：不接 AI 客户端也能验证 Agent 会看到什么

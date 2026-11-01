@@ -11,7 +11,7 @@ gld daemon status
 ```text
 状态          运行中
 pid           9363
-版本          0.10.1（协议 17）
+版本          0.10.1（协议 18）
 运行时长      2h 13m
 运行中的服务  1
 数据目录      /Users/you/.config/gld
@@ -141,6 +141,37 @@ stdin 关闭，stdout / stderr 追加到 `logs/daemon.log`，工作目录切到�
 gld 的凭据放在哪。本机 MCP server 拿到的是全部环境。
 如果你的 frpc 装在只有某个 shell 才有的 PATH 里（比如只在 `.zshrc` 里加过），
 用 `gld cfg runtime --executable-paths` 补上那个目录，让路径不依赖是谁拉起的守护进程。
+
+macOS 上**登录会话类型也是继承的**，`setsid` 不改它：从 SSH 或后台工具里 `gld daemon start`，守护进程就没有图形界面，AI 跑的命令截不了屏。见下一节。
+
+## 让 AI 能截屏（macOS）
+
+先跑这句，它让守护进程真截 1 个像素，然后告诉你卡在哪、怎么修：
+
+```bash
+gld doctor --desktop
+```
+
+没授权时系统可能弹授权框。通过之后，给要用的项目放行命令（它能看到整个屏幕，只给信得过的项目开）：
+
+```bash
+gld set <项目> allowed-commands=screencapture
+```
+
+下面三层都要通，前两层不通时系统报的是同一句 `could not create image from display`，只看报错分不出来：
+
+| 哪一层 | 怎么查 | 不通怎么办 |
+| --- | --- | --- |
+| 守护进程在图形会话里 | `gld doctor --desktop` 的结果写着会话类型，要是 `Aqua` | 交给 launchd 拉起，见[开机自启](#开机自启)。在 `Background` 会话里开录屏权限没用 |
+| 这个二进制有录屏授权 | 同上 | 系统设置 → 隐私与安全性 → 录屏与系统录音：删掉 gld 那条，再加现在的二进制 |
+| 屏幕没锁 | 同上 | 解锁 |
+
+**容易踩的两个坑：**
+
+- **换二进制后授权就失效，开关还亮着。**发布包没有代码签名，系统把授权绑在这个文件的内容哈希上，路径一样也不算。每次升级后重新查一次，不通就删了重加。
+- **`gld daemon restart` 会掉出图形会话。**新进程跟着敲这条命令的地方走，在 SSH 或后台工具里敲，就又回到 `Background`。配了 launchd 的按[开机自启](#开机自启)那条升级命令来。
+
+这是拿命令行工具凑的路子，只能在目标机本机截整屏再读文件；专门的桌面工具还没做，见 [RFC-0013](rfc/0013-native-machines-and-desktop.md)。
 
 ## 开机自启
 

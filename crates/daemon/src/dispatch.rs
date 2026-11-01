@@ -399,6 +399,16 @@ pub async fn dispatch(
 
         // ---- 观察 ----
         R::Doctor => ok(&app.doctor().await?),
+        R::DesktopProbe => {
+            let executable = std::env::current_exe()
+                .map_err(|error| RpcError::internal(format!("找不到自己的路径：{error}")))?;
+            let check = tokio::task::spawn_blocking(move || {
+                gld_core::app::desktop_capture_check(&executable)
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("截屏探测失败：{error}")))?;
+            ok(&check)
+        }
         R::Health { target } => {
             let profile = resolve(app, &target)?;
             ok(&app.health_checks(&profile.id).await?)

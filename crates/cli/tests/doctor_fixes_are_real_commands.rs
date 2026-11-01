@@ -6,9 +6,11 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use gld_core::app::{
-    config_checks, port_check, service_checks, service_port_check, software_check, PortOccupant,
+    config_checks, desktop_capture_check, port_check, service_checks, service_port_check,
+    software_check, PortOccupant,
 };
 use gld_core::runtime::ServiceKind;
 use gld_core::settings::{AppSettings, FrpProfile};
@@ -176,6 +178,9 @@ fn all_fix_texts() -> BTreeSet<String> {
         checks.push(software_check(kind, None));
         checks.push(software_check(kind, Some("/usr/local/bin/x")));
     }
+
+    // 桌面探测：跑在哪台机器上都至少有这一条；真正的修法分支在 core 的单元测试里。
+    checks.push(desktop_capture_check(Path::new("/usr/local/bin/x")));
 
     let fixes: BTreeSet<String> = checks
         .into_iter()

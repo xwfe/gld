@@ -51,7 +51,8 @@ use serde_json::Value;
 /// 16：新增 upgrade_status、upgrade_prepare、upgrade_switch、upgrade_abort（`gld daemon upgrade`，RFC-0008）。
 ///    旧守护进程没有执行代，不能接这几个，见 [`FIRST_PROTOCOL_WITH_GENERATIONS`]。
 /// 17：新增 node_remove（`gld node remove`）。
-pub const PROTOCOL_VERSION: u32 = 17;
+/// 18：新增 desktop_probe（`gld doctor --desktop`）。
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// 从这个协议起守护进程才有执行代。更老的一律当作不支持：提前拒绝，不发任何会动在线状态的请求。
 pub const FIRST_PROTOCOL_WITH_GENERATIONS: u32 = 16;
@@ -409,6 +410,8 @@ pub enum Request {
 
     // ---- 观察 ----
     Doctor,
+    /// 守护进程自己试着截 1×1 像素。没有守护进程时没有意义，命令行不会直连发。
+    DesktopProbe,
     Health {
         target: WorkspaceTarget,
     },

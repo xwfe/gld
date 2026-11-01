@@ -137,7 +137,7 @@ pub async fn run(cli: Cli) -> CliResult {
         Command::Mcp(command) => mcp::run(&mut ctx, command).await,
         Command::Logs(args) => logs::logs(&mut ctx, args).await,
         Command::Health(args) => inspect::health(&mut ctx, args).await,
-        Command::Doctor { probe } => doctor::run(&mut ctx, probe).await,
+        Command::Doctor { probe, desktop } => doctor::run(&mut ctx, probe, desktop).await,
         Command::Tool(command) => tool::run(&mut ctx, command).await,
         Command::Secret(command) => secret::run(&mut ctx, command).await,
         Command::Frp(command) => frp::run(&mut ctx, command).await,
