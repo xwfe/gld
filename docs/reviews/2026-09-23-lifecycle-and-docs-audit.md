@@ -4555,3 +4555,35 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 - 读 `interpreter_mutation_pattern` 的正则（没实跑）：`fs.cp` / `cpSync`、`Path(…).replace`、`Path(…).copy`、`os.symlink`、`os.link` 都不算写文件，路径判断轮不到它们。
 
 **没做：**没部署，没推送。§108 另一处策略问题（`needs_user_authorization` 误导）不在这一轮。
+
+## 111. 桌面截屏实测补全，加 `gld desktop authorize`（2026-11-01）
+
+**§109 没验证的那条现在验了：**三个条件都满足才能截。同一台 macOS 26.6，隔离守护进程，经 `gld tool call` 真跑 `screencapture -x shot.png`：
+
+| 会话 | 授权 | 结果 |
+| --- | --- | --- |
+| `Aqua`（LaunchAgent） | 绑定当前哈希 `f748df59…` | 退出码 0，整屏 PNG 1.1–2.4 MB |
+| `Background`（`daemon start`） | 同上，同一个文件 | 退出码 1，`could not create image from display` |
+| `Aqua` | 开关开着，绑的是 `a218a198…`，文件已是 `f748df59…` | 退出码 1，同一句 |
+
+**只拨开关不更新哈希：**用户在设置里操作后，`~/.local/bin/gld` 那条的 `last_modified` 变成 22:26、调试版那条变成 23:14，两条绑定的哈希都没变，截屏也还是失败。§109 写的“删了重加”是对的，“开关亮着不算数”这次有了直接证据。
+
+**新执行代不影响授权：**宿主用已授权的文件（`f748df59…`），`gld daemon upgrade prepare` + `switch` 到另一个文件（`4d4be7e4…`，权限库里没有它的记录），项目搬过去后照样截到（1.1 MB）。所以 RFC-0008 的换代不丢授权，换宿主才丢。
+
+**这次改了什么：**用户要求别等 AI 用时才弹框。
+
+- `gld desktop authorize`：让守护进程试截 1 个像素，打开设置，每 2 秒重试，能截了才返回，默认最多等 180 秒。守护进程不在跑时直接报错，不自动拉起；在后台会话里直接说要交给 launchd，不开设置。
+- 提前提醒三处：`gld set` 放行 `screencapture`、`gld daemon start`、`gld doctor`。后两处只查放行过它的机器，因为一试就可能弹授权框。命令结果里的警告也改成指向这条命令。
+- `DesktopProbe` 回包从一条检查改成带 `session`、`can_capture`、`executable` 的结构，加 `only_if_used`。协议号 18 还没发布过，不再递增。
+
+**真实走一遍：**全新路径的二进制在 LaunchAgent 下跑 `gld desktop authorize`：系统自动登记了一条记录，用户打开开关（23:20:39），命令 8 秒内报“能截屏了”，退出码 0，守护进程没重启。后台会话和没起守护进程两条路径也实跑过，提示和退出码都对。
+
+**合并：**这次把两张任务卡的分支也合进来了。`d14eb74`（`check_command` 加 `resolved_by`、`config_command`）当时没写审查记录，改动和用法见 `docs/concepts.md`；路径保护见 §110。
+
+**没验证：**
+
+- 点“−”删掉失效记录后重新登记这条路。上面的实测都是全新路径。命令提示里这么写，依据是系统对没记录的文件会自动登记。
+- 真实服务没动：还是 0.10.1，还在 `Background`，也没配 launchd，所以本机现在 AI 还截不了屏。
+- 替换了正在运行的宿主文件、但还没重启时授权算不算；远端节点；锁屏时的报错（文案按同一句写的，没实测）。
+
+**没解决：**每次换宿主二进制都要重新授权。根治要稳定的签名身份，比如 Developer ID，要用户决定。
