@@ -197,6 +197,12 @@ guarded 命令检查和 confined 文件读写继续生效，但任意子进程�
 绝对路径——就报 `WORKSPACE_PATH_PROTECTED`。Workspace 里面的绝对路径照常放行（比如测试用的
 `<仓库>/target/test-home`）；绝对路径经过 Workspace 里的软链指到外面的，算外面。
 
+- 把外面的文件拷进来可以：`shutil.copy` / `copy2` / `copyfile` / `copytree`、`fs.copyFile` / `copyFileSync`
+  只查目标路径。源和目标都要直接写成字符串（`shutil.copy('/x/a.png', 'a.png')`）；源写成变量、`f'…'`、
+  `Path(…)`、`expanduser(…)`，或者 Python 这几个函数多带了 `dirs_exist_ok=True` 这类参数，
+  都看不全这次调用干了什么，还是报这个错。反斜杠路径也一样，所以 Windows 上 `'C:\\x'` 当源还会被拒。
+- 把外面的文件搬进来（`shutil.move`、`os.rename`、`os.replace`）不行：搬走会把外面的源删掉，等于改了外面。
+  先拷进来，外面那份让用户自己处理。
 - 引号里单独一个 `/` 按根目录算，所以 `'/'.join(parts)` 加写文件会被拒：换成 `os.sep`，
   或者把脚本存成项目里的文件再跑。
 - 它只看命令文本：脚本存成文件再跑就看不见了，相对路径经过软链出去也看不出来。
