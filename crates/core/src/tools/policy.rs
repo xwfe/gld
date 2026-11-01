@@ -251,7 +251,9 @@ impl PolicyReason {
             Self::ShellSyntaxRejected => {
                 "移除未加引号的 shell 操作符；引号内的程序参数可以保留。需要管道或重定向时，写成工作区里的脚本再执行"
             }
-            Self::ProtectedRepositoryAsset => "不要通过子进程删除或清空 .git/.github",
+            Self::ProtectedRepositoryAsset => {
+                "不要经命令删除或写入 .git/.github：仓库状态用 git 命令改，.github 下的文件用 apply_patch；会让 git 跑别的程序的配置只有用户自己在终端里能配"
+            }
             Self::WorkspacePathProtected => "子进程只能写 Workspace 内的路径",
             Self::ConfirmationRequired => "让用户确认这次危险操作，再带 confirm=true 重试",
             Self::NetworkBlocked => {
@@ -462,8 +464,11 @@ pub fn validate_command_for_workspace(
             "Shell chaining, redirection and expansion are not allowed",
         ));
     }
+    let looks_like_interpreter_write =
+        interpreter_mutation_pattern().is_match(command) && !only_handles_text(command);
     if (dangerous_command_pattern().is_match(command)
-        || interpreter_mutation_pattern().is_match(command))
+        || looks_like_interpreter_write
+        || delete_tool_pattern().is_match(command))
         && command_targets_protected_repository_asset(command)
     {
         return Err(PolicyError::new(
@@ -475,6 +480,22 @@ pub fn validate_command_for_workspace(
     // 白名单、gh 只读、远端 shell）都不拦。上面几条照旧：workdir 在工作区里、cmd 形式不当 shell 解释是工具本身的约定，
     // 删 .git 几乎从来不是想要的；后面的环境变量、超时也照旧。放行了什么由 dispatch 按默认策略再判一次、告诉 AI。
     let allow_all = policy.allows_all_commands();
+    if !allow_all
+        && (looks_like_interpreter_write || file_tool_pattern().is_match(command))
+        && (crate::tools::command_paths::command_writes_repository_asset(command)
+            || runs_inside_repository_asset(arguments))
+    {
+        return Err(PolicyError::new(
+            PolicyReason::ProtectedRepositoryAsset,
+            "禁止经命令写入 .git/.github",
+        ));
+    }
+    if !allow_all && crate::tools::command_paths::git_config_runs_programs(command) {
+        return Err(PolicyError::new(
+            PolicyReason::ProtectedRepositoryAsset,
+            "这个 Git 配置会让 git 运行别的程序，不能经命令设置",
+        ));
+    }
     if !allow_all
         && interpreter_mutation_pattern().is_match(command)
         && crate::tools::command_paths::command_contains_external_path(
@@ -910,7 +931,7 @@ fn network_command_pattern() -> &'static regex::Regex {
 fn dangerous_command_pattern() -> &'static regex::Regex {
     DANGEROUS_COMMAND_PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)(git\s+reset\s+--hard|git\s+clean\s+-[^\r\n]*f|git\s+checkout\s+--\s+\.|(^|\s)rm\s+(-[^\r\n]*r[^\r\n]*f|--recursive)|remove-item\s+[^\r\n]*-recurse|(^|\s)(rmdir|del)\s+/s\b)",
+            r"(?i)(git\s+reset\s+--hard|git\s+clean\s+-[^\r\n]*f|git\s+checkout\s+--\s+\.|(^|\s)rm\s+(-[^\r\n]*r[^\r\n]*f|-[^\r\n]*f[^\r\n]*r|--recursive)|remove-item\s+[^\r\n]*-recurse|(^|\s)(rmdir|del)\s+/s\b)",
         )
         .expect("valid regex")
     })
@@ -919,19 +940,67 @@ fn dangerous_command_pattern() -> &'static regex::Regex {
 fn interpreter_mutation_pattern() -> &'static regex::Regex {
     INTERPRETER_MUTATION_PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r#"(?i)(shutil\.(rmtree|move|copy\w*)|os\.(remove|unlink|rmdir|removedirs|rename|renames|replace|makedirs|mkdir)|\.(unlink|rename|touch|mkdir|rmdir|symlink_to|hardlink_to)\(|write_text|write_bytes|fs\.(writefile|writefilesync|appendfile|appendfilesync|unlink|unlinksync|rm|rmsync|rename|renamesync|copyfile|copyfilesync|mkdir|mkdirsync|createwritestream)|set-content|out-file|new-item|files?\.(write|delete)|\bopen\([^;\n]*?['\"](r\+|[wax])b?t?\+?['\"])"#,
+            r#"(?i)(shutil\.(rmtree|move|copy\w*)|os\.(remove|unlink|rmdir|removedirs|rename|renames|replace|makedirs|mkdir)|\bos\.(symlink|link)\(|\.(unlink|rename|touch|mkdir|rmdir|symlink_to|hardlink_to)\(|\b(?-i:Path)\([^()]*\)\.(replace|copy|copy_into|move|move_into)\(|write_text|write_bytes|\.(writefile|writefilesync|appendfile|appendfilesync|copyfile|copyfilesync|cpsync|symlinksync|linksync|renamesync|unlinksync|rmsync|mkdirsync|createwritestream)\(|\)\.(cp|rm|link|symlink)\(|fs\.(writefile|writefilesync|appendfile|appendfilesync|unlink|unlinksync|rm|rmsync|rename|renamesync|copyfile|copyfilesync|mkdir|mkdirsync|createwritestream)|\bfs\.(cp|cpsync|symlink|symlinksync|link|linksync)\(|set-content|out-file|new-item|files?\.(write|delete)|\bopen\([^;\n]*?['\"]([rwax][bt]?\+[bt]?|[wax][bt]?)['\"])"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+/// 这些命令的参数只是文字：`git commit -m '修 os.symlink 写 .git/hooks'`、
+/// `grep --exclude-dir=.git os.makedirs .` 没写任何文件，文本像写文件也不算。
+fn only_handles_text(command: &str) -> bool {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(r"(?i)^\S*\b(?:git|gh|grep|egrep|fgrep|rg|ag|ack)(?:\.exe)?\s")
+                .expect("valid regex")
+        })
+        .is_match(command)
+}
+
+/// `workdir=.git/hooks` 之后写 `pre-commit`，命令文本里就看不到 `.git` 了。
+fn runs_inside_repository_asset(arguments: &Value) -> bool {
+    ["workdir", "cwd"].iter().any(|key| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|dir| {
+                crate::tools::write_class::is_git_internal(dir)
+                    || dir
+                        .split(['/', '\\'])
+                        .any(|part| part.trim_end_matches('.').eq_ignore_ascii_case(".github"))
+            })
+    })
+}
+
+/// 删文件的命令。`command-policy=all` 下也和它们一起挡删 `.git`，所以单列，不走白名单。
+fn delete_tool_pattern() -> &'static regex::Regex {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)^\S*\b(?:(?:rm|rmdir|unlink)(?:\.exe)?\s|find(?:\.exe)?\s(?:.*\s)?-delete(?:\s|$))",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// 默认不在白名单、用户自己加进去的文件命令。只用来挡写 `.git`、`.github`，不算进上面那条：
+/// 用户放行了 `cp`，`cp /etc/hosts a` 这种从外面拷进来不该跟着被拒。
+fn file_tool_pattern() -> &'static regex::Regex {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)^\S*\b(?:(?:cp|mv|ln|tee|install|touch|chmod|chown|rsync|dd|mkdir|truncate)(?:\.exe)?\s|sed(?:\.exe)?\s(?:.*\s)?(?:-\w*i|--in-place)(?:\s|=|$))",
         )
         .expect("valid regex")
     })
 }
 
 fn command_targets_protected_repository_asset(command: &str) -> bool {
-    let normalized_command = command.to_ascii_lowercase().replace('\\', "/");
-    let references_protected_asset =
-        normalized_command.contains(".git") || normalized_command.contains(".github");
-    if !references_protected_asset {
+    if !crate::tools::command_paths::mentions_repository_asset(command) {
         return false;
     }
+    let normalized_command = command.to_ascii_lowercase().replace('\\', "/");
 
     let mutating_operation = [
         "rm ",
@@ -940,6 +1009,8 @@ fn command_targets_protected_repository_asset(command: &str) -> bool {
         "del ",
         "unlink",
         "rmtree",
+        "rmsync",
+        ".rm(",
         "write_text",
         "writefile",
         "rename",

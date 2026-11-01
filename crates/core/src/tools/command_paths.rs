@@ -7,6 +7,7 @@
 use std::cmp::Reverse;
 use std::ops::Range;
 use std::path::{Component, Path};
+use std::sync::OnceLock;
 
 /// 命令文本里有没有指向 Workspace 外面的路径：`../` 跳出去、`~/` 家目录、
 /// 不在 Workspace 里的绝对路径（`root` 为 `None` 时绝对路径一律算外面）。
@@ -97,6 +98,176 @@ fn string_literal(text: &str) -> Option<(Range<usize>, &str)> {
     let end = start + text[start..].find(['\'', '"', '`', '\\'])?;
     let rest = text[end..].strip_prefix(quote)?;
     Some((start..end, rest))
+}
+
+/// 命令文本里有没有一段路径落在 `.git` 或 `.github` 上。`.gitignore`、`.gitattributes` 不算。
+/// `git~1`、尾巴上的点、`::$INDEX_ALLOCATION` 都是 Windows 上 `.git` 的别名。
+pub(crate) fn mentions_repository_asset(command: &str) -> bool {
+    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"(?i)(?:^|[\s'"`(,=\[{/\\:])(?:\.git\.*|git~1|\.github\.*)(?:$|[/\\\s'"`),\]}*?:])"#,
+            )
+            .expect("valid regex")
+        })
+        .is_match(command)
+}
+
+/// 像在写文件的命令有没有写到 `.git`、`.github`。
+///
+/// 从文本里分不清哪段是写入目标，所以把明显不是目标的先抠掉再看：拷贝的读取源、写进文件的内容
+/// （`open('.gitignore','a').write('.git/')`）、排除规则。别的提到 `.git` 的写法宁可误拒。
+///
+/// `apply_patch` 永远不写 `.git`，改 workflow 也要确认；经命令写不该比它宽。
+pub(crate) fn command_writes_repository_asset(command: &str) -> bool {
+    if let Ok(parts) = shell_words::split(command) {
+        // 这几个的最后一个参数才是目标，`cp .git/config backup.txt` 是读。
+        if let Some(("cp" | "rsync" | "install", arguments)) = split_program(&parts) {
+            return arguments
+                .last()
+                .is_some_and(|target| mentions_repository_asset(target));
+        }
+    }
+    static NOT_TARGETS: OnceLock<regex::Regex> = OnceLock::new();
+    let not_targets = NOT_TARGETS.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)\.write(?:_text|_bytes)?\([^;\n]*|ignore_patterns\([^)]*\)|--exclude[\w-]*(?:=|\s+)\S+|[!=]=\s*(?:'\\''|\\?['"])\.git(?:hub)?(?:'\\''|\\?['"])"#,
+        )
+        .expect("valid regex")
+    });
+    let blanked = blank_copy_sources(command);
+    mentions_repository_asset(&not_targets.replace_all(&blanked, ""))
+}
+
+/// 拆出程序名（去掉路径和 `.exe`，转小写）和它的参数。
+fn split_program(parts: &[String]) -> Option<(&str, &[String])> {
+    let (program, arguments) = parts.split_first()?;
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let name = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    // 只认全小写：这里的名字都是小写，Windows 上写成 `CP` 的按没认出来算，后面还有白名单。
+    Some((name, arguments))
+}
+
+/// `git config` 或 `git -c` 设置的值会不会让 git 去跑别的程序。
+///
+/// 这些键和往 `.git/hooks` 写脚本是一回事：`git -c core.fsmonitor=./x status` 直接就跑起来了，
+/// `only:git` 这种收窄过的白名单也拦不住。列表挡的是常见的，不是全部（docs/security.md）。
+/// 要解析参数，不能在整行里找：`git log --grep 'git config core.pager x'` 只是在搜字符串。
+pub(crate) fn git_config_runs_programs(command: &str) -> bool {
+    let Ok(parts) = shell_words::split(command) else {
+        return false;
+    };
+    let Some(("git", arguments)) = split_program(&parts) else {
+        return false;
+    };
+    let mut arguments = arguments.iter().map(String::as_str);
+    while let Some(argument) = arguments.next() {
+        match argument {
+            "-c" => {
+                if arguments.next().is_some_and(inline_setting_runs_programs) {
+                    return true;
+                }
+            }
+            "--config-env" => {
+                if arguments.next().is_some_and(env_setting_runs_programs) {
+                    return true;
+                }
+            }
+            "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--attr-source" => {
+                arguments.next();
+            }
+            "config" => return config_call_runs_programs(arguments),
+            "clone" => return clone_call_runs_programs(arguments),
+            _ if argument.starts_with("--config-env=") => {
+                if env_setting_runs_programs(&argument["--config-env=".len()..]) {
+                    return true;
+                }
+            }
+            _ if argument.starts_with('-') => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn config_call_runs_programs<'a>(mut arguments: impl Iterator<Item = &'a str>) -> bool {
+    while let Some(argument) = arguments.next() {
+        match argument {
+            "-f" | "--file" | "--blob" | "-t" | "--type" | "--default" | "--comment"
+            | "--value" => {
+                arguments.next();
+            }
+            "set" => {}
+            "get" | "list" | "unset" | "edit" | "-l" | "--list" | "-e" | "--edit" => return false,
+            _ if argument.starts_with("--get") || argument.starts_with("--unset") => return false,
+            _ if argument.starts_with('-') => {}
+            // 键后面没有值就是读：`git config core.hooksPath`。
+            key => {
+                return arguments
+                    .find(|argument| !argument.starts_with('-'))
+                    .is_some_and(|value| setting_runs_programs(key, value));
+            }
+        }
+    }
+    false
+}
+
+fn clone_call_runs_programs<'a>(mut arguments: impl Iterator<Item = &'a str>) -> bool {
+    while let Some(argument) = arguments.next() {
+        let setting = match argument {
+            "-c" | "--config" => arguments.next(),
+            _ => argument.strip_prefix("--config="),
+        };
+        if setting.is_some_and(inline_setting_runs_programs) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `-c key=value`。没有 `=` 时 git 当成 true。
+fn inline_setting_runs_programs(setting: &str) -> bool {
+    let (key, value) = setting.split_once('=').unwrap_or((setting, "true"));
+    setting_runs_programs(key, value)
+}
+
+/// `--config-env=key=ENVVAR`：值在环境变量里，看不到，按会跑算。
+fn env_setting_runs_programs(setting: &str) -> bool {
+    let key = setting.split('=').next().unwrap_or(setting);
+    program_key_pattern().is_match(key)
+}
+
+fn program_key_pattern() -> &'static regex::Regex {
+    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)^(core\.(hookspath|fsmonitor|sshcommand|pager|editor|askpass|gitproxy|alternaterefscommand)|hook\..+\.command|sequence\.editor|interactive\.difffilter|diff\.external|alias\..+|pager\..+|credential\.(.+\.)?helper|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand|filter\..+\.(clean|smudge|process)|diff\..+\.(textconv|command)|merge\..+\.driver|(diff|merge)tool\..+\.cmd|tar\..+\.command|trailer\..+\.(cmd|command)|remote\..+\.(uploadpack|receivepack)|uploadpack\.packobjectshook|submodule\..+\.update|include\.path|includeif\..+\.path|init\.templatedir|browser\..+\.cmd|man\..+\.cmd|sendemail\.(.+\.)?sendmailcmd|protocol\.(.+\.)?allow)$",
+        )
+        .expect("valid regex")
+    })
+}
+
+fn setting_runs_programs(key: &str, value: &str) -> bool {
+    if !program_key_pattern().is_match(key) {
+        return false;
+    }
+    let key = key.to_ascii_lowercase();
+    // 这两个只有 `!` 开头才跑程序。别名还能以 `-c` 开头再套一层配置，也不放。
+    if key.starts_with("alias.") {
+        return value.starts_with(['!', '-']);
+    }
+    if key.starts_with("submodule.") {
+        return value.starts_with('!');
+    }
+    // `git -c core.pager=cat log`、`-c credential.helper=` 是在关掉它们，不是在跑东西。
+    !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "" | "false" | "true" | "cat" | "off" | "no" | "0" | "never"
+    )
 }
 
 /// 挑出像路径的片段：前面是开头、空白、引号或 `(` `=` `,` `[` `{`，本身以 `/`、`~/`、
