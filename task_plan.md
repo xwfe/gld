@@ -16,12 +16,14 @@
 `825b74a` 有命令在跑时 `gld daemon restart` 不重启、列出来（§40）；`e265ca6` `gld remote add <项目名>` 精简、默认 coding；
 `0324602`–`267cdf9` Agent 委派 D1：`agent_manage`、`gld agent`、项目开关 `agent-delegation`（§42）。
 **守护进程协议从 7 起**（`85804aa`），工具表多了 `agent_manage`。
-- 本机：`v0.10.1` 发布包（`15a7bb1`），守护进程 2026-11-01 17:52 换上（审查 §106），工具已经在执行代子进程里跑。**协议 17**；工具表 35 项、指纹 `6022dd56440b0ea9`，和换之前一样，连接器不用动。
+- 本机：源码 `1717aaf` 的 release 版（未发版，版本号仍是 0.10.1），2026-11-03 23:29 换上（审查 §113）。**协议 18**；工具表 35 项、指纹 `6022dd56440b0ea9`，和换之前一样，连接器不用动。
+  **守护进程归 launchd 管**（`~/Library/LaunchAgents/dev.gld.daemon.plist`，带 `HTTPS_PROXY`、`HTTP_PROXY`），在图形会话里，录屏授权已办，AI 能截屏（还没有项目放行 `screencapture`）。
+  升级用 `gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，换完跑 `gld desktop authorize`。全局可执行路径是交互 shell 的 PATH（61 个目录）。
   下面队列里写着“未部署”的 D15、D10-W0/W1、D16-M0/M1 都写在这次之前，代码已随这次换上；默认关的功能仍然是关的，没有真机验证的仍然没验证。
-  守护进程是去掉 `CLAUDE*` 变量后起的；已点名注入 `~/.codex/AGENTS.md`。本机现在没有 grant（§69 测试用的 `deleg-grant` 已撤销）。
+  launchd 起的守护进程不带 `CLAUDE*` 变量（实测 0 个）；已点名注入 `~/.codex/AGENTS.md`。本机现在没有 grant（§69 测试用的 `deleg-grant` 已撤销）。
   临时项目 `delegation-test`（`~/xdw/gld-delegation-test`，`agent-delegation=ask`，测试时临时开过 `command-policy=all`、`agent-approval=self`，
   §62 测完已改回 guarded / all；工作区里故意留着前几轮委派没提交的改动）还挂在服务上，不要了就 `gld rm delegation-test`。
-  回滚用 `~/.local/opt/gld-0.10.0-20261101-1752`（换之前那版，协议 16）和 `gld-config-20261101-1752.tgz`（0600，有明文凭据）；再往前是 `gld-fef936d-20261101-1537` 和 `gld-config-20261101-1537.tgz`；再往前是 `gld-7959dfc-20261031-1220`（协议 10）和 `gld-config-20261031-1220.tgz`；
+  回滚用 `~/.local/opt/gld-0.10.1-20261103-2319`（换之前那版，协议 17）和 `gld-config-20261103-2319.tgz`（0600，有明文凭据），退回时先 `launchctl bootout gui/$(id -u)/dev.gld.daemon`；再往前是 `gld-0.10.0-20261101-1752`（协议 16）和 `gld-config-20261101-1752.tgz`（0600，有明文凭据）；再往前是 `gld-fef936d-20261101-1537` 和 `gld-config-20261101-1537.tgz`；再往前是 `gld-7959dfc-20261031-1220`（协议 10）和 `gld-config-20261031-1220.tgz`；
   另有官方 0.8.3 包 `gld-0.8.3-20261009-2336`。更早的二进制和数据备份 2026-10-31 按用户要求删了，要那些版本得从 tag 或提交重新构建。
 - 另一台 Mac、Linux 服务器的普通账号和 root：还是 `fba39d0`，`gld --version` 打 `gld 0.8.3 (fba39d049e5c)`（审查 §38）；
   只装了命令行，没起守护进程（审查 §33）。

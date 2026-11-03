@@ -4625,3 +4625,27 @@ launchd 的间隔同样改成 10 秒后在本机复测：启动不久就被杀�
 **没修、写进文档的：**`os.system`、`subprocess.run`、拼接路径、`git rebase --exec`、`git fetch --upload-pack` 这些参数，追不完。`require('fs').copyFileSync('.git/config','a')`、`Path('.git/config').copy('b')` 是读但被拒，安全方向。
 
 **验证：**全量 66 个测试目标 1408 passed / 0 failed，clippy `-D warnings`、fmt 通过，只在 macOS 跑过。新增 `command_repository_assets.rs` 9 条。隔离守护进程真跑 `exec_command`：`workdir=.git/hooks` 写文件、写 `.git/hooks/pc`、`git -c core.fsmonitor=./x status` 都报 `PROTECTED_REPOSITORY_ASSET`，`.git/hooks` 里没多文件；读 `.git/HEAD` 退出码 0。审查的 236 条本机历史命令回放只有 1 条判定变化，发生在修这批误拒之前；修完没有重放。Windows 和 PowerShell 只看了策略判定，没实跑。
+
+## 113. 本机换装：交给 launchd、办录屏授权（2026-11-03）
+
+**用户要求：**合并清理分支和 worktree，更新文档，最后换本机服务。两个任务会话重建的 worktree 都停在 `00c59bf`、没有新提交，直接删了。
+
+**换了什么：**源码 `1717aaf` 的 release 版（版本号 0.10.1，协议 17 → 18），守护进程从后台工具里起的改成 LaunchAgent 拉起。顺序：用旧命令行写全局可执行路径（新命令行和旧守护进程协议不同，只能 stop/status/restart）→ 写 LaunchAgent → 换二进制 → `gld daemon stop` → `launchctl bootstrap`。
+
+| 核对 | 结果 |
+| --- | --- |
+| 中断 | 两次换装都在 1 秒内恢复，服务自动起回 |
+| 工具表 | 35 项，指纹 `6022dd56440b0ea9`，和换前一样，连接器不用动 |
+| 凭据 | `oauth-clients/hub.json` 不变；`profiles.json` 逐键比对只有 `global_executable_paths` 变了，是这次改的 |
+| `gld health` | 刚起来 3 秒时公网一项失败，几秒后重跑全 ✓ |
+| 会话类型 | 经守护进程的子进程查是 `Aqua` |
+| 环境 | `CLAUDE*` 变量 0 个；`HTTPS_PROXY`、`HTTP_PROXY` 从 plist 带上 |
+| 录屏授权 | 用户在设置里删掉 11-01 那条（绑 `951da954…`），329 秒内 `gld desktop authorize` 报能截；新记录绑 `bdeb879d…`，等于当前文件；`gld doctor --desktop` ✓ |
+
+**换装时抓到的 bug：**第一次换上后 AI 跑 `cargo` 报 `Program not found on PATH`。`docs/daemon.md` 第 1 步让人用 `tr ':' ';'` 把 PATH 改成分号分隔，`gld fields` 和 `--help` 也写“换行或分号分隔”，可 `merge_executable_paths` 在 macOS/Linux 上只认换行、逗号和冒号，61 个目录成了一个不存在的路径。修在 `1717aaf`（加单元测试，全量 1409 passed），重编后第二次换装，`cargo`、`rustc`、`node`、`pnpm`、`git` 都找得到。以前本机只配了一个目录，所以没暴露；照文档配过 launchd 的人都会中招。
+
+**另外补的文档：**launchd 不给终端里的代理变量，开机自启一节加了写进 `EnvironmentVariables` 的做法。
+
+**§111 没验证的“点‘−’删掉失效记录后重新登记”这次验了**，就是上面录屏授权那一行。
+
+**没做：**没有项目放行 `screencapture`（放哪个项目要用户定）；没发版。`gld doctor` 那一项“需要处理”是项目 `hpsrv-docs` 的目录不在了，换装前的配置副本用旧二进制跑结果一样，和这次无关。系统设置里还留着测试用的 `gld-grant-test`、`gld-auth-test`、`target/debug/gld` 三条录屏记录，文件已删，要用户自己点“−”。
