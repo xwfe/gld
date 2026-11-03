@@ -369,7 +369,9 @@ impl ToolContext {
 pub fn merge_executable_paths(workspace_paths: &str, global_paths: &str) -> Vec<PathBuf> {
     let mut output = Vec::new();
     for configured in [workspace_paths, global_paths] {
-        for group in configured.split(['\n', ',']) {
+        // 字段说明和文档写的都是换行或分号分隔。以前只认换行和逗号，照 docs/daemon.md 用 `tr ':' ';'`
+        // 配的整串在 macOS 上被当成一个不存在的目录，launchd 起的守护进程跑命令就找不到 cargo。
+        for group in configured.split(['\n', ',', ';']) {
             let group = group.trim();
             if group.is_empty() {
                 continue;
@@ -445,6 +447,18 @@ mod tests {
         assert_eq!(
             paths,
             vec![PathBuf::from("/first"), PathBuf::from("/second")]
+        );
+    }
+
+    #[test]
+    fn executable_paths_accept_semicolons_on_every_platform() {
+        assert_eq!(
+            merge_executable_paths("", "/first;/second; /third"),
+            vec![
+                PathBuf::from("/first"),
+                PathBuf::from("/second"),
+                PathBuf::from("/third")
+            ]
         );
     }
 
