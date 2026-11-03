@@ -240,6 +240,17 @@ gld tool call exec_command -w <项目> cmd='cargo --version'   # 你常用的工
 - **第 1 步是一份快照**：以后装了新工具、放在新目录里，重跑第 1 步。它对手动 `gld daemon start` 也有用：
   守护进程的 PATH 取决于是谁、在什么环境里拉起它的，配成全局可执行路径之后就和这个无关了（2026-09-24
   本机重启后从一个没带 rustup 目录的 shell 拉起守护进程，AI 跑 `cargo` 报 `Program not found on PATH`）。
+  这个值用换行、逗号或分号分隔都行。`1717aaf` 之前在 macOS 和 Linux 上不认分号，照上面第 1 步配的整串会被当成一个
+  不存在的目录：`gld cfg runtime` 显示得好好的，AI 跑 `cargo` 却报 `Program not found on PATH`。用老版本的改成冒号再配一次。
+- **终端里设了代理的，代理也要写进去。**launchd 不给 `HTTPS_PROXY` 这类变量，守护进程经代理出站的连接会断。
+  在第 2 步的 `<dict>` 里、`RunAtLoad` 前面加一段，值照 `echo $HTTPS_PROXY` 填：
+
+  ```xml
+  <key>EnvironmentVariables</key><dict>
+    <key>HTTPS_PROXY</key><string>http://127.0.0.1:7890</string>
+    <key>HTTP_PROXY</key><string>http://127.0.0.1:7890</string>
+  </dict>
+  ```
 - **不要了**：`launchctl bootout gui/$(id -u)/dev.gld.daemon && rm ~/Library/LaunchAgents/dev.gld.daemon.plist`，
   还想让它现在接着跑就再 `gld daemon start`。
 
