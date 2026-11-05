@@ -17,7 +17,7 @@
 - **让 AI 用你装好的 [Skill](docs/concepts.md#本机和项目里的-skill) 和 [MCP server](docs/concepts.md#本机装好的-mcp-server)**。
 - **只给别人开几个项目**：发一份单独的凭据，默认只读，随时作废（[详情](docs/concepts.md#只开几个项目gld-grant)）。
 - **把活交给本机的 Codex、Claude Code 等 Agent**：做完交回 AI 审核，默认关（[怎么用](docs/concepts.md#能用哪些-agent怎么放权)、[风险](docs/security.md#委派出去的-agent-是全权跑的)）。
-- **操作另一台机器上的项目**：那台机器要用 [ccnm](https://github.com/xwfe/ccnm) 管着（[详情](docs/concepts.md#成员还可以在别的机器上)）。
+- **操作另一台机器上的项目**：目标机安装 gld、按邀请命令加入同一个 Hub，并明确共享项目和权限（[原生节点](docs/concepts.md#原生-gld-节点项目读写与凭据管理)）；已有的 [ccnm 接法](docs/concepts.md#成员还可以在别的机器上) 继续可用。
 
 ## 第 1 步：安装
 
@@ -33,7 +33,7 @@ gld --version
 
 别的平台、macOS 弹窗说"无法验证开发者"、新开终端报 `command not found: gld`，都在 [install.md](docs/install.md)。
 
-下载包目前到 0.10.1，和 main 一致。
+安装包的功能以对应[发布说明](docs/releases/v0.10.1.md)为准；源码与部署状态见 [task_plan.md](task_plan.md#当前基线)。
 
 ## 第 2 步：加项目
 
