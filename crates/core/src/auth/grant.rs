@@ -19,34 +19,7 @@ pub const MAX_BROWSER_GRANT_TTL_SECONDS: u64 = 24 * 60 * 60;
 use super::bearer::constant_time_eq_str;
 use crate::data::DataStore;
 
-/// 一个 grant 的范围。跟着 [`super::AuthContext`] 往下走，**不带钥匙本身**。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Grant {
-    /// 随机 id，写进令牌里。不用名字：删了再建一个同名的，旧令牌不能跟着复活。
-    pub id: String,
-    pub name: String,
-    /// 开放的成员 id（本地工作区或远端 ccnm 成员）。
-    pub workspaces: Vec<String>,
-    /// 只读：工具按 read-only 工具集取交集，远端只给读的那几个。
-    #[serde(default)]
-    pub read_only: bool,
-    /// 浏览器专用短期地址发的。不落盘，查 grant 时按记录里有没有 `browser` 现算：
-    /// 委派要分得出它（RFC-0009 第 5 节），而数据文件里本来就有这个事实，存两份迟早对不上。
-    #[serde(skip)]
-    pub browser: bool,
-}
-
-impl Grant {
-    pub fn allows(&self, member_id: &str) -> bool {
-        self.workspaces.iter().any(|id| id == member_id)
-    }
-
-    /// 能不能把活委派给本机 Agent（RFC-0009 第 5 节）：只有 `gld grant add --write` 发的。
-    /// 只读的本来就调不到；浏览器地址嵌在网页扩展里、谁拿到 URL 谁就能用，带了 `--write` 也不给起全权的 Agent。
-    pub fn may_delegate(&self) -> bool {
-        !self.read_only && !self.browser
-    }
-}
+use super::Grant;
 
 impl GrantRecord {
     /// 往下传的范围，带上"是不是浏览器地址"。

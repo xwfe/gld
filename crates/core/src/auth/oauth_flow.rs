@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use super::bearer::constant_time_eq_str;
 use super::client_registry::{ClientRegistry, RegisteredClient, RegistrationError};
-use super::grant::{Grant, GrantBook, NoGrants};
+use super::grant::{GrantBook, NoGrants};
+use super::Grant;
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
 pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;

@@ -36,6 +36,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | 测试 | 位置 | 覆盖什么 |
 | --- | --- | --- |
 | 单元测试 | 各 crate `src/**` 的 `#[cfg(test)]` | 解析、策略、协议编解码、路径回退、字段表 |
+| crate 依赖边界 | `crates/core/tests/crate_boundaries.rs` | 读取离线、锁定的 Cargo metadata，阻止 policy/transport 引入上层、网络框架或构建脚本；代码依赖检查不等于 OS 沙箱 |
 | 工具契约 | `crates/core/tests/call_tool_contract.rs` | 每个 profile 暴露的工具集与返回结构 |
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |
@@ -51,6 +52,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 
 ```bash
 cargo test -p gld-core tools::
+cargo test -p gld-policy -p gld-transport --locked
 cargo test -p gld-daemon
 cargo test -p gld --test daemon_lifecycle
 ```

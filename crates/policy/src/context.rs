@@ -18,7 +18,9 @@
 //! 自然人」）。它能做的是两件实在事：**把不同主体的远端连接分开**，
 //! 以及**把「这次有没有过鉴权」这个事实往下传**。
 
-use super::Grant;
+use alloc::{format, string::String};
+
+use crate::Grant;
 
 /// 已经通过鉴权的调用主体。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +119,7 @@ impl AuthContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn only_noauth_counts_as_unauthenticated() {

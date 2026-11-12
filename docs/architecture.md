@@ -1,18 +1,24 @@
 # 架构
 
-## 三层 crate
+## 按信任边界组织 crate
 
-```text
-crates/
-├── core/    gld-core     运行时内核 + 应用服务层，不知道命令行和守护进程的存在
-├── daemon/  gld-daemon   协议、IPC、守护进程主循环、生命周期
-└── cli/     gld          唯一的二进制：clap 解析、后端选择、终端渲染
-```
+| 目录 / crate | 当前职责 |
+| --- | --- |
+| `crates/policy` / `gld-policy` | 主体、授权范围、调用方键与普通文件写入分类；`no_std + alloc`，只处理显式输入 |
+| `crates/transport` / `gld-transport` | 共用的 MCP Peer、stdio 通道、远端能力表；持有实际通信资源，不决定项目权限 |
+| `crates/core` / `gld-core` | 应用编排与尚未分离的宿主、工具执行、Agent 等适配，消费两个底层 crate |
+| `crates/daemon` / `gld-daemon` | 本机协议、IPC、守护进程主循环、生命周期 |
+| `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
-依赖向内指向 core，core 不反向依赖 cli 或 daemon。core 不负责 clap 命令行解析，
+依赖为 CLI → daemon/core，daemon → core，core → policy/transport；两个底层 crate 不反向依赖 core。
+`crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖，随全仓测试执行。
+旧 `core::auth`、`core::tools::caller/write_class`、`core::bridge::peer/session` 的公开路径通过 re-export 继续可用，只有一份实现。
+后续协议 DTO、执行器、Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
+
+core 不负责 clap 命令行解析，
 但**确实包含 HTTP 监听、命令执行、隧道和 MCP 子进程管理**；daemon 负责守护进程自身的
 IPC 与生命周期，cli 负责参数解析、请求组装和终端展示。不能把“core 不依赖 daemon”
-写成“core 没有网络或进程代码”。业务规则应尽量留在 core，由契约测试约束入口一致性。
+写成“core 没有网络或进程代码”。纯规则按已建立的边界下沉，应用编排留在 core；契约测试继续约束入口一致性。
 
 ```text
 用户
@@ -40,7 +46,8 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务 hub 和单个工作区（`Endpoint` 二选一；后者是 RFC-0004 之前单项目服务的路径，命令行已经起不了它），认证、OAuth 路由、请求日志只有一份 |
 | `machine_mcp/` | 本机装好的 MCP server 经服务转给 AI（RFC-0006）。读配置、握手调用、子进程通道、连接池、结果整理在共享库 `toexec-mcp`（ccnm 同用）；这里是 gld 自己的：怎么起进程和怎么杀、HTTP 通道、`list_mcp_tools` 等三个工具。自成一块，hub 只在列工具、分发、关服务三处调它 |
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |
-| `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
+| `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token，以及 grant 凭据/撤销存储；纯主体和范围来自 `gld-policy`。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
+| `bridge/`、`nodes/` | CCNM 会话、原生节点的身份/项目权限与连接生命周期；共同使用 `gld-transport` 的 Peer 和能力表，保留各自的租约、单连接和断线语义 |
 | `runtime/` | 进程内 MCP / Actions 监听器的启停、端口检测与释放等待 |
 | `tunnel/`、`global_gateway.rs` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
@@ -126,14 +133,14 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
   不同 `GLD_HOME` 的另一个 gld、Git common directory——写在那个模块的文档和
   [security.md](security.md) 里，别当成已经隔离了。
 - **命令会话表也归同一个 `WorkspaceRuntime`，按「目录 + 调用方主体」分。**
-  主体是 `tools/caller.rs` 的 `Caller`：两条 MCP 路从监听器验完鉴权的
+  主体是 `gld-policy` 的 `Caller`（`tools/caller.rs` 重导出）：两条 MCP 路从监听器验完鉴权的
   `AuthContext` 来，命令行和测试是 `local`。两个后果：
 
   - 同一个主体换个 `ToolContext` 进来还是那张表，所以 hub 因为配置指纹变了
     重建上下文时**不再杀掉正在跑的命令**（以前杀，理由是"表跟着旧上下文一起
     没了"，现在理由不成立）。
   - 不同主体的表互不可见，拿别人的 `session_id` 得到 `SESSION_NOT_FOUND`。
-    哪些主体分得开、哪些分不开，写在 `tools/caller.rs`。
+    哪些主体分得开、哪些分不开，写在 `crates/policy/src/caller.rs`。
 
   所以工具内核有两个执行入口：`call_tool`（本机操作员）和 `call_tool_as`
   （带主体，网络进来的都走它）。加新的传输层时**必须用后者**，用前者等于把

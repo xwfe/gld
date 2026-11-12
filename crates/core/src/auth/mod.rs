@@ -1,6 +1,5 @@
 mod bearer;
 mod client_registry;
-mod context;
 mod grant;
 mod oauth;
 mod oauth_flow;
@@ -8,11 +7,11 @@ mod oauth_flow;
 pub use bearer::verify_bearer_header;
 pub(crate) use bearer::{bearer_token, header_secret_matches};
 pub use client_registry::{remove_scope as remove_client_registry, ClientRegistry};
-pub use context::{AuthContext, Principal};
+pub use gld_policy::{AuthContext, Grant, Principal};
 #[cfg(test)]
 pub use grant::FixedGrants;
 pub use grant::{
-    BrowserCredential, Grant, GrantBook, GrantRecord, NoGrants, StoredGrants,
+    BrowserCredential, GrantBook, GrantRecord, NoGrants, StoredGrants,
     DEFAULT_BROWSER_GRANT_TTL_SECONDS, DEFAULT_BROWSER_ORIGIN, MAX_BROWSER_GRANT_TTL_SECONDS,
 };
 pub use oauth::{

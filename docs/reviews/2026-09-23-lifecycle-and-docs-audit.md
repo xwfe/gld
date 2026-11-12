@@ -4701,3 +4701,67 @@ D15-P2 只保留用户指定 Prompt 正文读取的缺口；另一台 Mac/Linux 
 本轮未重跑真实 Windows/远端节点、整机重启、公网三平台或跨执行代场景；没有改生产服务、连接凭据、默认开关，也没有推送或发布。
 
 **文档落盘后复验：**`docs_commands_exist`、`docs_links_resolve`、`docs_have_no_home_paths`、`messages_name_real_commands` 四个测试目标合计 **7 passed / 0 failed**；`git diff --check` 通过。
+
+## 115. 按信任边界拆出授权模型与传输机制（2026-11-12）
+
+**用户要求：**GLD 像 CCNM 一样，在 crate 层按信任边界优化设计，为后续功能保留可维护的接入面。
+本轮从 `main@508571c`、干净工作树开始；按最新要求新增 D17，首批完成 A/B，后续排队只在 `task_plan.md`。
+设计依据、职责与具体拆分顺序见 [RFC-0014](../rfc/0014-trust-boundary-crates.md)。
+
+### 源码与边界
+
+| 变更 | 实际归属与保持的契约 |
+| --- | --- |
+| 新增 `gld-policy` | Grant、Principal/AuthContext、Caller、WriteClass/Verdict；`no_std + alloc`、禁止 unsafe，普通依赖只有 serde。凭据/存储/时钟留 core 认证适配 |
+| 新增 `gld-transport` | Peer、Transport、ChildTransport、PeerError、Offered/RemoteGeneration、能力摘要；仅依赖 serde_json。CCNM 和原生节点复用，连接登记、权限、租约与回收留调用侧 |
+| 原公共导入路径 | core 的 auth、caller、write_class、bridge peer/session 通过 re-export 保持同一类型与实现，没有增加运行时转发层 |
+| 依赖约束 | `crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查普通/开发/构建、可选及目标平台依赖，禁止底层重新依赖 core 或带入上层框架；随现有全仓测试执行 |
+| 锁文件 | 只增加两个 workspace 包与 core 的依赖边，外部版本、源和校验和未变化 |
+| 迁移测试 | 15 条纯权限测试、14 条通信/能力测试随所属 crate 移动；另补 2 条 Grant 序列化/权限测试和 1 条 Cargo 边界测试。core 保留连接租约、权限及真实调用链回归 |
+
+`Grant.browser` 继续不参与持久化；`generation::wire::WireAuth` 仍显式传递它，防止浏览器 grant 到执行代后获得 Agent 委派权限。
+主体 key/scope、命令会话隔离、错误与协议字段保持。daemon 协议仍为 18，没有因为 Rust 文件迁移更改协议版本。
+
+### 为什么没有直接整搬 runtime 或 protocol
+
+源码确认 daemon 协议依赖 core 的 app/settings 等 DTO；执行代消息还混有配置解释、进程探测和管道 I/O。
+执行资源又查询 Agent 状态，Agent 反向使用 exec/runs。整目录改名会保留这些双向依赖。
+
+本轮先建立两个能独立编译的真实边界。下一步 D17-C 先分离配置 DTO 与纯 profile 规则，再迁协议；
+随后按 D17-D1/D2、E、F 逐片收口文件执行、命令会话、Agent 和宿主。core 中相关实现尚未全部分离。
+crate 约束只说明代码依赖，不意味着现有子进程新增网络隔离或操作系统沙箱。
+
+### 独立审查与实际验证
+
+两个实现任务分别迁移 policy 与 transport，另一个只读审查者逐段比较基线原文与新增文件。
+生产逻辑保持，仅调整归属、导入和必要的跨 crate 可见性。
+审查补正了主体说明的文档路径和 profile 归一化的归属，未留下阻断发现。
+
+初次集成编译发现 OAuth 仍经私有 grant 模块导入 Grant（`E0603`），已改从 auth 公开入口导入；
+原生节点四处使用的 `Peer::transport_mut` 改为公开方法，保持原有空闲控制帧说明。
+能力逻辑迁出后清理了 session 的未使用 json 宏导入。下列完整回归在这些修正后运行。
+
+平台：macOS `aarch64-apple-darwin`，`rustc 1.98.0 (88d9e12ae 2026-08-18)`。
+test 和 Clippy 实际通过 cargo `--config env.GLD_HOME=…` 指向仓库 target 下本轮专用隔离目录；下表列其 cargo 子命令。
+
+| 实际检查 | 结果 |
+| --- | --- |
+| `cargo test -p gld-policy -p gld-transport --all-targets --offline` | 17 + 14 = **31 passed**；仅此首次允许 Cargo 写入新增内部包的锁条目 |
+| `cargo test --workspace --all-targets --locked --offline --quiet` | **66 个测试目标，1412 passed / 0 failed / 0 ignored**，退出码 0 |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | 退出码 0 |
+| `cargo fmt --all -- --check` | 退出码 0 |
+| `cargo check -p gld-policy --lib --locked --offline` | 独立普通库目标通过，退出码 0；没有依赖 core 或测试用 serde_json |
+
+全仓通过是当前本机快照的证据；旧测试中的环境条件仍按 development 文档解释，不能从 0 ignored 推导所有外部条件均已执行。
+本轮没有重跑真实 Windows/Linux 节点、公网连接器跨执行代或整机重启场景。
+
+### 在线状态与工具使用问题
+
+只读 `server_info` 仍为 `0.10.1 / 1717aaf41685`，连接工具表 35 项、指纹 `6022dd56440b0ea9`；
+`list_workspaces` 返回 25 项、全部 local。源码首批重构与当前运行制品分别记录；本轮没有换二进制、重启在线服务、推送或发布。
+
+本轮两次 `apply_patch` 返回 `PATCH_FAILED / context_not_found`（外层 `INVALID_ARGUMENT`）。
+第一次是任务表锚点里的双引号被额外转义，第二次是审查记录的锚点只取了原行后半句；两次事务都没有落盘。
+按诊断重读实际文本、重建完整行后完成修改。这是本轮补丁构造问题，不据此登记为 GLD 已确认缺陷。
+
+**文档最终复验：**命令、链接、公开路径与提示四个测试目标合计 7 passed / 0 failed；随后清理 Markdown 文件末尾多余空行。

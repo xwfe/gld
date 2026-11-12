@@ -604,6 +604,8 @@ dependencies = [
  "dirs",
  "fs2",
  "futures-util",
+ "gld-policy",
+ "gld-transport",
  "glob",
  "image",
  "jsonwebtoken",
@@ -647,6 +649,21 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "gld-policy"
+version = "0.10.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gld-transport"
+version = "0.10.1"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
