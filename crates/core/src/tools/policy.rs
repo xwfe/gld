@@ -1164,7 +1164,7 @@ mod tests {
     fn trusted_mode_accepts_an_extensionless_workspace_entry() {
         let dir = tempfile::tempdir().expect("workspace");
         std::fs::write(dir.path().join("project-entry"), "#!/bin/sh\necho ok\n").expect("entry");
-        let workspace = Workspace::new(dir.path().to_path_buf()).expect("workspace");
+        let workspace = crate::tools::new_workspace(dir.path().to_path_buf()).expect("workspace");
         assert!(validate_command_for_workspace(
             &serde_json::json!({ "cmd": "project-entry", "workdir": "." }),
             &PolicySettings::default(),

@@ -14,7 +14,7 @@ use crate::agent_context::{merge_source_lists, AgentContextRuntimeConfig};
 use crate::settings::AppSettings;
 use crate::tools::context::{merge_ai_instructions, merge_executable_paths};
 use crate::tools::policy::PolicySettings;
-use crate::tools::{ToolContext, Workspace};
+use crate::tools::{new_workspace, ToolContext};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, RuntimeConfig};
 
@@ -30,7 +30,7 @@ pub fn build_tool_context(
     settings: &AppSettings,
     usage: Arc<ServiceUsage>,
 ) -> Result<ToolContext, String> {
-    let workspace = Workspace::new(workspace_path).map_err(|error| error.message())?;
+    let workspace = new_workspace(workspace_path).map_err(|error| error.message())?;
     let policy = PolicySettings::from_runtime(runtime);
     let agent_context = AgentContextRuntimeConfig {
         instruction_sources: merge_source_lists(

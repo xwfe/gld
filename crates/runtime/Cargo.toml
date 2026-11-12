@@ -1,0 +1,26 @@
+[package]
+name = "gld-runtime"
+description = "Workspace paths, file reads and transactional patches with explicit protection inputs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gld-policy = { workspace = true }
+gld-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+toexec-fs = { workspace = true }
+toexec-text = { workspace = true }
+walkdir = "2"
+regex = "1"
+glob = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }

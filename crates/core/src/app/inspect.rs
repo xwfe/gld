@@ -10,7 +10,7 @@ use crate::agent_context::{
 use crate::error::{AppError, AppResult};
 use crate::health::{run_health_checks, HealthItem};
 use crate::runtime::ServiceKind;
-use crate::tools::{history, Workspace};
+use crate::tools::{history, new_workspace};
 use crate::usage::ServiceUsageStats;
 
 impl App {
@@ -23,7 +23,7 @@ impl App {
     /// 项目内 `docs/history-session/` 的会话目录（有界，不含正文）。
     pub fn history_sessions(&self, id: &str) -> AppResult<Value> {
         let profile = self.profile_by_id(id)?;
-        let workspace = Workspace::new(profile.path.into())
+        let workspace = new_workspace(profile.path.into())
             .map_err(|error| AppError::Message(error.message()))?;
         history::list_sessions_for_workspace(&workspace)
             .map_err(|error| AppError::Message(error.message()))

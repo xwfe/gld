@@ -392,7 +392,7 @@ mod tests {
         std::fs::create_dir_all(root.join("node_modules/@scope/tool")).expect("scoped");
         std::fs::write(root.join("node_modules/@scope/tool/package.json"), "{}").expect("pkg");
         std::fs::create_dir_all(root.join("web")).expect("web");
-        let ws = Workspace::new(root.to_path_buf()).expect("workspace");
+        let ws = crate::tools::new_workspace(root.to_path_buf()).expect("workspace");
         let held = |cmd: &str, workdir: &str| {
             let words = shell_words::split(cmd).expect("words");
             installs_before_running(Some(&ws), &words[0], workdir, &words[1..]).is_some()
@@ -433,7 +433,7 @@ mod tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join("api/src")).expect("api");
         std::fs::write(root.join("api/pyproject.toml"), "[project]\nname='api'\n").expect("toml");
-        let ws = Workspace::new(root.to_path_buf()).expect("workspace");
+        let ws = crate::tools::new_workspace(root.to_path_buf()).expect("workspace");
         let held = |cmd: &str, workdir: &str| {
             let words = shell_words::split(cmd).expect("words");
             installs_before_running(Some(&ws), &words[0], workdir, &words[1..]).is_some()

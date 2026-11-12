@@ -637,7 +637,7 @@ impl ContextKind {
                 Arc::new(ServiceUsage::default()),
             ),
             Self::Actions => {
-                let workspace = tools::Workspace::new(PathBuf::from(&profile.path))
+                let workspace = tools::new_workspace(PathBuf::from(&profile.path))
                     .map_err(|error| error.message())?;
                 let policy = tools::PolicySettings::from_actions_config(&profile.actions);
                 let permission_mode = policy.permission_mode.clone();

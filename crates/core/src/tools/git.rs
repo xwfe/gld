@@ -978,7 +978,7 @@ mod tests {
     #[test]
     fn the_file_list_names_each_file_once_with_its_real_status() {
         use super::{git_diff, git_show};
-        use crate::tools::workspace::Workspace;
+        use crate::tools::new_workspace;
         use serde_json::json;
 
         let dir = tempfile::tempdir().unwrap();
@@ -999,7 +999,7 @@ mod tests {
         std::fs::write(root.join("added.txt"), "new\n").unwrap();
         git(root, &["add", "blob.bin", "added.txt"]);
 
-        let ws = Workspace::new(root.to_path_buf()).expect("workspace");
+        let ws = new_workspace(root.to_path_buf()).expect("workspace");
         // 文本只要 1 KiB：edit.txt 一个文件的补丁就超了，后面的文件都不在文本里。
         let out = git_diff(&ws, &json!({"staged": true, "max_bytes": 1024})).expect("diff");
         assert_eq!(out["truncated"], true, "{out}");
@@ -1060,7 +1060,7 @@ mod tests {
     #[test]
     fn a_workspace_inside_a_repo_sees_only_its_own_subtree() {
         use super::{git_diff, git_log, git_show, git_status};
-        use crate::tools::workspace::Workspace;
+        use crate::tools::new_workspace;
         use serde_json::json;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1077,7 +1077,7 @@ mod tests {
         std::fs::write(repo.join("web/.env"), "WEB_SECRET=3\n").unwrap();
         std::fs::write(repo.join("api/main.rs"), "fn main() { api() }\n").unwrap();
 
-        let ws = Workspace::new(repo.join("api")).expect("workspace");
+        let ws = new_workspace(repo.join("api")).expect("workspace");
         let leaks = |value: &serde_json::Value| {
             value.to_string().contains("WEB_SECRET") || value.to_string().contains("web/")
         };
@@ -1125,7 +1125,7 @@ mod tests {
         assert!(!leaks(&first), "提交里 web 的改动漏出来了：{first}");
 
         // 项目就是仓库根时一切照旧：整个仓库本来就是它的。
-        let whole = Workspace::new(repo.clone()).expect("workspace");
+        let whole = new_workspace(repo.clone()).expect("workspace");
         let shown = git_show(&whole, &json!({ "rev": "HEAD:web/.env" })).expect("root show");
         assert!(
             shown["content"].as_str().unwrap().contains("WEB_SECRET=2"),

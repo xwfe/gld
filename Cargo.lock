@@ -606,8 +606,8 @@ dependencies = [
  "futures-util",
  "gld-policy",
  "gld-protocol",
+ "gld-runtime",
  "gld-transport",
- "glob",
  "image",
  "jsonwebtoken",
  "libc",
@@ -625,7 +625,6 @@ dependencies = [
  "toexec-fs",
  "toexec-mcp",
  "toexec-skill",
- "toexec-text 0.1.0 (git+https://github.com/xwfe/toexec.git?tag=toexec-text-v0.1.0)",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
@@ -667,6 +666,26 @@ version = "0.10.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "gld-runtime"
+version = "0.10.1"
+dependencies = [
+ "base64",
+ "gld-policy",
+ "gld-protocol",
+ "glob",
+ "image",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toexec-fs",
+ "toexec-text 0.1.0 (git+https://github.com/xwfe/toexec.git?tag=toexec-text-v0.1.0)",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

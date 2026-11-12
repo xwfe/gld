@@ -4838,3 +4838,116 @@ test 和 Clippy 通过 cargo `--config env.GLD_HOME=…` 指向本轮专用 targ
 这是调用时限调整，不作为源码回归或已修复的 GLD 缺陷。
 
 **文档收尾复验：**命令、相对链接、公开路径与提示四个测试目标合计 **7 passed / 0 failed**；`git diff --check` 通过。独立审查已核对任务状态、方法入口调整和本节验证数字。
+
+
+## 117. 提取工作区文件执行边界（2026-11-12）
+
+**用户继续 D17。** 本轮从干净的 `main@2e36d28` 开始，比本地 `origin/main` 超前 2 个提交。
+D1 的源码迁移与本机回归已通过；Windows CI 测试入口同步被工作流保护规则拦下，待用户明确授权。
+本轮改动仍在工作树，尚未提交；完成状态不提前进入 D2。
+
+### 代码归属与接入面
+
+| 范围 | 实际调整 |
+| --- | --- |
+| 工作区路径 | Workspace、ResolvedPath、错误、文件状态和版本迁入 runtime；core 工厂解析 GLD_HOME 并显式传入保护目录 |
+| 文件能力 | read/list/search、图片和 Notebook 读取迁入 runtime；文件实现按读取、列表、搜索拆分，公开函数路径通过 core 重导出保持 |
+| 事务补丁 | runtime 的 patch 入口及 parse/validation/commit/report 子模块负责解析、前置条件、暂存、提交与回滚；原补丁/Notebook 测试及 fixture 随实现迁移 |
+| 调用侧编排 | core 先解析 PatchRequest，再取得原共享写锁；runtime 返回 PatchOutcome，core 仍在同一 guard 内记录调用方版本链并生成运行命令提醒 |
+| 窄接口 | wrote_since 只查询原 caller 的版本链；on_commit 只通知成功提交，位置在 commit 完成后、UUID 与新版本采样前；没有新增锁注册表或通用执行器 |
+| 参数契约 | 数值参数表、bounded/range 进入 protocol::tool_args；注册表和未知参数校验留 core，两个源码扫描表已同步迁移后的实现文件，保留现有参数名与 bounded 调用点检查 |
+| Cargo 依赖 | 第七个 crate gld-runtime 依赖 policy/protocol 和原文件处理库，禁止 unsafe；metadata 门禁覆盖普通、开发、平台、可选与构建依赖 |
+| 锁文件 | 仅新增 gld-runtime 和内部依赖边；core 不再直接依赖 glob/toexec-text，外部版本、源和校验和未变 |
+
+原 `core::tools::workspace::Workspace` 类型路径保持，单参数构造入口有明确调整：
+应用调用者改用 `core::tools::new_workspace(root)`，直接使用 runtime 的调用者必须提供 `protected_read_roots`。
+没有通过隐式空保护列表保留旧构造语义；MCP 结果包装继续留 core。
+
+默认 confined reads、路径与符号链接检查、Git 资产分类、版本前置条件和回滚语义保持。
+保护目录同时保存原始与 canonical 前缀，关闭 confinement 后仍拒绝工作区之外的受保护路径；
+所有位于显式工作区内的路径沿用原有豁免，没有在本轮新增收紧或放宽。
+
+真实写入的整个流程仍在原有同目录锁内；预检不取写锁，失败及预检不增加写计数。
+不同主体的版本链与命令提醒保持隔离。网络身份、项目权限、Planning、Agent 互斥和任务账本留原调用链；
+直接调用 runtime 不是新的授权入口，crate 拆分也没有新增 OS 或网络沙箱。
+
+### 独立审查与测试归属
+
+实现按文件读取、事务补丁与组合适配分别推进，由独立只读审查者对照 `2e36d28` 检查。
+补丁的 35 个顶层辅助函数以及文件工具的 26 个顶层函数、4 个 impl、类型和常量保持原算法；
+迁移差异限于归属、必要的可见性与适配。审查未发现阻断源码回归。
+文档审查收准了工作区内保护目录豁免，以及“D2 迁执行状态、任务账本继续留 core”的表述。
+
+67 个原文件/路径/补丁测试随实现进入 runtime，新增保护目录别名、显式工作区豁免、提交回调时序 3 条，共 **70 条**。
+数值边界原测试移入 protocol，protocol 合计 **21 条**；core 新增工厂注入保护目录的 1 条。
+全仓相较 §116 净增 **4 条**，既有授权、路径、调用方版本链、共享锁、Notebook 事务和 CLI 集成继续保留。
+
+### 本机验证
+
+平台：macOS，隔离 `GLD_HOME` 指向本轮专用 target 子目录；全仓命令显式设置 600000 ms 时限。
+下表列 cargo 子命令，均使用本地已有依赖，不升级外部包。
+
+| 实际检查 | 结果 |
+| --- | --- |
+| `cargo test -p gld-protocol --all-targets --offline` | **21 passed / 0 failed**；首次为新增内部包更新锁文件 |
+| `cargo test -p gld-runtime --all-targets --locked --offline` | **70 passed / 0 failed** |
+| `cargo test -p gld-core --lib --locked --offline -- tools::args tools::workspace` | **19 passed / 0 failed**；参数、工厂与共享运行状态 |
+| `cargo test --workspace --all-targets --locked --offline --quiet` | **69 个目标，1428 passed / 0 failed / 0 ignored**，退出 0；完整日志已汇总 |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+| `cargo test -p gld-runtime --lib --locked --offline -- patch` | 本机 **38 passed / 0 failed**，证明新过滤器实际选择补丁和诊断测试 |
+| `cargo test -p gld-core --lib --locked --offline -- tools::workspace_runtime` | 本机 **14 passed / 0 failed**，保留原写锁与会话状态覆盖 |
+| `git diff --check` | 退出 0 |
+
+全仓验证之后只继续调整文档，不再修改生产源码。上述过滤器在本机执行，不作为 Windows CI 或真实 Windows 文件锁验收。
+本轮也没有重跑真实 Linux/Windows 节点、公网连接器或整机重启场景。
+
+### 待授权的 CI 收尾
+
+[Windows 工作流](../../.github/workflows/ci.yml) 当前仍用 core 上的 `tools::patch tools::workspace_runtime` 过滤器。
+补丁测试迁出后，前一过滤器不会覆盖 runtime；因此 D1 还不能宣告全部完成。
+待应用的变更只将这一测试条件改为：
+
+```bash
+if {
+  cargo test -p gld-runtime --lib --locked -- patch &&
+    cargo test -p gld-core --lib --locked -- tools::workspace_runtime
+} 2>&1 | tee test.log; then
+```
+
+两条命令以 `&&` 连接，避免 if 条件中的首组失败被第二组成功掩盖；原日志与失败报告继续复用。
+普通 apply_patch 返回 `DANGEROUS_OPERATION_REQUIRES_CONFIRMATION`，理由是 CI 工作流修改需要用户明确授权后 `confirm=true`。
+本轮没有设置确认标记或绕过此门禁；批准后应用、复核并连同 D1 源码提交。
+
+### 在线状态与工具使用记录
+
+`server_info` 实测仍为 **0.10.1 / 1717aaf41685**；连接工具表 **35 项**、指纹 `6022dd56440b0ea9`。
+`list_workspaces` 返回 **25 项、全部 local**。源码回归与在线制品分别记录，本轮没有换装、重启在线服务、推送或发布。
+
+定向 `rustfmt`、行数命令 `wc` 和文件清单命令 `rg` 被命令白名单以 `POLICY_REJECTED / command_not_allowlisted` 拒绝，均未执行。
+改用已允许的 `cargo fmt`、read_file 与 list_files 完成相应工作，没有修改策略配置。
+这些拒绝是现有安全规则的结果，不记为已修复的产品故障。
+
+**文档收尾复验：**命令、链接、公开路径与提示四个目标合计 **7 passed / 0 failed**，退出 0；最终 `git diff --check` 通过。独立审查已核对测试数字、构造入口、状态归属及 CI 待授权状态。
+
+
+## 118. D17-D1 授权后的 CI 与文档收尾（2026-11-12）
+
+用户明确批准 Windows CI 测试入口修改，并要求同步提交与文档。接续 §117 的待提交改动，起点仍是 `main@2e36d28`。
+按该授权通过 apply_patch 的 `confirm=true` 完成工作流修改；§117 中的待授权状态已在本轮解除。
+
+- Windows 的“补丁落盘与写锁测试”先跑 `gld-runtime` 的 `patch`，成功后再跑 `gld-core` 的 `tools::workspace_runtime`，使用同一日志和失败报告。
+- 修改限定于该测试条件；两组通过 `&&` 连接，保留任意一组失败时的失败结果。
+- development 同步实际测试归属和执行顺序；task_plan 将 D1 标为完成，下一实施入口改为 D2。
+- 架构与 RFC 保留 D1 的显式保护目录、共享参数契约和调用侧锁/账本约束；D2 只排队，本轮完成 D1 收尾。
+
+Rust 源码保持 §117 已验证的快照：69 个目标 **1428 passed / 0 failed / 0 ignored**，严格 Clippy、格式检查均通过；
+新过滤器在本机分别选中并通过 **38 / 14** 条测试。本次主要复核新增的 CI 控制流和最终文档。
+
+从实际工作流提取 if 条件，在本地 `bash -eo pipefail` 下用命令退出码替身验证四种组合：
+两组均成功时退出 0；第一组、第二组或两组失败时均退出 1，且第一组失败不会执行第二组。
+这覆盖 shell 的控制流，实际 Windows Cargo 与文件锁仍由后续远端 CI 验证；本轮未推送或触发远端 CI。
+
+源码、测试、CI 与相关文档纳入同一份 D1 提交，外部依赖锁定版本沿用；完整源码验证与拆分接口说明见 §117。
+
+**授权后收尾复验：**四个文档目标合计 **7 passed / 0 failed**，格式检查退出 0；独立审查确认 CI 修改范围、失败传播、runtime 文件/fixture 完整性及状态文档一致。

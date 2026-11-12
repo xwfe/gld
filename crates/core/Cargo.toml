@@ -15,6 +15,7 @@ path = "src/lib.rs"
 gld-policy = { workspace = true }
 gld-protocol = { workspace = true }
 gld-transport = { workspace = true }
+gld-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -25,7 +26,6 @@ fs2 = { workspace = true }
 toexec-fs = { workspace = true }
 toexec-mcp = { workspace = true }
 toexec-skill = { workspace = true }
-toexec-text = { workspace = true }
 axum = { version = "0.8", features = ["form", "ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -38,7 +38,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 ring = { version = "0.17", default-features = false }
 walkdir = "2"
 regex = "1"
-glob = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.22"
 percent-encoding = "2"

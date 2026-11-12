@@ -9,7 +9,7 @@ use std::process::Command;
 use serde_json::Value;
 
 #[test]
-fn leaf_crates_keep_their_dependency_boundaries() {
+fn extracted_crates_keep_their_dependency_boundaries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new(env!("CARGO"))
         .current_dir(root)
@@ -35,6 +35,25 @@ fn leaf_crates_keep_their_dependency_boundaries() {
         ("gld-policy", &["serde"][..], &["serde_json"][..]),
         ("gld-protocol", &["serde", "serde_json"][..], &[][..]),
         ("gld-transport", &["serde_json"][..], &[][..]),
+        (
+            "gld-runtime",
+            &[
+                "gld-policy",
+                "gld-protocol",
+                "serde",
+                "serde_json",
+                "thiserror",
+                "uuid",
+                "toexec-fs",
+                "toexec-text",
+                "walkdir",
+                "regex",
+                "glob",
+                "image",
+                "base64",
+            ][..],
+            &["tempfile"][..],
+        ),
     ] {
         let package = packages
             .iter()
@@ -46,7 +65,7 @@ fn leaf_crates_keep_their_dependency_boundaries() {
             let allowed = match dependency["kind"].as_str() {
                 None => normal,
                 Some("dev") => development,
-                // 叶子 crate 不执行 build.rs，也不通过构建依赖绕过边界。
+                // 拆出的 crate 不执行 build.rs，也不通过构建依赖绕过边界。
                 _ => &[],
             };
             assert!(

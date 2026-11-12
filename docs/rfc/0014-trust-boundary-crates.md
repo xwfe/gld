@@ -74,7 +74,7 @@ daemon 的协议又引用 core 的应用 DTO。模块名字区分了职责，但
 | 边界 | 职责与接入面 | 依赖方向 |
 | --- | --- | --- |
 | `gld-policy` | 纯主体、范围、权限判定 | serde；不依赖其他 GLD crate |
-| `gld-protocol` | 共享配置、daemon/执行代消息、节点数据快照、版本与纯编解码 | serde / serde_json；身份与资源转换由调用侧适配 |
+| `gld-protocol` | 共享配置、daemon/执行代消息、节点数据快照、工具参数范围、版本与纯编解码 | serde / serde_json；身份与资源转换由调用侧适配 |
 | `gld-transport` | RPC、stdio、必要的流式传输机制 | 序列化及实际传输库；需要共享 DTO 时可依赖 protocol |
 | `gld-runtime` | 工作区路径、文件、补丁、命令、会话、输出、写锁与运行记录 | policy、必要的 protocol、已有 toexec 原语及平台实现 |
 | `gld-agent` | 已有 Agent profile/store/run 与进程生命周期 | runtime 的实际执行接口、policy、必要的 protocol |
@@ -111,6 +111,22 @@ daemon 的协议又引用 core 的应用 DTO。模块名字区分了职责，但
 应用侧保留 `call_tool_as` 的工具暴露、grant、Planning、Agent 互斥、任务基线与账本编排；
 执行侧接收解析完成的工作区、策略、调用主体、受保护路径和运行记录目录。
 
+### D1 的文件执行接口
+
+`gld-runtime` 承载 Workspace、文件/图片/Notebook 读取、补丁解析与事务提交。
+构造函数显式接收 `protected_read_roots`，core 工厂解析 GLD_HOME；原始和 canonical 路径的保护语义保持。
+数值参数的默认与范围由 `protocol::tool_args` 统一提供，core 的 schema 回归继续扫描实际实现。
+
+补丁使用 `PatchRequest` 和 `PatchOutcome` 两个具体类型。core 先解析参数再取得原有提交锁，
+runtime 在该锁内完成文件操作；`wrote_since` 查询调用方已有版本链，`on_commit` 在提交成功后、采样版本前通知写计数。
+core 继续在同一锁内记录新版本并生成命令提醒。避免为一次拆分新建锁注册表、复制版本账本或引入通用执行器。
+
+路径和文件工具的旧类型路径通过重导出保持；单参数 Workspace 构造改为 core 的 `new_workspace`，
+直接使用 runtime 的调用者必须显式提供保护目录。MCP 包装、权限编排、命令会话与任务账本留 core。
+D2 再一起迁移命令、会话、输出、运行记录与共享运行状态，保持状态所有者唯一。
+
+### D2 与 Agent 需要继续处理的依赖
+
 需要一起处理的反向依赖：
 
 - `WorkspaceRuntime::handoff_blockers` 与 Agent 在跑状态由应用层汇总；执行器只报告自己拥有的写入、命令和输出。
@@ -141,9 +157,9 @@ grant 撤销停止相关命令/Agent；换代不漏掉 Agent、运行命令或�
 每片先运行它迁移的单元测试，再验证实际调用路径。涉及的已有集成测试继续留在使用方；
 例如通信本身的测试随 transport 迁移，连接租约和拒发未知参数的测试留 core。
 
-`crates/core/tests/crate_boundaries.rs` 使用离线、锁定的 Cargo metadata 检查 policy、protocol 与 transport 的实际依赖，
+`crates/core/tests/crate_boundaries.rs` 使用离线、锁定的 Cargo metadata 检查 policy、protocol、transport 与 runtime 的实际依赖，
 包括别名展开、目标平台、可选和 build 依赖。它随现有全仓测试运行，不增加另一套 CI。
-新增叶子 crate 时同步扩展此表，才算把文字约定变成可检查约束。
+新增边界 crate 时同步扩展此表，才算把文字约定变成可检查约束。
 
 收尾运行现有全仓 test / 严格 Clippy / fmt，测试使用隔离 `GLD_HOME`。
 检查 Cargo.lock 只新增工作区内部包和边，不升级外部锁定版本。

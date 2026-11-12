@@ -7,7 +7,6 @@ pub mod context;
 pub mod dispatch;
 pub mod exec;
 pub mod file;
-mod file_types;
 pub mod git;
 pub mod history;
 mod image_tool;
@@ -15,7 +14,6 @@ pub mod manage;
 mod notebook;
 pub mod outcome;
 pub mod patch;
-mod patch_diag;
 pub mod planning;
 pub mod policy;
 mod project_commands;
@@ -41,4 +39,4 @@ pub use registry::{
 };
 /// 唯一工具上下文构建入口；MCP 监听器与命令行共用，避免两边行为漂移。
 pub use setup::build_tool_context;
-pub use workspace::{wrap_mcp_tool_result, wrap_tool_result, Workspace};
+pub use workspace::{new_workspace, wrap_mcp_tool_result, wrap_tool_result, Workspace};

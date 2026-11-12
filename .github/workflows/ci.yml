@@ -81,7 +81,10 @@ jobs:
       - name: 补丁落盘与写锁测试
         run: |
           export GLD_HOME="$(mktemp -d)"
-          if cargo test -p gld-core --lib --locked -- tools::patch tools::workspace_runtime 2>&1 | tee test.log; then
+          if {
+            cargo test -p gld-runtime --lib --locked -- patch &&
+              cargo test -p gld-core --lib --locked -- tools::workspace_runtime
+          } 2>&1 | tee test.log; then
             exit 0
           fi
           # 完整日志要登录 GitHub 才看得到（仓库公开也一样），annotation 匿名

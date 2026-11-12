@@ -11,8 +11,11 @@ use crate::agent_context::{
 };
 use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
-use crate::tools::workspace::{relative_display, Workspace};
 use crate::tools::workspace_runtime::WorkspaceRuntime;
+use crate::tools::{
+    new_workspace,
+    workspace::{relative_display, Workspace},
+};
 use crate::usage::ServiceUsage;
 use crate::workspace::AuthConfig;
 
@@ -78,7 +81,7 @@ pub type SharedToolContext = Arc<ToolContext>;
 
 impl ToolContext {
     pub fn new(workspace_path: PathBuf) -> Result<Self, String> {
-        let workspace = Workspace::new(workspace_path).map_err(|e| e.message())?;
+        let workspace = new_workspace(workspace_path).map_err(|e| e.message())?;
         let auth = AuthConfig {
             auth_type: "noauth".into(),
             ..AuthConfig::default()
@@ -149,7 +152,7 @@ impl ToolContext {
     }
 
     pub fn for_test(workspace_path: PathBuf, harness_root: PathBuf) -> Result<Self, String> {
-        let workspace = Workspace::new(workspace_path).map_err(|e| e.message())?;
+        let workspace = new_workspace(workspace_path).map_err(|e| e.message())?;
         Ok(Self::from_workspace_with_harness_root(
             workspace,
             AuthConfig {

@@ -153,7 +153,7 @@ async fn serve(
     usage: Arc<ServiceUsage>,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let workspace = tools::Workspace::new(workspace_path.clone()).map_err(|e| e.message())?;
+    let workspace = tools::new_workspace(workspace_path.clone()).map_err(|e| e.message())?;
     let ctx = Arc::new(
         ToolContext::from_workspace(
             workspace,
