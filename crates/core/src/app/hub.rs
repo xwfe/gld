@@ -57,23 +57,7 @@ pub struct HubMemberDto {
     pub mode: String,
 }
 
-/// `gld hub remote add` 收到的参数。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CcnmMemberSpec {
-    /// 给人看的名字，也是调用时 `workspace` 参数可以用的值；空串表示和 ccnm 里的项目名一样。
-    pub name: String,
-    /// ccnm 配置里的 node 别名（一台机器的名字），不是 host 也不是 user；空串表示交给 ccnm 选。
-    pub node: String,
-    /// ccnm 里的项目（workspace）名，不是路径。
-    pub workspace: String,
-    /// 本机 `ccnm` 可执行程序；空串表示用 PATH 里的 `ccnm`。
-    #[serde(default)]
-    pub ccnm_bin: String,
-    /// 访问上限：`coding`（默认）或 `read`。
-    #[serde(default)]
-    pub mode: String,
-}
+pub use gld_protocol::daemon::CcnmMemberSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

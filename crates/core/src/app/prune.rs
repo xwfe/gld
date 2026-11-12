@@ -17,67 +17,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use super::App;
 use crate::error::AppResult;
 use crate::workspace::WorkspaceProfile;
 
-/// `gld prune` 看到的（只列清单时）或者做了的（真删时）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PruneReport {
-    /// 登记了、目录却已经不在的项目。
-    pub missing_projects: Vec<MissingProject>,
-    /// 对不上任何留下的项目的数据：已删项目的，和上面那些项目的。
-    pub leftovers: Vec<Leftover>,
-    /// 也对不上，但里面还有命令或 Agent 在跑，这次不动。
-    #[serde(default)]
-    pub busy: Vec<Leftover>,
-    /// 真删了是 true；只列清单是 false。
-    #[serde(default)]
-    pub applied: bool,
-    /// 删的时候出了错的。
-    #[serde(default)]
-    pub failures: Vec<PruneFailure>,
-}
-
-impl PruneReport {
-    pub fn is_empty(&self) -> bool {
-        self.missing_projects.is_empty()
-            && self.leftovers.is_empty()
-            && self.busy.is_empty()
-            && self.failures.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MissingProject {
-    pub id: String,
-    pub name: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Leftover {
-    /// logs | oauth | harness | runs | agents
-    pub kind: String,
-    pub path: String,
-    pub bytes: u64,
-    /// 属于上面哪个目录不在了的项目（它的 id）；已经删掉的项目留下的是空串。
-    #[serde(default)]
-    pub project: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PruneFailure {
-    /// 项目 id 或路径。
-    pub target: String,
-    pub error: String,
-}
+pub use gld_protocol::daemon::{Leftover, MissingProject, PruneFailure, PruneReport};
 
 impl App {
     /// `confirmed` 是 `None` 时只列清单，什么都不动。

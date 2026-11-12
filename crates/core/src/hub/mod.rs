@@ -239,16 +239,7 @@ pub trait NodeBridge: Send + Sync {
     fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value;
 }
 
-/// 一条请求在执行代之间该怎么走，见 [`Hub::execution_route`]。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ExecutionRoute {
-    /// 工具表这类发现请求：走最老的一代。
-    Discovery,
-    /// 不碰工作区状态（`list_workspaces`、节点调用、选不中成员的报错）：走当前代。
-    Unbound,
-    /// 碰这个工作区：走它的主人，没主人就绑给当前代。
-    Owned(String),
-}
+pub use gld_protocol::generation::ExecutionRoute;
 
 /// 经宿主问节点失败时给模型的回包。等不到回复时节点可能已经执行了，所以不能叫它直接重试。
 pub(crate) fn node_bridge_failure(message: &str) -> Value {

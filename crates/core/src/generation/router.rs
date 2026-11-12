@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use tokio::runtime::Handle;
 
 use super::host::Link;
-use super::wire::{Op, WireAuth, WireNative};
-use super::{BuildIdentity, GENERATION_PROTOCOL, MAX_LIVE_GENERATIONS, STATE_FORMAT};
+use super::wire::{auth_to_wire, Op, WireNative};
+use super::{current_build_identity, GENERATION_PROTOCOL, MAX_LIVE_GENERATIONS, STATE_FORMAT};
 use crate::auth::AuthContext;
 use crate::hub::{ExecutionRoute, Hub};
 use crate::nodes::registry::{NativeMember, Nodes};
@@ -299,7 +299,7 @@ impl Router {
             ExecutionRoute::Owned(key) => (Some(key.clone()), false),
         };
         let op = Op::HubMcp {
-            auth: WireAuth::from(auth),
+            auth: auth_to_wire(auth),
             body: body.clone(),
             route,
         };
@@ -316,7 +316,7 @@ impl Router {
     ) -> Result<McpReply, CallError> {
         let op = Op::WorkspaceMcp {
             workspace_id: workspace_id.to_string(),
-            auth: WireAuth::from(auth),
+            auth: auth_to_wire(auth),
             body: body.clone(),
         };
         mcp_reply(self.forward(Some(root_key(root)), false, &op)?)
@@ -332,7 +332,7 @@ impl Router {
     ) -> Result<Value, CallError> {
         let op = Op::ActionsCall {
             workspace_id: workspace_id.to_string(),
-            auth: WireAuth::from(auth),
+            auth: auth_to_wire(auth),
             tool: tool.to_string(),
             arguments: arguments.clone(),
         };
@@ -1239,7 +1239,7 @@ impl Router {
             "host": {
                 "pid": std::process::id(),
                 "uptime_secs": self.started.elapsed().as_secs(),
-                "identity": BuildIdentity::current(),
+                "identity": current_build_identity(),
                 "service_running": hub_running,
             },
             "current": current.map(|id| format!("g{id}")),

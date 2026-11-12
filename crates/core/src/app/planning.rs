@@ -1,22 +1,12 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use super::App;
 use crate::error::{AppError, AppResult};
 use crate::planning::{
-    Goal, GoalStatus, Plan, PlanStatus, PlanStepStatus, PlanningMode, PlanningService,
-    PlanningState,
+    Goal, GoalStatus, Plan, PlanStatus, PlanningMode, PlanningService, PlanningState,
 };
 
-/// 对计划中一个步骤的状态更新。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanStepUpdate {
-    pub step_id: String,
-    pub status: PlanStepStatus,
-    #[serde(default)]
-    pub notes: Option<String>,
-}
+pub use gld_protocol::planning::PlanStepUpdate;
 
 impl App {
     pub fn planning_state(&self, id: &str) -> AppResult<PlanningState> {

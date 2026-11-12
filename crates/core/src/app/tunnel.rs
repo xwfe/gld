@@ -166,7 +166,7 @@ impl App {
     }
 
     fn validate_tunnel_start(&self, id: &str, kind: TunnelServiceKind) -> AppResult<()> {
-        self.with_data(|store| validate_service_start(store.list(), id, kind.workspace_service()))
+        self.with_data(|store| validate_service_start(store.list(), id, kind.into()))
     }
 
     fn unwrap_tunnel_result(

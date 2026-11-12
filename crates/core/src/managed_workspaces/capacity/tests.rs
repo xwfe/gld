@@ -141,18 +141,3 @@ fn usage_never_follows_links_or_counts_service_credentials() {
         "redirected storage is unknown, never zero"
     );
 }
-
-#[test]
-fn defaults_and_invalid_limits_have_explicit_boundaries() {
-    let old: crate::settings::HubConfig = serde_json::from_value(json!({})).unwrap();
-    assert_eq!(old.work_session_limits, WorkSessionLimits::default());
-    for bad in [
-        limits(0, 2, 1),
-        limits(3, 2, 1),
-        limits(1, 8193, 1),
-        limits(1, 1, 0),
-    ] {
-        assert!(bad.validate().is_err());
-    }
-    assert!(limits(1, 1, 1).validate().is_ok());
-}

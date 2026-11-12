@@ -17,63 +17,7 @@ use crate::tunnel::{cleanup_orphan_for_runtime, TunnelServiceKind};
 use crate::usage::{ServiceUsage, ServiceUsageStats};
 use crate::workspace::{RuntimeStatusDto, WorkspaceProfile};
 
-/// 一个工作区可运行的两种服务。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ServiceKind {
-    Mcp,
-    Actions,
-}
-
-impl ServiceKind {
-    pub const ALL: [ServiceKind; 2] = [ServiceKind::Mcp, ServiceKind::Actions];
-
-    pub fn parse(value: &str) -> crate::error::AppResult<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "mcp" => Ok(Self::Mcp),
-            "actions" | "action" => Ok(Self::Actions),
-            other => Err(crate::error::AppError::Message(format!(
-                "未知服务「{other}」（可选 mcp | actions）"
-            ))),
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Mcp => "mcp",
-            Self::Actions => "actions",
-        }
-    }
-
-    /// 面向用户的中文标签（带尾随空格，便于拼接“本地 MCP 端口 …”）。
-    pub fn label(self) -> &'static str {
-        service_label(self)
-    }
-
-    pub fn tunnel_kind(self) -> TunnelServiceKind {
-        match self {
-            Self::Mcp => TunnelServiceKind::Mcp,
-            Self::Actions => TunnelServiceKind::Actions,
-        }
-    }
-
-    pub fn workspace_service(self) -> crate::workspace::resources::WorkspaceService {
-        match self {
-            Self::Mcp => crate::workspace::resources::WorkspaceService::Mcp,
-            Self::Actions => crate::workspace::resources::WorkspaceService::Actions,
-        }
-    }
-
-    pub fn stderr_log_name(self) -> &'static str {
-        stderr_log_name(self)
-    }
-}
-
-impl std::fmt::Display for ServiceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+pub use gld_protocol::service::ServiceKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimePhase {
@@ -231,7 +175,7 @@ impl RuntimeSupervisor {
 
         let (local_endpoint, public_endpoint) = endpoints(profile, kind);
         let port = port_for(profile, kind);
-        let service_label = service_label(kind);
+        let service_label = kind.label();
 
         match phase {
             RuntimePhase::Running => RuntimeStatusDto {
@@ -302,7 +246,7 @@ impl RuntimeSupervisor {
         ) {
             return Err(crate::error::AppError::Message(format!(
                 "{}正在停止，请稍后再试",
-                service_label(kind).trim()
+                kind.label().trim()
             )));
         }
 
@@ -331,10 +275,10 @@ impl RuntimeSupervisor {
             }
             if let Some(pid) = platform().find_pid_listening_on_port(port)? {
                 self.entries.remove(&key);
-                let message = port_busy_message(port, service_label(kind).trim(), pid);
+                let message = port_busy_message(port, kind.label().trim(), pid);
                 append_profile_log(
                     &profile.id,
-                    stderr_log_name(kind),
+                    kind.stderr_log_name(),
                     &format!("[start] {message}"),
                 );
                 return Err(crate::error::AppError::Message(message));
@@ -463,8 +407,8 @@ impl RuntimeSupervisor {
                 // failure was previously invisible in the log viewer. Record it here.
                 append_profile_log(
                     &profile.id,
-                    stderr_log_name(kind),
-                    &format!("[start] {}启动失败：{err}", service_label(kind).trim()),
+                    kind.stderr_log_name(),
+                    &format!("[start] {}启动失败：{err}", kind.label().trim()),
                 );
                 self.entries.insert(
                     key,
@@ -528,7 +472,7 @@ impl RuntimeSupervisor {
                     Err(error) => {
                         append_profile_log(
                             &profile.id,
-                            stderr_log_name(kind),
+                            kind.stderr_log_name(),
                             &format!("[refresh] 检查端口 {port} 失败，保留当前线路：{error}"),
                         );
                         return;
@@ -551,13 +495,13 @@ impl RuntimeSupervisor {
                     let message = if occupied_by_self {
                         format!(
                             "{}端口 {} 未能成功启动，可能仍被本应用上一次服务占用，请先停止后再试",
-                            service_label(kind).trim(),
+                            kind.label().trim(),
                             port
                         )
                     } else {
                         format!(
                             "{}端口 {} 未能成功启动，可能已被其他程序占用",
-                            service_label(kind).trim(),
+                            kind.label().trim(),
                             port
                         )
                     };
@@ -566,7 +510,7 @@ impl RuntimeSupervisor {
                     // 而工作区日志里只剩监听器自己那句 listener stopped。
                     append_profile_log(
                         &profile.id,
-                        stderr_log_name(kind),
+                        kind.stderr_log_name(),
                         &format!(
                             "[refresh] 连续 {} 次在端口 {port} 上查不到监听者，判定服务已死并关闭它",
                             entry.missing_port_checks
@@ -598,7 +542,7 @@ impl RuntimeSupervisor {
             if let Err(error) = cleanup_orphan_for_runtime(&profile, tunnel_kind, false).await {
                 append_profile_log(
                     &profile.id,
-                    stderr_log_name(kind),
+                    kind.stderr_log_name(),
                     &format!("[refresh] 清理失效隧道失败：{error}"),
                 );
             }
@@ -644,20 +588,6 @@ fn public_message_for(profile: &WorkspaceProfile, kind: ServiceKind) -> String {
     match kind {
         ServiceKind::Mcp => profile.effective_public_url(),
         ServiceKind::Actions => profile.actions_effective_public_url(),
-    }
-}
-
-fn service_label(kind: ServiceKind) -> &'static str {
-    match kind {
-        ServiceKind::Mcp => "本地 MCP ",
-        ServiceKind::Actions => "本地 Actions ",
-    }
-}
-
-fn stderr_log_name(kind: ServiceKind) -> &'static str {
-    match kind {
-        ServiceKind::Mcp => "stderr.log",
-        ServiceKind::Actions => "actions-stderr.log",
     }
 }
 

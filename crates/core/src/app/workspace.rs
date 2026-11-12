@@ -12,32 +12,7 @@ use crate::workspace::resources::{
 };
 use crate::workspace::WorkspaceProfile;
 
-/// 调用方对“哪个工作区”的描述。
-///
-/// - `selector`：用户显式给出的 id / id 前缀 / 名称 / 路径；
-/// - `cwd`：调用方所在目录，用于在没有 selector 时按目录归属推断。
-///
-/// 解析规则见 [`App::resolve_workspace`]。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkspaceTarget {
-    #[serde(default)]
-    pub selector: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<PathBuf>,
-}
-
-impl WorkspaceTarget {
-    pub fn selector(selector: impl Into<String>) -> Self {
-        Self {
-            selector: Some(selector.into()),
-            cwd: None,
-        }
-    }
-
-    pub fn new(selector: Option<String>, cwd: Option<PathBuf>) -> Self {
-        Self { selector, cwd }
-    }
-}
+pub use gld_protocol::daemon::{WorkspaceCreateOptions, WorkspaceTarget};
 
 /// [`App::ensure_workspace`] 的结果：目录对应的工作区，以及它是不是刚建出来的。
 ///
@@ -48,17 +23,6 @@ impl WorkspaceTarget {
 pub struct EnsuredWorkspace {
     pub profile: WorkspaceProfile,
     pub created: bool,
-}
-
-/// 创建工作区时可选的覆盖项。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkspaceCreateOptions {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub mcp_port: Option<u16>,
-    #[serde(default)]
-    pub actions_port: Option<u16>,
 }
 
 /// `ws set` 的结果：改完的配置，以及为了让它生效做了什么。

@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gld-policy = { workspace = true }
+gld-protocol = { workspace = true }
 gld-transport = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

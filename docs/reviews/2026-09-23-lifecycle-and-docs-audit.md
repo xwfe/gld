@@ -4765,3 +4765,76 @@ test 和 Clippy 实际通过 cargo `--config env.GLD_HOME=…` 指向仓库 targ
 按诊断重读实际文本、重建完整行后完成修改。这是本轮补丁构造问题，不据此登记为 GLD 已确认缺陷。
 
 **文档最终复验：**命令、链接、公开路径与提示四个测试目标合计 7 passed / 0 failed；随后清理 Markdown 文件末尾多余空行。
+
+## 116. 提取配置与进程间纯协议（2026-11-12）
+
+**用户要求继续 D17。** 本轮从干净的 `main@f6cc335` 开始，该提交已完成 A/B，比本地 `origin/main` 超前 1 个提交。
+继续执行 C，按 [RFC-0014](../rfc/0014-trust-boundary-crates.md) 先解开纯数据对运行实现的引用，再提取 `gld-protocol`。
+
+### 代码归属与接入面
+
+| 变更 | 实际结果 |
+| --- | --- |
+| 纯配置 | HubConfig、WorkSessionLimits、FRP/代理/全局入口配置、默认值和 profile 规则进入 protocol::config；AppSettings 的数据转换、读盘和随机 ID 生成留 core |
+| daemon 协议 | Request、Response、RpcError、版本常量和请求引用的应用 DTO 进入 protocol::daemon；原 daemon 协议路径公开重导出 |
+| 执行代协议 | BuildIdentity、帧、操作、ExecutionRoute、WireAuth/WireNative 进入 protocol::generation；原类型路径保留 |
+| 计划/服务选择 | 共享状态枚举、步骤更新和服务类型保持纯数据；账本、服务进程与工作区资源模型留 core |
+| 调用侧适配 | core 负责进程身份工厂、认证结果转换、节点登记转换、应用错误转换与管道 I/O；没有把运行实现反向带进 protocol |
+| Cargo 边界 | protocol 普通依赖只有 serde / serde_json，禁止 unsafe；现有 metadata 测试扩展到这个 crate，继续覆盖可选、平台和构建依赖 |
+| 锁文件 | 只新增 gld-protocol 及 core、daemon 对它的内部依赖；外部版本、源和校验和未变化 |
+
+配置和消息只有一份类型定义，旧公开类型/常量路径通过 re-export 保持。
+Rust 方法入口确实调整了：`FrpProfile::new` 和 `BuildIdentity::current` 改为 core 工厂，
+WireAuth 改用显式转换函数，工作区资源使用 core 的 From 适配，服务 parse 返回纯错误类型再映射为原应用错误。
+实际工作区消费者全部迁移，具体入口见[架构](../architecture.md#protocol数据契约与适配边界)；不将这描述成“全部 Rust API 原样不变”。
+
+### 保持的外部契约
+
+- daemon 协议仍为 **18**，执行代协议和状态格式仍为 **1**。没有因为移动 Rust 文件递增版本。
+- Request 的标签/字段、Response 的错误码/消息、配置默认值和旧字段别名保持。
+- profile 反序列化只改写退役的 `compat-readonly-all`；其他字符串保留原值，和工具集 normalize 的未知值处理区分。
+- 执行代 op/value 仍是编码后的 JSON 字符串，深层内容解析失败不破坏外帧请求 ID。
+- WireAuth 显式携带 browser；完整策略对象→wire→JSON→策略对象回归证明浏览器 grant 仍不可委派 Agent。
+- 认证、凭据存储、权限判断、运行记录和工具行为没有新增语义；类型可反序列化不代表请求已经完成认证。
+
+本轮形成六个 crate 的依赖结构；core 中的宿主、执行器和 Agent 尚未全部分离。
+crate 依赖检查仍不代表子进程新增操作系统或网络隔离。
+
+### 独立审查与验证
+
+配置与执行代两部分分别实现，第三个只读审查者比较 `f6cc335` 原文与迁移后代码。
+完整 Request、Response、原 daemon 测试、迁移 DTO 的字段/serde 标注、Planning 枚举以及执行代消息保持；
+未发现阻断源码问题。文档审查补正了管道 I/O 的当前归属和“凭据存储”的措辞。
+
+8 条已有纯测试随类型迁移；新增 12 条固定 JSON、默认/别名、容量边界与服务解析回归，
+新 protocol 合计 20 条。core 保留 6 条实际身份转换、管道和路由测试，以及已有 CLI 执行代兼容集成。
+
+平台：macOS `aarch64-apple-darwin`，`rustc 1.98.0 (88d9e12ae 2026-08-18)`。
+test 和 Clippy 通过 cargo `--config env.GLD_HOME=…` 指向本轮专用 target 子目录；下表列 cargo 子命令。
+
+| 实际检查 | 结果 |
+| --- | --- |
+| `cargo test -p gld-protocol --all-targets --offline` | **20 passed / 0 failed**；只在首次为新增内部包更新锁文件 |
+| `cargo test -p gld-core --lib generation:: --locked --offline` | **6 passed / 0 failed**；发现一个迁移后多余导入，随后清理 |
+| `cargo test --workspace --all-targets --locked --offline --quiet` | **68 个测试目标，1424 passed / 0 failed / 0 ignored**，退出码 0 |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | 退出码 0 |
+| `cargo fmt --all -- --check` | 退出码 0 |
+
+全仓日志已完整读取并汇总，以上计数没有包含被超时中止的第一次命令。
+源码回归只代表当前本机快照；旧测试的条件返回仍按 development 说明解释。
+本轮没有重跑真实 Windows/Linux 节点、公网连接器跨执行代或整机重启验收。
+
+### 在线状态与工具使用记录
+
+`server_info` 仍为 **0.10.1 / 1717aaf41685**，连接工具表 35 项、指纹 `6022dd56440b0ea9`；
+`list_workspaces` 返回 25 项、全部 local。源码和当前运行制品分别记录，本轮没有换装、重启在线服务、推送或发布。
+
+上一轮继续 C 时，`workspace_context`、`list_workspaces`、`git_status` 都返回
+`Mcp error: -32603: Internal error`，未能读取仓库且没有修改文件。本轮重新连接成功并完成工作；
+原因仍未定位，恢复连通不等于修复了此前错误。
+
+第一次全仓命令未显式给长任务时限，约 47 秒时被工具以 `termination_reason=timeout` 终止，没有测试失败输出。
+将本轮验证的 `timeout_ms` 设为 600000 后重新执行，152 秒完成并退出 0。
+这是调用时限调整，不作为源码回归或已修复的 GLD 缺陷。
+
+**文档收尾复验：**命令、相对链接、公开路径与提示四个测试目标合计 **7 passed / 0 failed**；`git diff --check` 通过。独立审查已核对任务状态、方法入口调整和本节验证数字。

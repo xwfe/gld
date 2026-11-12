@@ -8,41 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use super::App;
 use crate::auth::{
-    BrowserCredential, Grant, GrantRecord, DEFAULT_BROWSER_GRANT_TTL_SECONDS,
-    DEFAULT_BROWSER_ORIGIN, MAX_BROWSER_GRANT_TTL_SECONDS,
+    BrowserCredential, Grant, GrantRecord, DEFAULT_BROWSER_ORIGIN, MAX_BROWSER_GRANT_TTL_SECONDS,
 };
 use crate::error::{AppError, AppResult};
 
-/// `gld grant add` 收到的参数。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GrantSpec {
-    pub name: String,
-    /// 服务里的项目：id、名称或 id 前缀（≥4 位），本地和远端都行。
-    pub workspaces: Vec<String>,
-    /// 能写能跑命令。默认 false（只读）：能跑命令就能以你的身份读到数据目录里的服务
-    /// 口令，拿到全权，所以要显式要（`gld grant add --write`）。
-    #[serde(default)]
-    pub writable: bool,
-}
-
-/// 浏览器连接单独发短期钥匙；旧 AddGrant IPC 不接受这项操作。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserGrantSpec {
-    pub name: String,
-    pub workspaces: Vec<String>,
-    #[serde(default)]
-    pub writable: bool,
-    #[serde(default = "default_browser_ttl")]
-    pub ttl_seconds: u64,
-    #[serde(default)]
-    pub allowed_origins: Vec<String>,
-}
-
-fn default_browser_ttl() -> u64 {
-    DEFAULT_BROWSER_GRANT_TTL_SECONDS
-}
+pub use gld_protocol::daemon::{BrowserGrantSpec, GrantSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

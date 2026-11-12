@@ -33,6 +33,7 @@ fn leaf_crates_keep_their_dependency_boundaries() {
 
     for (name, normal, development) in [
         ("gld-policy", &["serde"][..], &["serde_json"][..]),
+        ("gld-protocol", &["serde", "serde_json"][..], &[][..]),
         ("gld-transport", &["serde_json"][..], &[][..]),
     ] {
         let package = packages

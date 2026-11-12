@@ -21,65 +21,26 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-
-use serde::{Deserialize, Serialize};
 
 pub use router::{CallError, McpReply, Router};
 
-/// 宿主和执行代之间消息的版本。形状有不兼容改动时加一；同时要决定 [`GENERATION_PROTOCOL_MIN`]。
-/// 只加新操作不用加一：老二进制读不懂时回错误，不会执行，调用的一方自己要接得住（比如工作区搬不走就留着）。
-pub const GENERATION_PROTOCOL: u32 = 1;
-/// 这个宿主还能带的最老执行代协议。范围之外的二进制一律不让上线，失败发生在动路由之前。
-pub const GENERATION_PROTOCOL_MIN: u32 = 1;
-/// 盘上状态的格式版本：`profiles.json`、运行记录、任务和委派记录。
-///
-/// 两代要同时读同一份数据目录，所以必须相等。改了这些文件的不兼容格式就加一，
-/// 不加的话新代会把旧代读不懂的东西写到盘上，而这种坏法回退也救不回来。
-pub const STATE_FORMAT: u32 = 1;
+pub use gld_protocol::generation::{
+    BuildIdentity, GENERATION_PROTOCOL, GENERATION_PROTOCOL_MIN, STATE_FORMAT,
+};
+
 /// 同时活着的代数上限（含准备好还没切过去的）。到了就拒绝再准备新的，绝不为了腾位置杀旧代。
 pub const MAX_LIVE_GENERATIONS: usize = 3;
 
-/// 一代是什么构建。每个二进制启动时自报，宿主据此判断能不能用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BuildIdentity {
-    pub version: String,
-    /// 构建提交；不知道就是 `None`，不拿版本号顶替。
-    pub build_commit: Option<String>,
-    pub generation_protocol: u32,
-    pub state_format: u32,
-    pub pid: u32,
-    pub exe: Option<PathBuf>,
-}
-
-impl BuildIdentity {
-    pub fn current() -> Self {
-        Self {
-            version: crate::VERSION.to_string(),
-            build_commit: crate::BUILD_COMMIT.map(str::to_string),
-            generation_protocol: GENERATION_PROTOCOL,
-            state_format: STATE_FORMAT,
-            pid: std::process::id(),
-            exe: std::env::current_exe().ok(),
-        }
-    }
-
-    /// 这个宿主不能用它的原因；能用是 `None`。
-    pub fn incompatibility(&self) -> Option<String> {
-        if !(GENERATION_PROTOCOL_MIN..=GENERATION_PROTOCOL).contains(&self.generation_protocol) {
-            return Some(format!(
-                "执行代协议 {} 不在这个守护进程支持的 {GENERATION_PROTOCOL_MIN}–{GENERATION_PROTOCOL} 范围内",
-                self.generation_protocol
-            ));
-        }
-        if self.state_format != STATE_FORMAT {
-            return Some(format!(
-                "盘上状态格式 {} 和这个守护进程的 {STATE_FORMAT} 不一样",
-                self.state_format
-            ));
-        }
-        None
+/// 读取当前进程的构建和身份；协议模型只保存结果。
+pub fn current_build_identity() -> BuildIdentity {
+    BuildIdentity {
+        version: crate::VERSION.to_string(),
+        build_commit: crate::BUILD_COMMIT.map(str::to_string),
+        generation_protocol: GENERATION_PROTOCOL,
+        state_format: STATE_FORMAT,
+        pid: std::process::id(),
+        exe: std::env::current_exe().ok(),
     }
 }
 

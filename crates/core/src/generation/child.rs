@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use super::current_build_identity;
 use super::wire::{
-    read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op, WireAuth, WireNative,
+    auth_from_wire, auth_to_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op,
+    WireAuth, WireNative,
 };
-use super::BuildIdentity;
 use crate::agents;
 use crate::auth::AuthContext;
 use crate::data::{forbid_writes, DataStore};
@@ -75,7 +76,7 @@ pub fn serve() -> AppResult<()> {
     }
     writer
         .send(&GenerationFrame::Ready {
-            identity: BuildIdentity::current(),
+            identity: current_build_identity(),
         })
         .map_err(|error| AppError::Message(format!("回复宿主失败：{error}")))?;
 
@@ -238,7 +239,7 @@ impl Generation {
 
     fn run(&self, op: Op) -> Result<Value, String> {
         match op {
-            Op::Ping => Ok(json!({ "identity": BuildIdentity::current() })),
+            Op::Ping => Ok(json!({ "identity": current_build_identity() })),
             Op::Status => Ok(status()),
             Op::ToolNames => Ok(json!({ "tools": self.all_tool_names() })),
             Op::HubConfigure { config, sweep } => {
@@ -262,7 +263,7 @@ impl Generation {
             }
             Op::HubMcp { auth, body, route } => {
                 let hub = self.current_hub()?;
-                let (response, routed) = hub.handle_routed(&auth.into_auth(), &body, &route);
+                let (response, routed) = hub.handle_routed(&auth_from_wire(auth), &body, &route);
                 let member = routed.as_ref().map(|routed| routed.workspace_id.clone());
                 let audit = routed
                     .and_then(|routed| routed.context)
@@ -534,7 +535,7 @@ fn interrupt_everything() {
 }
 
 fn caller_of(auth: WireAuth) -> Caller {
-    let auth: AuthContext = auth.into_auth();
+    let auth: AuthContext = auth_from_wire(auth);
     Caller::from_auth(&auth)
 }
 
@@ -575,7 +576,7 @@ fn status() -> Value {
         .map(|count| count as usize)
         .sum();
     json!({
-        "identity": BuildIdentity::current(),
+        "identity": current_build_identity(),
         "active_commands": total,
         "active_agents": agents::live_count(),
         "unsettled_output": workspace_runtime::any_unsettled_output(),
@@ -707,7 +708,7 @@ impl NodeBridge for HostBridge {
     fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value {
         let asked = self.ask(
             HostOp::NodeCall {
-                auth: WireAuth::from(auth),
+                auth: auth_to_wire(auth),
                 member: WireNative::from(member),
                 tool: tool.to_string(),
                 args,

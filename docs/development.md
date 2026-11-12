@@ -36,7 +36,8 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | 测试 | 位置 | 覆盖什么 |
 | --- | --- | --- |
 | 单元测试 | 各 crate `src/**` 的 `#[cfg(test)]` | 解析、策略、协议编解码、路径回退、字段表 |
-| crate 依赖边界 | `crates/core/tests/crate_boundaries.rs` | 读取离线、锁定的 Cargo metadata，阻止 policy/transport 引入上层、网络框架或构建脚本；代码依赖检查不等于 OS 沙箱 |
+| crate 依赖边界 | `crates/core/tests/crate_boundaries.rs` | 读取离线、锁定的 Cargo metadata，阻止 policy/protocol/transport 引入上层、网络框架或构建脚本；代码依赖检查不等于 OS 沙箱 |
+| 协议兼容 | `crates/protocol/tests/daemon_contract.rs` 与 protocol 单元测试 | 固定 JSON、默认值、别名、错误码和执行代消息；core 保留身份转换与管道 I/O 测试 |
 | 工具契约 | `crates/core/tests/call_tool_contract.rs` | 每个 profile 暴露的工具集与返回结构 |
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |
@@ -52,7 +53,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 
 ```bash
 cargo test -p gld-core tools::
-cargo test -p gld-policy -p gld-transport --locked
+cargo test -p gld-policy -p gld-protocol -p gld-transport --locked
 cargo test -p gld-daemon
 cargo test -p gld --test daemon_lifecycle
 ```
@@ -157,7 +158,8 @@ gld stop && gld daemon stop
 ```text
 crates/core/src/app/        应用服务层（加用例先改这里）
 crates/core/src/tools/      工具内核（改工具行为改这里，同时更新契约测试）
-crates/daemon/src/          协议 / IPC / 守护进程
+crates/protocol/src/        配置 DTO / daemon 和执行代消息 / 纯规则
+crates/daemon/src/          IPC / 请求分发 / 守护进程
 crates/cli/src/cli.rs       全部命令与帮助文本
 crates/cli/src/commands/    子命令实现
 crates/core/tests/fixtures/ 契约测试用的示例项目
@@ -170,9 +172,9 @@ scripts/package.sh          构建 + 打包发布件（CI 也调它）
 
 ## 版本
 
-三个 crate 共用 workspace 版本（根 `Cargo.toml` 的 `[workspace.package].version`）。
+所有 Rust crate 共用 workspace 版本（根 `Cargo.toml` 的 `[workspace.package].version`）。
 守护进程会把版本和协议版本报给命令行，不一致时命令行拒绝转发；
-改了 `Request` / `Response` 的形状记得把 `PROTOCOL_VERSION` 加一。
+改了 `gld-protocol::daemon` 的 `Request` / `Response` 形状记得把 `PROTOCOL_VERSION` 加一；仅迁移 Rust 类型不改版本。
 
 ## 升级连续性
 

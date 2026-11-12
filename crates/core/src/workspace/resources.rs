@@ -18,6 +18,24 @@ impl WorkspaceService {
     }
 }
 
+impl From<crate::runtime::ServiceKind> for WorkspaceService {
+    fn from(kind: crate::runtime::ServiceKind) -> Self {
+        match kind {
+            crate::runtime::ServiceKind::Mcp => Self::Mcp,
+            crate::runtime::ServiceKind::Actions => Self::Actions,
+        }
+    }
+}
+
+impl From<crate::tunnel::TunnelServiceKind> for WorkspaceService {
+    fn from(kind: crate::tunnel::TunnelServiceKind) -> Self {
+        match kind {
+            crate::tunnel::TunnelServiceKind::Mcp => Self::Mcp,
+            crate::tunnel::TunnelServiceKind::Actions => Self::Actions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ServiceClaim<'a> {
     profile: &'a WorkspaceProfile,

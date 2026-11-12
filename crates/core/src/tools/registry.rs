@@ -881,37 +881,9 @@ pub fn canonical_tool_name(name: &str) -> &str {
     }
 }
 
-pub fn normalize_tool_profile(profile: &str) -> &'static str {
-    match profile {
-        "compact" => "compact",
-        "advanced" => "advanced",
-        "read-only" => "read-only",
-        _ => "core",
-    }
-}
-
-/// 已退役的工具集。它暴露的工具和 advanced 一样多（能写能执行），却把每个都标成
-/// `readOnlyHint: true`——客户端据此不再弹确认框，等于替用户把那道真人确认关了
-/// （审查 D08）。
-pub const RETIRED_COMPAT_PROFILE: &str = "compat-readonly-all";
-
-/// 读配置时把退役的 [`RETIRED_COMPAT_PROFILE`] 换成 advanced：工具一个不少，
-/// 标注改回实话。不换的话 [`normalize_tool_profile`] 会把它当成认不出的值、
-/// 悄悄降成 core，老配置升级后就少了一半工具。
-///
-/// 放在反序列化这一层，是因为配置只从这里进来（文件、命令行经 IPC 发回的整份配置），
-/// 换过之后内存里就不再有这个值，下次保存也写成 advanced。
-pub fn deserialize_tool_profile<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-    Ok(if value.trim() == RETIRED_COMPAT_PROFILE {
-        "advanced".into()
-    } else {
-        value
-    })
-}
+pub use gld_protocol::config::{
+    deserialize_tool_profile, normalize_tool_profile, RETIRED_COMPAT_PROFILE,
+};
 
 pub fn exposed_tool_names(tool_profile: &str) -> Vec<&'static str> {
     let names = match normalize_tool_profile(tool_profile) {

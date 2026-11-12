@@ -215,7 +215,7 @@ impl App {
     }
 
     async fn start_inner(&self, id: &str, kind: ServiceKind) -> AppResult<RuntimeStatusDto> {
-        self.with_data(|store| validate_service_start(store.list(), id, kind.workspace_service()))?;
+        self.with_data(|store| validate_service_start(store.list(), id, kind.into()))?;
         let profile = self.profile_by_id(id)?;
 
         // start 是幂等的：已经在跑（或正在起）就把当前状态还回去。

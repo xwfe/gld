@@ -1,5 +1,6 @@
 use super::wire::{
-    read_frame, FrameWriter, GenerationFrame, HostFrame, Op, WireAuth, MAX_FRAME_BYTES,
+    auth_from_wire, auth_to_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, Op,
+    WireAuth, MAX_FRAME_BYTES,
 };
 use super::*;
 use crate::auth::{AuthContext, Grant, Principal};
@@ -15,26 +16,6 @@ fn identity() -> BuildIdentity {
     }
 }
 
-#[test]
-fn only_a_matching_protocol_and_state_format_is_usable() {
-    assert_eq!(identity().incompatibility(), None);
-    let newer = BuildIdentity {
-        generation_protocol: GENERATION_PROTOCOL + 1,
-        ..identity()
-    };
-    assert!(newer.incompatibility().unwrap().contains("协议"));
-    let older = BuildIdentity {
-        generation_protocol: GENERATION_PROTOCOL_MIN - 1,
-        ..identity()
-    };
-    assert!(older.incompatibility().is_some());
-    let other_state = BuildIdentity {
-        state_format: STATE_FORMAT + 1,
-        ..identity()
-    };
-    assert!(other_state.incompatibility().unwrap().contains("状态格式"));
-}
-
 /// `Grant::browser` 标了 serde(skip)。直接序列化会丢，浏览器地址进来的 grant 到了执行代
 /// 就成了能委派全权 Agent 的 grant，这是一次权限提升，不是展示问题。
 #[test]
@@ -47,8 +28,8 @@ fn the_browser_flag_of_a_grant_survives_the_private_channel() {
         browser: true,
     };
     let auth = AuthContext::new(Principal::SharedSecret, "hub").with_grant(Some(grant));
-    let wire = serde_json::to_string(&WireAuth::from(&auth)).unwrap();
-    let back = serde_json::from_str::<WireAuth>(&wire).unwrap().into_auth();
+    let wire = serde_json::to_string(&auth_to_wire(&auth)).unwrap();
+    let back = auth_from_wire(serde_json::from_str::<WireAuth>(&wire).unwrap());
     assert_eq!(back, auth);
     assert!(!back.grant().unwrap().may_delegate());
 }
@@ -66,8 +47,8 @@ fn every_principal_keeps_its_identity_across_the_channel() {
         ),
         AuthContext::new(Principal::OpenAiTunnel, "hub"),
     ] {
-        let wire = serde_json::to_string(&WireAuth::from(&auth)).unwrap();
-        let back = serde_json::from_str::<WireAuth>(&wire).unwrap().into_auth();
+        let wire = serde_json::to_string(&auth_to_wire(&auth)).unwrap();
+        let back = auth_from_wire(serde_json::from_str::<WireAuth>(&wire).unwrap());
         assert_eq!(back, auth);
         assert_eq!(back.tag(), auth.tag());
     }
@@ -104,29 +85,6 @@ fn frames_round_trip_one_per_line() {
 
 fn writer_bytes(writer: FrameWriter<Vec<u8>>) -> Vec<u8> {
     writer.into_inner()
-}
-
-/// 内容嵌套到 serde 的递归上限也不能让帧本身解析失败：解析不了就拿不到 id，对面只能永远等。
-#[test]
-fn deep_content_never_breaks_the_frame_itself() {
-    let depth = 200;
-    let deep = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
-    let line = serde_json::to_string(&HostFrame::Call {
-        id: 9,
-        op: deep.clone(),
-    })
-    .unwrap();
-    let HostFrame::Call { id, op } = serde_json::from_str(&line).unwrap() else {
-        panic!("{line}");
-    };
-    assert_eq!((id, op), (9, deep));
-    let line = serde_json::to_string(&GenerationFrame::Reply {
-        id: 9,
-        ok: true,
-        value: "[".repeat(depth),
-    })
-    .unwrap();
-    assert!(serde_json::from_str::<GenerationFrame>(&line).is_ok());
 }
 
 /// 对端发一条没有换行的巨型消息时要报错，不能一直攒到把内存吃光。

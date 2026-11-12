@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/policy", "crates/transport", "crates/core", "crates/daemon", "crates/cli"]
+members = ["crates/policy", "crates/protocol", "crates/transport", "crates/core", "crates/daemon", "crates/cli"]
 
 [workspace.package]
 version = "0.10.1"
@@ -13,6 +13,7 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 gld-policy = { path = "crates/policy" }
+gld-protocol = { path = "crates/protocol" }
 gld-transport = { path = "crates/transport" }
 gld-core = { path = "crates/core" }
 gld-daemon = { path = "crates/daemon" }

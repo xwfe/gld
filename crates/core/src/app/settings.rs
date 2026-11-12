@@ -16,29 +16,7 @@ pub struct FrpProfileDto {
     pub has_token: bool,
 }
 
-/// 全局运行时设置（影响所有工作区）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GlobalRuntimeSettingsDto {
-    #[serde(default)]
-    pub executable_paths: String,
-    #[serde(default)]
-    pub ai_instructions: String,
-    #[serde(default)]
-    pub instruction_sources: Vec<String>,
-    #[serde(default)]
-    pub skill_sources: Vec<String>,
-    #[serde(default)]
-    pub custom_instruction_paths: String,
-    #[serde(default)]
-    pub custom_skill_paths: String,
-    #[serde(default)]
-    pub hidden_skills: Vec<String>,
-    #[serde(default)]
-    pub allow_lan_access: bool,
-    #[serde(default)]
-    pub restore_runtime_state_on_launch: bool,
-}
+pub use gld_protocol::daemon::GlobalRuntimeSettingsDto;
 
 impl App {
     // ---- FRP 服务器配置 -------------------------------------------------

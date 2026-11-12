@@ -13,38 +13,7 @@ use crate::workspace::WorkspaceProfile;
 use super::cloudflare::{self, CloudflareTunnelHandle};
 use super::frp::{self, FrpServerConfig};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TunnelServiceKind {
-    Mcp,
-    Actions,
-}
-
-impl TunnelServiceKind {
-    pub fn parse(service: &str) -> AppResult<Self> {
-        match service.trim().to_ascii_lowercase().as_str() {
-            "mcp" => Ok(Self::Mcp),
-            "actions" | "action" => Ok(Self::Actions),
-            other => Err(AppError::Message(format!(
-                "未知服务「{other}」（可选 mcp | actions）"
-            ))),
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Mcp => "mcp",
-            Self::Actions => "actions",
-        }
-    }
-
-    pub fn workspace_service(self) -> crate::workspace::resources::WorkspaceService {
-        match self {
-            Self::Mcp => crate::workspace::resources::WorkspaceService::Mcp,
-            Self::Actions => crate::workspace::resources::WorkspaceService::Actions,
-        }
-    }
-}
+pub use gld_protocol::service::TunnelServiceKind;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

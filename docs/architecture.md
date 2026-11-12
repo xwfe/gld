@@ -5,15 +5,17 @@
 | 目录 / crate | 当前职责 |
 | --- | --- |
 | `crates/policy` / `gld-policy` | 主体、授权范围、调用方键与普通文件写入分类；`no_std + alloc`，只处理显式输入 |
+| `crates/protocol` / `gld-protocol` | 配置 DTO、本机 IPC 与执行代消息、版本和纯规则；仅依赖 serde / serde_json |
 | `crates/transport` / `gld-transport` | 共用的 MCP Peer、stdio 通道、远端能力表；持有实际通信资源，不决定项目权限 |
-| `crates/core` / `gld-core` | 应用编排与尚未分离的宿主、工具执行、Agent 等适配，消费两个底层 crate |
-| `crates/daemon` / `gld-daemon` | 本机协议、IPC、守护进程主循环、生命周期 |
+| `crates/core` / `gld-core` | 应用编排与尚未分离的宿主、工具执行、Agent 等适配，消费三个底层 crate |
+| `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
-依赖为 CLI → daemon/core，daemon → core，core → policy/transport；两个底层 crate 不反向依赖 core。
+依赖为 CLI → daemon/core，daemon → core/protocol，core → policy/protocol/transport；三个底层 crate 不反向依赖 core。
 `crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖，随全仓测试执行。
-旧 `core::auth`、`core::tools::caller/write_class`、`core::bridge::peer/session` 的公开路径通过 re-export 继续可用，只有一份实现。
-后续协议 DTO、执行器、Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
+旧 `core::auth`、`core::tools::caller/write_class`、`core::bridge::peer/session` 的公开路径通过 re-export 继续可用。
+配置、应用 DTO 和 daemon 协议的旧类型路径也保持同一类型；带副作用的方法入口调整见下节。
+后续执行器、Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
 
 core 不负责 clap 命令行解析，
 但**确实包含 HTTP 监听、命令执行、隧道和 MCP 子进程管理**；daemon 负责守护进程自身的
@@ -38,6 +40,30 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 特别是 CLI 直连模式不能让下一次新进程继承命令会话（只留下运行记录：读得到结局和输出，接不上进程），
 不能仅凭共用代码断言端到端行为相同。
 
+## protocol：数据契约与适配边界
+
+| 模块 | 接入面 |
+| --- | --- |
+| `config` | Hub、代理、FRP、全局入口和任务容量配置；默认值、旧字段别名与 profile 归一化 |
+| `daemon` | `Request / Response / RpcError`、协议版本及请求引用的用例 DTO |
+| `generation` | `BuildIdentity`、执行代帧、操作、路由与身份/节点快照；保持内层 JSON 字符串编码 |
+| `planning / service` | 进程间共用的状态与服务选择类型；账本、服务实例和资源校验留 core |
+
+数据契约只有一份定义，core 和 daemon 通过 re-export 保留原类型导入路径。下列 Rust 方法入口随职责调整，
+工作区内的调用者已同步迁移；这不改变命令、配置或 JSON 协议。
+
+| 原入口 | 现在的归属 |
+| --- | --- |
+| `FrpProfile::new` | `core::settings::new_frp_profile` 生成随机 ID，纯 DTO 不读取随机源 |
+| `BuildIdentity::current` | `core::generation::current_build_identity` 读取构建、进程和可执行路径 |
+| `WireAuth::from / into_auth` | `core/src/generation/wire.rs` 的 `auth_to_wire / auth_from_wire`，显式保留 browser 标记 |
+| `ServiceKind / TunnelServiceKind::workspace_service` | core 的 `WorkspaceService::from` 适配；资源模型不进入协议 |
+| 服务类型的 `parse` 错误 | protocol 的 `ParseServiceKindError`；core 转成 `AppError`，原消息保持 |
+
+`FrameWriter / read_frame` 仍在 core 的执行代管道适配中；节点登记、凭据、撤销与进程生命周期也留实现侧。
+`WireAuth` 是已认证结果的数据表示，反序列化它并不完成网络认证；宿主仍须先验身份再进入已有调用链。
+新增协议字段先改此 crate，再更新分发与兼容测试，不让 protocol 引用实现层来解决依赖。
+
 ## core：内核与服务层
 
 | 模块 | 职责 |
@@ -51,7 +77,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | `runtime/` | 进程内 MCP / Actions 监听器的启停、端口检测与释放等待 |
 | `tunnel/`、`global_gateway.rs` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
-| `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的模型与读写 |
+| `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的组合模型与读写，纯共享配置类型来自 `gld-protocol` |
 | `platform/` | 端口占用查询、进程存活 / 终止、可执行文件查找，按 OS 分实现 |
 | `home.rs` | 数据目录解析（`GLD_HOME` / `~/.config/gld`），全项目唯一的路径来源 |
 | `async_rt.rs` | tokio 运行时垫片：工具内核是同步 API，内部需要 `spawn` / `block_on` |
@@ -78,7 +104,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 
 | 模块 | 职责 |
 | --- | --- |
-| `protocol.rs` | `Request`（`op` 标签的枚举）、`Response`、`RpcError`、`PROTOCOL_VERSION` |
+| `protocol.rs` | 重导出 `gld-protocol::daemon` 的 `Request`（`op` 标签的枚举）、`Response`、`RpcError` 与版本 |
 | `ipc.rs` | Unix domain socket / Windows 命名管道；一行 JSON 一条消息 |
 | `dispatch.rs` | `Request → App 调用 → JSON`，协议与业务的唯一交界 |
 | `server.rs` | 单实例锁、绑定、每连接一个任务、信号、优雅退出 |
@@ -152,7 +178,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 
 1. `core/src/app/<模块>.rs`：`impl App { pub fn workspace_stats(&self, id) -> AppResult<StatsDto> }`，
    DTO 派生 `Serialize + Deserialize`。
-2. `daemon/src/protocol.rs`：`Request::WorkspaceStats { target }`；
+2. `protocol/src/daemon/mod.rs`：`Request::WorkspaceStats { target }`；共享输入 DTO 也放协议层，
    若它必须由守护进程执行，加进 `needs_daemon()`；耗时长加进 `is_slow()`。
 3. `daemon/src/dispatch.rs`：新增一个 match 分支（漏了会编译失败）。
 4. `cli/src/cli.rs`：加子命令与帮助文本；`cli/src/commands/workspace.rs`：调用并渲染。

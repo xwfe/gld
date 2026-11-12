@@ -12,7 +12,9 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::router::{CallError, Router};
-use super::wire::{read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op};
+use super::wire::{
+    auth_from_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op,
+};
 use super::{BuildIdentity, GENERATION_PROTOCOL};
 
 /// 成功时是编码好的 JSON 文本，由等它的线程解析：读线程要给所有调用收包，不该替谁花这个时间。
@@ -278,6 +280,6 @@ fn answer_host_call(router: &Router, op: &str) -> Result<Value, String> {
             member,
             tool,
             args,
-        } => Ok(router.node_call(&auth.into_auth(), member.into(), &tool, args)),
+        } => Ok(router.node_call(&auth_from_wire(auth), member.into(), &tool, args)),
     }
 }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const DEFAULT_BROWSER_ORIGIN: &str = "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef";
-pub const DEFAULT_BROWSER_GRANT_TTL_SECONDS: u64 = 8 * 60 * 60;
+pub use gld_protocol::daemon::DEFAULT_BROWSER_GRANT_TTL_SECONDS;
 pub const MAX_BROWSER_GRANT_TTL_SECONDS: u64 = 24 * 60 * 60;
 
 use super::bearer::constant_time_eq_str;
