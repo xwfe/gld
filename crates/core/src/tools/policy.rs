@@ -299,6 +299,20 @@ impl PolicyError {
     }
 }
 
+impl From<crate::tools::command_spec::CommandSpecError> for PolicyError {
+    fn from(error: crate::tools::command_spec::CommandSpecError) -> Self {
+        use crate::tools::command_spec::CommandSpecReason;
+
+        let reason = match error.reason {
+            CommandSpecReason::MissingCommand => PolicyReason::MissingCommand,
+            CommandSpecReason::ConflictingCommandForms => PolicyReason::ConflictingCommandForms,
+            CommandSpecReason::InvalidSyntax => PolicyReason::InvalidSyntax,
+            CommandSpecReason::CommandTooLong => PolicyReason::CommandTooLong,
+        };
+        Self::new(reason, error.message)
+    }
+}
+
 /// 配成"只允许这些"的前缀。见 [`merge_default_allowed_commands`]。
 pub const ONLY_PREFIX: &str = "only:";
 

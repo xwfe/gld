@@ -75,7 +75,7 @@ jobs:
       #
       # 为什么不是 --workspace：其余测试大多没在 Windows 上跑过，一次全开只会得到
       # 一片红，分不出哪些是真问题。要扩就一块一块加（守护进程那一组见下一步）。
-      # 连 tools::workspace_runtime 一起跑：写锁的跨进程那一层在 Windows 上是
+      # runtime 的 workspace_runtime 和 core 的组合测试一起跑：写锁的跨进程层在 Windows 上是
       # LockFileEx，跟 Unix 的 flock 不是一回事（强制锁、按句柄），编得过不代表
       # 拦得住。
       - name: 补丁落盘与写锁测试
@@ -83,6 +83,7 @@ jobs:
           export GLD_HOME="$(mktemp -d)"
           if {
             cargo test -p gld-runtime --lib --locked -- patch &&
+              cargo test -p gld-runtime --lib --locked -- workspace_runtime &&
               cargo test -p gld-core --lib --locked -- tools::workspace_runtime
           } 2>&1 | tee test.log; then
             exit 0

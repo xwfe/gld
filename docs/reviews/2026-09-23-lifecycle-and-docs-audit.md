@@ -4951,3 +4951,81 @@ Rust 源码保持 §117 已验证的快照：69 个目标 **1428 passed / 0 fail
 源码、测试、CI 与相关文档纳入同一份 D1 提交，外部依赖锁定版本沿用；完整源码验证与拆分接口说明见 §117。
 
 **授权后收尾复验：**四个文档目标合计 **7 passed / 0 failed**，格式检查退出 0；独立审查确认 CI 修改范围、失败传播、runtime 文件/fixture 完整性及状态文档一致。
+
+## 119. D17-D2：命令、会话与共享执行状态归入 runtime（2026-11-13）
+
+从干净的 `main@933979a` 继续，起点比本地 `origin/main` 超前 3 个提交。
+按用户“继续深入”推进命令执行切片，沿已获准的范围同步源码、CI 入口、文档与提交。
+本节记录当前源码的本机证据；运行中的服务与正式发布包分别判断。
+
+### 119.1 归属与实际接入面
+
+| 对象 | 本次落点与约束 |
+| --- | --- |
+| 命令输入 | `runtime::command_spec` 统一 cmd/argv；四种 `CommandSpecReason` 由 core 映射回原 PolicyReason，保留先查 shell 操作符、再拆词的时点 |
+| 命令执行 | `exec::Execution` 接收 Workspace、WorkspaceRuntime、两个本地入口设置、合成 PATH 与需要移除的应用环境变量名；caller 会话表单独传入 |
+| 执行模块 | exec 按入口、进程、解析、原生诊断和平台拆分；core 保留策略预检、诊断快照及具体输入适配 |
+| 会话与输出 | SessionStore / ExecSession 及 process、output、control、list 归 runtime；状态字段保留原可见性，跨子模块 helper 只开放必要范围 |
+| 运行记录 | RunLog 显式接收记录根目录、项目 ID、caller；core 的 project_id 继续调用 Harness 唯一算法，runtime 不查询账本或解析 GLD_HOME |
+| 共享执行状态 | 唯一 RUNTIMES 注册表归 runtime，按 canonical 目录持有写锁、caller 会话表、写计数与交接状态；RuntimePaths / RunStorage 由 core 组合 |
+| Agent 组合 | runtime 只报告命令、未排完输出和写入；core 合并 running_agents，保留原阻塞顺序；撤销分别停止匹配命令与委派 |
+| 共用机制 | Tokio GLOBAL、运行实例 ID、owner 锁、私有文件原语和脱敏规则各只有一份；core 的旧入口重导出实际实现 |
+| unsafe 与依赖 | crate 默认 deny unsafe，原 libc / Win32 系统调用仅在 session/process_control.rs 局部允许；Cargo 依赖检查覆盖新机制依赖 |
+| 锁文件 | Cargo.lock 仅增加 runtime 对已有 fs2、libc、shell-words、tokio、which、windows 的 6 条边；外部版本、源与校验和没有变化 |
+
+本次没有新增 Executor / Provider trait、插件注册中心、第二套任务框架或状态注册表。
+新生产模块都低于 800 行；原有较长的 exec/session 代码按已有职责拆分，机制测试跟随实现，应用契约测试留在真实消费者一侧。
+PATH 现在由 core 构造 Execution 时显式快照；原函数只合并配置与环境，没有新增副作用或错误出口。
+直接使用 CommandSpec 的 Rust 调用者需适配新输入错误类型；工具 JSON、配置、身份及协议版本保持。
+
+### 119.2 保留的不变量与新增回归
+
+独立审查对照 HEAD 核对命令、会话、记录与锁的函数和状态归属：
+
+- 同目录仍只有一个强 Arc 资源所有者；同 caller 共享表、不同 caller 无法读取或枚举彼此的运行记录。
+- 空表回收保留 `strong_count > 1 || !is_empty()`，命令仍能被范围停止、模式切换和撤销找到。
+- 写锁文件命名、30 秒等待和 20 毫秒轮询保持；无法使用锁与被占用仍走原先不同分支。
+- 命令持锁范围仍从启动前到本次调用返回，后台续跑不额外占锁；原生内建和健康探针保持原路径。
+- Session 只持写计数器 Arc，不反向持有 WorkspaceRuntime；未知 owner 的历史结果仍没有可假定为零的写计数。
+- 命令终态、stdin 限时写、输出真实 offset、日志缺口、保留期、默认 cwd 与交接计数延续保持。
+- Windows taskkill / Win32 路径及条件编译按原实现迁移，本轮只做源码核对，未进行 Windows 实测。
+
+新增两条实际边界回归：
+
+1. `application_and_executor_share_the_canonical_directory_registry`：core 工厂与 runtime 工厂按同目录别名取得同一资源和 caller 表。
+2. `a_running_agent_keeps_its_workspace_back_until_stopped`：真实 Agent 经现有档案与 HTTP 工具启动，只有 Agent 在跑时工作区阻塞原因为 `running_agents`；其他工作区先迁移，停止 Agent 后旧代退出、原工作区迁入新代。
+
+测试迁移保留原数量，最终全仓由 1428 增至 1430。
+实现过程修正了拆文件时的一处闭合遗漏、会话测试常量可见性，以及托管目录删除真实调用的 `lock_commits_within` 跨 crate 可见性。
+首轮全仓在参数范围扫描处失败（27 个调用点，对照表为 36）；同步第二份源码扫描清单到 runtime 后，保持原断言，参数四项与最终全仓均通过。
+
+### 119.3 验证
+
+均在 macOS 使用隔离 GLD_HOME，未安装或升级全局依赖。
+
+| 命令 / 验证范围 | 实际结果 |
+| --- | --- |
+| `cargo test -p gld-runtime --lib --locked --offline` | **126 passed / 0 failed / 0 ignored** |
+| core：crate_boundaries、run_records、service_mode、task_acceptance、write_stdin_wait | 5 个目标，**45 passed / 0 failed** |
+| CLI：agent_delegation、generation_boundary、scoped_grants | 3 个目标，**39 passed / 0 failed**，其中换代 28 条含新增 Agent 回归 |
+| `cargo test -p gld-core --lib --locked -- tools::args` | **4 passed / 0 failed**，36 个有界参数调用点完整 |
+| `cargo test --workspace --all-targets --locked` | **69 个目标，1430 passed / 0 failed / 0 ignored**；命令退出 0，完整分页输出汇总与目标数一致 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+| `cargo test -p gld-runtime --lib --locked -- workspace_runtime` | 本机 **12 passed / 0 failed** |
+| `cargo test -p gld-core --lib --locked -- tools::workspace_runtime` | 本机 **3 passed / 0 failed** |
+| 文档收尾复验（四组） | **9 passed / 0 failed**，检查命令、生成脚本、相对链接与隐私路径；状态和本节更新后已单独复跑 |
+
+Windows 的补丁与写锁步骤现依次执行 runtime 的 patch、runtime 的 workspace_runtime、core 的 tools::workspace_runtime，继续用 `&&` 传播失败。
+按条件编译，Windows 选择 11 个 runtime 锁测试和 3 个 core 组合测试；Unix 专属的 scope 停止测试不计入 Windows。
+本机过滤器通过不能代表 Windows 已运行。架构、开发指南与 RFC 同步实际接口，当前状态仅更新 task_plan。
+
+### 119.4 经 gld 开发的工具摩擦
+
+- 文档核对时，两次 `search_text` 分别针对 architecture 与 RFC-0014，使用同一正则 `runtime|WorkspaceRuntime|会话|D17|D1|D2|锁|CommandSpec|Execution|RunStorage|RuntimePaths`、max_results=100、context_lines=1，均返回 MCP `-32603: Internal error`；改用 read_file 读完并完成核对。
+- 测试文件检索以 path=crates 配 `**/tests/*.rs` / `**/tests/**/*.rs` 时得到 0 文件，改为直接搜索 crates/core/tests 与 crates/cli/tests 后可用；本轮没有定位该组合的匹配原因。
+- 最终全仓运行后，write_stdin 一次返回相同内部错误，随后 read_output 与 git_status 也失败。之后 server_info 恢复正常，再次读取原会话得到退出 0，并按 4 页完整输出核对 1430 条结果。没有重启服务或重放测试来掩盖状态。
+- 以上恢复不代表根因修复；本轮没有 rg/wc/rustfmt 被命令白名单拒绝的实际证据，不将先前摩擦混入此次记录。
+
+收尾 server_info 仍为 `0.10.1 / 1717aaf41685`，连接工具表 35 项、指纹 `6022dd56440b0ea9`。
+本轮未推送、未触发远端 CI、未换装或重启运行中的服务，未改项目、节点或 grant 配置。

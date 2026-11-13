@@ -387,7 +387,15 @@ impl Generation {
             });
         };
         let runtime = workspace_runtime::runtime_for(&root);
-        let blockers = runtime.handoff_blockers(&root);
+        let mut blockers = runtime.handoff_blockers();
+        // 执行层只报告命令、输出和写入；Agent 的生命周期由应用层合并。
+        if crate::agents::running_in(&root).is_some() {
+            let before_writes = blockers
+                .iter()
+                .position(|blocker| *blocker == "write_in_progress")
+                .unwrap_or(blockers.len());
+            blockers.insert(before_writes, "running_agents");
+        }
         if !blockers.is_empty() {
             return Ok(json!({ "blocked": blockers }));
         }

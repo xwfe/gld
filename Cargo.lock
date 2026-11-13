@@ -673,19 +673,25 @@ name = "gld-runtime"
 version = "0.10.1"
 dependencies = [
  "base64",
+ "fs2",
  "gld-policy",
  "gld-protocol",
  "glob",
  "image",
+ "libc",
  "regex",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "thiserror",
  "toexec-fs",
  "toexec-text 0.1.0 (git+https://github.com/xwfe/toexec.git?tag=toexec-text-v0.1.0)",
+ "tokio",
  "uuid",
  "walkdir",
+ "which",
+ "windows",
 ]
 
 [[package]]

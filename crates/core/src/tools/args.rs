@@ -112,7 +112,34 @@ mod tests {
         const SOURCES: &[(&str, &str)] = &[
             ("dispatch.rs", include_str!("dispatch.rs")),
             ("exec.rs", include_str!("exec.rs")),
-            ("command_spec.rs", include_str!("command_spec.rs")),
+            (
+                "runtime/command_spec.rs",
+                include_str!("../../../runtime/src/command_spec.rs"),
+            ),
+            (
+                "runtime/exec/mod.rs",
+                include_str!("../../../runtime/src/exec/mod.rs"),
+            ),
+            (
+                "runtime/exec/native.rs",
+                include_str!("../../../runtime/src/exec/native.rs"),
+            ),
+            (
+                "runtime/exec/process.rs",
+                include_str!("../../../runtime/src/exec/process.rs"),
+            ),
+            (
+                "runtime/exec/resolve.rs",
+                include_str!("../../../runtime/src/exec/resolve.rs"),
+            ),
+            (
+                "runtime/exec/platform.rs",
+                include_str!("../../../runtime/src/exec/platform.rs"),
+            ),
+            (
+                "runtime/service.rs",
+                include_str!("../../../runtime/src/service.rs"),
+            ),
             ("file.rs", include_str!("../../../runtime/src/file.rs")),
             (
                 "runtime/file/read.rs",
@@ -147,7 +174,18 @@ mod tests {
             ),
             ("planning.rs", include_str!("planning.rs")),
             ("policy.rs", include_str!("policy.rs")),
-            ("session.rs", include_str!("session.rs")),
+            (
+                "runtime/session/output.rs",
+                include_str!("../../../runtime/src/session/output.rs"),
+            ),
+            (
+                "runtime/session/control.rs",
+                include_str!("../../../runtime/src/session/control.rs"),
+            ),
+            (
+                "runtime/session/list.rs",
+                include_str!("../../../runtime/src/session/list.rs"),
+            ),
             ("skill.rs", include_str!("skill.rs")),
             ("history/mod.rs", include_str!("history/mod.rs")),
             ("../harness/tools.rs", include_str!("../harness/tools.rs")),
@@ -282,7 +320,7 @@ mod tests {
     fn every_call_site_names_an_entry() {
         let sources = [
             include_str!("agent.rs"),
-            include_str!("exec.rs"),
+            include_str!("../../../runtime/src/exec/mod.rs"),
             include_str!("../../../runtime/src/file.rs"),
             include_str!("../../../runtime/src/file/read.rs"),
             include_str!("../../../runtime/src/file/listing.rs"),
@@ -290,7 +328,9 @@ mod tests {
             include_str!("git.rs"),
             include_str!("../../../runtime/src/image_tool.rs"),
             include_str!("../../../runtime/src/notebook.rs"),
-            include_str!("session.rs"),
+            include_str!("../../../runtime/src/session/output.rs"),
+            include_str!("../../../runtime/src/session/control.rs"),
+            include_str!("../../../runtime/src/session/list.rs"),
             include_str!("../harness/tools.rs"),
         ];
         let call = Regex::new(r#"bounded\(\s*[^,]+,\s*"([a-z_]+)",\s*"([a-z_]+)""#).unwrap();

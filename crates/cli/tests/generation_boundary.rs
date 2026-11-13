@@ -888,6 +888,77 @@ fn a_running_command_keeps_its_workspace_back_until_it_finishes() {
     );
 }
 
+/// 没有命令、只有委派在跑时，core 仍把项目留在旧代；本机停止委派后才允许交接。
+#[test]
+fn a_running_agent_keeps_its_workspace_back_until_stopped() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    let env = &fixture.env;
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(env.project.path())
+        .status()
+        .expect("git init")
+        .success());
+    // 和 agent_delegation 一样，经真实 agents.toml 启动临时脚本，不依赖本机 Agent 安装。
+    let script = env.home.path().join("holding-agent.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'fake-agent 1.0'; exit 0; fi\ncat >/dev/null\nexec sleep 120\n",
+    )
+    .expect("agent script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::fs::write(
+        env.home.path().join("agents.toml"),
+        format!(
+            "[agents.holding]\ncommand = [\"{}\"]\nresult = {{ from = \"stdout\" }}\n",
+            script.display()
+        ),
+    )
+    .expect("agents.toml");
+    env.ok(&["set", "api", "agent-delegation=auto"]);
+    let g1 = fixture.runner_of("api");
+    assert_eq!(fixture.runner_of("web"), g1);
+    let started = fixture.tool(
+        "agent_manage",
+        json!({ "workspace": "api", "action": "start", "agent": "holding", "prompt": "等待本机停止" }),
+    );
+    assert_eq!(started["state"], "running", "{started}");
+    let task_id = started["task_id"].as_str().expect("task_id").to_string();
+
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    let switched = env.json(&["--json", "daemon", "upgrade", "switch"]);
+    assert_eq!(switched["moved_workspaces"], 1, "{switched}");
+    assert_eq!(switched["waiting_workspaces"], 1, "{switched}");
+    let status = fixture.status();
+    let g2 = generation(&status, "g2")["pid"].as_u64().unwrap() as u32;
+    let old = generation(&status, "g1");
+    assert_eq!(old["role"], "draining", "{status}");
+    assert_eq!(old["workspaces"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(
+        old["workspaces"][0]["handoff_blocked_by"],
+        json!(["running_agents"]),
+        "没有命令可挡，委派必须由 core 组合进换代门禁：{status}"
+    );
+    assert!(alive(g1), "委派还在跑，旧代不能退：{status}");
+    assert_eq!(fixture.runner_of("web"), g2);
+    let running = fixture.tool(
+        "agent_manage",
+        json!({ "workspace": "api", "action": "status", "task_id": task_id }),
+    );
+    assert_eq!(running["state"], "running", "换代停掉了委派：{running}");
+
+    env.ok(&["agent", "stop", &task_id]);
+    wait_gone(g1);
+    assert_eq!(fixture.runner_of("api"), g2);
+    let stopped = fixture.tool(
+        "agent_manage",
+        json!({ "workspace": "api", "action": "status", "task_id": task_id }),
+    );
+    assert_eq!(stopped["state"], "stopped", "{stopped}");
+}
+
 /// 命令退了，留下的进程还占着输出管道：旧代一退管道就断，那个进程下次写输出就没了。
 /// 所以项目留在旧代，直到它自己退出；一点都不杀。重定向走了的不占管道，不用等。
 #[test]

@@ -7,8 +7,8 @@
 | `crates/policy` / `gld-policy` | 主体、授权范围、调用方键与普通文件写入分类；`no_std + alloc`，只处理显式输入 |
 | `crates/protocol` / `gld-protocol` | 配置 DTO、本机 IPC 与执行代消息、版本和纯规则；仅依赖 serde / serde_json |
 | `crates/transport` / `gld-transport` | 共用的 MCP Peer、stdio 通道、远端能力表；持有实际通信资源，不决定项目权限 |
-| `crates/runtime` / `gld-runtime` | 工作区路径、文件/图片/Notebook 读取与事务补丁；保护目录由调用侧显式传入 |
-| `crates/core` / `gld-core` | 应用编排与尚未分离的宿主、命令会话、Agent 等适配，消费四个底层 crate |
+| `crates/runtime` / `gld-runtime` | 工作区路径、文件/补丁、命令、会话、输出、写锁与运行记录；配置和存储位置由调用侧显式传入 |
+| `crates/core` / `gld-core` | 工具授权、任务/Planning 与应用编排，以及尚未分离的宿主、Agent 适配，消费四个底层 crate |
 | `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
@@ -16,10 +16,10 @@
 `crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖，随全仓测试执行。
 旧 `core::auth`、`core::tools::caller/write_class`、`core::bridge::peer/session` 的公开路径通过 re-export 继续可用。
 配置、应用 DTO 和 daemon 协议的旧类型路径也保持同一类型；带副作用的方法入口调整见下节。
-后续执行器、Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
+Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
 
 core 不负责 clap 命令行解析，
-但**确实包含 HTTP 监听、命令执行、隧道和 MCP 子进程管理**；daemon 负责守护进程自身的
+但**确实包含 HTTP 监听、Agent、隧道和 MCP 子进程管理**；工作区命令执行归 runtime，daemon 负责守护进程自身的
 IPC 与生命周期，cli 负责参数解析、请求组装和终端展示。不能把“core 不依赖 daemon”
 写成“core 没有网络或进程代码”。纯规则按已建立的边界下沉，应用编排留在 core；契约测试继续约束入口一致性。
 
@@ -66,7 +66,7 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 `WireAuth` 是已认证结果的数据表示，反序列化它并不完成网络认证；宿主仍须先验身份再进入已有调用链。
 新增协议字段先改此 crate，再更新分发与兼容测试，不让 protocol 引用实现层来解决依赖。
 
-## runtime：工作区与文件执行
+## runtime：工作区与命令执行
 
 | 接口 | 职责与接入约束 |
 | --- | --- |
@@ -74,12 +74,18 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | `file / image_tool / notebook` | 实际读取、列表、搜索和解码；文件实现按读取、列表、搜索拆分，复用已有有界读取原语 |
 | `patch::PatchRequest::from_args` | 解析参数形状；在获取写锁之前执行，保留参数错误的原有优先级 |
 | `patch::apply` | 在调用侧持有的写锁内解析补丁、校验版本、暂存和提交/回滚；返回工具结果与提交前版本 |
-| `wrote_since / on_commit` | 两个具体回调分别查询同主体版本链、通知提交成功；运行状态仍由调用侧持有 |
+| `wrote_since / on_commit` | 两个具体回调查询同主体版本链、通知提交成功；由 core 连接同一 `WorkspaceRuntime` |
+| `command_spec::CommandSpec` | 统一 cmd/argv 与词法解析；只返回输入错误，core 映射为既有策略原因 |
+| `exec::Execution / ExecutableConfig` | 接收工作区、共享执行资源、两个本地入口设置、合成 PATH 和需移除的应用环境变量名；执行入口另接 caller 对应的会话表 |
+| `session` | 命令状态、stdin、停止、有界输出和列表；按进程、输出、控制、分页拆模块 |
+| `runs::RunLog` | 显式记录根目录、项目 ID、caller；持久化结局和有界日志，提供唯一进程 owner 身份 |
+| `workspace_runtime` | 按 canonical 目录持有共享写锁、caller 会话表、写计数、版本链及交接状态 |
+| `service / redaction / async_rt` | 原有端口就绪检查、环境/记录脱敏、同步到 Tokio 的执行机制；各只有一份实现 |
 
 core 的 `tools::new_workspace(root)` 解析 GLD_HOME，再调用
 `gld_runtime::workspace::Workspace::new(root, protected_read_roots)`。
 保护目录在创建时保留原始与 canonical 路径；即使关闭读范围限制，直接读取与遍历仍会挡住工作区之外的受保护路径。
-位于显式工作区内的路径沿用原有豁免。runtime 不读取进程环境或应用配置。
+位于显式工作区内的路径沿用原有豁免。runtime 不读取应用配置或自行解析 GLD_HOME；命令执行仍按既有规则读取、过滤进程环境。
 
 原 `core::tools::workspace::Workspace` 类型路径和文件工具路径通过 re-export 保持；
 原单参数 `Workspace::new(root)` 的调用者需改用 core 工厂，直接使用 runtime 的调用者必须传入保护目录。
@@ -88,16 +94,36 @@ MCP 结果包装继续归 core。已有命令、JSON 结果、错误码与协议
 网络入口仍先验证身份与项目权限，工具调用经 `call_tool_as` 完成参数策略、Planning、Agent 互斥和任务检查。
 core 的补丁适配持有现有同目录写锁，调用 runtime，随后在同一把锁内更新调用方版本链并生成运行命令提醒。
 成功落盘后立即增加写计数，再采样新版本；预检和失败不增加计数。
-`WorkspaceRuntime`、命令会话和运行记录尚在 core，后续按 D2 一起迁移其实际状态所有者；任务账本继续归 core。
+命令、会话、运行记录和 `WorkspaceRuntime` 归 runtime；任务账本继续归 core，输出工具观察到终态后仍由统一分发收尾。
 
-新增文件能力在 runtime 实现，再接入 core 的工具表和统一分发；单元测试跟实现走，授权、并发与端到端契约留实际调用侧。
+### 命令与运行状态的组合
+
+core 的 `tools::workspace_runtime::runtime_for(root)` 选择写锁目录、运行记录目录和项目 ID，
+再调用 runtime 工厂。具体输入为 `RuntimePaths { write_lock_dir, runs }`，其中
+`RunStorage { root, project_id }` 使用原 Harness 的 ID 算法；runtime 不复制算法，也不查询任务账本。
+同一个 canonical 目录的注册表只有一份，后续上下文复用首次创建时的资源，不因入口或配置重建产生第二把锁。
+
+命令实际解析和启动使用 `Execution` 的具体参数；整份 `PolicySettings`、授权结论、Planning 和 Harness 不进入执行器。
+策略与语法错误顺序、原生内建和健康探针的特殊路径、同步等待持锁范围及现有 JSON 均保持。
+`CommandSpec::from_args / resolved_parts` 的 Rust 错误类型改为 `CommandSpecError`，
+core 显式转换为原 `PolicyError`；其他命令、会话、运行记录的旧导入路径继续可用。
+
+runtime 的 `handoff_blockers()` 只报告运行命令、未排完的输出与在途写入；
+core 的执行代组合入口合并 Agent 状态，保留原阻塞顺序。撤销仍分别停止匹配的命令和 Agent；
+退出仍写 `interrupted`。未知 owner 的旧结果保持未知写计数，不能当成有效的零写入证据。
+
+Agent 继续消费同一份 owner 锁、私有文件原语和环境过滤实现；其生命周期与审批仍归 core。
+全局 Tokio 运行时也由 runtime 单独持有。crate 默认拒绝 unsafe，只有
+`session/process_control.rs` 局部允许原有 libc / Win32 系统调用。
+
+新增文件或命令能力在 runtime 实现，再接入 core 的工具表和统一分发；单元测试跟实现走，授权、并发与端到端契约留实际调用侧。
 不把 runtime 的直接 Rust 调用当成独立授权入口。Cargo 依赖检查约束代码归属，子进程权限仍按现有机制执行。
 
 ## core：内核与服务层
 
 | 模块 | 职责 |
 | --- | --- |
-| `tools/` | 统一工具编排与 runtime 文件/Patch 适配、命令（含运行记录 `tools/runs.rs`，`GLD_HOME/runs/`）、Git、History、Planning、Skill，以及项目命令发现（`tools/project_commands/`：只读解析 Cargo、package.json 和 CI 工作流；`installs.rs` 判断哪些命令是在装东西、要不要 `confirm`，`policy` 调它）和服务模式（`tools/service.rs`：`service_port` 的端口查空、就绪探测）。`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文。MCP 与 CLI 复用内核，但还需验证各自身份、配置、schema 和结果传递 |
+| `tools/` | 统一工具编排与 runtime 文件/补丁/命令适配、策略预检、Git、History、Planning、Skill，以及项目命令发现（`tools/project_commands/`：只读解析 Cargo、package.json 和 CI 工作流；`installs.rs` 判断哪些命令是在装东西、要不要 `confirm`，`policy` 调它）。运行记录、会话和服务端口机制的旧模块只保留兼容入口。`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文。MCP 与 CLI 复用内核，但还需验证各自身份、配置、schema 和结果传递 |
 | `mcp/`、`actions/` | 两条 HTTP transport（axum），都调用 `call_tool`，不各自实现工具。MCP 监听器同时服务 hub 和单个工作区（`Endpoint` 二选一；后者是 RFC-0004 之前单项目服务的路径，命令行已经起不了它），认证、OAuth 路由、请求日志只有一份 |
 | `machine_mcp/` | 本机装好的 MCP server 经服务转给 AI（RFC-0006）。读配置、握手调用、子进程通道、连接池、结果整理在共享库 `toexec-mcp`（ccnm 同用）；这里是 gld 自己的：怎么起进程和怎么杀、HTTP 通道、`list_mcp_tools` 等三个工具。自成一块，hub 只在列工具、分发、关服务三处调它 |
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |
@@ -109,7 +135,7 @@ core 的补丁适配持有现有同目录写锁，调用 runtime，随后在同�
 | `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的组合模型与读写，纯共享配置类型来自 `gld-protocol` |
 | `platform/` | 端口占用查询、进程存活 / 终止、可执行文件查找，按 OS 分实现 |
 | `home.rs` | 数据目录解析（`GLD_HOME` / `~/.config/gld`），全项目唯一的路径来源 |
-| `async_rt.rs` | tokio 运行时垫片：工具内核是同步 API，内部需要 `spawn` / `block_on` |
+| `async_rt.rs` | 重导出 runtime 的 tokio 垫片；全局运行时只有一份，同步工具借它驱动子进程 I/O |
 | **`app/`** | **应用服务层**：`App` 持有 `DataStore`、`RuntimeSupervisor` 和命令行工具调用的 `ToolContext` 缓存，每个子模块是一组用例；`app/doctor.rs` 的纯配置检查不依赖磁盘，可直接单测 |
 
 `app` 是应用用例门面；工具传输另经上表中的工具分发入口。桌面版里的 Tauri command
@@ -173,7 +199,7 @@ core 的补丁适配持有现有同目录写锁，调用 runtime，随后在同�
   只影响那条连接，并转成 `RpcError::Internal` 回给客户端。
 - 工具内核是同步函数，被 `spawn_blocking` 包着跑；它内部通过 `async_rt::block_on`
   驱动子进程 I/O。这是从桌面版继承的约束：`block_on` 不能在 tokio worker 线程里调用。
-- **改同一个工作区目录的写操作排一个队**，归 `tools/workspace_runtime.rs` 管：
+- **改同一个工作区目录的写操作排一个队**，归 `runtime/src/workspace_runtime.rs` 管：
   一个目录一个 `WorkspaceRuntime`，按规范化路径认人，所以 hub、单项目 listener
   和 CLI 三个入口（三个 `ToolContext`）排的是同一个队。跨进程那一层是数据目录
   `write-locks/` 下的文件锁（`fs2`），进程死了内核自动放。等锁最多

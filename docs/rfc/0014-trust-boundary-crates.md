@@ -122,22 +122,31 @@ runtime 在该锁内完成文件操作；`wrote_since` 查询调用方已有版�
 core 继续在同一锁内记录新版本并生成命令提醒。避免为一次拆分新建锁注册表、复制版本账本或引入通用执行器。
 
 路径和文件工具的旧类型路径通过重导出保持；单参数 Workspace 构造改为 core 的 `new_workspace`，
-直接使用 runtime 的调用者必须显式提供保护目录。MCP 包装、权限编排、命令会话与任务账本留 core。
-D2 再一起迁移命令、会话、输出、运行记录与共享运行状态，保持状态所有者唯一。
+直接使用 runtime 的调用者必须显式提供保护目录。MCP 包装、权限编排与任务账本留 core。
+命令、会话、输出、运行记录与共享运行状态使用下述 D2 接口，保持状态所有者唯一。
 
-### D2 与 Agent 需要继续处理的依赖
+### D2 的命令执行与存储输入
 
-需要一起处理的反向依赖：
+`exec::Execution` 接收实际 Workspace、WorkspaceRuntime、程序解析需要的两个设置、合成 PATH 和需移除的应用环境变量名。
+会话表由调用侧按已认证 Caller 取得后单独传入；整份 PolicySettings、ToolContext、Planning 和 Harness 保持在应用侧。
+`CommandSpec` 统一解析，返回只描述输入问题的错误；core 映射为旧策略错误，保留原先的判断顺序和工具结果。
 
-- `WorkspaceRuntime::handoff_blockers` 与 Agent 在跑状态由应用层汇总；执行器只报告自己拥有的写入、命令和输出。
+`RuntimePaths` 显式指定写锁目录和可选 `RunStorage { root, project_id }`；core 解析 GLD_HOME 并调用唯一 Harness 项目 ID 算法。
+注册表、会话、写计数和 owner 身份归 runtime，core 兼容入口只注入参数或重导出。全局 Tokio 运行时与脱敏规则也只有一份。
+按进程、程序解析、输出、控制与分页拆模块，不引入万能 Executor 或新任务框架。
+
+与 Agent 的依赖按以下方式组合：
+
+- `WorkspaceRuntime::handoff_blockers()` 与 Agent 在跑状态由应用层汇总；执行器只报告自己拥有的写入、命令和输出。
 - Agent 的环境过滤和运行资源使用 runtime 现有函数；执行器不再查询 Agent 管理器。
-- 项目 ID 算法只有一个所有者，或由组合处传入；运行记录不向 Harness 查询。
+- 项目 ID 由 core 组合处传入；运行记录不向 Harness 查询，也不复制 ID 算法。
 - 受保护数据目录与 run-record 目录从组合处传入，保持已有数据目录和写入保护的语义。
 
 必须继续满足：同目录共享写锁；同主体共享会话、不同主体隔离结果；后台写计数与验收快照有效性；
 grant 撤销停止相关命令/Agent；换代不漏掉 Agent、运行命令或未收完的输出。
 
-运行时禁止直接依赖 axum、OAuth/签名适配、节点路由和 Agent provider；
+运行时默认拒绝 unsafe，仅在 `session/process_control.rs` 局部保留原有 libc / Win32 进程控制。
+禁止直接依赖 axum、OAuth/签名适配、节点路由和 Agent provider；
 有实际需要的进程操作与本地端口就绪检查仍属于执行侧。这条约束不宣称子进程无法联网。
 
 ## 6. 新功能放在哪里

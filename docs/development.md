@@ -39,6 +39,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | crate 依赖边界 | `crates/core/tests/crate_boundaries.rs` | 读取离线、锁定的 Cargo metadata，阻止 policy/protocol/transport/runtime 引入上层、网络框架或构建脚本；代码依赖检查不等于 OS 沙箱 |
 | 协议兼容 | `crates/protocol/tests/daemon_contract.rs` 与 protocol 单元测试 | 固定 JSON、默认值、别名、错误码和执行代消息；core 保留身份转换与管道 I/O 测试 |
 | 文件执行边界 | `crates/runtime/src/**` | 显式保护目录与别名、有界文件读取、补丁版本前置条件、提交/回滚、Notebook；core 保留共享锁和调用方版本链集成测试 |
+| 命令与会话边界 | runtime 的 exec/session/runs/workspace_runtime；core 的 run_records/task_acceptance；CLI 的 generation_boundary/scoped_grants/agent_delegation | 启动与写锁、主体隔离、输出/终态/记录证据、撤销、交接状态；Agent 阻塞条件在应用层组合 |
 | 工具契约 | `crates/core/tests/call_tool_contract.rs` | 每个 profile 暴露的工具集与返回结构 |
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |
@@ -61,14 +62,15 @@ cargo test -p gld --test daemon_lifecycle
 ```
 
 **Windows CI 不跑全套**，只跑 `ci.yml` 里 `windows` job 列出的两小组：补丁落盘与写锁
-（补丁已迁至 `gld-runtime`，写锁仍在 `gld-core`），和 `daemon_lifecycle.rs` 里点名的一小组端到端测试（命名管道上的
+（补丁与写锁机制归 `gld-runtime`，上下文组合测试归 `gld-core`），和 `daemon_lifecycle.rs` 里点名的一小组端到端测试（命名管道上的
 守护进程起停、单实例锁、经守护进程跑命令、停命令不留孤儿、运行记录的 `exited` /
 `interrupted`）。后者跑的是这次编出来的 `target/debug/gld`，**不算下载包验收**。清单只写在
 `ci.yml` 一处；往里加测试前先把 fixture 改成两边都能跑（`sh` 脚本、`sleep`、`pgrep` 在
 Windows 上都没有，`daemon_lifecycle.rs` 里的 `Sleeper`、`write_script` 是现成的写法）。
 测试改了名要同步改清单，否则那一步会报"条数不对"。
-补丁测试按 runtime 的 `patch` 过滤，写锁测试按 core 的 `tools::workspace_runtime` 过滤；
-两组以 `&&` 连接，任意一组失败都会使该步骤失败。实际运行结果与平台范围见 [task_plan.md](../task_plan.md)。
+补丁测试按 runtime 的 `patch` 过滤，写锁机制按 runtime 的 `workspace_runtime` 过滤，
+上下文组合按 core 的 `tools::workspace_runtime` 过滤；三组以 `&&` 连接，任意一组失败都会使该步骤失败。
+Unix 专属的 scope 停止测试不在 Windows 过滤结果中。实际运行结果与平台范围见 [task_plan.md](../task_plan.md)。
 
 ## 文档与完成声明的契约
 
