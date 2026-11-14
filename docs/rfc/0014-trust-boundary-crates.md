@@ -88,6 +88,31 @@ daemon 的协议又引用 core 的应用 DTO。模块名字区分了职责，但
 
 `common` / `utils` 不能用来接收循环依赖。某个类型归属不清时，先找它的状态所有者和真实消费者。
 
+### 宿主拆分前先解开的依赖
+
+不要把现在的 `Hub`、`App` 或 `generation` 整包搬走。它们同时装着应用状态与宿主资源，
+直接建立 `gld-host → gld-core` 会碰上 core 对这些对象的反向引用。
+
+| 现有对象 | 留在应用侧的职责 | 待归宿主或组合入口的职责 |
+| --- | --- | --- |
+| `Hub` | 可见项目、工具暴露、授权/Planning、工作会话、上下文、结果包装，以及执行前的归属复核 | 原生节点的实际连接；已有 `NodeBridge::{members,call}` 可传递调用，不另造通用接口 |
+| `generation` | 执行代 child、工作区状态与交接、身份转换和双方共用的路径归属语义 | Router、子进程 Link、执行代选择与替换 |
+| `App` | 数据与工具上下文、业务用例 | 当前内嵌的 RuntimeSupervisor、监听器重启串行化及服务/隧道管理，需要 daemon 明确装配 |
+| 认证与持久化 | policy 的已认证主体、授权范围；调用方需要的数据模型 | Bearer/OAuth HTTP 适配、客户端注册表、凭据读取、日志和目录选择；不能把 DataStore/home 伪装成纯配置 |
+
+实际请求顺序保持：HTTP 验证身份 → Hub 计算归属 → Router 选择执行代 → 私有管道 →
+child 还原身份 → Hub 再核对归属 → `call_tool_as`。两边名单不同就拒绝执行，不能因拆分省掉复核。
+
+依次处理这些依赖，而不是先建空壳 crate：
+
+1. Router 只接收现有 `ExecutionRoute`，不持有或解析 Hub；同目录归属键由 core 的执行代共享语义提供。
+2. 分离原生节点连接的所有者与 NodeBridge 应用调用；保留 CCNM/本机 MCP 会话对旧执行代交接的阻塞。
+3. 将本地工具、委派、撤销、服务启停与执行代路由的装配归到 daemon；明确认证存储、日志和目录输入。
+4. 再按实际依赖迁移 Router/Link、HTTP/OAuth、网关和监听管理，决定独立 host crate。core 不通过兼容重导出反向绑定宿主。
+
+清理 owner 时仍每轮读当前数据；读失败就保留原 owner。无 Router 的本地调用路径、配置/凭据格式、
+关闭顺序与公开协议保持；这些后续职责的迁移需要各自的集成回归，不由第一步的路径测试代替。
+
 ## 4. 协议与实现的归属规则
 
 执行代的一条完整协议切片包含 `HostFrame / GenerationFrame / Op / HostOp / WireAuth / WireNative`，

@@ -16,12 +16,15 @@ use super::host::Link;
 use super::wire::{auth_to_wire, Op, WireNative};
 use super::{current_build_identity, GENERATION_PROTOCOL, MAX_LIVE_GENERATIONS, STATE_FORMAT};
 use crate::auth::AuthContext;
-use crate::hub::{ExecutionRoute, Hub};
 use crate::nodes::registry::{NativeMember, Nodes};
 use crate::settings::HubConfig;
+use gld_protocol::generation::ExecutionRoute;
 
 /// 启动和替换时等子进程就绪的上限。
 pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+// 保留旧 Rust 导入路径；归属键不属于宿主路由器实现。
+pub use super::root_key;
 /// 当前代刚挂、替代的还没起来时，新请求等这么久；再久就如实报不可用。
 const ADMIT_WAIT: Duration = Duration::from_secs(10);
 /// Agent 收尾最多 15 秒，再留一点给命令。
@@ -285,14 +288,13 @@ impl Router {
 
     // ---- 工具入口 ----
 
-    /// Hub 上的一次 MCP 请求。必须在阻塞线程里调。
+    /// 转发 Hub 已按认证主体算好归属的 MCP 请求。必须在阻塞线程里调。
     pub fn hub_mcp(
         &self,
-        hub: &Hub,
+        route: ExecutionRoute,
         auth: &AuthContext,
         body: &Value,
     ) -> Result<McpReply, CallError> {
-        let route = hub.execution_route(auth, body);
         let (key, discovery) = match &route {
             ExecutionRoute::Discovery => (None, true),
             ExecutionRoute::Unbound => (None, false),
@@ -1329,15 +1331,6 @@ fn move_workspace(key: &str, from: &Link, to: &Link) -> Result<(), Vec<String>> 
     )
     .map_err(|error| vec![format!("adopt_failed: {error}")])?;
     Ok(())
-}
-
-/// 工作区所有权的键：和 [`crate::tools::workspace_runtime::runtime_for`] 一样规范化路径，
-/// 同一个目录不管从哪个入口进来都是同一个主人。
-pub fn root_key(root: &Path) -> String {
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .display()
-        .to_string()
 }
 
 fn mcp_reply(value: Value) -> Result<McpReply, CallError> {

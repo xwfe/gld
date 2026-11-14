@@ -102,9 +102,17 @@ fn an_oversized_frame_is_an_error_not_a_memory_leak() {
 #[test]
 fn a_workspace_has_one_owner_key_however_its_path_is_written() {
     let root = tempfile::tempdir().unwrap();
-    let plain = router::root_key(root.path());
-    let dotted = router::root_key(&root.path().join("."));
+    let plain = root_key(root.path());
+    let dotted = root_key(&root.path().join("."));
     assert_eq!(plain, dotted);
+    assert_eq!(plain, router::root_key(root.path()));
+}
+
+#[test]
+fn an_unavailable_root_keeps_its_original_owner_key() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing");
+    assert_eq!(root_key(&missing), missing.display().to_string());
 }
 
 /// 只有确定没发出去的才能叫客户端重试：其余的工具可能已经跑过了。

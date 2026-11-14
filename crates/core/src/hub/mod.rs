@@ -1358,7 +1358,7 @@ pub fn known_owner_keys() -> Result<std::collections::HashSet<String>, String> {
     let (mut keys, _) = DataStore::read_file(|data| {
         let mut keys = std::collections::HashSet::new();
         for profile in &data.profiles {
-            keys.insert(crate::generation::router::root_key(std::path::Path::new(
+            keys.insert(crate::generation::root_key(std::path::Path::new(
                 &profile.path,
             )));
         }
@@ -1380,7 +1380,7 @@ pub fn known_owner_keys() -> Result<std::collections::HashSet<String>, String> {
 /// 这个成员的工作区状态归谁管。节点上的状态在节点那台机器上，这边哪一代转发都一样。
 fn member_route(member: &Member) -> ExecutionRoute {
     match member {
-        Member::Local(profile) => ExecutionRoute::Owned(crate::generation::router::root_key(
+        Member::Local(profile) => ExecutionRoute::Owned(crate::generation::root_key(
             std::path::Path::new(&profile.path),
         )),
         Member::Remote(remote) => ExecutionRoute::Owned(remote.id.clone()),
@@ -1823,6 +1823,8 @@ fn workspace_context_definition() -> Value {
 mod tests {
     use super::*;
     use crate::planning::PlanningMode;
+
+    mod routing;
 
     struct Fixture {
         _dirs: Vec<tempfile::TempDir>,

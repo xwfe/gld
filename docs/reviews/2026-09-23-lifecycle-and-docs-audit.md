@@ -5094,3 +5094,72 @@ CI 仍由 Linux/macOS 的全 workspace 测试与 Windows 的全 workspace 编译
 文件连接器 `Filesystem.read_multiple_files` 因路径白名单返回 `Access denied - path outside allowed directories`，
 改用本地 shell 定点读写，没有修改白名单。它不是 gld 工具错误。
 本轮构建与测试走本地 shell，gld 仅用于运行版本查询，因此不据此宣布 §119 的内部错误已修复。
+
+
+## 121. D17-F1：先分开请求归属与宿主路由（2026-11-14）
+
+用户要求继续 D17-F，先梳理宿主边界和依赖，再按能单独验证的小步拆分；本轮不推送、不部署。
+起点为干净的 `main@768fe95`，比本地 `origin/main` 超前 5 个提交。
+
+### 121.1 依赖核对与第一片范围
+
+按当前源码核对一条完整调用链：MCP HTTP 入口先验证身份，Hub 按主体可见项目计算归属，
+Router 选择执行代并经 Link 的私有管道发请求，child 还原身份，Hub 再核对归属后进入 `call_tool_as`。
+无 Router 的直接执行路径独立存在，不能因宿主拆分丢掉。
+
+核对发现的实际依赖：
+
+- `Hub` 同时拥有工具/权限/工作会话逻辑、CCNM/本机 MCP 会话及原生 Nodes；前两类会话还会阻塞旧执行代交接，不能随 HTTP 整搬。
+- `App` 同时持有 DataStore、工具上下文、RuntimeSupervisor 与重启锁；daemon 当前加载的是这个组合对象。
+- Router 接收整份 Hub 只为调用 execution_route；反过来 Hub 的成员归属和已知 owner 清单又调用 Router 模块的 root_key。
+- OAuth 客户端注册表仍耦合目录、日志和错误适配，StoredGrants/SecretStore 读取 DataStore；不是把 auth 目录改个位置就能独立。
+
+依据与后续顺序补入 RFC-0014 的宿主依赖分析；本轮只切请求归属，不新建空壳 host crate，
+也不把第一次小步通过说成 D17-F 已完成。
+
+### 121.2 实现与保留边界
+
+- `Router::hub_mcp` 改收既有 ExecutionRoute；唯一生产调用点 MCP Endpoint 用同一 auth/body 先计算归属。
+  仍在认证后的同一个 spawn_blocking 内，没有跨 await、锁或配置快照移动计算时点。
+- root_key 原样移到 core 的 generation 共享语义，Hub 不再引用宿主 Router 模块；旧 `generation::router::root_key` 重导出保持。
+  canonicalize 成功用规范路径，失败保留原路径，没有复制或更改算法。
+- Discovery 仍选最老可用代，Unbound 走当前代且不绑定，Owned 走对应 owner；执行代按现状重新核对，
+  不一致仍返回 WORKSPACE_ROUTE_CHANGED，拒绝执行且不记录到成员头上。
+- 直接调用 hub_mcp 的 Rust 使用者需将原 Hub 参数换为算好的归属；HTTP、配置和私有消息形状不变，不递增协议版本。
+- known_owner_keys 的定时查询、查询失败保留 owner、原生节点关闭顺序、本地无 Router 路径均未修改。
+  所有 Cargo manifest、锁文件与 CI 工作流保持。
+
+### 121.3 回归与独立审查
+
+新增三条测试先在原生产实现上运行，再迁移并复跑：
+
+1. `request_routes_follow_visible_state_without_executing_the_tool`：发现请求、本地项目、缺名、未知/未共享项目，
+   以及 grant 可见/不可见项目；路由计算不建立执行上下文。
+2. `member_routes_follow_the_location_of_their_execution_state`：本地用 canonical 根目录，CCNM 用成员 ID，原生节点不绑定宿主执行代。
+   CCNM/原生节点这里只验证成员类型的映射，不是假装做过真实远端验收。
+3. `an_unavailable_root_keeps_its_original_owner_key`：目录不存在时仍保留原路径；原有目录别名测试改用共享入口，并核对旧重导出。
+
+新路由测试放在 Hub tests 的独立子模块，复用已有隔离 fixture，未增加生产抽象。
+定向验证：Hub 单测 69、generation 单测 7、CLI generation_boundary 28、hub_one_connection 9、scoped_grants 3，
+合计 **116 passed / 0 failed**。前两组在迁移前也分别通过 69 与 7 条。
+独立只读审查确认调用顺序、认证边界、归属复核、路径算法及消费者迁移，没有发现 F1 回归；未扩大为完整宿主审计。
+
+### 121.4 验证与运行范围
+
+macOS、隔离 GLD_HOME；外部依赖离线使用，没有安装或升级全局依赖。
+
+| 命令 / 范围 | 实际结果 |
+| --- | --- |
+| Hub 与 generation 定向单测，迁移前和迁移后 | 69 + 7 passed / 0 failed |
+| CLI generation_boundary / hub_one_connection / scoped_grants | 28 + 9 + 3 passed / 0 failed |
+| `cargo test --workspace --all-targets --locked` | **70 个目标，1434 passed / 0 failed / 0 ignored**，退出 0 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+
+本轮未做 Windows/Linux 实机、真实跨机器节点或线上升级兼容验收；F1 的测试不替代 F2–F4 的验证。
+本轮不推送、不部署，不换装或重启运行中的服务，不修改项目、节点、grant 或个人配置。
+仓库读写与测试沿用本地 shell；没有使用 gld 工具执行这些变更，也没有将历史内部错误宣布为已修复。
+
+收尾 `server_info` 实测仍为 `0.10.1 / 1717aaf41685`，连接工具 35 项、指纹 `6022dd56440b0ea9`。
+
+状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。

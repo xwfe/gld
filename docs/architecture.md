@@ -173,6 +173,18 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 （按 `service_config_changed` 逐侧比 JSON 快照）。加了新字段就自动被覆盖，
 不需要额外登记"这个字段要不要重启"。
 
+### 宿主与执行代之间的请求归属
+
+MCP 的 HTTP 入口在完成认证后，调用 `Hub::execution_route(auth, body)`，将已有 `ExecutionRoute`
+显式传入 `Router::hub_mcp`。Router 只按归属选择执行代，不再接收整份 Hub。
+直接调用该 Rust 方法的调用者需要将原 `&Hub` 参数改为算好的 `ExecutionRoute`；HTTP 与私有协议不变。
+执行代仍调用 `Hub::handle_routed` 复核，避免配置变化时同一目录被两代执行。
+
+同目录的归属键由 `generation::root_key` 生成：路径可解析时规范化，无法解析时保留原路径。
+`generation::router::root_key` 仅为旧 Rust 导入路径的重导出，没有第二份实现。
+这只是请求归属的依赖分离；节点连接、认证存储、App 装配和 Router 的其余宿主依赖见
+[RFC-0014 的宿主依赖分析](rfc/0014-trust-boundary-crates.md)，实施进度只看 task_plan。
+
 ## daemon：协议与进程
 
 | 模块 | 职责 |

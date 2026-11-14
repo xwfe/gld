@@ -21,6 +21,7 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 pub use router::{CallError, McpReply, Router};
@@ -28,6 +29,15 @@ pub use router::{CallError, McpReply, Router};
 pub use gld_protocol::generation::{
     BuildIdentity, GENERATION_PROTOCOL, GENERATION_PROTOCOL_MIN, STATE_FORMAT,
 };
+
+/// 工作区所有权的键：和 [`crate::tools::workspace_runtime::runtime_for`] 一样规范化路径，
+/// 同一个目录不管从哪个入口进来都是同一个主人。
+pub fn root_key(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .display()
+        .to_string()
+}
 
 /// 同时活着的代数上限（含准备好还没切过去的）。到了就拒绝再准备新的，绝不为了腾位置杀旧代。
 pub const MAX_LIVE_GENERATIONS: usize = 3;

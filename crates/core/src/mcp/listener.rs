@@ -120,7 +120,7 @@ impl Endpoint {
             Self::Workspace(context) => {
                 router.workspace_mcp(scope, context.workspace.root(), auth, body)
             }
-            Self::Hub(hub) => router.hub_mcp(hub, auth, body),
+            Self::Hub(hub) => router.hub_mcp(hub.execution_route(auth, body), auth, body),
         };
         match routed {
             Ok(reply) => Handled {
