@@ -5163,3 +5163,65 @@ macOS、隔离 GLD_HOME；外部依赖离线使用，没有安装或升级全局
 收尾 `server_info` 实测仍为 `0.10.1 / 1717aaf41685`，连接工具 35 项、指纹 `6022dd56440b0ea9`。
 
 状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。
+
+## 122. D18 规划：统一客户端授权与动态全部项目（2026-11-14）
+
+### 122.1 用户决定与本次范围
+
+用户要求安排简单接入方式，统一 grant 与 grant browser 的使用体验，默认开放全部项目并自动纳入新增项目，
+让 OAuth、API token、URL 凭据按模块边界维护。本次从干净的 main@fd02709 开始，比本地 origin/main 超前 6 个提交；
+只落地设计、阶段顺序与文档入口，不实施新认证行为，不创建或撤销真实 grant。
+
+新增 RFC-0015，任务状态统一记 task_plan.md 的 D18-A–E。代码顺序保持 D17-F2/F3/F4 源码收口后进入 D18，
+D17 的归属搬迁不夹带新授权行为；不以线上部署或 D16 的长线真机验收阻塞 D18 源码开发。
+
+### 122.2 现状证据与设计边界
+
+- 当前标准 /mcp 的 OAuth 与静态 bearer 仍互斥；浏览器路径已与 OAuth 共存，两路复用 dispatch_mcp。
+  依据 core 的 auth/oauth.rs、mcp/listener.rs 和 app/grant.rs；本次未将现有 browser 接入重新列为未实现功能。
+- 现有普通 grant 的 workspaces 是固定名单；CLI 的 --all 也只展开创建时的成员。
+  新设计使用显式 AllProjects / Selected，默认只适用于新建操作，旧记录、空数组和损坏数据不能因此变全项目。
+- policy 的 Caller 派生 Eq/Hash 含整个 Grant，runtime 的会话表用 Caller 作键。
+  设计必须把稳定 CallerId 与逐请求权限分开，避免新增项目、轮换或范围变化令已有会话失联。
+- 原生节点目前拒绝 grant，ForwardedCaller 只带 hub_id/subject，节点重建的是节点共享权限。
+  设计必须显式传递可信 grant 归属、有效权限及凭据限制，取节点 shared/writable/runnable 的交集；
+  不能仅删除拒绝判断，也不能让旧节点因看不懂字段而按全权执行。CCNM 写限制沿用原契约。
+- AppData 的旧写者会忽略新字段再整份保存；执行代版本握手不能单独防止磁盘字段丢失。
+  新存储与迁移必须覆盖旧写者和完整备份回退，不能以 Serde 默认值代替实际兼容验证。
+
+“全部项目”按当前与未来登记到 Hub 的成员计算，不扫描任意目录，也不赋予服务管理员身份。
+读写/命令能力仍与现有项目策略取交集，写权限显式选择。现有授权不自动扩权；
+新的统一命令、token 期限/轮换与节点转发设计均标明为待实施，不写成当前可执行用法。
+
+### 122.3 文档归属与验证
+
+RFC-0015 保存完整契约、模块边界、迁移约束及验收矩阵；task_plan.md 保存实施阶段与唯一状态。
+RFC-0007 标注后续决定，RFC-0014 记录新认证的宿主接入面；connect-clients/concepts 保留现行用法，
+只加入规划提示与链接。普通 token 生命周期及动态范围从“等遇到再做”移入 D18，
+原地收窄既有 grant、服务端审批仍按实际需求另行处理。
+
+独立只读审查核对了本次文档、相关 diff 与 Caller、节点身份、持久化源码，没有发现阻断规划提交的问题。
+审查确认新旧契约、动态范围、节点交集和阶段依赖一致；旧写者的实际存储布局仍由 D18-A 实现验证。
+本机 macOS，Cargo 通过 env.GLD_HOME.value 与 force 指向仓库 target 下的隔离目录。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| docs_commands_exist / docs_have_no_home_paths / docs_links_resolve | 3 个目标，6 passed / 0 failed |
+| cargo test --workspace --all-targets --locked | 70 个目标，1434 passed / 0 failed / 0 ignored，退出 0 |
+| cargo clippy --workspace --all-targets --locked -- -D warnings | 退出 0 |
+| cargo fmt --all -- --check | 退出 0 |
+
+这些结果验证现有代码基线及文档一致性，不代表 D18 的新功能已经实现；本次只修改 7 份 Markdown，
+没有修改源码、CLI 帮助、锁文件或协议，因此不重新生成 CLI 帮助文档，也不升级协议版本。
+真实客户端、运行中授权、部署和远端 CI 未变更；D18 的功能与升级验收仍按其阶段执行。
+
+### 122.4 工具记录
+
+首个多文件 apply_patch 返回 PATCH_FAILED / context_not_found，顶层 error_code 为 INVALID_ARGUMENT，
+files_changed=false。原因是提交补丁时把 task_plan.md 的两条长行截成前半行作匹配；
+重新读取原文，按完整行重建后五个文件一次写入成功。这是补丁构造错误，不据此认定匹配器缺陷。
+首次 Clippy 在编译前退出 101：Cargo 的 --config 不接受 inline table；改为 env.GLD_HOME.value 与
+env.GLD_HOME.force 两个标量配置后，隔离目录生效，严格 Clippy 退出 0。这是命令参数错误，未运行失败的编译。
+删除检查发现的文件尾空行时，apply_patch 对 End of File 指令返回 PATCH_FAILED / unsupported_directive，
+没有落盘；改用工具支持的 Update File 补丁后成功删除。该格式差异已记录，未扩展为本轮源码修复。
+本轮未出现新的 gld 内部错误，也没有把此前间歇恢复宣布为根因修复。
