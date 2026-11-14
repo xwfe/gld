@@ -8,19 +8,20 @@
 | `crates/protocol` / `gld-protocol` | 配置 DTO、本机 IPC 与执行代消息、版本和纯规则；仅依赖 serde / serde_json |
 | `crates/transport` / `gld-transport` | 共用的 MCP Peer、stdio 通道、远端能力表；持有实际通信资源，不决定项目权限 |
 | `crates/runtime` / `gld-runtime` | 工作区路径、文件/补丁、命令、会话、输出、写锁与运行记录；配置和存储位置由调用侧显式传入 |
-| `crates/core` / `gld-core` | 工具授权、任务/Planning 与应用编排，以及尚未分离的宿主、Agent 适配，消费四个底层 crate |
+| `crates/agent` / `gld-agent` | Agent 档案、任务存储与委派进程生命周期；消费 runtime 的私有文件、环境过滤与脱敏接口 |
+| `crates/core` / `gld-core` | 工具授权、任务/Planning、Agent 审批/审核与应用编排，以及尚未分离的宿主，消费五个底层 crate |
 | `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
-依赖为 CLI → daemon/core，daemon → core/protocol，core → policy/protocol/transport/runtime，runtime → policy/protocol；四个底层 crate 不反向依赖 core。
+依赖为 CLI → daemon/core，daemon → core/protocol，core → policy/protocol/transport/runtime/agent，agent → runtime，runtime → policy/protocol；五个底层 crate 不反向依赖 core。
 `crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖，随全仓测试执行。
 旧 `core::auth`、`core::tools::caller/write_class`、`core::bridge::peer/session` 的公开路径通过 re-export 继续可用。
 配置、应用 DTO 和 daemon 协议的旧类型路径也保持同一类型；带副作用的方法入口调整见下节。
 Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
 
 core 不负责 clap 命令行解析，
-但**确实包含 HTTP 监听、Agent、隧道和 MCP 子进程管理**；工作区命令执行归 runtime，daemon 负责守护进程自身的
-IPC 与生命周期，cli 负责参数解析、请求组装和终端展示。不能把“core 不依赖 daemon”
+但**确实包含 HTTP 监听、Agent 应用编排、隧道和 MCP 子进程管理**。Agent 进程归 agent，工作区命令执行归 runtime；
+daemon 负责守护进程自身的 IPC 与生命周期，cli 负责参数解析、请求组装和终端展示。不能把“core 不依赖 daemon”
 写成“core 没有网络或进程代码”。纯规则按已建立的边界下沉，应用编排留在 core；契约测试继续约束入口一致性。
 
 ```text
@@ -112,12 +113,29 @@ runtime 的 `handoff_blockers()` 只报告运行命令、未排完的输出与�
 core 的执行代组合入口合并 Agent 状态，保留原阻塞顺序。撤销仍分别停止匹配的命令和 Agent；
 退出仍写 `interrupted`。未知 owner 的旧结果保持未知写计数，不能当成有效的零写入证据。
 
-Agent 继续消费同一份 owner 锁、私有文件原语和环境过滤实现；其生命周期与审批仍归 core。
+Agent 继续消费同一份 owner 锁、私有文件原语和环境过滤实现；其进程生命周期归 agent，审批仍归 core。
 全局 Tokio 运行时也由 runtime 单独持有。crate 默认拒绝 unsafe，只有
 `session/process_control.rs` 局部允许原有 libc / Win32 系统调用。
 
 新增文件或命令能力在 runtime 实现，再接入 core 的工具表和统一分发；单元测试跟实现走，授权、并发与端到端契约留实际调用侧。
 不把 runtime 的直接 Rust 调用当成独立授权入口。Cargo 依赖检查约束代码归属，子进程权限仍按现有机制执行。
+
+## agent：档案、记录与进程生命周期
+
+Agent 执行机制放在 `crates/agent`：`profile` 读取显式指定的档案路径并拼接参数，`store` 保存任务记录，
+`run` 持有唯一 `LIVE` 表、子进程与监视线程，负责超时、停止和运行前后的 Git 快照。
+它依赖 runtime 的已有环境过滤、脱敏和私有文件原语，不读取 GLD_HOME，也不反向查询应用层。
+Unix 进程组信号沿用原实现，仅 `run::signal` 局部允许 unsafe；Windows 委派仍按原行为返回不支持。
+
+core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责提议、幂等、审批/拒绝、撤销、互斥与审核；
+`agents::results` 负责有界结果、报告和 diff 分页。工具入口继续核验主体、项目名单和 Planning；
+换代入口继续汇总 Agent 阻塞状态，验收仍只认 gld 自己运行的命令证据。
+直接使用 agent crate 不是新的授权入口，不提供 OS 或网络沙箱。
+
+旧 `core::agents::{profile,store,run}` 类型路径通过重导出保留；直接构造 `run::Launch` 的 Rust 调用者
+需提供 `remove_env: Vec<String>`。core 显式传入 GLD_HOME，正式委派子进程无条件扣下它，即使档案
+`env_pass` 点名也不放回。版本探测和 Git 快照子进程沿用原行为，不把这条规则扩大到所有子进程。
+任务 JSON、档案配置、MCP 回包、命令行帮助和 daemon 协议均不因拆分改变。
 
 ## core：内核与服务层
 

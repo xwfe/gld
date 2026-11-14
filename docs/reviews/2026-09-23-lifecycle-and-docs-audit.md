@@ -5029,3 +5029,68 @@ Windows 的补丁与写锁步骤现依次执行 runtime 的 patch、runtime 的 
 
 收尾 server_info 仍为 `0.10.1 / 1717aaf41685`，连接工具表 35 项、指纹 `6022dd56440b0ea9`。
 本轮未推送、未触发远端 CI、未换装或重启运行中的服务，未改项目、节点或 grant 配置。
+
+
+## 120. D17-E：Agent 档案、任务记录与进程生命周期拆分（2026-11-14）
+
+从干净的 `main@3c5fc77` 继续，起点比本地 `origin/main` 超前 4 个提交。依据 RFC-0014 的下一切片，
+只调整代码归属与实际调用接口，不改变 MCP 回包、Agent 档案/任务 JSON、命令行帮助或 daemon 协议。
+
+### 120.1 代码边界
+
+- 新建 `gld-agent`，承载 profile/store/run；进程、监视线程、超时、停止与 Git 快照沿用原实现，`LIVE` 注册表只有一份。
+- 档案显式接收文件路径；运行器接收已有任务、目录、档案、提示和总超时。私有文件、环境过滤与脱敏复用 runtime，不反向依赖 core。
+- core 继续组合数据目录、唯一项目 ID 算法和 owner 锁，保留授权、审批/拒绝、幂等、撤销、互斥与审核；换代组合仍查询同一张运行表。
+- `Launch::remove_env` 由 core 显式传入 GLD_HOME；正式委派子进程无条件移除它，档案 `env_pass` 不能覆盖。
+  版本探测与 Git 子进程沿用原行为，没有新增过滤，不能把这条规则说成覆盖所有子进程。
+- 旧 `core::agents::{profile,store,run}` 路径继续重导出；直接构造 Launch 的 Rust 调用者需补 remove_env。
+  默认 30 分钟常量只有一份，任务序列化与档案默认值保持。
+- profile 生产代码与测试分开；core 的有界结果、报告和 diff 分页移到 `agents::results`，公开入口保持。
+  本轮生产模块均低于 800 行；Agent crate 默认拒绝 unsafe，仅 `run::signal` 保留原 Unix 系统调用。
+- Cargo metadata 依赖测试加入 agent，仍覆盖普通、开发、平台、可选与构建依赖；277 个外部锁定包的名称、版本、来源和校验和没有变化。
+
+### 120.2 测试归属与独立审查
+
+档案 7 条、存储 2 条、Git numstat 解析 1 条随实现迁入 agent；审批、主体隔离、取消、撤销、互斥和验收编排仍在 core/CLI。
+UTF-8 diff 分页测试跟私有 read_diff 进入 core results 子模块，不为测试开放生产 helper。
+原同目录互斥测试补查 gld-agent 的 LIVE 表，确认应用入口启动、停止的任务在底层是同一份状态。
+新增隔离 CLI 回归 `the_application_data_home_is_removed_even_when_the_profile_passes_it`：
+真起守护进程，档案显式写 `env_pass = ["GLD_HOME"]`，测试 Agent 仍读不到该变量，正常结束为 awaiting_review。
+
+独立只读审查对照迁移前原文，核对状态/默认值、单一注册表、owner 锁、环境处理、失败/超时、Git 快照与外部依赖；没有发现迁移回归。
+对这组源码与 CLI 委派测试逐名对照为 44 → 45，原测试未丢，只增加环境注入回归。
+实现与复核使用独立、定点上下文：轻量模型核对测试位置，工作模型迁移和审查；没有重复整仓探索。
+
+整合时发现并修正两类遗漏：uuid 最初误放测试依赖，使单测通过而独立生产编译报 E0433；移为普通依赖后 check 通过。
+结果拆分后私有 read_diff 的测试位置未跟随、以及旧私有重导出无人使用，均已按实际归属调整，未放宽可见性或压制 warning。
+
+### 120.3 验证
+
+本机 macOS，所有测试使用隔离 GLD_HOME。委派流程真起本次源码构建的 CLI/守护进程，Agent 用测试脚本，
+没有消耗第三方 Agent 额度；这不替代真实 Agent 产品、跨平台运行或线上连接器验收。
+
+| 命令 / 范围 | 结果 |
+| --- | --- |
+| 迁移前 `cargo test -p gld-core --lib --locked -- agents` | 36 passed / 0 failed |
+| `cargo check -p gld-agent --locked --offline` | 退出 0，独立生产编译通过 |
+| `cargo test -p gld-agent --lib --locked --offline` | 10 passed / 0 failed / 0 ignored |
+| core 的 agents 单测与 crate_boundaries 集成测试 | 26 + 1 passed / 0 failed |
+| CLI 的 agent_delegation / scoped_grants / generation_boundary | 9 + 3 + 28 passed / 0 failed |
+| `cargo test --workspace --all-targets --locked` | **70 个目标，1431 passed / 0 failed / 0 ignored**，退出 0 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+| `cargo check -p gld-agent --all-targets --target x86_64-pc-windows-msvc --locked --offline` | 退出 0；只用已安装 target，未安装 SDK/依赖，不代表 Windows 运行验收 |
+
+CI 仍由 Linux/macOS 的全 workspace 测试与 Windows 的全 workspace 编译覆盖新 crate；
+既有 Windows 定向测试没有被此次迁移抽空，不修改 CI 入口。
+
+状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。
+
+### 120.4 运行状态与工具使用
+
+开始与收尾的 `server_info` 都为 `0.10.1 / 1717aaf41685`，连接工具 35 项、指纹 `6022dd56440b0ea9`。
+本轮没有推送、触发远端 CI、换装或重启运行中的服务，也没有修改项目、节点、grant 和个人配置。
+
+文件连接器 `Filesystem.read_multiple_files` 因路径白名单返回 `Access denied - path outside allowed directories`，
+改用本地 shell 定点读写，没有修改白名单。它不是 gld 工具错误。
+本轮构建与测试走本地 shell，gld 仅用于运行版本查询，因此不据此宣布 §119 的内部错误已修复。

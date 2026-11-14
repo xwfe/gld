@@ -596,6 +596,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gld-agent"
+version = "0.10.1"
+dependencies = [
+ "gld-runtime",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "gld-core"
 version = "0.10.1"
 dependencies = [
@@ -604,6 +617,7 @@ dependencies = [
  "dirs",
  "fs2",
  "futures-util",
+ "gld-agent",
  "gld-policy",
  "gld-protocol",
  "gld-runtime",

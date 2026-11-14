@@ -38,7 +38,7 @@
 | MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；Actions 监听器（`actions/listener.rs`）、`gld tool call`（`dispatch.rs` → `App::call_tool`）是另外两条进同一批工具的入口；没有升级用的在途请求登记及 admission gate | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
 | OAuth 身份 | `crates/core/src/auth/oauth_flow.rs` 与 `client_registry.rs`：签名 secret、client registry 等可持久化；授权码 pending map 是 OAuthRuntime 内存状态 | 复用密钥有利于保留已签发 token，但进行中的授权流程仍可能丢失 |
 | 原生节点 | `crates/core/src/nodes/registry.rs`：`Nodes` 持有每台机器唯一的一条 WSS；连接从 Hub 监听器的 `/nodes/v1/connect/{machine_id}`（或全局入口）进来，`Hub` 经 `nodes.call` 转发 | 连接挂在公网入口上，不能跟着执行代走；换代断连接等于每台机器都要重连 |
-| 委派的 Agent | `crates/core/src/agents/run.rs`：`LIVE` 表和子进程都在起它的进程里，`agent_manage start` 和 `gld agent approve/stop` 都能起或停；任务记录和 owner 锁在盘上 | 属于工作区执行状态；停和放行必须到起它的进程里做，看记录不用 |
+| 委派的 Agent | `crates/agent/src/run.rs`：`LIVE` 表和子进程都在起它的进程里，`agent_manage start` 和 `gld agent approve/stop` 都能起或停；任务记录和 owner 锁在盘上 | 属于工作区执行状态；停和放行必须到起它的进程里做，看记录不用 |
 | 通用任务空间 | `crates/core/src/hub/work_sessions.rs` 与 `managed_workspaces/`：登记在数据目录自己的存储里，不走 `DataStore`；启动检查由 `HubRuntime` 拉起，碰 `workspace_runtime` | 跟执行状态走，不跟监听器走 |
 | exec 会话 | `crates/core/src/tools/session.rs`：ExecSession 持有进程 Child、ChildStdin、输出 reader task、内存状态；run record 另行落盘 | 持久化日志不等于接管进程和 stdin；重启后读取历史不能算命令连续运行与交互能力保留 |
 | workspace 执行状态 | `crates/core/src/tools/workspace_runtime.rs`：SessionStore、workspace 写入序号与运行归属均在进程内；文件写锁通过同一 `GLD_HOME` 下的 fs2 锁协调 | 只把 session ID 路由回旧代仍不足够；新旧代并行写同一 workspace 会漏记对方的写入序号 |

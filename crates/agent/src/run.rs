@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use gld_runtime::{redaction::redact_text, runs::create_private_file};
+
 use super::profile::{AgentProfile, ResultFrom, StopSignal};
 use super::store::{self, AgentTask, State};
 
@@ -117,6 +119,8 @@ pub struct Launch {
     pub profile: AgentProfile,
     pub prompt: String,
     pub total_timeout: Duration,
+    /// 调用侧指定无条件移除的环境变量；不受档案 `env_pass` 影响。
+    pub remove_env: Vec<String>,
 }
 
 /// 起进程、起监视线程。失败时任务记成 `failed`、放开项目，返回原因。
@@ -127,6 +131,7 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
         profile,
         prompt,
         total_timeout,
+        remove_env,
     } = launch;
     let reason = match live().get(&task.task_id) {
         Some(entry) => Arc::clone(&entry.reason),
@@ -147,7 +152,7 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
         &prompt,
     );
     if argv.is_empty() {
-        // 调用方（agents::launch）已经查过；万一漏了也是起不来，不换成全放开的那条命令。
+        // 调用方漏查也起不来，不换成全放开的那条命令。
         task.state = State::Failed;
         task.failure = Some(format!(
             "档案 {} 没有 agent-approval={} 要用的命令",
@@ -171,6 +176,7 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
         &task_dir,
         &profile,
         prompt_on_stdin.then_some(prompt.as_str()),
+        &remove_env,
     );
     let child = match spawned {
         Ok(child) => child,
@@ -214,10 +220,11 @@ fn spawn(
     task_dir: &Path,
     profile: &AgentProfile,
     stdin_text: Option<&str>,
+    remove_env: &[String],
 ) -> Result<Child, String> {
     #[cfg(not(unix))]
     {
-        let _ = (argv, root, task_dir, profile, stdin_text);
+        let _ = (argv, root, task_dir, profile, stdin_text, remove_env);
         Err("Windows 上还不支持委派（RFC-0009 没验过 Windows 的进程组和信号）".into())
     }
     #[cfg(unix)]
@@ -225,7 +232,7 @@ fn spawn(
         use std::os::unix::process::CommandExt;
 
         let open = |name: &str| {
-            crate::tools::runs::create_private_file(&task_dir.join(name))
+            create_private_file(&task_dir.join(name))
                 .map_err(|error| format!("建不了 {name}：{error}"))
         };
         let mut command = Command::new(&argv[0]);
@@ -236,10 +243,11 @@ fn spawn(
             .stdout(open(store::STDOUT_FILE)?)
             .stderr(open(store::STDERR_FILE)?)
             .process_group(0);
-        // 和 exec_command 一个规矩：gld 的数据目录、名字像密钥的变量不给，档案点名要的除外
-        // （有的 Agent 靠环境变量里的 key 登录）。
-        command.env_remove(crate::home::HOME_ENV);
-        for name in crate::tools::exec::withheld_env_names() {
+        for name in remove_env {
+            command.env_remove(name);
+        }
+        // 和 exec_command 共用密钥过滤规则；档案可以放行 Agent 登录需要的变量。
+        for name in gld_runtime::exec::withheld_env_names() {
             if !profile.env_pass.contains(&name) {
                 command.env_remove(name);
             }
@@ -449,6 +457,7 @@ fn stop_group(child: &mut Child, pgid: i32, first: StopSignal) {
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code)]
 fn signal(pgid: i32, sig: i32) {
     // SAFETY: kill 只是发信号；负的 pid 表示整个进程组，组已经没了会回 ESRCH，忽略。
     unsafe {
@@ -484,7 +493,7 @@ fn read_result(profile: &AgentProfile, task_dir: &Path) -> Result<String, String
         text.truncate(end);
         text.push_str("\n…[截断，全文见任务目录]");
     }
-    crate::tools::history::redact_text(&mut text);
+    redact_text(&mut text);
     Ok(text)
 }
 
@@ -506,7 +515,7 @@ fn json_field(stdout: &str, field: &str) -> Option<String> {
 
 /// 项目某一刻的样子：整个工作区写成的一棵 git 树，加上 HEAD。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Snapshot {
+struct Snapshot {
     tree: String,
     head: Option<String>,
 }
@@ -537,7 +546,7 @@ fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
 ///
 /// 临时 index 先从用户的 index 复制一份：`git add -A` 靠里面记的文件状态跳过没变的文件，大仓库也不用整个重读。
 /// 代价是往仓库的对象库里写了 blob 和树，没人引用，过期后 `git gc` 会清掉。
-pub(crate) fn snapshot(root: &Path, task_dir: &Path, label: &str) -> Option<Snapshot> {
+fn snapshot(root: &Path, task_dir: &Path, label: &str) -> Option<Snapshot> {
     let index = task_dir.join(format!("{label}.index"));
     let _ = fs::remove_file(&index);
     if let Some(path) = git(root, &["rev-parse", "--git-path", "index"]) {
@@ -608,7 +617,7 @@ fn task_diff(
             stats.len()
         );
     }
-    let written = crate::tools::runs::create_private_file(&task_dir.join(store::DIFF_FILE))
+    let written = create_private_file(&task_dir.join(store::DIFF_FILE))
         .and_then(|mut file| file.write_all(&patch));
     if let Err(error) = written {
         eprintln!("任务 diff 写不进 {}：{error}", task_dir.display());
@@ -618,7 +627,7 @@ fn task_diff(
 
 /// `git diff --numstat -z --no-renames` 的输出：每个文件一条 `增\t删\t路径\0`，二进制文件的增删是 `-`。
 /// 不带 `--no-renames` 的话改名会变成另一种格式（路径分两段），这里不认。
-pub(crate) fn parse_numstat(raw: &[u8]) -> Vec<store::FileStat> {
+fn parse_numstat(raw: &[u8]) -> Vec<store::FileStat> {
     raw.split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
         .filter_map(|record| {
@@ -642,7 +651,7 @@ pub(crate) fn parse_numstat(raw: &[u8]) -> Vec<store::FileStat> {
 ///
 /// 每段从行首的 `diff --git ` 起。diff 的内容行都带 ` `、`+`、`-`、`\` 前缀，路径里的换行 git 会转义，
 /// 所以行首出现这几个字就是下一个文件的开头。改模式、二进制、空文件也各有一段，和 numstat 一一对应。
-pub(crate) fn file_sections(patch: &[u8]) -> Vec<(u64, u64)> {
+fn file_sections(patch: &[u8]) -> Vec<(u64, u64)> {
     const HEADER: &[u8] = b"diff --git ";
     let starts: Vec<usize> = std::iter::once(0)
         .chain(
@@ -671,15 +680,32 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 测试里等监视线程收尾用。
 #[cfg(test)]
-pub fn wait_until_finished(task_dir: &Path, wait: Duration) -> AgentTask {
-    let deadline = Instant::now() + wait;
-    loop {
-        let task = store::read(task_dir).expect("任务记录");
-        if task.state != State::Running || Instant::now() >= deadline {
-            return task;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+mod tests {
+    use super::*;
+
+    /// `--numstat -z` 的路径原样带着，里面有制表符也不切开。
+    #[test]
+    fn numstat_records_keep_tabs_in_paths_and_mark_binaries() {
+        let stats = parse_numstat(b"3\t1\ta\tb.txt\0-\t-\timg.png\0\0");
+        assert_eq!(
+            stats,
+            vec![
+                store::FileStat {
+                    path: "a\tb.txt".into(),
+                    added: Some(3),
+                    deleted: Some(1),
+                    diff_offset: None,
+                    diff_bytes: None,
+                },
+                store::FileStat {
+                    path: "img.png".into(),
+                    added: None,
+                    deleted: None,
+                    diff_offset: None,
+                    diff_bytes: None,
+                },
+            ]
+        );
     }
 }

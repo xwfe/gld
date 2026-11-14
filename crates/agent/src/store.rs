@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::tools::runs::{create_private_dir, create_private_file};
+use gld_runtime::runs::{create_private_dir, create_private_file};
 
 pub const TASK_FILE: &str = "task.json";
 pub const PROMPT_FILE: &str = "prompt.md";
@@ -89,7 +89,7 @@ pub struct AgentTask {
     pub workspace_root: String,
     pub workspace_name: String,
     pub agent: String,
-    /// 发起人（[`crate::tools::caller::Caller::key`]），不含令牌。
+    /// 发起人的标识，不含令牌。
     pub caller: String,
     /// 用 `--write` grant 的钥匙发起的：哪一把。grant 只看得见、动得了自己起的任务，`gld grant rm` 按 id 停掉它们，
     /// 本机列表显示名字（ask 档放行前看得出是谁要跑）。服务自己的凭据发起的没有。

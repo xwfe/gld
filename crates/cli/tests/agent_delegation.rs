@@ -79,6 +79,46 @@ fn project(env: &Env) {
 }
 
 #[test]
+fn the_application_data_home_is_removed_even_when_the_profile_passes_it() {
+    use std::io::Write;
+
+    let env = Env::new();
+    agent(
+        &env,
+        "env-check",
+        r#"cat >/dev/null
+if [ "${GLD_HOME+x}" = x ]; then echo 'data home leaked'; exit 23; fi
+echo 'data-home-filtered'"#,
+    );
+    // 档案可放行 Agent 自己需要的环境变量，但不能覆盖应用明确扣下的 GLD_HOME。
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(env.home.path().join("agents.toml"))
+            .expect("agents.toml"),
+        "env_pass = [\"GLD_HOME\"]"
+    )
+    .expect("env_pass");
+    project(&env);
+    env.ok(&["set", "it", "agent-delegation=auto"]);
+    let started = manage(
+        &env,
+        &["action=start", "agent=env-check", "prompt=检查环境"],
+    );
+    let task_id = started["task_id"].as_str().expect("task_id");
+    let done = wait_done(&env, task_id);
+    assert_eq!(done["state"], "awaiting_review", "{done}");
+    assert_eq!(done["exit_code"], 0, "{done}");
+    assert!(
+        done["recap"]
+            .as_str()
+            .unwrap_or("")
+            .contains("data-home-filtered"),
+        "{done}"
+    );
+}
+
+#[test]
 fn ask_mode_goes_from_approval_to_review() {
     let env = Env::new();
     agent(

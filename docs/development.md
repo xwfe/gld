@@ -36,10 +36,11 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | 测试 | 位置 | 覆盖什么 |
 | --- | --- | --- |
 | 单元测试 | 各 crate `src/**` 的 `#[cfg(test)]` | 解析、策略、协议编解码、路径回退、字段表 |
-| crate 依赖边界 | `crates/core/tests/crate_boundaries.rs` | 读取离线、锁定的 Cargo metadata，阻止 policy/protocol/transport/runtime 引入上层、网络框架或构建脚本；代码依赖检查不等于 OS 沙箱 |
+| crate 依赖边界 | `crates/core/tests/crate_boundaries.rs` | 读取离线、锁定的 Cargo metadata，阻止 policy/protocol/transport/runtime/agent 引入上层、网络框架或构建脚本；代码依赖检查不等于 OS 沙箱 |
 | 协议兼容 | `crates/protocol/tests/daemon_contract.rs` 与 protocol 单元测试 | 固定 JSON、默认值、别名、错误码和执行代消息；core 保留身份转换与管道 I/O 测试 |
 | 文件执行边界 | `crates/runtime/src/**` | 显式保护目录与别名、有界文件读取、补丁版本前置条件、提交/回滚、Notebook；core 保留共享锁和调用方版本链集成测试 |
 | 命令与会话边界 | runtime 的 exec/session/runs/workspace_runtime；core 的 run_records/task_acceptance；CLI 的 generation_boundary/scoped_grants/agent_delegation | 启动与写锁、主体隔离、输出/终态/记录证据、撤销、交接状态；Agent 阻塞条件在应用层组合 |
+| Agent 边界 | agent 的 profile/store/run；core 的 agents；CLI 的 agent_delegation/generation_boundary | 档案、存储和进程机制随实现；审批、主体隔离、撤销、互斥、环境注入和换代组合在实际调用侧验证 |
 | 工具契约 | `crates/core/tests/call_tool_contract.rs` | 每个 profile 暴露的工具集与返回结构 |
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |
@@ -55,6 +56,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 
 ```bash
 cargo test -p gld-runtime --all-targets --locked
+cargo test -p gld-agent --all-targets --locked
 cargo test -p gld-core tools::
 cargo test -p gld-policy -p gld-protocol -p gld-transport --locked
 cargo test -p gld-daemon
@@ -164,7 +166,8 @@ gld stop && gld daemon stop
 ```text
 crates/core/src/app/        应用服务层（加用例先改这里）
 crates/core/src/tools/      工具编排与适配（授权、任务、共享锁和契约测试）
-crates/runtime/src/         工作区路径 / 文件读取 / 事务补丁
+crates/runtime/src/         工作区路径 / 文件补丁 / 命令会话与共享执行状态
+crates/agent/src/           Agent 档案 / 任务记录 / 委派进程生命周期
 crates/protocol/src/        配置 DTO / daemon 和执行代消息 / 参数范围与纯规则
 crates/daemon/src/          IPC / 请求分发 / 守护进程
 crates/cli/src/cli.rs       全部命令与帮助文本

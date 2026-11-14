@@ -139,7 +139,14 @@ impl Fixture {
 
     fn finished(&self, task: &AgentTask) -> AgentTask {
         let (dir, _) = get(self.data_home(), &task.task_id).expect("任务");
-        run::wait_until_finished(&dir, Duration::from_secs(20))
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let task = store::read(&dir).expect("任务记录");
+            if task.state != State::Running || std::time::Instant::now() >= deadline {
+                return task;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn detail_of(&self, task: &AgentTask) -> TaskDetail {
@@ -347,6 +354,11 @@ fn one_project_runs_one_task_at_a_time_and_stop_frees_it() {
         running_in(&f.root()).as_deref(),
         Some(first.task_id.as_str())
     );
+    assert_eq!(
+        gld_agent::run::running_in(&f.root()).as_deref(),
+        Some(first.task_id.as_str())
+    );
+    assert!(gld_agent::run::is_live(&first.task_id));
     let busy = f
         .start("ticker", Approval::Auto)
         .expect_err("同一个项目只许一个");
@@ -359,6 +371,7 @@ fn one_project_runs_one_task_at_a_time_and_stop_frees_it() {
     assert_eq!(stopped.state, State::Stopped, "{stopped:?}");
     assert!(running_in(&f.root()).is_none());
     assert!(running_under(f.data_home(), me).is_empty());
+    assert!(!gld_agent::run::is_live(&first.task_id));
     let again = f.start("ticker", Approval::Auto).expect("停了就能再起");
     stop(f.data_home(), &again.task_id).expect("收掉");
     f.finished(&again);
@@ -966,31 +979,6 @@ fn one_file_can_be_read_alone_out_of_a_big_diff() {
     );
 }
 
-/// `--numstat -z` 的路径原样带着，里面有制表符也不切开。
-#[test]
-fn numstat_records_keep_tabs_in_paths_and_mark_binaries() {
-    let stats = run::parse_numstat(b"3\t1\ta\tb.txt\0-\t-\timg.png\0\0");
-    assert_eq!(
-        stats,
-        vec![
-            store::FileStat {
-                path: "a\tb.txt".into(),
-                added: Some(3),
-                deleted: Some(1),
-                diff_offset: None,
-                diff_bytes: None,
-            },
-            store::FileStat {
-                path: "img.png".into(),
-                added: None,
-                deleted: None,
-                diff_offset: None,
-                diff_bytes: None,
-            },
-        ]
-    );
-}
-
 /// 不是 git 仓库：改动记成"不知道"，没有树、没有 diff，不瞎报。
 #[test]
 fn outside_git_the_changes_are_unknown_and_there_are_no_trees() {
@@ -1094,30 +1082,6 @@ fn a_huge_diff_is_cut_on_a_line_boundary() {
             .code,
         "INVALID_ARGUMENT"
     );
-}
-
-/// 一行比一页还长（压缩过的文件）就在行中间切，切在字符边界上；一页页接起来不丢不重。
-#[test]
-fn pages_cut_inside_an_overlong_line_on_a_char_boundary() {
-    let dir = tempfile::tempdir().expect("dir");
-    let path = dir.path().join("task.diff");
-    for (text, max) in [("aéééb", 4), ("ab\ncdefgh\n", 5), ("", 4)] {
-        std::fs::write(&path, text).expect("write");
-        let (mut whole, mut offset) = (String::new(), 0);
-        loop {
-            let (page, next) = read_diff(&path, offset, u64::MAX, max).expect("读");
-            assert!(page.len() <= max && !page.contains('\u{FFFD}'), "{page:?}");
-            whole.push_str(&page);
-            match next {
-                Some(next) => {
-                    assert!(next > offset, "要往前走");
-                    offset = next;
-                }
-                None => break,
-            }
-        }
-        assert_eq!(whole, text);
-    }
 }
 
 /// 还没跑完的任务没有 diff 可读。

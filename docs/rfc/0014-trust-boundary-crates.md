@@ -77,7 +77,7 @@ daemon 的协议又引用 core 的应用 DTO。模块名字区分了职责，但
 | `gld-protocol` | 共享配置、daemon/执行代消息、节点数据快照、工具参数范围、版本与纯编解码 | serde / serde_json；身份与资源转换由调用侧适配 |
 | `gld-transport` | RPC、stdio、必要的流式传输机制 | 序列化及实际传输库；需要共享 DTO 时可依赖 protocol |
 | `gld-runtime` | 工作区路径、文件、补丁、命令、会话、输出、写锁与运行记录 | policy、必要的 protocol、已有 toexec 原语及平台实现 |
-| `gld-agent` | 已有 Agent profile/store/run 与进程生命周期 | runtime 的实际执行接口、policy、必要的 protocol |
+| `gld-agent` | 已有 Agent profile/store/run 与进程生命周期 | runtime 的实际执行接口；其余沿用现有序列化、配置解析与进程依赖 |
 | `gld-core` | 工具分发、任务/验收/Planning、能力暴露、应用用例与适配组合 | 调用已经抽出的底层能力 |
 | 宿主边界 | HTTP/OAuth、凭据/配对、公网入口、节点连接与执行代路由 | 最后从 core 移出；由 daemon 的组合入口装配应用和监听器 |
 | `gld-daemon` / CLI | 本机 IPC、进程服务生命周期、命令行与展示 | daemon 依赖 core / protocol；CLI 消费现有应用与 daemon 入口 |
@@ -149,12 +149,23 @@ grant 撤销停止相关命令/Agent；换代不漏掉 Agent、运行命令或�
 禁止直接依赖 axum、OAuth/签名适配、节点路由和 Agent provider；
 有实际需要的进程操作与本地端口就绪检查仍属于执行侧。这条约束不宣称子进程无法联网。
 
+### E 的 Agent 执行接口
+
+`gld-agent` 接管 profile/store/run 和唯一 `LIVE` 注册表，复用 runtime 的私有文件、脱敏与环境过滤函数。
+core 继续拥有审批、授权、项目 ID、owner 锁及任务审核，组合工作区互斥、grant 撤销和执行代阻塞；
+应用的结果回包与 diff 分页留在 core，不为拆分引入第二份状态或新的 provider 接口。
+
+`run::Launch` 接收已有任务、任务目录、档案、提示、总超时，以及显式 `remove_env`。
+core 注入 GLD_HOME，正式委派子进程的环境剥离顺序与档案例外保持；版本探测和 Git 子进程不新增过滤。
+旧模块导入路径继续重导出，Rust 构造方需补充新字段；任务存储、工具 JSON、配置和协议形状不变。
+档案/存储/解析单测随实现迁移，审批、互斥、隔离、撤销和换代测试留在实际调用侧。
+
 ## 6. 新功能放在哪里
 
 | 新能力 | 首先改哪里 | 接入时必须保留的边界 |
 | --- | --- | --- |
 | 新工具或已有工具的新行为 | core 的工具表与统一分发；需要副作用时调用对应执行服务 | 网络主体经 `call_tool_as` 传入，错误与证据按现有契约返回 |
-| 新 Agent | 现有 Agent profile / run 接口，稳定后迁入 agent crate | 审批、允许范围、互斥和验收继续由应用侧负责 |
+| 新 Agent | agent crate 的现有 profile / run 接口 | 审批、允许范围、互斥和验收继续由应用侧负责 |
 | 新传输方式 | transport 的现有实际消费者，确有协议差异再增加适配 | 不从工具 arguments 取得可信身份，不自动重放结果未知的写操作 |
 | 新节点/平台能力 | 节点共享与平台适配，按真实功能加入 runtime | 每机一条 WSS、显式项目权限、原有签名和撤销语义 |
 | 新诊断 | 组合已有模块的事实与错误 | 不为排障复制一份执行或授权规则 |
@@ -166,7 +177,7 @@ grant 撤销停止相关命令/Agent；换代不漏掉 Agent、运行命令或�
 每片先运行它迁移的单元测试，再验证实际调用路径。涉及的已有集成测试继续留在使用方；
 例如通信本身的测试随 transport 迁移，连接租约和拒发未知参数的测试留 core。
 
-`crates/core/tests/crate_boundaries.rs` 使用离线、锁定的 Cargo metadata 检查 policy、protocol、transport 与 runtime 的实际依赖，
+`crates/core/tests/crate_boundaries.rs` 使用离线、锁定的 Cargo metadata 检查 policy、protocol、transport、runtime 与 agent 的实际依赖，
 包括别名展开、目标平台、可选和 build 依赖。它随现有全仓测试运行，不增加另一套 CI。
 新增边界 crate 时同步扩展此表，才算把文字约定变成可检查约束。
 

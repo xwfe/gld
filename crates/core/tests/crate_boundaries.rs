@@ -60,6 +60,11 @@ fn extracted_crates_keep_their_dependency_boundaries() {
             ][..],
             &["tempfile"][..],
         ),
+        (
+            "gld-agent",
+            &["gld-runtime", "serde", "serde_json", "toml", "uuid", "libc"][..],
+            &["tempfile"][..],
+        ),
     ] {
         let package = packages
             .iter()
