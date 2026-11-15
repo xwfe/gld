@@ -69,7 +69,7 @@ pub struct ToolContext {
     /// 管不到什么。
     ///
     /// **会话表不在这儿，要用得带上调用方主体去 `runtime` 取**
-    /// （`runtime.sessions_for(caller)`）。上下文是按入口建的，主体是按连接
+    /// （`runtime.sessions_for(auth.id())`）。上下文是按入口建的，主体是按连接
     /// 来的——放上下文上，一个入口的所有连接就共用一张表，谁都能读谁的命令
     /// 输出。
     pub runtime: Arc<WorkspaceRuntime>,

@@ -45,6 +45,25 @@ impl Env {
             .unwrap_or_else(|| panic!("服务凭据 {key} 读不出来"))
             .to_string()
     }
+
+    /// 显式本地操作员入口，仍经过真实 CLI、daemon 和执行代；不替代任何 HTTP 认证。
+    pub fn local_tool(&self, workspace: &str, name: &str, arguments: Value) -> Value {
+        let mut args: Vec<String> = ["--json", "-w", workspace, "tool", "call", name]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for (key, value) in arguments.as_object().expect("tool arguments") {
+            args.push(format!("{key}:={value}"));
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = self.gld(&refs);
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "local tool response: {error}; {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    }
 }
 
 impl Service {

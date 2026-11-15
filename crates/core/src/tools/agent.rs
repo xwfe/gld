@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::agents::{self, store::State, AgentError, Approval, StartRequest, TaskDetail};
-use crate::tools::caller::Caller;
+use crate::auth::AuthContext;
 use crate::tools::workspace::WorkspaceError;
 use crate::tools::ToolContext;
 
@@ -26,7 +26,7 @@ pub const ACTIONS: &[&str] = &[
 
 pub fn agent_manage(
     ctx: &ToolContext,
-    caller: &Caller,
+    caller: &AuthContext,
     args: &Value,
 ) -> Result<Value, WorkspaceError> {
     let action = args
@@ -99,7 +99,7 @@ pub fn agent_manage(
 
 fn start(
     ctx: &ToolContext,
-    caller: &Caller,
+    caller: &AuthContext,
     data_home: &Path,
     args: &Value,
 ) -> Result<Value, WorkspaceError> {
@@ -140,7 +140,7 @@ fn start(
         data_home,
         workspace_root: ctx.workspace.root(),
         workspace_name: &ctx.workspace_name,
-        caller: caller.key(),
+        caller: caller.id().key(),
         grant: caller.grant().map(|grant| agents::store::TaskGrant {
             id: grant.id.clone(),
             name: grant.name.clone(),
@@ -213,7 +213,7 @@ fn agent_profiles(ctx: &ToolContext, data_home: &Path) -> Result<Value, Workspac
     }))
 }
 
-fn list(ctx: &ToolContext, caller: &Caller, data_home: &Path) -> Value {
+fn list(ctx: &ToolContext, caller: &AuthContext, data_home: &Path) -> Value {
     let project_id = crate::tools::runs::project_id(&canonical(ctx.workspace.root()));
     let tasks: Vec<Value> = agents::list(data_home, Some(&project_id))
         .into_iter()
@@ -232,18 +232,15 @@ fn list(ctx: &ToolContext, caller: &Caller, data_home: &Path) -> Value {
     json!({ "tasks": tasks })
 }
 
-/// grant 进来的只看得见自己起的任务；服务自己的凭据看得见这个项目的全部。
-fn visible_to(caller: &Caller, task: &agents::store::AgentTask) -> bool {
-    match caller.grant_id() {
-        None => true,
-        Some(id) => task.grant.as_ref().is_some_and(|grant| grant.id == id),
-    }
+/// 本机操作员可管理项目任务；外部客户端只看自己的稳定身份所创建的任务。
+fn visible_to(caller: &AuthContext, task: &agents::store::AgentTask) -> bool {
+    caller.is_local_operator() || task.caller == caller.id().key()
 }
 
 /// 按 task_id 找，而且必须是这个项目的、这个调用方看得见的：别的项目的、别人用 grant 看不到的任务当作不存在。
 fn this_project_task(
     ctx: &ToolContext,
-    caller: &Caller,
+    caller: &AuthContext,
     data_home: &Path,
     args: &Value,
 ) -> Result<(std::path::PathBuf, agents::store::AgentTask), WorkspaceError> {
@@ -341,23 +338,18 @@ fn present_page(page: agents::DiffPage) -> Value {
     value
 }
 
-fn may_delegate(caller: &Caller, action: &str) -> Result<(), WorkspaceError> {
-    let Some(grant) = caller.grant().filter(|grant| !grant.may_delegate()) else {
+fn may_delegate(caller: &AuthContext, action: &str) -> Result<(), WorkspaceError> {
+    if caller.may_delegate() {
         return Ok(());
-    };
-    let kind = if grant.browser {
-        "browser"
-    } else {
-        "read_only"
-    };
+    }
     Err(WorkspaceError::ToolDetails {
         code: "AGENT_DELEGATION_NOT_ALLOWED",
         message: format!(
-            "这把 grant 不能 {action} 委派：Agent 是全权跑的，只有用户用 gld grant add <名字> <项目> --write 发的 grant 才行，只读的、浏览器地址的都不行。"
+            "这次授权不能 {action} 委派：需要项目写权限，并使用 OAuth 或 API token；URL 凭据不能委派 Agent。"
         ),
         category: "permission",
         retryable: false,
-        details: json!({ "action": action, "grant": kind }),
+        details: json!({ "action": action }),
     })
 }
 
@@ -406,6 +398,50 @@ fn on_path(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_grant_different_oauth_clients_cannot_share_agent_tasks() {
+        use gld_policy::{
+            CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject, ProjectScope,
+        };
+        let client = |name: &str| {
+            AuthContext::verified_mcp(
+                "hub",
+                Grant {
+                    id: "same-grant".into(),
+                    name: "Team project".into(),
+                    scope: ProjectScope::Selected(vec!["project".into()]),
+                    permissions: GrantPermissions {
+                        write: true,
+                        ..Default::default()
+                    },
+                    status: GrantStatus::Active,
+                },
+                CredentialKind::OAuth,
+                McpSubject::OAuth {
+                    client_id: name.into(),
+                },
+            )
+            .unwrap()
+        };
+        let alice = client("alice");
+        let task: agents::store::AgentTask = serde_json::from_value(json!({
+            "task_id": "task",
+            "project_id": "project",
+            "workspace_root": "/w",
+            "workspace_name": "w",
+            "agent": "codex",
+            "caller": alice.id().key(),
+            "grant": {"id":"same-grant","name":"Team project"},
+            "prompt_preview": "fix",
+            "state": "waiting_local_approval",
+            "created_at_ms": 1
+        }))
+        .unwrap();
+        assert!(visible_to(&alice, &task));
+        assert!(!visible_to(&client("bob"), &task));
+        assert!(visible_to(&AuthContext::local_operator(), &task));
+    }
 
     /// 给 AI 的回包不带它自己写的提示、也不带 gld 本机记账的字段；审核要的照样都在。
     #[test]

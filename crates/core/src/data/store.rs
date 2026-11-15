@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::auth::GrantRecord;
 use crate::bridge::member::CcnmMember;
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
@@ -186,25 +185,6 @@ impl DataStore {
             return Ok(None);
         };
         let removed = self.data.ccnm_members.remove(index);
-        self.save()?;
-        Ok(Some(removed))
-    }
-
-    /// 只开部分项目的凭据（RFC-0007），连同它们的钥匙。
-    pub fn grants(&self) -> &[GrantRecord] {
-        &self.data.grants
-    }
-
-    pub fn add_grant(&mut self, record: GrantRecord) -> AppResult<()> {
-        self.data.grants.push(record);
-        self.save()
-    }
-
-    pub fn remove_grant(&mut self, id: &str) -> AppResult<Option<GrantRecord>> {
-        let Some(index) = self.data.grants.iter().position(|item| item.grant.id == id) else {
-            return Ok(None);
-        };
-        let removed = self.data.grants.remove(index);
         self.save()?;
         Ok(Some(removed))
     }

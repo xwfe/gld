@@ -29,7 +29,7 @@ use crate::nodes::NativeMember;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{canonical_tool_name, exposed_tool_names};
 use crate::tools::workspace_runtime::{self, WorkspaceHandoff};
-use crate::tools::{self, build_tool_context, Caller, SharedToolContext, ToolContext};
+use crate::tools::{self, build_tool_context, SharedToolContext, ToolContext};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, WorkspaceProfile};
 
@@ -262,8 +262,9 @@ impl Generation {
                 }))
             }
             Op::HubMcp { auth, body, route } => {
+                let auth = mcp_auth(auth)?;
                 let hub = self.current_hub()?;
-                let (response, routed) = hub.handle_routed(&auth_from_wire(auth), &body, &route);
+                let (response, routed) = hub.handle_routed(&auth, &body, &route);
                 let member = routed.as_ref().map(|routed| routed.workspace_id.clone());
                 let audit = routed
                     .and_then(|routed| routed.context)
@@ -276,8 +277,10 @@ impl Generation {
                 auth,
                 body,
             } => {
+                let auth = mcp_auth(auth)?;
+                require_workspace(&auth, &workspace_id)?;
                 let context = self.context_for(&workspace_id, ContextKind::Mcp)?;
-                let response = handle_request(&context, &caller_of(auth), &body);
+                let response = handle_request(&context, &auth, &body);
                 Ok(json!({ "response": response, "member": null, "audit": audit_digest(&context) }))
             }
             Op::ActionsCall {
@@ -286,13 +289,13 @@ impl Generation {
                 tool,
                 arguments,
             } => {
+                if !matches!(&auth, WireAuth::Actions { .. }) {
+                    return Err("Actions requires an explicit Actions identity".into());
+                }
+                let auth = auth_from_wire(auth)?;
+                require_workspace(&auth, &workspace_id)?;
                 let context = self.context_for(&workspace_id, ContextKind::Actions)?;
-                Ok(tools::call_tool_as(
-                    &context,
-                    &caller_of(auth),
-                    &tool,
-                    &arguments,
-                ))
+                Ok(tools::call_tool_as(&context, &auth, &tool, &arguments))
             }
             Op::LocalTool {
                 workspace_id,
@@ -542,9 +545,18 @@ fn interrupt_everything() {
     agents::interrupt_all(INTERRUPT_WAIT);
 }
 
-fn caller_of(auth: WireAuth) -> Caller {
-    let auth: AuthContext = auth_from_wire(auth);
-    Caller::from_auth(&auth)
+fn mcp_auth(auth: WireAuth) -> Result<AuthContext, String> {
+    if !matches!(&auth, WireAuth::Mcp { .. }) {
+        return Err("MCP requires an explicit grant-bound identity".into());
+    }
+    auth_from_wire(auth)
+}
+
+fn require_workspace(auth: &AuthContext, workspace_id: &str) -> Result<(), String> {
+    if !auth.allows_project(workspace_id) {
+        return Err("The authenticated identity does not allow this project".into());
+    }
+    Ok(())
 }
 
 fn agent_failure(error: agents::AgentError) -> String {
@@ -714,9 +726,13 @@ impl NodeBridge for HostBridge {
     }
 
     fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value {
+        let auth = match auth_to_wire(auth) {
+            Ok(auth) => auth,
+            Err(message) => return crate::hub::node_bridge_failure(&message),
+        };
         let asked = self.ask(
             HostOp::NodeCall {
-                auth: auth_to_wire(auth),
+                auth,
                 member: WireNative::from(member),
                 tool: tool.to_string(),
                 args,

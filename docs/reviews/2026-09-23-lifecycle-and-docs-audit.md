@@ -5518,3 +5518,76 @@ RFC-0015 重写，task_plan 更新 A–E 顺序与完成标准，RFC-0007/0014�
 
 本轮未创建/轮换/撤销真实授权，未读取凭据配置，未部署、重启、推送、发布或做真实客户端切换。
 下一项源码工作仍是 task_plan 的 D18-A；当前运行连接与凭据不会因本轮文档提交改变。
+
+## 132. 2026-11-15：D18-A 显式授权模型、新存储与消费者切换
+
+**范围：**从干净的 `main@05bec55c` 开始，执行 §131 与 RFC-0015 的 A 阶段。用户已明确不保留旧授权兼容；
+本轮实现基础模型、存储、可信执行边界和消费者，不把后续签发、认证与远端接通提前算作完成。
+
+**源码边界：**
+
+- `gld-policy` 改用 Grant、AllProjects / Selected、显式服务能力、AuthContext 与稳定 CallerId，删除旧 Caller / Principal。
+  网络 MCP 必须有 GrantId；LocalOperator 只能由可信本机入口显式构造；Actions 使用独立项目与主体。
+  缺失 grant 不代表全权。Selected 不接受空表、重复 ID 或服务能力；URL 不允许服务能力与 Agent 委派。
+- `gld-core` 新增 `<数据目录>/access/v1/grants.json`，当前 schema 为 1。应用持有单一写端与生命周期文件锁，
+  验证候选、写私有临时文件并同步、原子替换成功后再发布共享索引。保存失败保留旧状态，不在请求中遍历全盘。
+  凭据只保存摘要，严格要求用途、修订与期限；元数据列表不返回秘密或摘要。撤销保留 tombstone，旧 ID 不复活。
+  AppData 的旧 grants 按不透明内容保留，缺省不会添字段，不导入或用作认证；新文件损坏或版本错误不回退。
+- runtime、Agent、托管空间、Hub 与工具入口消费显式权限和稳定身份；权限、名字、范围和凭据修订不参与会话键。
+  委派可见性按完整 CallerId 判断，撤销仍按 GrantId 收回资源。网络 wire 不提供 LocalOperator 变体。
+  执行代协议 **2 / min 2**、状态格式 **2**、daemon 协议 **19**，旧结构、未知字段、缺少安全字段与身份混用均拒绝。
+- A 阶段 MCP、URL 和未绑定专用隧道统一拒绝；旧服务令牌、旧 OAuth、回环地址和隧道头均不能建立网络权威。
+  原生节点旧 metadata / 伪 grant 转换也明确拒绝，TLS、机器凭据和 Hub 签名不能代替项目授权。
+  Actions API key / OAuth 的独立入口保留；OAuth claims 要求当前用途与注册客户端，不回退旧受众。
+- `grant ls` / `rm` 管理新授权元数据与撤销。旧创建和 reveal 执行明确报停用，不签发旧凭据；
+  参数定义在 B/D 接通统一 CLI 时清理，不作为兼容实现。没有新增依赖或缓存服务。
+
+**独立审查与实际修正：**
+
+1. Actions 原先只按入口与凭据种类建 CallerId，会让不同项目的同类主体发生身份碰撞。
+   现将稳定 workspace_id 纳入身份，并验证同项目变更权限不换身份、不同项目不共用会话键。
+2. 本地 CLI 命令实际归执行代持有，原删除项目路径只清 App 自身 runtime，可能遗留命令与旧代。
+   daemon 现在注入 Router，先按原登记目录清理实际执行代，再删登记和凭据；失败保留原配置。
+   Prune 重新扫描确认交集，dry-run 不清理，单项失败保留该项目及关联记录并继续其他项。
+   普通 Hub stop 仍只清 Hub 范围，不因此终止本地 CLI 命令。独立复核未发现新增 P1/P2 阻断。
+
+3. 最终全仓的核心库出现最后 reader 释放后无法重开写端的失败。旧实现仅靠 File close 释放文件锁；
+   新增保留同 open-description 的 try_clone 副本的 Unix 回归，旧实现确定性报
+   `Authorization store already has a writer or cannot be locked`，0 passed / 1 failed。
+   私有 WriterLock guard 已改为在最后 Shared 释放时显式 unlock，读取/解析失败也由同一 guard 收回锁；
+   保留原 reader 生命周期断言，不增加重试或等待。并发 fork→exec 窗口是可能的副本来源，
+   本轮以句柄复制实验验证释放缺口，没有追踪原失败瞬间的子进程。
+
+**回归证据：**
+
+- macOS、隔离 GLD_HOME；冻结源码后 `cargo test --workspace --all-targets --locked`：
+  **72 个目标，1450 passed / 0 failed / 0 ignored**，运行期间源码写入计数为 0。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。
+- AccessStore 定向 8/8，包含句柄副本回归由红转绿；generation_boundary 30/30，Hub 9/9，native 33/33。
+  Actions 的 API key、OAuth PKCE / refresh 与工具调用保持正向验证，项目、命令、执行代切换等本地正向回归继续执行。
+- 文档命令、私人路径和相对链接在全仓回归中通过；CLI 文档由实际脚本重新生成。
+  Windows 交叉检查、远端 CI 和真实跨平台/客户端切换仍沿用 §130 的具体缺口，本轮没有新增这些证据。
+
+旧成功矩阵不能机械沿用：native 集成从原 49 项改为当前 A 阶段 33 项，没有 ignore、伪造 grant 或网络 LocalOperator。
+配对、邀请丢包恢复、TLS、Hub 公钥、CONNECT/NO_PROXY、配置锁、退出与自启动仍使用实际进程和网络验证；
+文件/命令拒绝同时检查无写入、无命令标记及运行/任务记录不增加。旧完整转发场景按原测试名记录在
+`crates/cli/tests/native_nodes/forwarding_contract.md`，C 必须恢复验证。
+RFC-0015 §7.1 还列出 B/C 必须恢复的三凭据生命周期、委派、托管空间与 CCNM 唯一写租约矩阵。
+拒绝、端口探测、CORS 或元数据返回成功不替代任何客户端工具往返验收。
+
+**文档与工具记录：**
+
+concepts、architecture、security、connect-clients、project-lifecycle、README、RFC 和任务计划同步；
+帮助变化已实际运行 `scripts/gen-cli-docs.sh` 生成 cli.md。安全文档移除旧全局凭据/noauth 建议，
+并更新独立存储备份范围。历史审查中 Selected 小节链接失效，通过当前概念文档保留有实质内容的同名标题解决，未改写旧审查。
+
+- apply_patch 的过大补丁、重复上下文和顺序约束曾分别触发 `patch_too_large`、`PATCH_AMBIGUOUS` / 定位失败；
+  按文件拆分、重读版本并使用唯一完整行上下文后完成，拒绝的补丁未落盘。
+  工具建议的数字行号式 hunk 在该入口又被当作文字锚点，最后使用普通 `@@`；此提示与解析差异仍是工具摩擦。
+- 一次 `bash scripts/gen-cli-docs.sh` 被命令白名单拒绝。随后 check_command 明确批准仓库脚本入口，
+  直接执行原脚本成功；没有修改白名单、扩大权限或改用包装程序绕过策略。
+- 早期诊断回归运行时仍在修改测试，只用于定位旧假设；最终统计使用冻结源码后的完整运行。
+  Hub 测试的注册路径和 helper 签名错误均已修正；一次核心过滤命中 0 项不计作验证。
+
+本轮未读取、创建、轮换或撤销真实凭据，未换装二进制、重启运行服务、推送或发布。
+A 不是完整客户端接入版本；三种凭据签发与认证、动态远端授权、统一命令和真实客户端切换分别由 B/C/D/E 完成。

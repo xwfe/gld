@@ -138,7 +138,7 @@ fn stopping_one_entry_leaves_the_other_entries_alone() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().canonicalize().expect("canonical");
     let runtime = runtime_for(&root);
-    let (hub, local) = (caller("alpha"), Caller::local());
+    let (hub, local) = (caller("alpha"), CallerId::local_operator());
     let hub_table = runtime.sessions_for(&hub);
     let local_table = runtime.sessions_for(&local);
     let hub_session = sleeping_session(&hub_table);
@@ -194,13 +194,74 @@ fn empty_session_tables_are_reclaimed() {
 }
 
 /// 测试里的网络主体：一个 hub 上的 OAuth 客户端。
-fn caller(client_id: &str) -> Caller {
-    Caller::from_auth(&gld_policy::AuthContext::new(
-        gld_policy::Principal::OAuthClient {
+fn caller(client_id: &str) -> CallerId {
+    network_auth(client_id).id().clone()
+}
+
+fn network_auth(client_id: &str) -> gld_policy::AuthContext {
+    use gld_policy::{
+        AuthContext, CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject, ProjectScope,
+    };
+    AuthContext::verified_mcp(
+        "hub",
+        Grant {
+            id: "grant-a".into(),
+            name: "client".into(),
+            scope: ProjectScope::AllProjects,
+            permissions: GrantPermissions::default(),
+            status: GrantStatus::Active,
+        },
+        CredentialKind::OAuth,
+        McpSubject::OAuth {
             client_id: client_id.into(),
         },
+    )
+    .expect("verified test identity")
+}
+
+/// 权限和显示名称是每次请求的快照，不能成为会话表或自己的写入记录的身份。
+#[test]
+fn permission_changes_keep_sessions_and_own_writes_but_a_new_grant_does_not() {
+    use gld_policy::{AuthContext, CredentialKind, McpSubject, ProjectScope};
+    let dir = tempdir().expect("tempdir");
+    let runtime = runtime_for(&dir.path().canonicalize().expect("canonical"));
+    let before = network_auth("alpha");
+    let table = runtime.sessions_for(before.id());
+    runtime.record_own_write(before.id(), "a.txt", Some("v1"), Some("v2"));
+
+    let mut grant = before.grant().unwrap().clone();
+    grant.name = "renamed".into();
+    grant.scope = ProjectScope::Selected(vec!["project-a".into()]);
+    grant.permissions.write = true;
+    let after = AuthContext::verified_mcp(
         "hub",
-    ))
+        grant.clone(),
+        CredentialKind::OAuth,
+        McpSubject::OAuth {
+            client_id: "alpha".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(before.id(), after.id());
+    assert_ne!(before, after);
+    assert!(Arc::ptr_eq(&table, &runtime.sessions_for(after.id())));
+    assert!(runtime.wrote_since(after.id(), "a.txt", "v1", "v2"));
+
+    grant.id = "grant-b".into();
+    let replacement = AuthContext::verified_mcp(
+        "hub",
+        grant,
+        CredentialKind::OAuth,
+        McpSubject::OAuth {
+            client_id: "alpha".into(),
+        },
+    )
+    .unwrap();
+    assert!(!Arc::ptr_eq(
+        &table,
+        &runtime.sessions_for(replacement.id())
+    ));
+    assert!(!runtime.wrote_since(replacement.id(), "a.txt", "v1", "v2"));
 }
 
 /// 写权被占着的时候，后来的人等到上限就得到 `None`，不是一直挂着。

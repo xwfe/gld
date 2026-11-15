@@ -265,7 +265,7 @@ impl Router {
             ExecutionRoute::Owned(key) => (Some(key.clone()), false),
         };
         let op = Op::HubMcp {
-            auth: auth_to_wire(auth),
+            auth: auth_to_wire(auth).map_err(CallError::Unavailable)?,
             body: body.clone(),
             route,
         };
@@ -282,7 +282,7 @@ impl Router {
     ) -> Result<McpReply, CallError> {
         let op = Op::WorkspaceMcp {
             workspace_id: workspace_id.to_string(),
-            auth: auth_to_wire(auth),
+            auth: auth_to_wire(auth).map_err(CallError::Unavailable)?,
             body: body.clone(),
         };
         mcp_reply(self.forward(Some(root_key(root)), false, &op)?)
@@ -298,7 +298,7 @@ impl Router {
     ) -> Result<Value, CallError> {
         let op = Op::ActionsCall {
             workspace_id: workspace_id.to_string(),
-            auth: auth_to_wire(auth),
+            auth: auth_to_wire(auth).map_err(CallError::Unavailable)?,
             tool: tool.to_string(),
             arguments: arguments.clone(),
         };

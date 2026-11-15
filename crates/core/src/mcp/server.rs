@@ -1,13 +1,12 @@
 use serde_json::{json, Value};
 
 use crate::agent_context::render_skill_catalog_for_profile;
-use crate::tools::{
-    call_tool_as, list_tools_for_profile, wrap_mcp_tool_result, Caller, SharedToolContext,
-};
+use crate::auth::AuthContext;
+use crate::tools::{call_tool_as, list_tools_for_profile, wrap_mcp_tool_result, SharedToolContext};
 
 pub type SharedState = SharedToolContext;
 
-pub fn handle_request(state: &SharedState, caller: &Caller, body: &Value) -> Value {
+pub fn handle_request(state: &SharedState, auth: &AuthContext, body: &Value) -> Value {
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let params = body.get("params").cloned().unwrap_or(Value::Null);
@@ -17,14 +16,22 @@ pub fn handle_request(state: &SharedState, caller: &Caller, body: &Value) -> Val
     }
 
     let result = match method {
-        "initialize" => Ok(initialize_result(state)),
+        "initialize" => Ok(initialize_result(state, auth)),
         "ping" => Ok(serde_json::json!({})),
         "tools/list" => {
-            let tools = list_tools_for_profile(&state.tool_profile);
+            let allowed = tool_names_for(state, auth);
+            let tools: Vec<Value> = list_tools_for_profile(&state.tool_profile)
+                .into_iter()
+                .filter(|tool| {
+                    tool["name"]
+                        .as_str()
+                        .is_some_and(|name| allowed.contains(&name))
+                })
+                .collect();
             state.record_context_block("tool_definitions", &json!(tools));
             Ok(json!({ "tools": tools }))
         }
-        "tools/call" => handle_tools_call(state, caller, &params),
+        "tools/call" => handle_tools_call(state, auth, &params),
         _ => Err(serde_json::json!({
             "code": -32601,
             "message": format!("Method not found: {method}")
@@ -44,16 +51,18 @@ pub fn handle_request(state: &SharedState, caller: &Caller, body: &Value) -> Val
 /// 没看到 command_ok / 提交号就说"已完成"。删掉哪句，对应的毛病就可能回来。
 const RESULT_RULES: &str = "Read project files with read_file (pass ranges for several parts of a file in one call), not with cat, sed or interpreter one-liners through exec_command. FILE_VERSION_CONFLICT, or a patch whose context no longer matches, means the file changed after you read it: re-read it and rebuild the change; it is not a server or infrastructure failure, so do not report it as one. When a command is rejected by policy, do not run the same thing through another program, interpreter one-liner or wrapper; use check_command to see which rule blocked it and tell the user. Only say a command passed when its result has command_ok=true, and only say work was committed when git printed the new commit hash.";
 
-fn initialize_result(state: &SharedState) -> Value {
+fn initialize_result(state: &SharedState, auth: &AuthContext) -> Value {
     let base_instructions = "Use these tools only for local coding operations inside the configured workspace. Planning mode is controlled exclusively by the gld CLI: every tool response may contain planning_context with the authoritative current mode, revision, focused Goal, and focused Plan. Never assume or attempt to change the mode from chat. Goal and Plan records are AI-driven conversation artifacts: when a user request benefits from durable tracking, create_goal and create_plan may be called directly from the conversation without asking the user to approve a proposal first. Keep their criteria and steps updated as work progresses. When the work is ready for acceptance, call request_goal_review and/or request_plan_review with a concise verification summary. Never archive or claim final acceptance yourself; only the human operator (gld planning ... accept) can accept and archive. If a review is rejected, continue from the reactivated Goal/Plan and incorporate the human feedback. In Plan mode, project writes and command execution are intentionally blocked by the server. In Goal mode, project mutations require an active focused Goal and must respect any focused Plan relationship/status. If the client reports missing tools while server authorization is still valid, treat it as a capability discovery mismatch rather than a permission loss: refresh the MCP session/tool list before requesting permissions. At the start of every new ChatGPT conversation, before answering the user's first request, call history_session_bootstrap exactly once and pass the user's verbatim first request as initial_user_input. Treat bootstrap as required conversation initialization: it creates or resumes a lossless Markdown archive and returns bounded current state, not all history. Use history_session_search followed by history_session_read only when exact earlier context is needed. history_session_read returns a bounded UTF-8-safe page; follow next_cursor with the returned content hash until the relevant archive is complete. Repeated successful bootstrap calls in the same conversation resume the same session and must not create duplicates. Preserve session_key and current_path returned by bootstrap, then pass them unchanged as session_key and expected_path to every history_session_checkpoint call. After completing each user-requested task in the conversation, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same session_key and path. The server cannot access ChatGPT transcript text that was not provided as a tool argument; persistence is not automatic background persistence. If an operation returns DANGEROUS_OPERATION_REQUIRES_CONFIRMATION, do not request a separate permission grant. Only retry the same tool with confirm=true when the user's request already clearly authorizes that dangerous operation; otherwise ask the user for confirmation.";
-    let base_instructions = if state.tool_profile == "compact" {
+    let base_instructions = if auth.read_only() {
+        "Use these tools only to read the configured workspace. This connection has no project write permission. The current tools/list is the authoritative callable surface; do not attempt writes, command execution, history bootstrap or checkpoints through this connection."
+    } else if state.tool_profile == "compact" {
         "Use these tools only for local coding operations inside the configured workspace. This profile uses Stable Tool API v2: use history_manage, planning_manage, and task_manage with their action field instead of relying on lifecycle-specific tool names. The gld CLI controls permissions and planning mode. History recording is controlled by the workspace setting; history bootstrap is optional and is never required before the first response. Use history_manage action=search/read only when exact older context is needed. Selected history context below is a bounded snapshot; do not repeat it in tool responses. Checkpoints may omit session_key and expected_path because the server can lazily create the current workspace session. If a dangerous operation requires confirmation, retry only the original tool with confirm=true when the user's request clearly authorizes it."
     } else {
         base_instructions
     };
     let base_instructions = format!("{base_instructions} {RESULT_RULES}");
     // 一键放行的项目：连上就告诉 AI，让它转告用户（审查 §60）。放在最前，别被后面一长串规矩淹没。
-    let base_instructions = if state.policy.allows_all_commands() {
+    let base_instructions = if auth.may_write_project() && state.policy.allows_all_commands() {
         format!(
             "{} {base_instructions}",
             crate::tools::policy::ALLOW_ALL_NOTICE
@@ -122,7 +131,20 @@ fn initialize_result(state: &SharedState) -> Value {
     })
 }
 
-fn handle_tools_call(state: &SharedState, caller: &Caller, params: &Value) -> Result<Value, Value> {
+fn tool_names_for(state: &SharedState, auth: &AuthContext) -> Vec<&'static str> {
+    let mut names = crate::tools::registry::exposed_tool_names(&state.tool_profile);
+    if auth.read_only() {
+        let read_only = crate::tools::registry::exposed_tool_names("read-only");
+        names.retain(|name| read_only.contains(name));
+    }
+    names
+}
+
+fn handle_tools_call(
+    state: &SharedState,
+    auth: &AuthContext,
+    params: &Value,
+) -> Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -130,7 +152,7 @@ fn handle_tools_call(state: &SharedState, caller: &Caller, params: &Value) -> Re
     let args = tool_arguments(name, params);
 
     let canonical_name = crate::tools::registry::canonical_tool_name(name);
-    let known = crate::tools::registry::exposed_tool_names(&state.tool_profile);
+    let known = tool_names_for(state, auth);
     if !known.iter().any(|n| n == &canonical_name) {
         return Err(serde_json::json!({
             "code": -32602,
@@ -139,7 +161,20 @@ fn handle_tools_call(state: &SharedState, caller: &Caller, params: &Value) -> Re
         }));
     }
 
-    let structured = call_tool_as(state.as_ref(), caller, canonical_name, &args);
+    let mut structured = call_tool_as(state.as_ref(), auth, canonical_name, &args);
+    if canonical_name == "server_info" {
+        if let Some(tools) = structured.get_mut("tools").and_then(Value::as_array_mut) {
+            tools.retain(|name| name.as_str().is_some_and(|name| known.contains(&name)));
+            let count = tools.len();
+            structured["tool_count"] = json!(count);
+        }
+        if let Some(aggregate) = structured
+            .pointer_mut("/tool_api/aggregate_tools")
+            .and_then(Value::as_array_mut)
+        {
+            aggregate.retain(|name| name.as_str().is_some_and(|name| known.contains(&name)));
+        }
+    }
     let result = wrap_mcp_tool_result(canonical_name, &args, structured);
     state.record_context_block("tool_return", &result);
     Ok(result)
@@ -176,7 +211,8 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::tools::{Caller, ToolContext};
+    use crate::auth::AuthContext;
+    use crate::tools::ToolContext;
 
     use super::{handle_request, initialize_result, tool_arguments};
 
@@ -193,6 +229,58 @@ mod tests {
     }
 
     #[test]
+    fn read_only_authority_controls_discovery_calls_and_connection_instructions() {
+        let state = test_state();
+        let auth = AuthContext::verified_mcp(
+            "project-entry",
+            gld_policy::Grant {
+                id: "read-only".into(),
+                name: "Reader".into(),
+                scope: gld_policy::ProjectScope::Selected(vec!["project".into()]),
+                permissions: gld_policy::GrantPermissions::default(),
+                status: gld_policy::GrantStatus::Active,
+            },
+            gld_policy::CredentialKind::Token,
+            gld_policy::McpSubject::Token,
+        )
+        .unwrap();
+        let listed = handle_request(&state, &auth, &json!({"id":1,"method":"tools/list"}));
+        let names: Vec<_> = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"read_file"));
+        assert!(!names.contains(&"apply_patch"));
+        assert!(!names.contains(&"exec_command"));
+        let denied = handle_request(
+            &state,
+            &auth,
+            &json!({
+                "id":2,"method":"tools/call","params":{"name":"apply_patch","arguments":{}}
+            }),
+        );
+        assert_eq!(denied["error"]["data"]["reason"], "unknown_tool");
+        let info = handle_request(
+            &state,
+            &auth,
+            &json!({
+                "id":3,"method":"tools/call","params":{"name":"server_info","arguments":{}}
+            }),
+        );
+        let tools = info["result"]["structuredContent"]["tools"]
+            .as_array()
+            .unwrap();
+        assert!(!tools.contains(&json!("apply_patch")));
+        assert!(!tools.contains(&json!("exec_command")));
+        let initialized = initialize_result(&state, &auth);
+        let instructions = initialized["instructions"].as_str().unwrap();
+        assert!(instructions.contains("no project write permission"));
+        assert!(!instructions.contains("call history_session_bootstrap exactly once"));
+    }
+
+    #[test]
     fn compact_initialize_does_not_require_history_bootstrap() {
         let state = Arc::new(
             test_context()
@@ -200,7 +288,7 @@ mod tests {
                 .with_history_config(true, Vec::new())
                 .with_agent_runtime(Vec::new(), String::new()),
         );
-        let initialized = initialize_result(&state);
+        let initialized = initialize_result(&state, &AuthContext::local_operator());
         let instructions = initialized["instructions"].as_str().expect("instructions");
         assert!(instructions.contains("history bootstrap is optional"));
         assert!(!instructions.contains("exactly once"));
@@ -210,7 +298,7 @@ mod tests {
     #[test]
     fn legacy_initialize_keeps_the_history_persistence_workflow() {
         let state = test_state();
-        let initialized = initialize_result(&state);
+        let initialized = initialize_result(&state, &AuthContext::local_operator());
         let instructions = initialized["instructions"].as_str().expect("instructions");
         assert!(instructions.contains("history_session_bootstrap"));
         assert!(instructions.contains("At the start of every new ChatGPT conversation"));
@@ -241,7 +329,7 @@ mod tests {
             Arc::new(test_context().with_tool_profile("compact")),
             test_state(),
         ] {
-            let initialized = initialize_result(&state);
+            let initialized = initialize_result(&state, &AuthContext::local_operator());
             let instructions = initialized["instructions"].as_str().expect("instructions");
             assert!(instructions.contains("pass ranges"), "{instructions}");
             assert!(
@@ -257,7 +345,7 @@ mod tests {
     #[test]
     fn initialize_does_not_claim_tool_catalog_notifications_without_a_stream() {
         let state = test_state();
-        let initialized = initialize_result(&state);
+        let initialized = initialize_result(&state, &AuthContext::local_operator());
 
         assert_eq!(initialized["capabilities"]["tools"]["listChanged"], false);
     }
@@ -267,14 +355,14 @@ mod tests {
     fn initialize_leads_with_the_risk_when_all_commands_are_allowed() {
         let mut context = test_context();
         context.policy.command_policy = "all";
-        let initialized = initialize_result(&Arc::new(context));
+        let initialized = initialize_result(&Arc::new(context), &AuthContext::local_operator());
         let instructions = initialized["instructions"].as_str().expect("instructions");
         assert!(
             instructions.starts_with(crate::tools::policy::ALLOW_ALL_NOTICE),
             "{instructions}"
         );
 
-        let guarded = initialize_result(&test_state());
+        let guarded = initialize_result(&test_state(), &AuthContext::local_operator());
         let instructions = guarded["instructions"].as_str().expect("instructions");
         assert!(!instructions.contains("command-policy=all"));
     }
@@ -284,7 +372,7 @@ mod tests {
         let state = Arc::new(
             test_context().with_agent_runtime(Vec::new(), "Global rule\n\nWorkspace rule".into()),
         );
-        let initialized = initialize_result(&state);
+        let initialized = initialize_result(&state, &AuthContext::local_operator());
         let instructions = initialized["instructions"].as_str().expect("instructions");
 
         assert!(instructions.contains("Configured agent instructions"));
@@ -317,7 +405,7 @@ mod tests {
         );
         let response = handle_request(
             &state,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             &json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -356,7 +444,7 @@ mod tests {
 
         let response = handle_request(
             &state,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             &json!({
                 "jsonrpc": "2.0",
                 "id": 1,

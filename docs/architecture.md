@@ -1,5 +1,10 @@
 # 架构
 
+> **当前源码处于 D18-A 授权基础阶段。**统一授权类型、稳定调用方身份、独立授权存储与新执行代契约已接入内核；
+> HTTP MCP（包括单工作区、Hub、URL 和隧道入口）及原生节点转发暂以 `AUTH_NOT_READY` 拒绝。
+> Actions 的独立认证仍支持。新凭据签发、验证和轮换待 B，远端权限与租约待 C，统一 CLI 待 D；
+> 这不是客户端接入完成或已上线的声明。范围与后续验收见 [RFC-0015](rfc/0015-unified-client-access.md)。
+
 ## 按信任边界组织 crate
 
 | 目录 / crate | 当前职责 |
@@ -9,16 +14,16 @@
 | `crates/transport` / `gld-transport` | 共用的 MCP Peer、stdio 通道、远端能力表；持有实际通信资源，不决定项目权限 |
 | `crates/runtime` / `gld-runtime` | 工作区路径、文件/补丁、命令、会话、输出、写锁与运行记录；配置和存储位置由调用侧显式传入 |
 | `crates/agent` / `gld-agent` | Agent 档案、任务存储与委派进程生命周期；消费 runtime 的私有文件、环境过滤与脱敏接口 |
-| `crates/core` / `gld-core` | 工具授权、任务/Planning、Agent 审批/审核与应用编排，以及尚未分离的宿主，消费五个底层 crate |
+| `crates/core` / `gld-core` | 工具授权、任务/Planning、Agent 审批/审核、授权存储与应用编排，消费五个底层 crate |
 | `crates/host` / `gld-host` | 执行代 Router/Link、MCP/Actions HTTP、OAuth、网关、Hub/工作区监听管理与节点连接；复用 core 的执行与凭据存储接口 |
 | `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
 依赖为 CLI → daemon/core，daemon → host/core/protocol，host → core/protocol，core → policy/protocol/transport/runtime/agent，agent → runtime，runtime → policy/protocol；五个底层 crate 不反向依赖 core。
 `crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖及 core 不反向依赖宿主，随全仓测试执行。
-`core::auth` 的主体模型、`core::tools::caller/write_class` 和 `core::bridge::peer/session` 保留原类型路径；
-OAuth HTTP 入口归 `gld_host::auth`。
-配置、应用 DTO 和 daemon 协议的旧类型路径也保持同一类型；带副作用的方法入口调整见下节。
+`core::auth` 重导出 `gld-policy` 的主体与授权类型；`core::tools::caller/write_class` 和
+`core::bridge::peer/session` 保留类型重导出，OAuth HTTP 入口归 `gld_host::auth`。
+crate 拆分保留的 Rust 导入路径不代表旧授权兼容；D18-A 已移除旧 grant 模型与明文凭据 DTO，协议版本见下文。
 Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
 
 core 不负责 clap 命令行解析，
@@ -44,6 +49,28 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 特别是 CLI 直连模式不能让下一次新进程继承命令会话（只留下运行记录：读得到结局和输出，接不上进程），
 不能仅凭共用代码断言端到端行为相同。
 
+## policy：身份与授权
+
+`gld-policy` 只接收显式输入，不访问磁盘、随机源或时钟。`Grant` 包含稳定 ID、展示名称、
+`ProjectScope`、`GrantPermissions` 和 `GrantStatus`；凭据摘要、有效期与修订号留在 core。
+`AuthContext` 保存已验证的当前权限，不再用“没有 grant”推断全权：
+
+| 身份 | 稳定身份内容 | 权限来源 |
+| --- | --- | --- |
+| `LocalOperator` | 本机操作员 | 可信本机应用 / IPC 显式构造；网络和执行代身份消息不能声明此变体 |
+| `McpClient` | 入口、Grant ID、OAuth client_id / Token / URL / 隧道绑定主体 | 当前有效 grant、凭据种类及本次项目策略 |
+| `ActionsClient` | 入口、配置中的 workspace_id、匿名 / API key / OAuth client_id 主体 | 明确的单工作区权限和 write 设置；没有 MCP 服务能力 |
+
+`CallerId` 的相等与哈希只取稳定身份；grant 名称、项目范围、write、服务能力和凭据修订号不进入键。
+同一 OAuth grant 的不同 client_id 分开；Actions 同一 client_id 或 API key 主体在不同 workspace_id 下也分开，
+同一工作区收紧权限则保持原身份。命令会话、运行记录和任务归属消费同一稳定键，权限仍逐次复核。
+
+默认 `AllProjects` 表示当前及后续登记项目，`Selected` 保存非空、去重的项目 ID；两者都还要与当前成员目录、
+项目配置和上游限制相交。默认 write 为 false，服务能力为空。只有 AllProjects 可显式带
+`user_prompts`、`machine_mcp`、`managed_workspaces`；调用机器 MCP 与管理托管空间还要求 write。
+托管空间仍按调用方所有权检查，不因 AllProjects 变成公共项目。URL 凭据禁止服务能力和 Agent 委派，
+OAuth / Token 委派仍要求 write 及项目既有审批规则；Actions 不借用这些 MCP 权能。
+
 ## protocol：数据契约与适配边界
 
 | 模块 | 接入面 |
@@ -54,20 +81,30 @@ cli::backend::Backend                  守护进程在跑？→ 转发；没跑�
 | `planning / service` | 进程间共用的状态与服务选择类型；账本、服务实例和资源校验留 core |
 | `tool_args` | 工具整型参数的默认值与上下界；core 和 runtime 共用，工具注册表和未知参数校验留 core |
 
-数据契约只有一份定义，core 和 daemon 通过 re-export 保留原类型导入路径。下列 Rust 方法入口随职责调整，
-工作区内的调用者已同步迁移；这不改变命令、配置或 JSON 协议。
+数据契约只有一份定义，core 和 daemon 通过 re-export 共享它。下列 Rust 方法入口随职责调整，
+工作区内的调用者已同步迁移。D18-A 的授权与身份形状另作不兼容切换，不沿用 D17 拆 crate 时的协议不变承诺。
 
 | 原入口 | 现在的归属 |
 | --- | --- |
 | `FrpProfile::new` | `core::settings::new_frp_profile` 生成随机 ID，纯 DTO 不读取随机源 |
 | `BuildIdentity::current` | `core::generation::current_build_identity` 读取构建、进程和可执行路径 |
-| `WireAuth::from / into_auth` | `core/src/generation/wire.rs` 的 `auth_to_wire / auth_from_wire`，显式保留 browser 标记 |
+| `WireAuth::from / into_auth` | `core/src/generation/wire.rs` 的 `auth_to_wire / auth_from_wire`，在显式 MCP / Actions 变体与已验证上下文间转换 |
 | `ServiceKind / TunnelServiceKind::workspace_service` | core 的 `WorkspaceService::from` 适配；资源模型不进入协议 |
 | 服务类型的 `parse` 错误 | protocol 的 `ParseServiceKindError`；core 转成 `AppError`，原消息保持 |
 
 `FrameWriter / read_frame` 仍在 core 的执行代管道适配中；节点登记、凭据、撤销与进程生命周期也留实现侧。
-`WireAuth` 是已认证结果的数据表示，反序列化它并不完成网络认证；宿主仍须先验身份再进入已有调用链。
-新增协议字段先改此 crate，再更新分发与兼容测试，不让 protocol 引用实现层来解决依赖。
+`WireAuth` 是已认证结果的数据表示，反序列化它并不完成网络认证。它只有 `Mcp` 与 `Actions` 两个严格变体：
+MCP 必须携带 grant、凭据种类与主体；Actions 必须携带 workspace_id、主体与 write。缺字段、旧结构和
+不匹配的主体被拒绝，没有 LocalOperator 变体。执行代还核验操作与身份种类一致，以及 Actions 的目标工作区一致。
+
+| 契约 | 当前版本 | 边界 |
+| --- | --- | --- |
+| daemon `PROTOCOL_VERSION` | 19 | grant DTO 只返回授权及凭据元数据；旧守护进程不接受新请求形状 |
+| `GENERATION_PROTOCOL` / `GENERATION_PROTOCOL_MIN` | 2 / 2 | 只接纳明确主体的新执行代消息，不与协议 1 混跑 |
+| `STATE_FORMAT` | 2 | 阻止旧格式执行代参与共享状态的读写；旧授权不会因此被导入 |
+
+版本核验在换代前完成。新增协议字段先改此 crate，再更新分发和拒绝旧版本的测试，不让 protocol 引用实现层来解决依赖。
+新存储的 schema_version 独立为 1，不能把它与执行代的 STATE_FORMAT 混为一个版本号。
 
 ## runtime：工作区与命令执行
 
@@ -92,7 +129,7 @@ core 的 `tools::new_workspace(root)` 解析 GLD_HOME，再调用
 
 原 `core::tools::workspace::Workspace` 类型路径和文件工具路径通过 re-export 保持；
 原单参数 `Workspace::new(root)` 的调用者需改用 core 工厂，直接使用 runtime 的调用者必须传入保护目录。
-MCP 结果包装继续归 core。已有命令、JSON 结果、错误码与协议版本保持。
+MCP 结果包装继续归 core。runtime 的拆分保持工具结果和执行机制；D18-A 的身份与协议变化以上节契约为准。
 
 网络入口仍先验证身份与项目权限，工具调用经 `call_tool_as` 完成参数策略、Planning、Agent 互斥和任务检查。
 core 的补丁适配持有现有同目录写锁，调用 runtime，随后在同一把锁内更新调用方版本链并生成运行命令提醒。
@@ -147,7 +184,7 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 | `mcp/` | MCP 应用分发：工作区的本地请求和执行代共用同一个 JSON-RPC 入口，不负责 HTTP 与 OAuth |
 | `machine_mcp/` | 本机装好的 MCP server 经服务转给 AI（RFC-0006）。读配置、握手调用、子进程通道、连接池、结果整理在共享库 `toexec-mcp`（ccnm 同用）；这里是 gld 自己的：怎么起进程和怎么杀、HTTP 通道、`list_mcp_tools` 等三个工具。自成一块，hub 只在列工具、分发、关服务三处调它 |
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`gld-host::hub_runtime` 管宿主起停，连同服务自己的隧道和原生节点表 |
-| `auth/` | 持久 grant/撤销和 OAuth 客户端注册表；纯主体和范围来自 `gld-policy`。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
+| `auth/` | 独立 AccessStore、凭据摘要/有效期、撤销与共享授权快照；纯主体和范围来自 `gld-policy`。保留独立 OAuth 客户端注册表，Actions 仍使用它；新 MCP 签发和验证待 B |
 | `bridge/`、`nodes/` | CCNM 会话、原生节点的身份/项目权限与连接生命周期；共同使用 `gld-transport` 的 Peer 和能力表，保留各自的租约、单连接和断线语义 |
 | `runtime/` | 应用侧监听接口与同步协调锁；实际 RuntimeSupervisor、监听任务和端口状态在 `gld-host` |
 | `tunnel/` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
@@ -156,7 +193,7 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 | `platform/` | 端口占用查询、进程存活 / 终止、可执行文件查找，按 OS 分实现 |
 | `home.rs` | 数据目录解析（`GLD_HOME` / `~/.config/gld`），全项目唯一的路径来源 |
 | `async_rt.rs` | 重导出 runtime 的 tokio 垫片；全局运行时只有一份，同步工具借它驱动子进程 I/O |
-| **`app/`** | **应用服务层**：`App` 持有 `DataStore` 和命令行工具调用的 `ToolContext` 缓存；监听状态由宿主显式传入 ListenerManager，每个子模块是一组用例；`app/doctor.rs` 的纯配置检查不依赖磁盘，可直接单测 |
+| **`app/`** | **应用服务层**：`App` 持有 `DataStore`、懒加载的唯一 AccessStore 和命令行工具调用的 `ToolContext` 缓存；监听状态由宿主显式传入 ListenerManager，每个子模块是一组用例；`app/doctor.rs` 的纯配置检查不依赖磁盘，可直接单测 |
 
 `app` 是应用用例门面；工具传输另经上表中的工具分发入口。桌面版里的 Tauri command
 在这里改成普通的 `impl App` 方法，供命令行、守护进程和测试复用。
@@ -186,6 +223,30 @@ App 保留数据文件锁、重读磁盘和工具上下文失效规则。Listene
 工作区重启锁与一次恢复标记；失败也消耗本次恢复机会。停止先发信号，放锁等端口，再摘表；Hub 的 LIFECYCLE 仍独立，
 不把普通 start/stop、恢复或退出放进新的重启大锁。工具/委派的执行位置仍按执行代入口另行组合。
 
+### 授权存储与撤销
+
+`App` 首次授权操作时打开 `AccessStore`，之后复用同一个实例；普通项目配置保存不会提前打开它。
+`App::access_reader()` 返回共享快照读取端。授权独立存于 `<数据目录>/access/v1/grants.json`，
+格式是 `schema_version: 1` 与记录列表，每条记录包含 Grant 和 CredentialRecord；摘要与时间校验属于 core，
+policy 不读取此文件。
+
+存储持有 `grants.lock` 生命周期独占锁；最后一个共享读取端释放前锁也不会释放。单写端序列化修改，
+读取端取得当前不可变 `Arc<AccessSnapshot>`，按 grant ID、凭据 ID 和名称索引查询，不逐请求重读 JSON。
+写入先构造并验证候选快照，在同目录创建私有临时文件、写入并同步，再以 rename 作为提交点；
+提交后发布已准备好的内存快照。提交前失败保留旧文件和旧快照，不能先改内存再尝试保存。
+
+新文件严格拒绝未知字段、旧结构、重复 ID、非法有效期、降修订和撤销记录重新激活；读坏文件不会回退成空授权或覆盖原件。
+旧 `profiles.json` 的 grants 字段只作为脱敏 Debug 的 opaque JSON 原值保留，普通配置保存保留其内容，
+缺省时不创建该字段；它不是验证源，也不会自动写入 AccessStore。切换后的客户端必须重新授权，旧凭据不会恢复全权。
+
+凭据只保存摘要与校验元数据，不保存签发明文。`GrantDto` 只返回 id、name、scope、permissions、status，
+以及 credential 的 id、kind、revision、issuedAtUnixSecs、expiresAtUnixSecs；列表和 Debug 不带摘要或秘密。
+列表也包含撤销状态，读到一条记录不等于它能通过认证。创建旧 grant / browser grant 的 App 用例暂返回
+`AUTH_NOT_READY`，不写旧字段；签发与完整轮换留待 B，统一命令留待 D。
+
+撤销先提交新存储并发布 revoked 状态，再按 Grant ID 清理对应命令、待审批和运行中的 Agent 任务，
+并保留既有延迟复查。其他 grant 不受清理影响；同名重建不能复用已撤销 ID。
+
 ### daemon 显式选择执行位置
 
 `DaemonContext` 持有启动时创建的同一个 `Arc<Router>`。工具、批准/停止委派和升级从这里选执行代，
@@ -212,12 +273,16 @@ Rust 的具体路由器入口现为 `gld_host::generation::Router`。旧的 `cor
 ### HTTP 监听和凭据读取
 
 `gld-host` 提供 MCP（单工作区和 Hub）与 Actions HTTP 入口并持有实际监听状态。core 的 `ListenerHost` 只暴露现有 Hub 与网关控制，
-`WorkspaceListeners` 支持应用在原锁内读快照、推进状态。宿主读取启用监听所需的 `SecretStore` 凭据、创建 OAuth 会话并同步绑定端口。
-装配凭据的读取失败与监听器绑定失败仍按两层错误处理，不合并为一种运行状态。daemon 和 CLI 直连都显式构造实际 adapter；
-只有 daemon 的 adapter 有执行代。直接构造过去的 core Supervisor/HTTP 入口的 Rust 调用者改用宿主的装配入口。协议和 URL 不变。
+`WorkspaceListeners` 支持应用在原锁内读快照、推进状态。装配凭据的读取失败与监听器绑定失败仍分别处理。
+daemon 和 CLI 直连显式构造实际 adapter；只有 daemon 的 adapter 有执行代。
 
-OAuth 签名、受众、meta、动态注册、PKCE 和刷新逻辑原样迁移。注册表仍由 core 的 `ClientRegistry` 以原作用域写盘，
-`StoredGrants` 仍逐请求重读同一份数据，HTTP 不另建持久凭据表。内存授权码仍只随当前 HTTP 会话存活。
+D18-A 的标准 MCP / AuthMCP 和新 URL 入口统一返回 HTTP 503、`AUTH_NOT_READY`、`Cache-Control: no-store`；
+旧服务口令、bearer、旧 OAuth token、loopback、隧道或缺省 grant 都不能绕过它。MCP 的 noauth 配置也拒绝。
+这保留监听和路由结构，但不会把未完成的网络验证伪装成已验证 MCP 主体。
+
+Actions 继续走自己的 OAuth / API key / 显式匿名配置，使用独立单工作区 AuthContext；
+OAuth 动态注册、PKCE 和刷新仍由宿主与 core 的 `ClientRegistry` 协作，内存授权码只随当前 HTTP 会话存活。
+旧 `StoredGrants` 已移除；新 MCP 验证器接通前不以 Actions OAuth 或旧配置替代 grant 验证。
 
 全局网关进程内状态、HTTP 转发和退出归 `gld_host::global_gateway`。App 留网关配置读写；Hub 或工作区服务在绑定之前
 通过同一个宿主入口确保已启用的网关启动，失败不绕过网关直接绑定。`public_url` 回写继续使用原 DataStore 文件锁；
@@ -225,10 +290,10 @@ OAuth 签名、受众、meta、动态注册、PKCE 和刷新逻辑原样迁移�
 
 ### 宿主与执行代之间的请求归属
 
-MCP 的 HTTP 入口在完成认证后，调用 `Hub::execution_route(auth, body)`，将已有 `ExecutionRoute`
-显式传入 `Router::hub_mcp`。Router 只按归属选择执行代，不再接收整份 Hub。
-直接调用该 Rust 方法的调用者需要将原 `&Hub` 参数改为算好的 `ExecutionRoute`；HTTP 与私有协议不变。
-执行代仍调用 `Hub::handle_routed` 复核，避免配置变化时同一目录被两代执行。
+内核的 MCP 路由契约是：验证身份后调用 `Hub::execution_route(auth, body)`，
+将明确的 `ExecutionRoute` 传入 `Router::hub_mcp`；Router 只按归属选择执行代，不接收整份 Hub。
+D18-A 的 HTTP 验证入口尚未放行这条路径，不能据此声称网络 MCP 已接通。
+执行代通过严格 WireAuth 重建上下文，并调用 `Hub::handle_routed` 复核，避免配置变化时同一目录被两代执行。
 
 同目录的归属键由 `generation::root_key` 生成：路径可解析时规范化，无法解析时保留原路径。
 `generation::router::root_key` 仅为旧 Rust 导入路径的重导出，没有第二份实现。
@@ -251,8 +316,11 @@ Hub 的 `NodeBridge`。直连 WebSocket 从监听器自己的 state 取得它；
 NodeBridge 不新增关闭方法，丢弃 Arc 也不能替代显式关闭。执行代替换不关闭宿主的节点连接。
 
 宿主使用 `Hub::new(config, bridge)` 并持有 Nodes，不再经 `Hub::nodes()` 取连接表。
-直接监听器与应用桥由同一处装配，使用同一个节点表。HTTP、节点/执行代协议、配置、
-错误回包及客户端重连规则不变；服务端登记、配对 HTTP 适配和 socket 接入归 `gld_host::nodes`；节点本地执行、配对持久化、共享传输和成员模型留 core。
+直接监听器与应用桥由同一处装配，使用同一个节点表。服务端登记、配对 HTTP 适配和 socket 接入归
+`gld_host::nodes`；节点本地执行、配对持久化、共享传输和成员模型留 core。
+D18-A 的原生节点身份转换和转发明确返回 `AUTH_NOT_READY`，没有旧主凭据映射或本机执行回退。
+C 必须接通新 grant 与目标机共享权限的交集，并验证旧节点拒绝行为后，才能恢复客户端经节点执行；
+CCNM 写入也要先完成按 CallerId 隔离的唯一写租约，不新增独立 RemoteCoding 服务能力。
 
 ## daemon：协议与进程
 
@@ -290,8 +358,9 @@ NodeBridge 不新增关闭方法，丢弃 Arc 也不能替代显式关闭。执�
 
 ## 并发与锁
 
-- `App` 的数据与工具缓存、ListenerManager 的监听表分别使用 `std::sync::Mutex`，同步锁不跨 `await`；
-  数据读改写仍在文件锁内先重读磁盘。
+- `App` 的配置与工具缓存、ListenerManager 的监听表分别使用 `std::sync::Mutex`，同步锁不跨 `await`；
+  DataStore 的配置读改写仍在文件锁内先重读磁盘。授权用 AccessStore 的生命周期独占锁和共享不可变快照，
+  不套用配置文件逐操作重读的路径。
 - 跨 `await` 的串行化用 `tokio::sync::Mutex`：ListenerManager 的工作区重启锁（MCP / Actions 的 stop→start）
   和 `tunnel::supervisor()`（frpc / cloudflared 的进程操作）。
 - 守护进程每个连接一个 tokio 任务，`dispatch` 再包一层 `spawn`：业务代码 panic
@@ -313,8 +382,9 @@ NodeBridge 不新增关闭方法，丢弃 Arc 也不能替代显式关闭。执�
   不同 `GLD_HOME` 的另一个 gld、Git common directory——写在那个模块的文档和
   [security.md](security.md) 里，别当成已经隔离了。
 - **命令会话表也归同一个 `WorkspaceRuntime`，按「目录 + 调用方主体」分。**
-  主体是 `gld-policy` 的 `Caller`（`tools/caller.rs` 重导出）：两条 MCP 路从监听器验完鉴权的
-  `AuthContext` 来，命令行和测试是 `local`。两个后果：
+  键是 `gld-policy` 的稳定 `CallerId`（`tools/caller.rs` 重导出），由显式 `AuthContext` 提供。
+  MCP 以 grant 和客户端主体隔离，Actions 还包含 workspace_id；只有可信本机应用 / IPC 使用 LocalOperator。
+  权限变化不生成新的会话表，也不会因此跳过新权限检查。两个后果：
 
   - 同一个主体换个 `ToolContext` 进来还是那张表，所以 hub 因为配置指纹变了
     重建上下文时**不再杀掉正在跑的命令**（以前杀，理由是"表跟着旧上下文一起

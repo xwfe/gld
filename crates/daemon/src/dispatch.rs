@@ -79,9 +79,35 @@ pub async fn dispatch(
         }
         R::DeleteWorkspace { target } => {
             let profile = resolve(app, &target)?;
-            ok(&app.delete_workspace(listeners, &profile.id).await?)
+            let deleted = match daemon {
+                Some(context) => {
+                    let router = context.router.clone();
+                    app.delete_workspace_with_cleanup(listeners, &profile.id, move |root| {
+                        router
+                            .terminate_workspace(root)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await?
+                }
+                None => app.delete_workspace(listeners, &profile.id).await?,
+            };
+            ok(&deleted)
         }
-        R::Prune { confirmed } => ok(&app.prune(listeners, confirmed).await?),
+        R::Prune { confirmed } => {
+            let pruned = match daemon {
+                Some(context) => {
+                    let router = context.router.clone();
+                    app.prune_with_cleanup(listeners, confirmed, move |root| {
+                        router
+                            .terminate_workspace(root)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await?
+                }
+                None => app.prune(listeners, confirmed).await?,
+            };
+            ok(&pruned)
+        }
         R::UseWorkspace { target } => {
             let profile = resolve(app, &target)?;
             app.set_last_workspace(&profile.id)?;

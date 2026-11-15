@@ -133,10 +133,7 @@ fn cli_join_pairs_only_selected_projects_through_tls_and_preserves_confirmation_
     let rpc = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"list_workspaces","arguments":{}}})
     .to_string();
-    assert_eq!(
-        post_json(service.port, "/mcp", &rpc, Some(token)).status,
-        401
-    );
+    assert_auth_not_ready(&post_json(service.port, "/mcp", &rpc, Some(token)));
     assert_eq!(rejected_upgrade(service.port, &"e".repeat(32), token), 401);
     let body = json!({"request_id":"f".repeat(32),"credential":TOKEN_B}).to_string();
     assert_eq!(
@@ -210,13 +207,13 @@ fn cli_join_pairs_only_selected_projects_through_tls_and_preserves_confirmation_
     );
 
     assert_no_daemon(&machine);
-    let _node = NodeProcess::start(&machine, &config);
-    let listed = wait_inventory(&service, 1, 1);
-    assert!(!listed
-        .iter()
-        .any(|item| item["name"] == "paired-node/web" || item["name"] == "paired-node/unshared"));
-    let workspace = find(&listed, "paired-node/api");
-    assert_eq!(read(&service, &workspace)["content"], "paired-node/api\n");
+    assert_node_auth_pending(&NodeProcess::start(&machine, &config).rejected());
+    assert_no_native_projects(&hub);
+    assert_eq!(std::fs::read(&config).unwrap(), saved_bytes);
+    assert_eq!(
+        std::fs::read_to_string(machine.project.path().join("api/README.md")).unwrap(),
+        "paired-node/api\n"
+    );
     assert_no_daemon(&machine);
 }
 

@@ -9,14 +9,14 @@ use crate::config::HubConfig;
 
 /// 宿主和执行代之间消息的版本。形状有不兼容改动时加一；同时要决定 [`GENERATION_PROTOCOL_MIN`]。
 /// 只加新操作不用加一：老二进制读不懂时回错误，不会执行，调用的一方自己要接得住（比如工作区搬不走就留着）。
-pub const GENERATION_PROTOCOL: u32 = 1;
+pub const GENERATION_PROTOCOL: u32 = 2;
 /// 这个宿主还能带的最老执行代协议。范围之外的二进制一律不让上线，失败发生在动路由之前。
-pub const GENERATION_PROTOCOL_MIN: u32 = 1;
+pub const GENERATION_PROTOCOL_MIN: u32 = 2;
 /// 盘上状态的格式版本：`profiles.json`、运行记录、任务和委派记录。
 ///
 /// 两代要同时读同一份数据目录，所以必须相等。改了这些文件的不兼容格式就加一，
 /// 不加的话新代会把旧代读不懂的东西写到盘上，而这种坏法回退也救不回来。
-pub const STATE_FORMAT: u32 = 1;
+pub const STATE_FORMAT: u32 = 2;
 /// 一代是什么构建。每个二进制启动时自报，宿主据此判断能不能用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildIdentity {
@@ -179,34 +179,101 @@ pub enum HostOp {
     },
 }
 
-/// 鉴权结果在通道上的样子。
-///
-/// 由宿主从验完鉴权的结果生成；读取这个 DTO 本身不代表完成认证。
-/// 独立保留 grant 的 browser 字段，因为持久化授权模型不会保存它：
-/// 直接序列化会丢掉它，浏览器地址进来的 grant 到了执行代就变成了能委派 Agent 的 grant。
+/// 宿主验证后的网络身份。读取 DTO 本身不代表认证；core 转换时再校验主体与权限组合。
+/// 本机操作员没有网络编码，只能使用单独的 LocalTool 操作。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireAuth {
-    pub principal: WirePrincipal,
-    pub scope: String,
-    pub grant: Option<WireGrant>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireAuth {
+    Mcp {
+        entry: String,
+        subject: WireMcpSubject,
+        credential_kind: WireCredentialKind,
+        grant: WireGrant,
+    },
+    Actions {
+        entry: String,
+        workspace_id: String,
+        subject: WireActionsSubject,
+        write: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WirePrincipal {
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireMcpSubject {
+    #[serde(rename = "oauth")]
+    OAuth {
+        client_id: String,
+    },
+    Token,
+    Url,
+    Tunnel {
+        binding_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireActionsSubject {
     Anonymous,
-    SharedSecret,
-    OauthClient { client_id: String },
-    OpenAiTunnel,
+    ApiKey,
+    #[serde(rename = "oauth")]
+    OAuth {
+        client_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireCredentialKind {
+    #[serde(rename = "oauth")]
+    OAuth,
+    Token,
+    Url,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "ids",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WireProjectScope {
+    AllProjects,
+    Selected(Vec<String>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireServiceCapabilities {
+    pub user_prompts: bool,
+    pub machine_mcp: bool,
+    pub managed_workspaces: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireGrantPermissions {
+    pub write: bool,
+    pub service: WireServiceCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireGrantStatus {
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireGrant {
     pub id: String,
     pub name: String,
-    pub workspaces: Vec<String>,
-    pub read_only: bool,
-    pub browser: bool,
+    pub scope: WireProjectScope,
+    pub permissions: WireGrantPermissions,
+    pub status: WireGrantStatus,
 }
 
 /// 节点成员在通道上的数据；运行时节点登记与它的转换由调用侧负责。
@@ -305,7 +372,7 @@ mod tests {
                 "frame": "ready",
                 "identity": {
                     "version": "0.0.0", "build_commit": null,
-                    "generation_protocol": 1, "state_format": 1, "pid": 1, "exe": null
+                    "generation_protocol": GENERATION_PROTOCOL, "state_format": STATE_FORMAT, "pid": 1, "exe": null
                 }
             })
         );
@@ -320,66 +387,95 @@ mod tests {
         );
     }
 
-    #[test]
-    fn principal_tags_keep_their_wire_shape() {
-        for (principal, expected) in [
-            (
-                WirePrincipal::Anonymous,
-                serde_json::json!({"kind": "anonymous"}),
-            ),
-            (
-                WirePrincipal::SharedSecret,
-                serde_json::json!({"kind": "shared_secret"}),
-            ),
-            (
-                WirePrincipal::OauthClient {
-                    client_id: "client".into(),
+    fn url_auth() -> WireAuth {
+        WireAuth::Mcp {
+            entry: "hub".into(),
+            subject: WireMcpSubject::Url,
+            credential_kind: WireCredentialKind::Url,
+            grant: WireGrant {
+                id: "grant".into(),
+                name: "browser".into(),
+                scope: WireProjectScope::AllProjects,
+                permissions: WireGrantPermissions {
+                    write: true,
+                    service: WireServiceCapabilities {
+                        user_prompts: false,
+                        machine_mcp: false,
+                        managed_workspaces: false,
+                    },
                 },
-                serde_json::json!({"kind": "oauth_client", "client_id": "client"}),
-            ),
-            (
-                WirePrincipal::OpenAiTunnel,
-                serde_json::json!({"kind": "open_ai_tunnel"}),
-            ),
-        ] {
-            assert_eq!(serde_json::to_value(principal).unwrap(), expected);
-            assert!(serde_json::from_value::<WirePrincipal>(expected).is_ok());
+                status: WireGrantStatus::Active,
+            },
         }
     }
 
     #[test]
-    fn routed_calls_keep_explicit_browser_permissions() {
+    fn network_identity_carries_explicit_scope_and_credential_purpose() {
         let call = Op::HubMcp {
-            auth: WireAuth {
-                principal: WirePrincipal::SharedSecret,
-                scope: "hub".into(),
-                grant: Some(WireGrant {
-                    id: "grant".into(),
-                    name: "browser".into(),
-                    workspaces: vec!["workspace".into()],
-                    read_only: false,
-                    browser: true,
-                }),
-            },
+            auth: url_auth(),
             body: serde_json::json!({"method": "tools/list"}),
             route: ExecutionRoute::Owned("workspace".into()),
         };
-        let expected = serde_json::json!({
-            "op": "hub_mcp",
-            "auth": {
-                "principal": {"kind": "shared_secret"}, "scope": "hub",
-                "grant": {
-                    "id": "grant", "name": "browser", "workspaces": ["workspace"],
-                    "read_only": false, "browser": true
-                }
-            },
-            "body": {"method": "tools/list"}, "route": {"Owned": "workspace"}
-        });
-        assert_eq!(serde_json::to_value(call).unwrap(), expected);
-        let Op::HubMcp { auth, .. } = serde_json::from_value(expected).unwrap() else {
-            panic!("expected a routed call");
+        let value = serde_json::to_value(call).unwrap();
+        assert_eq!(value["auth"]["kind"], "mcp");
+        assert_eq!(value["auth"]["credential_kind"], "url");
+        assert_eq!(
+            value["auth"]["grant"]["scope"],
+            serde_json::json!({"kind":"all_projects"})
+        );
+        let Op::HubMcp { auth, .. } = serde_json::from_value(value).unwrap() else {
+            panic!("expected routed call");
         };
-        assert!(auth.grant.unwrap().browser);
+        assert!(matches!(
+            auth,
+            WireAuth::Mcp {
+                credential_kind: WireCredentialKind::Url,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_missing_or_unknown_authority_is_rejected() {
+        let valid = serde_json::to_value(url_auth()).unwrap();
+        for name in ["entry", "subject", "credential_kind", "grant"] {
+            let mut value = valid.clone();
+            value.as_object_mut().unwrap().remove(name);
+            assert!(serde_json::from_value::<WireAuth>(value).is_err(), "{name}");
+        }
+        for name in ["scope", "permissions", "status"] {
+            let mut value = valid.clone();
+            value["grant"].as_object_mut().unwrap().remove(name);
+            assert!(serde_json::from_value::<WireAuth>(value).is_err(), "{name}");
+        }
+        for value in [
+            serde_json::json!({"principal":{"kind":"shared_secret"},"scope":"hub","grant":null}),
+            serde_json::json!({"kind":"local_operator"}),
+            serde_json::json!({"kind":"mcp","entry":"hub","subject":{"kind":"unknown"},"credential_kind":"url","grant":valid["grant"]}),
+        ] {
+            assert!(serde_json::from_value::<WireAuth>(value).is_err());
+        }
+        let mut extra = valid;
+        extra["grant"]["browser"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<WireAuth>(extra).is_err());
+    }
+
+    #[test]
+    fn actions_has_its_own_bounded_network_identity() {
+        let auth = WireAuth::Actions {
+            entry: "actions".into(),
+            workspace_id: "workspace".into(),
+            subject: WireActionsSubject::OAuth {
+                client_id: "client".into(),
+            },
+            write: false,
+        };
+        let value = serde_json::to_value(auth).unwrap();
+        assert_eq!(value["subject"]["kind"], "oauth");
+        assert!(matches!(
+            serde_json::from_value::<WireAuth>(value).unwrap(),
+            WireAuth::Actions { write: false, .. }
+        ));
     }
 
     #[test]

@@ -62,11 +62,12 @@ fn a_fresh_machine_joins_by_directory_and_later_commands_find_the_config_themsel
     assert_no_daemon(&machine);
 
     let child = command(&machine).args(["node", "run"]).spawn().unwrap();
-    let mut node = NodeProcess(Some(child));
-    let items = wait_inventory(&service, 1, 1);
-    let api = find(&items, "fresh/api");
-    assert_eq!(read(&service, &api)["content"], "fresh/api\n");
-    node.stop();
+    assert_node_auth_pending(&NodeProcess(Some(child)).rejected());
+    assert_no_native_projects(&hub);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("README.md")).unwrap(),
+        "fresh/api\n"
+    );
 
     let shown = command(&machine)
         .args(["--json", "node", "shares"])
@@ -135,7 +136,7 @@ fn check<'a>(checks: &'a [Value], label: &str) -> &'a Value {
 }
 
 #[test]
-fn doctor_tells_apart_stopped_online_revoked_untrusted_and_unreachable() {
+fn doctor_checks_transport_without_claiming_native_forwarding_authority() {
     let hub = Env::new();
     let service = hub.serve("local", "bearer");
     let relay = TlsRelay::new(service.port);
@@ -153,21 +154,12 @@ fn doctor_tells_apart_stopped_online_revoked_untrusted_and_unreachable() {
     assert_eq!(check(&checks, "节点进程")["level"], "warn", "{text}");
     assert_eq!(check(&checks, "代理")["detail"], "直连", "{text}");
     assert!(!text.contains(TOKEN_A), "doctor output must be shareable");
-    // 探测用完就断，节点随后能正常接上。
-    let mut node = NodeProcess::start(&machine, &path);
-    wait_inventory(&service, 2, 2);
-
+    // 握手只验证传输端点；正式节点仍因未接通的授权协议拒绝，不得发布项目。
+    assert_node_auth_pending(&NodeProcess::start(&machine, &path).rejected());
+    assert_no_native_projects(&hub);
     let (healthy, checks, text) = doctor(&machine, &path);
     assert!(healthy, "{text}");
-    assert!(
-        check(&checks, "Hub 握手")["detail"]
-            .as_str()
-            .unwrap()
-            .contains("已在线"),
-        "{text}"
-    );
-    node.stop();
-    wait_inventory(&service, 0, 2);
+    assert_eq!(check(&checks, "节点进程")["level"], "warn", "{text}");
 
     // 证书不受信：不配 CA。
     let mut untrusted = value.clone();

@@ -1,33 +1,160 @@
 use alloc::{string::String, vec::Vec};
+use core::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// 一个 grant 的范围。跟着 [`crate::AuthContext`] 往下走，**不带钥匙本身**。
+/// A deterministic policy error. Authentication and persistence stay outside this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyError(pub(crate) &'static str);
+
+impl fmt::Display for PolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl core::error::Error for PolicyError {}
+
+/// All registered projects, or an explicit nonempty set of stable project IDs.
+/// The creation default is not a deserialization default.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind", content = "projects", rename_all = "snake_case")]
+pub enum ProjectScope {
+    AllProjects,
+    Selected(Vec<String>),
+}
+
+impl ProjectScope {
+    pub fn validate(&self) -> Result<(), PolicyError> {
+        if let Self::Selected(projects) = self {
+            if projects.is_empty() {
+                return Err(PolicyError("selected project scope must not be empty"));
+            }
+            for (index, project) in projects.iter().enumerate() {
+                if project.trim().is_empty() {
+                    return Err(PolicyError("project ID must not be empty"));
+                }
+                if projects[..index].contains(project) {
+                    return Err(PolicyError("selected project IDs must be unique"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn allows(&self, project: &str) -> bool {
+        !project.trim().is_empty()
+            && match self {
+                Self::AllProjects => true,
+                Self::Selected(projects) => projects.iter().any(|id| id == project),
+            }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectScope {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "kind",
+            content = "projects",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum Repr {
+            AllProjects,
+            Selected(Vec<String>),
+        }
+        let scope = match Repr::deserialize(deserializer)? {
+            Repr::AllProjects => Self::AllProjects,
+            Repr::Selected(projects) => Self::Selected(projects),
+        };
+        scope.validate().map_err(serde::de::Error::custom)?;
+        Ok(scope)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceCapabilities {
+    pub user_prompts: bool,
+    pub machine_mcp: bool,
+    pub managed_workspaces: bool,
+}
+
+impl ServiceCapabilities {
+    pub fn is_empty(&self) -> bool {
+        !self.user_prompts && !self.machine_mcp && !self.managed_workspaces
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantPermissions {
+    pub write: bool,
+    pub service: ServiceCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantStatus {
+    Active,
+    Revoked,
+}
+
+/// Authorization only: no secret, credential revision or transport-specific flags.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "GrantData")]
 pub struct Grant {
-    /// 随机 id，写进令牌里。不用名字：删了再建一个同名的，旧令牌不能跟着复活。
     pub id: String,
     pub name: String,
-    /// 开放的成员 id（本地工作区或远端 ccnm 成员）。
-    pub workspaces: Vec<String>,
-    /// 只读：工具按 read-only 工具集取交集，远端只给读的那几个。
-    #[serde(default)]
-    pub read_only: bool,
-    /// 浏览器专用短期地址发的。不落盘，查 grant 时按记录里有没有 `browser` 现算：
-    /// 委派要分得出它（RFC-0009 第 5 节），而数据文件里本来就有这个事实，存两份迟早对不上。
-    #[serde(skip)]
-    pub browser: bool,
+    pub scope: ProjectScope,
+    pub permissions: GrantPermissions,
+    pub status: GrantStatus,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantData {
+    id: String,
+    name: String,
+    scope: ProjectScope,
+    permissions: GrantPermissions,
+    status: GrantStatus,
+}
+
+impl TryFrom<GrantData> for Grant {
+    type Error = PolicyError;
+
+    fn try_from(data: GrantData) -> Result<Self, Self::Error> {
+        let grant = Self {
+            id: data.id,
+            name: data.name,
+            scope: data.scope,
+            permissions: data.permissions,
+            status: data.status,
+        };
+        grant.validate()?;
+        Ok(grant)
+    }
 }
 
 impl Grant {
-    pub fn allows(&self, member_id: &str) -> bool {
-        self.workspaces.iter().any(|id| id == member_id)
+    pub fn validate(&self) -> Result<(), PolicyError> {
+        if self.id.trim().is_empty() || self.name.trim().is_empty() {
+            return Err(PolicyError("grant ID and name must not be empty"));
+        }
+        self.scope.validate()?;
+        if !matches!(self.scope, ProjectScope::AllProjects) && !self.permissions.service.is_empty()
+        {
+            return Err(PolicyError(
+                "service capabilities require all-project scope",
+            ));
+        }
+        Ok(())
     }
 
-    /// 能不能把活委派给本机 Agent（RFC-0009 第 5 节）：只有 `gld grant add --write` 发的。
-    /// 只读的本来就调不到；浏览器地址嵌在网页扩展里、谁拿到 URL 谁就能用，带了 `--write` 也不给起全权的 Agent。
-    pub fn may_delegate(&self) -> bool {
-        !self.read_only && !self.browser
+    pub fn allows(&self, project: &str) -> bool {
+        self.status == GrantStatus::Active && self.scope.allows(project)
     }
 }
 
@@ -37,48 +164,79 @@ mod tests {
     use alloc::vec;
     use serde_json::json;
 
-    #[test]
-    fn grant_wire_keeps_defaults_without_serializing_browser_authority() {
-        let mut grant: Grant = serde_json::from_value(json!({
-            "id": "grant-id",
-            "name": "grant-name",
-            "workspaces": ["workspace-id"],
-            "browser": true
-        }))
-        .unwrap();
-        assert!(!grant.read_only);
-        assert!(!grant.browser);
-
-        grant.browser = true;
-        assert_eq!(
-            serde_json::to_value(&grant).unwrap(),
-            json!({
-                "id": "grant-id",
-                "name": "grant-name",
-                "workspaces": ["workspace-id"],
-                "read_only": false
-            })
-        );
+    fn grant() -> Grant {
+        Grant {
+            id: "grant-id".into(),
+            name: "client".into(),
+            scope: ProjectScope::AllProjects,
+            permissions: GrantPermissions::default(),
+            status: GrantStatus::Active,
+        }
     }
 
     #[test]
-    fn scope_membership_and_agent_delegation_are_explicit() {
-        for (read_only, browser, may_delegate) in [
-            (false, false, true),
-            (false, true, false),
-            (true, false, false),
-            (true, true, false),
+    fn current_shape_round_trips_without_authority_defaults() {
+        let original = grant();
+        let value = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Grant>(value.clone()).unwrap(),
+            original
+        );
+        for missing in ["id", "name", "scope", "permissions", "status"] {
+            let mut incomplete = value.clone();
+            incomplete.as_object_mut().unwrap().remove(missing);
+            assert!(
+                serde_json::from_value::<Grant>(incomplete).is_err(),
+                "{missing}"
+            );
+        }
+        let mut old = value;
+        old["workspaces"] = json!(["project"]);
+        assert!(serde_json::from_value::<Grant>(old).is_err());
+    }
+
+    #[test]
+    fn selected_scope_never_interprets_empty_or_invalid_data_as_all() {
+        for value in [
+            json!({"kind": "selected", "projects": []}),
+            json!({"kind": "selected", "projects": [""]}),
+            json!({"kind": "selected", "projects": ["same", "same"]}),
+            json!({"kind": "all_projects", "workspaces": ["old"]}),
+            json!({}),
+            json!([]),
         ] {
-            let grant = Grant {
-                id: "grant-id".into(),
-                name: "grant-name".into(),
-                workspaces: vec!["workspace-id".into()],
-                read_only,
-                browser,
-            };
-            assert!(grant.allows("workspace-id"));
-            assert!(!grant.allows("workspace"));
-            assert_eq!(grant.may_delegate(), may_delegate);
+            assert!(serde_json::from_value::<ProjectScope>(value).is_err());
+        }
+        let selected = ProjectScope::Selected(vec!["project".into()]);
+        assert!(selected.allows("project"));
+        assert!(!selected.allows("later"));
+        assert!(ProjectScope::AllProjects.allows("later"));
+        assert!(!ProjectScope::AllProjects.allows(""));
+    }
+
+    #[test]
+    fn grant_scope_service_authority_and_revocation_are_explicit() {
+        let mut value = grant();
+        assert!(value.allows("future-registration"));
+        value.permissions.service.user_prompts = true;
+        value.scope = ProjectScope::Selected(vec!["project".into()]);
+        assert!(value.validate().is_err());
+        assert!(serde_json::from_value::<Grant>(serde_json::to_value(&value).unwrap()).is_err());
+        value.permissions.service = ServiceCapabilities::default();
+        assert!(value.validate().is_ok());
+        value.status = GrantStatus::Revoked;
+        assert!(!value.allows("project"));
+    }
+
+    #[test]
+    fn missing_permissions_do_not_default_to_write_or_service_access() {
+        for value in [
+            json!({}),
+            json!({"write": true}),
+            json!({"write": false, "service": {}}),
+            json!({"write": false, "service": {"user_prompts": false, "machine_mcp": false}}),
+        ] {
+            assert!(serde_json::from_value::<GrantPermissions>(value).is_err());
         }
     }
 }

@@ -227,24 +227,7 @@ async fn a_relay_cannot_alter_a_hub_message_even_when_it_keeps_the_signature_tag
         .await
     });
     let mut signer = MessageSigner::new(key, binding);
-    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
-        "params":{"protocolVersion":PROTOCOL_VERSION}})
-    .to_string();
-    relay
-        .send(Message::Text(
-            signer.sign(&initialize, MAX_MESSAGE_BYTES).unwrap().into(),
-        ))
-        .await
-        .unwrap();
-    let answered = tokio::time::timeout(Duration::from_secs(5), relay.next())
-        .await
-        .unwrap();
-    assert!(
-        matches!(&answered, Some(Ok(Message::Text(text))) if text.contains("\"result\"")),
-        "a signed message is handled normally: {answered:?}"
-    );
-
-    // 中间人保留签名段、只改调用内容：节点不解析、不执行、不回复，按不可重试的失败退出。
+    // 签名在解析 RPC 之前验：直接发送被篡改的首条消息，也必须因签名失败退出。
     let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
         "params":{"name":"list_workspaces","arguments":{}}})
     .to_string();
@@ -266,6 +249,67 @@ async fn a_relay_cannot_alter_a_hub_message_even_when_it_keeps_the_signature_tag
             .unwrap(),
         None | Some(Err(_))
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signed_initialize_reaches_the_explicit_authorization_refusal() {
+    use super::super::hub_key::{generate_private_key, HubKey, MessageSigner};
+    let project = "d".repeat(32);
+    let key = Arc::new(HubKey::from_stored(&generate_private_key().unwrap()).unwrap());
+    let config = NodeConfig {
+        hub_url: "https://example.invalid/hub".into(),
+        hub_id: "a".repeat(32),
+        hub_public_key: key.public_key(),
+        machine_id: "b".repeat(32),
+        credential: "c".repeat(64),
+        workspaces: vec![project.clone()],
+        writable_workspaces: Vec::new(),
+        runnable_workspaces: Vec::new(),
+        ca_certificate: None,
+    };
+    let binding = Binding::new(&config.hub_id, &config.machine_id, &new_nonce().unwrap()).unwrap();
+    let verifier = MessageVerifier::new(&config.hub_public_key, binding.clone());
+    let hub = Arc::new(Hub::for_node_tests(vec![project]));
+    let (node, mut relay) = sockets().await;
+    let serving = tokio::spawn(async move {
+        serve_until(
+            node,
+            hub,
+            &config,
+            verifier,
+            &mut std::future::pending(),
+            &mut Stability::new(),
+        )
+        .await
+    });
+    let mut signer = MessageSigner::new(key, binding);
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"protocolVersion":PROTOCOL_VERSION}})
+    .to_string();
+    relay
+        .send(Message::Text(
+            signer.sign(&initialize, MAX_MESSAGE_BYTES).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let answered = next_json(&mut relay).await;
+    assert_eq!(answered["id"], 1);
+    assert_eq!(answered["error"]["code"], -32602);
+    assert_eq!(
+        answered["error"]["message"],
+        "Native node authorization protocol is not supported yet"
+    );
+    assert!(answered.get("result").is_none(), "{answered}");
+    let failure = tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(failure.retry, reconnect::Retry::Never);
+    assert_eq!(
+        failure.message,
+        "node inventory requires scoped authorization; legacy control credentials are not accepted"
+    );
 }
 
 #[tokio::test]

@@ -146,7 +146,7 @@ fn global_gateway_routes_only_what_opted_in() {
         "--port",
         &service_port.to_string(),
         "--auth",
-        "noauth",
+        "oauth",
     ]);
     env.ok(&["start"]);
 

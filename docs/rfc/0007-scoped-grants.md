@@ -72,7 +72,7 @@ grant，行为和以前一模一样：ChatGPT 连接器不用动。新发的全�
 **同一个项目里不再按主体划分私有记录。** 两把凭据都开了 api，其 Task、History、Planning
 属于共享的项目记录；能否修改仍取决于各自有效工具集，**只读 grant 没有写权限**，不是
 “两个客户端都能改”。命令会话与运行输出仍按主体分
-（[caller.rs](../../crates/core/src/tools/caller.rs)），这一条不变。
+（现由 [CallerId](../../crates/policy/src/caller.rs) 实现），主体隔离继续保持；新身份结构见 RFC-0015。
 
 **noauth 下不给建，有 grant 时也不给改成 noauth。** 没有鉴权就没有"用哪把进来"，谁连上都是全权。
 

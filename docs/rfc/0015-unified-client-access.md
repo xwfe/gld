@@ -97,13 +97,14 @@ OAuth 不接受 `--ttl`。输出显示替换影响与新秘密，不暗中保留
 | ProjectScope | `AllProjects` 或非空 `Selected(ProjectId...)`；创建默认值不等于反序列化默认值 |
 
 `CallerIdentity` 明确区分可信本机 `LocalOperator`、必带 GrantId 的 `McpClient` 和独立的 `ActionsClient`。
-ActionsClient 只由 Actions 认证适配器构造，使用明确的 Actions 权限与写锁，不用缺失 grant 表示全权。
+ActionsClient 由 Actions 认证适配器构造，稳定身份同时包含 workspace_id 与主体；相同主体标签
+在不同工作区不能共用会话。它使用明确的 Actions 权限与写锁，不用缺失 grant 表示全权。
 本机操作员只从可信 IPC/本地应用入口构造；HTTP、隧道、节点 metadata 和工具参数都不能声明这个身份。
 OAuth 的同一 grant 可被不同注册客户端使用，client_id 继续区分各自会话。
 稳定主体还区分 token、URL 和受信隧道绑定；隧道与直接 token 接入不能因为共用 GrantId 合并会话。
 API token 或 URL 被多人共用时就是同一主体，不将其宣传为自然人隔离。
 
-当前 Caller 的 Eq/Hash 包含完整 Grant，运行时会话表又以 Caller 为键。
+D18 之前的 Caller Eq/Hash 包含完整 Grant，运行时会话表又以 Caller 为键。
 新模型只以稳定 CallerId 分表；动态项目变化、权限内容、OAuth 刷新、密钥轮换和重启均不改变身份。
 旧 caller 字符串和历史归属不映射进新模型；同名重建不能读取前一 GrantId 的记录。
 撤销按 GrantId 清理所有 client_id 对应的会话；查询仍按完整 CallerId 隔离。
@@ -270,6 +271,23 @@ C 覆盖 `core/src/hub`、`core/src/bridge/session.rs`、`core/src/nodes`、`hos
 复用并改写真实认证/授权集成测试，不为保留旧断言继续留下旧实现。
 每片先做定向测试；收尾在隔离 GLD_HOME 下运行全仓 tests、严格 Clippy 和 rustfmt。
 CLI 帮助改变后运行 `scripts/gen-cli-docs.sh`；行为变化同步 concepts、connect-clients、security 和必要发布说明。
+
+### 7.1 过渡阶段的回归责任
+
+A 可以关闭尚未接通新模型的网络入口；拒绝测试不代表该功能已完成。旧 master/noauth、旧 URL
+和旧节点 metadata 的成功用例随退休实现一起退出当前测试面，Git 历史保留原证据。
+执行代切换、命令和文件、CLI 与 Actions 的独立正向回归继续运行，不得通过伪造网络 LocalOperator 保绿。
+
+| 后续门禁 | 必须用真实新入口恢复的正向场景 |
+| --- | --- |
+| B 三类凭据 | 签发、用途隔离、OAuth PKCE/access/refresh/注册表重启、token/URL 期限、Origin、轮换与撤销 |
+| B/C 授权委派 | 同 grant 不同 client_id 隔离、只读与 URL 禁止委派、撤销停止等待及运行任务 |
+| B/C 托管工作区 | 零项目创建幂等、命令阻止重启、保留/到期清扫/关闭重试跨重启、配额与归档幂等、启动自动清扫、PNG 的 MCP image 回填 |
+| C 原生节点 | 新 HubId+CallerId 归属、三级权限交集、原子写入/版本前提、命令运行/输出/停止、断线不重放、撤销清理、单连接跨代与重启、代理/配对/分享/自启动 |
+| C CCNM | 稳定 owner 唯一写槽、并发 begin/call/end、同主体复用、他人 busy、轮换保归属与撤销回收 |
+
+`AUTH_NOT_READY`、发现文档或 CORS 成功都不能作为上述正向门禁的替代。A 的元数据管理可用，
+旧创建/reveal 仅给出停用错误，旧参数定义在 B/D 随新配置和统一命令一并删除，不构成兼容实现。
 
 ## 8. 验收与切换边界
 

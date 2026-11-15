@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use gld_runtime::patch::{self, PatchOutcome, PatchRequest};
 
-use crate::tools::caller::Caller;
+use crate::auth::AuthContext;
 use crate::tools::context::ToolContext;
 use crate::tools::workspace::WorkspaceError;
 
@@ -12,7 +12,7 @@ pub use gld_runtime::patch::{failure_log_fields, operation_summary, patch_format
 
 pub fn apply_patch(
     ctx: &ToolContext,
-    caller: &Caller,
+    caller: &AuthContext,
     args: &Value,
 ) -> Result<Value, WorkspaceError> {
     // Decode before taking the lock to preserve argument-error precedence.
@@ -44,7 +44,7 @@ pub fn apply_patch(
     let outcome = patch::apply(
         &ctx.workspace,
         request,
-        |path, then, now| ctx.runtime.wrote_since(caller, path, then, now),
+        |path, then, now| ctx.runtime.wrote_since(caller.id(), path, then, now),
         || ctx.runtime.record_write(),
     )?;
     match outcome {
@@ -59,7 +59,7 @@ pub fn apply_patch(
                 .expect("applied patches contain file_versions")
             {
                 ctx.runtime.record_own_write(
-                    caller,
+                    caller.id(),
                     path,
                     previous_versions.get(path).and_then(Value::as_str),
                     version.as_str(),
@@ -87,9 +87,9 @@ pub fn apply_patch(
 /// 认下"那条结果是基于旧代码的"。
 ///
 /// 别人起的只报个数。命令文本是另一个主体的东西，会话刚按主体分开，这里摊开
-/// 就白分了（见 [`crate::tools::caller`]）。
-fn commands_still_running_warnings(ctx: &ToolContext, caller: &Caller) -> Vec<String> {
-    let running = ctx.runtime.running_commands(caller);
+/// 就白分了（见 [`gld_policy::CallerId`]）。
+fn commands_still_running_warnings(ctx: &ToolContext, caller: &AuthContext) -> Vec<String> {
+    let running = ctx.runtime.running_commands(caller.id());
     let mut warnings = Vec::new();
     for command in &running.mine {
         warnings.push(format!(
@@ -124,7 +124,7 @@ fn short_command(command: &str) -> String {
 
 pub fn patch_check(
     ctx: &ToolContext,
-    caller: &Caller,
+    caller: &AuthContext,
     args: &Value,
 ) -> Result<Value, WorkspaceError> {
     let mut check_args = args.clone();

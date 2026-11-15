@@ -1,117 +1,234 @@
-//! 一条请求是**怎么通过鉴权的**，验完之后带着往下走。
-//!
-//! 在这之前，鉴权只决定放行还是 401，进到 hub 里就什么都不剩了。远端成员
-//! 需要这份东西：RFC-0002 5.3「不能只按 workspace ID 缓存长期 bridge」——
-//! 一条通往远端的连接属于某个主体，不是属于某个工作区名字。
-//!
-//! ## 它不是身份
-//!
-//! **这里说的是「这次请求过了哪种鉴权」，不是「这是哪个自然人」。**gld 没有
-//! 多用户目录：
-//!
-//! - bearer 是一串所有客户端共用的密钥，谁拿到谁就是"通过"；
-//! - OAuth 那边验的也是同一个操作员口令，签出来的令牌里只有注册过的
-//!   `client_id`，没有 `sub`。`client_id` 是一个 MCP 客户端，不是一个人。
-//!
-//! 所以任何地方都不能拿它做人与人之间的隔离，也不能对外宣传多租户
-//! （RFC-0002 5.3 原话：「共享 bearer 密钥代表共享授权，不承诺识别不同
-//! 自然人」）。它能做的是两件实在事：**把不同主体的远端连接分开**，
-//! 以及**把「这次有没有过鉴权」这个事实往下传**。
+//! Verified authority for one call. Network callers cannot acquire authority by omitting a grant.
 
-use alloc::{format, string::String};
+use alloc::string::String;
 
-use crate::Grant;
+use serde::{Deserialize, Serialize};
 
-/// 已经通过鉴权的调用主体。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Principal {
-    /// 没配鉴权（`auth_type = noauth`）。端口开着谁都能连。
-    Anonymous,
-    /// 过了共享 bearer 密钥。
-    SharedSecret,
-    /// 过了 OAuth 访问令牌。`client_id` 来自令牌里已验签的 claim。
-    OAuthClient { client_id: String },
-    /// 经 OpenAI 隧道转进来、带着服务凭据 `openai_tunnel_key` 的请求。
-    ///
-    /// 和 bearer 分开算：两边都是一串共享密钥，合成一个主体的话，本机 bearer 客户端
-    /// 和 ChatGPT 能互相读到对方的命令输出。
-    OpenAiTunnel,
+use crate::{
+    ActionsSubject, CallerId, CallerIdentity, Grant, GrantStatus, McpSubject, PolicyError,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    #[serde(rename = "oauth")]
+    OAuth,
+    Token,
+    Url,
 }
 
-/// 一条请求验完鉴权之后剩下的东西。
-///
-/// **不存令牌**。构造它的地方拿得到原始令牌，但那串东西到这里就该被丢掉：
-/// 它会进日志、进错误消息、进连接代次的字符串（验收项 H02「原始凭据不进
-/// 输出/日志」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Authority {
+    Operator,
+    Mcp {
+        grant: Grant,
+        credential_kind: CredentialKind,
+    },
+    Actions {
+        workspace_id: String,
+        write: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
-    principal: Principal,
-    /// 这道鉴权守的是哪个入口：`hub`，或者某个工作区 id。
-    scope: String,
-    /// 用 grant 的钥匙进来的：只看得到它开的那几个项目（RFC-0007）。
-    /// None 是服务自己的凭据，全部项目。
-    grant: Option<Grant>,
+    caller_id: CallerId,
+    authority: Authority,
 }
 
 impl AuthContext {
-    pub fn new(principal: Principal, scope: impl Into<String>) -> Self {
-        AuthContext {
-            principal,
-            scope: scope.into(),
-            grant: None,
+    /// Only trusted local application/IPC entrypoints may construct this authority.
+    pub fn local_operator() -> Self {
+        Self {
+            caller_id: CallerId::local_operator(),
+            authority: Authority::Operator,
         }
     }
 
-    /// 这次请求是用某个 grant 的钥匙过的鉴权。
-    pub fn with_grant(mut self, grant: Option<Grant>) -> Self {
-        self.grant = grant;
-        self
+    /// Call after verifying the credential, its lifetime and current grant/revision.
+    pub fn verified_mcp(
+        entry: impl Into<String>,
+        grant: Grant,
+        credential_kind: CredentialKind,
+        subject: McpSubject,
+    ) -> Result<Self, PolicyError> {
+        grant.validate()?;
+        if grant.status != GrantStatus::Active {
+            return Err(PolicyError("revoked grant cannot authorize a call"));
+        }
+        let kind_matches = matches!(
+            (&subject, credential_kind),
+            (McpSubject::OAuth { .. }, CredentialKind::OAuth)
+                | (
+                    McpSubject::Token | McpSubject::Tunnel { .. },
+                    CredentialKind::Token
+                )
+                | (McpSubject::Url, CredentialKind::Url)
+        );
+        if !kind_matches {
+            return Err(PolicyError(
+                "MCP subject does not match the verified credential kind",
+            ));
+        }
+        if credential_kind == CredentialKind::Url && !grant.permissions.service.is_empty() {
+            return Err(PolicyError(
+                "URL credentials cannot carry service capabilities",
+            ));
+        }
+        let caller_id = CallerId::new(
+            entry.into(),
+            CallerIdentity::McpClient {
+                grant_id: grant.id.clone(),
+                subject,
+            },
+        )?;
+        Ok(Self {
+            caller_id,
+            authority: Authority::Mcp {
+                grant,
+                credential_kind,
+            },
+        })
+    }
+
+    /// Actions authorization is explicit and confined to its configured workspace.
+    pub fn actions(
+        entry: impl Into<String>,
+        workspace_id: impl Into<String>,
+        subject: ActionsSubject,
+        write: bool,
+    ) -> Result<Self, PolicyError> {
+        let workspace_id = workspace_id.into();
+        if workspace_id.trim().is_empty() {
+            return Err(PolicyError("Actions authority requires a workspace ID"));
+        }
+        let caller_id = CallerId::new(
+            entry.into(),
+            CallerIdentity::ActionsClient {
+                workspace_id: workspace_id.clone(),
+                subject,
+            },
+        )?;
+        Ok(Self {
+            caller_id,
+            authority: Authority::Actions {
+                workspace_id,
+                write,
+            },
+        })
+    }
+
+    pub fn id(&self) -> &CallerId {
+        &self.caller_id
+    }
+
+    pub fn identity(&self) -> &CallerIdentity {
+        self.caller_id.identity()
     }
 
     pub fn grant(&self) -> Option<&Grant> {
-        self.grant.as_ref()
+        match &self.authority {
+            Authority::Mcp { grant, .. } => Some(grant),
+            Authority::Operator | Authority::Actions { .. } => None,
+        }
     }
 
-    /// 没配鉴权的入口。
-    pub fn anonymous(scope: impl Into<String>) -> Self {
-        Self::new(Principal::Anonymous, scope)
+    pub fn credential_kind(&self) -> Option<CredentialKind> {
+        match &self.authority {
+            Authority::Mcp {
+                credential_kind, ..
+            } => Some(*credential_kind),
+            Authority::Operator | Authority::Actions { .. } => None,
+        }
     }
 
-    pub fn principal(&self) -> &Principal {
-        &self.principal
+    pub fn actions_workspace_id(&self) -> Option<&str> {
+        match &self.authority {
+            Authority::Actions { workspace_id, .. } => Some(workspace_id),
+            Authority::Operator | Authority::Mcp { .. } => None,
+        }
     }
 
     pub fn scope(&self) -> &str {
-        &self.scope
+        self.caller_id.scope()
     }
 
-    /// 这次请求确实过了一道鉴权。
-    ///
-    /// RFC-0002 5.3：第一版 remote coding 要求可验证的认证身份，noauth 不开放
-    /// 该能力。只读不受这条限制——操作员选了 noauth 就是自己决定把端口敞开。
-    pub fn is_authenticated(&self) -> bool {
-        !matches!(self.principal, Principal::Anonymous)
-    }
-
-    /// 写进日志、错误和连接代次的短标识。**永远不含令牌本身。**
-    ///
-    /// OAuth 那支带上 client_id：不同的注册客户端拿到不同的远端连接，
-    /// 而不是共用一条按 workspace id 缓存的。
-    ///
-    /// 带 grant 的再接上 `#grant:<id>`：两把 grant 的 bearer 令牌都是 SharedSecret，
-    /// 不接上就成了同一个主体，互相读得到对方的命令输出。全权的不接，标识和以前一样。
     pub fn tag(&self) -> String {
-        let base = match &self.principal {
-            Principal::Anonymous => format!("noauth:{}", self.scope),
-            Principal::SharedSecret => format!("bearer:{}", self.scope),
-            Principal::OAuthClient { client_id } => {
-                format!("oauth:{}:{client_id}", self.scope)
+        self.caller_id.key().into()
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        !matches!(
+            self.identity(),
+            CallerIdentity::ActionsClient {
+                subject: ActionsSubject::Anonymous,
+                ..
             }
-            Principal::OpenAiTunnel => format!("openai-tunnel:{}", self.scope),
-        };
-        match &self.grant {
-            Some(grant) => format!("{base}#grant:{}", grant.id),
-            None => base,
+        )
+    }
+
+    pub fn is_local_operator(&self) -> bool {
+        matches!(self.authority, Authority::Operator)
+    }
+
+    pub fn read_only(&self) -> bool {
+        !self.may_write_project()
+    }
+
+    pub fn may_write_project(&self) -> bool {
+        match &self.authority {
+            Authority::Operator => true,
+            Authority::Mcp { grant, .. } => grant.permissions.write,
+            Authority::Actions { write, .. } => *write,
+        }
+    }
+
+    /// Membership in the Hub and project/node policy must still be checked by the caller.
+    pub fn allows_project(&self, project: &str) -> bool {
+        match &self.authority {
+            Authority::Operator => !project.trim().is_empty(),
+            Authority::Mcp { grant, .. } => grant.allows(project),
+            Authority::Actions { workspace_id, .. } => project == workspace_id,
+        }
+    }
+
+    pub fn may_read_user_prompts(&self) -> bool {
+        match &self.authority {
+            Authority::Operator => true,
+            Authority::Mcp { grant, .. } => grant.permissions.service.user_prompts,
+            Authority::Actions { .. } => false,
+        }
+    }
+
+    pub fn may_use_machine_mcp(&self) -> bool {
+        match &self.authority {
+            Authority::Operator => true,
+            Authority::Mcp { grant, .. } => grant.permissions.service.machine_mcp,
+            Authority::Actions { .. } => false,
+        }
+    }
+
+    pub fn may_call_machine_mcp(&self) -> bool {
+        self.may_use_machine_mcp() && self.may_write_project()
+    }
+
+    pub fn may_manage_workspaces(&self) -> bool {
+        self.may_write_project()
+            && match &self.authority {
+                Authority::Operator => true,
+                Authority::Mcp { grant, .. } => grant.permissions.service.managed_workspaces,
+                Authority::Actions { .. } => false,
+            }
+    }
+
+    pub fn may_delegate(&self) -> bool {
+        match &self.authority {
+            Authority::Operator => true,
+            Authority::Mcp {
+                grant,
+                credential_kind,
+            } => grant.permissions.write && *credential_kind != CredentialKind::Url,
+            Authority::Actions { .. } => false,
         }
     }
 }
@@ -119,73 +236,183 @@ impl AuthContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GrantPermissions, ProjectScope, ServiceCapabilities};
     use alloc::vec;
 
-    #[test]
-    fn only_noauth_counts_as_unauthenticated() {
-        assert!(!AuthContext::anonymous("hub").is_authenticated());
-        assert!(AuthContext::new(Principal::SharedSecret, "hub").is_authenticated());
-        assert!(AuthContext::new(
-            Principal::OAuthClient {
-                client_id: "c1".into()
+    fn grant(write: bool) -> Grant {
+        Grant {
+            id: "grant-id".into(),
+            name: "name".into(),
+            scope: ProjectScope::AllProjects,
+            permissions: GrantPermissions {
+                write,
+                service: ServiceCapabilities::default(),
             },
-            "hub"
-        )
-        .is_authenticated());
+            status: GrantStatus::Active,
+        }
     }
 
-    /// 不同主体的标识必须不同，否则远端连接会被两个主体共用。
     #[test]
-    fn different_principals_get_different_tags() {
-        let shared = AuthContext::new(Principal::SharedSecret, "hub").tag();
-        let one = AuthContext::new(
-            Principal::OAuthClient {
-                client_id: "chatgpt".into(),
-            },
+    fn default_all_projects_grants_do_not_inherit_service_or_write_authority() {
+        let auth = AuthContext::verified_mcp(
             "hub",
+            grant(false),
+            CredentialKind::Token,
+            McpSubject::Token,
         )
-        .tag();
-        let other = AuthContext::new(
-            Principal::OAuthClient {
-                client_id: "claude".into(),
-            },
-            "hub",
-        )
-        .tag();
-        assert_ne!(one, other);
-        assert_ne!(one, shared);
-        assert_ne!(shared, AuthContext::anonymous("hub").tag());
-        let tunnel = AuthContext::new(Principal::OpenAiTunnel, "hub");
-        assert!(tunnel.is_authenticated());
-        assert_eq!(tunnel.tag(), "openai-tunnel:hub");
+        .unwrap();
+        assert!(auth.allows_project("new-project"));
+        assert!(auth.is_authenticated());
+        assert!(auth.read_only());
+        assert!(!auth.may_read_user_prompts());
+        assert!(!auth.may_use_machine_mcp());
+        assert!(!auth.may_manage_workspaces());
+        assert!(!auth.may_delegate());
+        assert!(!auth.is_local_operator());
     }
 
-    /// 两把 grant 的 bearer 令牌都是 SharedSecret，标识必须分开；全权的标识和以前一样。
     #[test]
-    fn a_grant_is_its_own_principal() {
-        let grant = |id: &str| Grant {
-            id: id.into(),
-            name: id.into(),
-            workspaces: vec![],
-            read_only: false,
-            browser: false,
+    fn service_capabilities_intersect_write_and_credential_limits() {
+        let mut grant = grant(false);
+        grant.permissions.service = ServiceCapabilities {
+            user_prompts: true,
+            machine_mcp: true,
+            managed_workspaces: true,
         };
-        let owner = AuthContext::new(Principal::SharedSecret, "hub");
-        let alice = owner.clone().with_grant(Some(grant("a1")));
-        let bob = owner.clone().with_grant(Some(grant("b2")));
-        assert_eq!(owner.tag(), "bearer:hub");
-        assert_ne!(alice.tag(), bob.tag());
-        assert_ne!(alice.tag(), owner.tag());
+        let read = AuthContext::verified_mcp(
+            "hub",
+            grant.clone(),
+            CredentialKind::Token,
+            McpSubject::Token,
+        )
+        .unwrap();
+        assert!(read.may_read_user_prompts());
+        assert!(read.may_use_machine_mcp());
+        assert!(!read.may_call_machine_mcp());
+        assert!(!read.may_manage_workspaces());
+        grant.permissions.write = true;
+        let write = AuthContext::verified_mcp(
+            "hub",
+            grant.clone(),
+            CredentialKind::Token,
+            McpSubject::Token,
+        )
+        .unwrap();
+        assert!(write.may_call_machine_mcp());
+        assert!(write.may_manage_workspaces());
+        assert!(write.may_delegate());
+        assert_eq!(read.id(), write.id());
+        assert!(
+            AuthContext::verified_mcp("hub", grant, CredentialKind::Url, McpSubject::Url).is_err()
+        );
+        let url = AuthContext::verified_mcp(
+            "hub",
+            crate::context::tests::grant(true),
+            CredentialKind::Url,
+            McpSubject::Url,
+        )
+        .unwrap();
+        assert!(!url.may_delegate());
     }
 
-    /// 同一个入口、同一种鉴权，标识要稳定——否则每次请求都重开一条 bridge。
     #[test]
-    fn the_same_principal_on_the_same_scope_is_stable() {
-        let tag = || AuthContext::new(Principal::SharedSecret, "hub").tag();
-        assert_eq!(tag(), tag());
-        assert_ne!(
-            tag(),
-            AuthContext::new(Principal::SharedSecret, "ws-1").tag()
-        );
+    fn identity_does_not_change_with_name_or_scope_and_permissions() {
+        let mut grant = grant(false);
+        let first = AuthContext::verified_mcp(
+            "hub",
+            grant.clone(),
+            CredentialKind::OAuth,
+            McpSubject::OAuth {
+                client_id: "registered".into(),
+            },
+        )
+        .unwrap();
+        grant.name = "renamed".into();
+        grant.scope = ProjectScope::Selected(vec!["project".into()]);
+        grant.permissions.write = true;
+        let second = AuthContext::verified_mcp(
+            "hub",
+            grant,
+            CredentialKind::OAuth,
+            McpSubject::OAuth {
+                client_id: "registered".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(first.id(), second.id());
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn revoked_mismatched_and_empty_identity_cannot_authorize() {
+        let mut revoked = grant(false);
+        revoked.status = GrantStatus::Revoked;
+        assert!(AuthContext::verified_mcp(
+            "hub",
+            revoked,
+            CredentialKind::Token,
+            McpSubject::Token
+        )
+        .is_err());
+        assert!(AuthContext::verified_mcp(
+            "hub",
+            grant(false),
+            CredentialKind::Url,
+            McpSubject::Token
+        )
+        .is_err());
+        assert!(AuthContext::verified_mcp(
+            "hub",
+            grant(false),
+            CredentialKind::OAuth,
+            McpSubject::OAuth {
+                client_id: "".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn actions_identity_is_workspace_bound_and_permission_independent() {
+        for subject in [
+            ActionsSubject::Anonymous,
+            ActionsSubject::ApiKey,
+            ActionsSubject::OAuth {
+                client_id: "same-client".into(),
+            },
+        ] {
+            let read =
+                AuthContext::actions("actions", "project-a", subject.clone(), false).unwrap();
+            let write =
+                AuthContext::actions("actions", "project-a", subject.clone(), true).unwrap();
+            let other = AuthContext::actions("actions", "project-b", subject, true).unwrap();
+            assert_eq!(read.id(), write.id());
+            assert_ne!(write.id(), other.id());
+            assert_ne!(write.id().key(), other.id().key());
+            assert_eq!(write.scope(), other.scope());
+            assert!(!other.allows_project("project-a"));
+        }
+    }
+
+    #[test]
+    fn actions_never_get_operator_or_service_authority_from_missing_grant() {
+        let auth =
+            AuthContext::actions("actions", "project", ActionsSubject::ApiKey, true).unwrap();
+        assert!(auth.grant().is_none());
+        assert!(auth.is_authenticated());
+        assert!(auth.allows_project("project"));
+        assert!(!auth.allows_project("other"));
+        assert!(!auth.read_only());
+        assert!(!auth.is_local_operator());
+        assert!(!auth.may_read_user_prompts());
+        assert!(!auth.may_use_machine_mcp());
+        assert!(!auth.may_manage_workspaces());
+        assert!(!auth.may_delegate());
+        let anonymous =
+            AuthContext::actions("actions", "project", ActionsSubject::Anonymous, false).unwrap();
+        assert!(!anonymous.is_authenticated());
+        assert_ne!(auth.id(), anonymous.id());
+        assert_ne!(auth.id(), AuthContext::local_operator().id());
+        assert!(AuthContext::actions("actions", "", ActionsSubject::ApiKey, true).is_err());
     }
 }

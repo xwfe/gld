@@ -34,6 +34,19 @@ impl App {
         listeners: &ListenerManager,
         confirmed: Option<PruneReport>,
     ) -> AppResult<PruneReport> {
+        self.prune_with_cleanup(listeners, confirmed, |root| {
+            Ok(crate::tools::workspace_runtime::runtime_for(root).terminate_all_sessions())
+        })
+        .await
+    }
+
+    /// 只在重新扫描、筛选已确认的项目之后清理执行资源；失败项目及其记录保留。
+    pub async fn prune_with_cleanup(
+        &self,
+        listeners: &ListenerManager,
+        confirmed: Option<PruneReport>,
+        cleanup: impl Fn(&Path) -> Result<usize, String> + Clone + Send + 'static,
+    ) -> AppResult<PruneReport> {
         let home = crate::home::data_home()?;
         let profiles = self.list_workspaces()?;
         let scan_home = home.clone();
@@ -51,7 +64,10 @@ impl App {
         let mut failures = Vec::new();
         let mut kept_projects = HashSet::new();
         for project in &plan.missing_projects {
-            if let Err(error) = self.delete_workspace(listeners, &project.id).await {
+            if let Err(error) = self
+                .delete_workspace_with_cleanup(listeners, &project.id, cleanup.clone())
+                .await
+            {
                 kept_projects.insert(project.id.clone());
                 failures.push(PruneFailure {
                     target: project.id.clone(),

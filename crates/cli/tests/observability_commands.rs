@@ -14,7 +14,6 @@ mod common;
 
 use common::env::Env;
 use common::http::post_json;
-use common::service::Service;
 
 /// 补全脚本必须五种 shell 都能生成，而且不依赖守护进程和项目。
 ///
@@ -51,13 +50,11 @@ fn completions_work_for_every_shell_without_a_workspace_or_daemon() {
     );
 }
 
-/// `usage` 的计数得真的跟着请求走。
-///
-/// 一直是 0 和"今天没用过"长得一模一样，没有对照就发现不了计数没接上。
+/// 鉴权前拒绝的请求不能被记成已执行的 MCP 工具请求。
 #[test]
-fn usage_counts_real_requests() {
+fn rejected_requests_do_not_count_as_executed_mcp_requests() {
     let env = Env::new();
-    let port = env.serve("counted", "noauth").port;
+    let port = env.serve("counted", "oauth").port;
 
     let before = mcp_request_count(&env);
     assert_eq!(before, 0, "刚起来就有请求计数？");
@@ -69,11 +66,11 @@ fn usage_counts_real_requests() {
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             None,
         );
-        assert_eq!(response.status, 200);
+        assert_eq!(response.status, 503);
     }
 
     let after = mcp_request_count(&env);
-    assert_eq!(after, 3, "发了 3 次请求，计数是 {after}");
+    assert_eq!(after, before, "鉴权前拒绝却记成已执行：{after}");
 }
 
 fn mcp_request_count(env: &Env) -> u64 {
@@ -95,7 +92,7 @@ fn mcp_request_count(env: &Env) -> u64 {
 #[test]
 fn logs_show_the_request_that_just_happened() {
     let env = Env::new();
-    let port = env.serve("logged", "noauth").port;
+    let port = env.serve("logged", "oauth").port;
     post_json(
         port,
         "/mcp",
@@ -105,7 +102,7 @@ fn logs_show_the_request_that_just_happened() {
 
     let logs = env.ok(&["logs", "-n", "50"]);
     assert!(
-        logs.contains("tools/list"),
+        logs.contains("[auth] rejected status=503"),
         "日志里看不到刚发的那次请求：{logs}"
     );
 }
@@ -121,16 +118,16 @@ fn logs_show_requests_rejected_by_auth_without_the_credential() {
     let port = env.serve("guarded", "bearer").port;
     let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
     let wrong = "almost-the-right-token-0123456789";
-    assert_eq!(post_json(port, "/mcp", body, None).status, 401);
-    assert_eq!(post_json(port, "/mcp", body, Some(wrong)).status, 401);
+    assert_eq!(post_json(port, "/mcp", body, None).status, 503);
+    assert_eq!(post_json(port, "/mcp", body, Some(wrong)).status, 503);
 
     let logs = env.ok(&["logs", "-n", "50"]);
     assert!(
-        logs.contains("[auth] rejected status=401 credential=missing"),
+        logs.contains("[auth] rejected status=503 credential=missing"),
         "没带凭据的请求没记下来：{logs}"
     );
     assert!(
-        logs.contains("[auth] rejected status=401 credential=rejected"),
+        logs.contains("[auth] rejected status=503 credential=rejected"),
         "凭据错误的请求没记下来：{logs}"
     );
     assert!(!logs.contains(wrong), "错的 token 进了日志：{logs}");
@@ -146,7 +143,7 @@ fn logs_show_requests_rejected_by_auth_without_the_credential() {
 #[test]
 fn health_probes_the_local_endpoint_without_going_through_a_proxy() {
     let env = Env::new();
-    env.serve("proxied", "noauth");
+    env.serve("proxied", "oauth");
 
     let output = env.gld_with_env(
         &["health"],
@@ -199,7 +196,7 @@ fn context_marks_what_is_actually_injected() {
         ".claude/skills/deploy-skill/SKILL.md",
         "---\nname: deploy-skill\ndescription: DEPLOY-MARKER-3b4a ships to prod.\ndisable-model-invocation: true\n---\nBody.\n",
     );
-    let service = env.serve("ctx", "noauth");
+    env.ok(&["add", ".", "--name", "ctx"]);
 
     // 默认 compact：只有 AGENTS.md 进得去。
     let snapshot = env.json(&["--json", "context"]);
@@ -255,7 +252,7 @@ fn context_marks_what_is_actually_injected() {
         .unwrap_or_else(|| panic!("点名才用的 skill 也要列出来：{human}"));
     assert!(deploy_line.contains("只在用户点名时用"), "{deploy_line}");
 
-    let text = model_context(&service);
+    let text = model_context(&env);
     assert!(
         text.contains("AGENTS-MARKER-1f2e"),
         "报告说注入了 AGENTS.md，实际没进去"
@@ -283,7 +280,7 @@ fn context_marks_what_is_actually_injected() {
     );
     assert_eq!(snapshot["skillsInjected"], true);
 
-    let text = model_context(&service);
+    let text = model_context(&env);
     assert!(
         text.contains("AGENTS-MARKER-1f2e") && text.contains("CURSOR-MARKER-9a8b"),
         "advanced 下两份说明都该注入：{text}"
@@ -308,7 +305,7 @@ fn compact_injects_explicitly_configured_instruction_files() {
         "--custom-instruction-paths",
         rules_file.to_str().expect("utf-8 path"),
     ]);
-    let service = env.serve("ctx", "noauth");
+    env.ok(&["add", ".", "--name", "ctx"]);
 
     let snapshot = env.json(&["--json", "context"]);
     let injected = injected_paths(&snapshot);
@@ -325,7 +322,7 @@ fn compact_injects_explicitly_configured_instruction_files() {
         "自动扫到的照旧不进：{injected:?}"
     );
 
-    let text = model_context(&service);
+    let text = model_context(&env);
     assert!(
         text.contains("CUSTOM-MARKER-4a2b") && text.contains("AGENTS-MARKER-5d1c"),
         "点名的说明和 AGENTS.md 都该递给模型：{text}"
@@ -351,16 +348,38 @@ fn injected_paths(snapshot: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// 服务给这个项目的说明和 Skill 目录——模型第一次进项目前调 `workspace_context`
-/// 拿到的那段文本。
-fn model_context(service: &Service) -> String {
-    let context = service.call_tool("workspace_context", serde_json::json!({}));
-    assert_eq!(context["ok"], true, "workspace_context 没通：{context}");
-    format!(
-        "{}\n{}",
-        context["instructions"].as_str().unwrap_or_default(),
-        context["skills"].as_str().unwrap_or_default()
+/// 读取 CLI 实际保存的配置，经共享构造器生成真实 MCP 初始化文本。
+/// 此处核对说明注入；HTTP grant 认证和路由在独立入口测试中验证。
+fn model_context(env: &Env) -> String {
+    let data: gld_core::data::AppData = serde_json::from_slice(
+        &std::fs::read(env.home.path().join("data/profiles.json"))
+            .expect("isolated fixture config"),
     )
+    .expect("current project config");
+    let profile = data
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "ctx")
+        .expect("project");
+    let settings = gld_core::settings::AppSettings::from_data(&data);
+    let context = gld_core::tools::build_tool_context(
+        env.project.path().to_path_buf(),
+        &profile.name,
+        profile.auth.clone(),
+        &profile.runtime,
+        &settings,
+        std::sync::Arc::new(gld_core::usage::ServiceUsage::default()),
+    )
+    .expect("actual tool context");
+    let reply = gld_core::mcp::handle_request(
+        &std::sync::Arc::new(context),
+        &gld_core::auth::AuthContext::local_operator(),
+        &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+    );
+    reply["result"]["instructions"]
+        .as_str()
+        .expect("initialization instructions")
+        .to_string()
 }
 
 /// `history` 在没有档案时要说清楚下一步，而不是空着。

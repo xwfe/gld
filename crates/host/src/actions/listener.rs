@@ -25,7 +25,7 @@ use tower_http::cors::CorsLayer;
 use crate::auth::{
     actions_audience, authorization_server_metadata, authorize_get, authorize_post,
     external_base_url, register_client, token_exchange, AuthContext, AuthorizeForm,
-    AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, Principal, TokenForm,
+    AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, TokenForm,
 };
 use crate::generation::Router as GenerationRouter;
 
@@ -90,7 +90,7 @@ pub fn spawn_listener(
     let configured_public_url = public_base_url.trim().to_string();
     let oauth = if auth_type == "oauth" {
         let registry_scope = format!("{workspace_id}-actions");
-        Some(Arc::new(OAuthRuntime::new(
+        Some(Arc::new(OAuthRuntime::new_actions(
             actions_audience(workspace_id),
             oauth_client_id,
             oauth_client_secret.clone(),
@@ -196,6 +196,8 @@ async fn serve(
         oauth.clone(),
         actions_port,
         configured_public_url.clone(),
+        profile_id.to_string(),
+        true,
     ));
 
     let state = AppState {
@@ -390,11 +392,20 @@ async fn execute_action(
     auth: Option<Extension<AuthContext>>,
     body: Option<Json<Value>>,
 ) -> Response {
-    // 鉴权中间件验完挂上的身份；万一没挂（路由没经过它），按匿名算，绝不落到本机主体。
-    let auth = auth.map_or_else(
-        || AuthContext::new(Principal::Anonymous, super::auth::ACTIONS_SCOPE),
-        |Extension(auth)| auth,
-    );
+    let Some(Extension(auth)) = auth else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "detail": "Missing Actions authorization" })),
+        )
+            .into_response();
+    };
+    if auth.actions_workspace_id() != Some(state.workspace_id.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "detail": "Actions authority does not match this workspace" })),
+        )
+            .into_response();
+    }
     let arguments = match body {
         Some(Json(value)) if value.is_object() || value.is_null() => {
             if value.is_null() {
@@ -450,12 +461,7 @@ async fn execute_action(
                         retryable: error.surely_not_executed(),
                     })
                 }),
-            None => tools::call_tool_as(
-                ctx.as_ref(),
-                &tools::Caller::from_auth(&auth),
-                &name,
-                &arguments,
-            ),
+            None => tools::call_tool_as(ctx.as_ref(), &auth, &name, &arguments),
         }
     };
     let joined = if tools::registry::MUTATING_TOOLS.contains(&tool_name.as_str()) {

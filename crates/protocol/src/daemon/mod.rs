@@ -55,7 +55,8 @@ use serde_json::Value;
 ///    旧守护进程没有执行代，不能接这几个，见 [`FIRST_PROTOCOL_WITH_GENERATIONS`]。
 /// 17：新增 node_remove（`gld node remove`）。
 /// 18：新增 desktop_probe（`gld doctor --desktop`）。
-pub const PROTOCOL_VERSION: u32 = 18;
+/// 19：授权切换为新 scope/permissions/status 与凭据元数据；不传旧明文凭据或兼容旧 grant。
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// 从这个协议起守护进程才有执行代。更老的一律当作不支持：提前拒绝，不发任何会动在线状态的请求。
 pub const FIRST_PROTOCOL_WITH_GENERATIONS: u32 = 16;

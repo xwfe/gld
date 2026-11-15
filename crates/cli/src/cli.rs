@@ -1438,7 +1438,7 @@ pub enum AgentCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum GrantCmd {
-    /// 发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
+    /// 尚未开放：旧创建入口已停用，统一 token/oauth/url 签发正在接入
     Add {
         /// 名字，在 ls / rm 里用它认这一把
         name: String,
@@ -1450,7 +1450,7 @@ pub enum GrantCmd {
         #[arg(long)]
         write: bool,
     },
-    /// 为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
+    /// 已停用：后续统一由 grant add --via url 创建，不再签发旧浏览器地址
     Browser {
         /// 名字，在 ls / rm 里用它认这一把
         name: String,
@@ -1474,9 +1474,10 @@ pub enum GrantCmd {
         #[arg(long)]
         write: bool,
     },
-    /// 列出全部（默认脱敏，--reveal 显示普通口令和令牌；浏览器 URL 只在创建时显示）
+    /// 列出新授权的范围、能力、状态和凭据元数据，不返回秘密或摘要
     #[command(visible_alias = "ls")]
     List {
+        /// 已停用；新存储不保存可恢复的秘密明文
         #[arg(long)]
         reveal: bool,
     },
@@ -1505,7 +1506,9 @@ fn parse_browser_ttl(value: &str) -> Result<u64, String> {
         .parse::<u64>()
         .ok()
         .and_then(|count| count.checked_mul(factor))
-        .filter(|seconds| *seconds > 0 && *seconds <= gld_core::auth::MAX_BROWSER_GRANT_TTL_SECONDS)
+        .filter(|seconds| {
+            *seconds > 0 && *seconds <= gld_core::auth::access_store::MAX_URL_TTL_SECONDS
+        })
         .ok_or_else(invalid)
 }
 

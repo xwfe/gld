@@ -74,7 +74,7 @@ const OWNERS: &str = "owners";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub session_id: String,
-    /// 起它的主体（[`gld_policy::Caller::key`]）。读的人对不上就当没有这条，
+    /// 起它的主体（[`gld_policy::CallerId::key`]）。读的人对不上就当没有这条，
     /// 和内存里的会话表按主体分开是同一个规矩。
     pub caller: String,
     /// 命令原文，已脱敏，最多 500 字符。

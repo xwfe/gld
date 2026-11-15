@@ -1,10 +1,5 @@
 use super::*;
 
-use crate::auth::Principal;
-use crate::nodes::identity::{auth_from_meta, forwarded_meta};
-
-const HUB_ID: &str = "11111111111111111111111111111111";
-
 #[test]
 fn node_commands_stay_in_the_allowed_project_and_with_the_caller_who_started_them() {
     const CHILD: &str = "GLD_TEST_NODE_COMMANDS_CHILD";
@@ -57,15 +52,12 @@ fn exercise_commands() {
     };
     let hub = Hub::for_node(access.clone()).unwrap();
     let call_as = |who: &str, name: &str, args: Value| {
-        let origin = AuthContext::new(
-            Principal::OAuthClient {
-                client_id: who.into(),
-            },
-            "hub",
-        );
-        let params =
-            json!({"name":name,"arguments":args,"_meta":forwarded_meta(&origin,HUB_ID).unwrap()});
-        let auth = auth_from_meta(&params, HUB_ID, &access.shared, &access.writable).unwrap();
+        let write = args
+            .get("workspace")
+            .and_then(Value::as_str)
+            .is_some_and(|id| access.writable.iter().any(|allowed| allowed == id));
+        let auth = verified_project_caller(who, access.shared.clone(), write);
+        let params = json!({"name":name,"arguments":args});
         hub.handle_request(
             &auth,
             &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params}),
@@ -272,15 +264,12 @@ fn exercise_git_config() {
     };
     let hub = Hub::for_node(access.clone()).unwrap();
     let call = |name: &str, args: Value| {
-        let origin = AuthContext::new(
-            Principal::OAuthClient {
-                client_id: "alice".into(),
-            },
-            "hub",
-        );
-        let params =
-            json!({"name":name,"arguments":args,"_meta":forwarded_meta(&origin,HUB_ID).unwrap()});
-        let auth = auth_from_meta(&params, HUB_ID, &access.shared, &access.writable).unwrap();
+        let write = args
+            .get("workspace")
+            .and_then(Value::as_str)
+            .is_some_and(|id| access.writable.iter().any(|allowed| allowed == id));
+        let auth = verified_project_caller("alice", access.shared.clone(), write);
+        let params = json!({"name":name,"arguments":args});
         hub.handle_request(
             &auth,
             &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params}),

@@ -119,6 +119,6 @@ fn response_envelopes_and_error_display_keep_the_wire_contract() {
         let decoded: Response = serde_json::from_value(fixture).unwrap();
         assert_eq!(decoded.into_result().unwrap_err().to_string(), "message");
     }
-    assert_eq!(PROTOCOL_VERSION, 18);
+    assert_eq!(PROTOCOL_VERSION, 19);
     assert_eq!(FIRST_PROTOCOL_WITH_GENERATIONS, 16);
 }

@@ -174,20 +174,7 @@ impl App {
             .work_session_limits
             .validate()
             .map_err(AppError::Message)?;
-        if config.work_sessions && auth_type == "noauth" {
-            return Err(AppError::Message(
-                "通用任务空间需要认证：请使用 oauth 或 bearer，或先关闭 --work-sessions。".into(),
-            ));
-        }
-        // noauth 下谁连上都是全权：发出去的 grant 一下子全成了摆设，还照样列在 gld grant ls 里。
-        if auth_type == "noauth" {
-            let grants = self.with_data(|store| Ok(store.grants().len()))?;
-            if grants > 0 {
-                return Err(AppError::Message(format!(
-                    "还有 {grants} 把 grant：改成 noauth 之后谁连上都是全权，它们就挡不住任何人了。先 gld grant rm 掉它们再改"
-                )));
-            }
-        }
+        reject_noauth(&config)?;
         let settings = self.settings()?;
         let before = settings.hub.clone();
         if config.local_port != before.local_port {
@@ -222,7 +209,7 @@ impl App {
             ..config
         };
         validate_tunnel(&after)?;
-        reject_public_noauth(&after)?;
+        reject_noauth(&after)?;
         if after != before {
             let saved = after.clone();
             self.update_settings(|settings| {
@@ -575,7 +562,7 @@ impl App {
         let config = settings.hub.clone();
         self.validate_hub_port(listeners, config.local_port)?;
         // 保存时已经拦过一道；这里再拦是防手工改过数据文件、或老配置恢复起来。
-        reject_public_noauth(&config)?;
+        reject_noauth(&config)?;
         if config.use_global_gateway {
             if !settings.global_gateway.enabled {
                 return Err(AppError::Message(
@@ -729,20 +716,11 @@ impl App {
     }
 }
 
-/// hub 挂了公网入口就不许 noauth。
-///
-/// 工作区那边 noauth + 公网只是 `gld doctor` 报 ✗，这里直接拒：hub 的暴露面是全部成员，
-/// 一个无认证的公网地址等于把这几个项目的"执行任意命令"一起开放给整个互联网，
-/// 而且谁连上来先调 list_workspaces 就知道有哪几个。
-fn reject_public_noauth(config: &HubConfig) -> AppResult<()> {
-    let public = config.use_global_gateway
-        || config.tunnel_type != "none"
-        || !config.public_url.trim().is_empty();
-    if config.auth_type == "noauth" && public {
+/// 回环和公网 MCP 使用同一授权要求，零份 grant 也不能转为匿名全权。
+fn reject_noauth(config: &HubConfig) -> AppResult<()> {
+    if config.auth_type.trim() == "noauth" {
         return Err(AppError::Message(
-            "服务挂了公网入口，不能用 noauth：那等于把全部项目的执行权限开放给整个互联网。\
-             改用认证：gld upgrade --auth oauth；确实只在本机用就先撤掉公网入口（gld share --off）再改 noauth。"
-                .into(),
+            "AUTH_REQUIRED: 所有 MCP 入口都需要有效授权，不支持 noauth。".into(),
         ));
     }
     Ok(())
@@ -884,6 +862,18 @@ fn validate_hub_key(key: &str) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noauth_is_rejected_even_without_a_public_endpoint() {
+        let config = HubConfig {
+            auth_type: "noauth".into(),
+            ..HubConfig::default()
+        };
+        assert!(reject_noauth(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("AUTH_REQUIRED"));
+    }
 
     fn spec() -> CcnmMemberSpec {
         CcnmMemberSpec {

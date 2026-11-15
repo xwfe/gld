@@ -7,8 +7,7 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{
     header::{
-        ACCEPT, ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, REFERRER_POLICY,
-        USER_AGENT, WWW_AUTHENTICATE,
+        ACCEPT, ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, REFERRER_POLICY, USER_AGENT,
     },
     HeaderMap, HeaderName, Method, StatusCode,
 };
@@ -18,13 +17,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use gld_core::async_rt::{self, JoinHandle};
 use gld_core::generation::CallError;
-use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER, SERVER_NAME};
+use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE, SERVER_NAME};
 use gld_core::local_network;
 use gld_core::logs::append_profile_log;
 use gld_core::mcp::handle_request;
-use gld_core::secret::SecretStore;
 use gld_core::settings::AppSettings;
-use gld_core::tools::{build_tool_context, patch::failure_log_fields, Caller, SharedToolContext};
+use gld_core::tools::{build_tool_context, patch::failure_log_fields, SharedToolContext};
 use gld_core::usage::ServiceUsage;
 use gld_core::workspace::{AuthConfig, RuntimeConfig};
 use serde_json::{json, Value};
@@ -32,12 +30,10 @@ use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::auth::{
-    authorization_server_metadata, authorize_get, authorize_post, bearer_token, external_base_url,
-    header_secret_matches, hub_audience, protected_resource_metadata,
-    protected_resource_metadata_url, register_client, token_exchange, verify_bearer_header,
-    verify_oauth_bearer_header, workspace_audience, AuthContext, AuthorizeForm, AuthorizeParams,
-    ClientRegistrationRequest, ClientRegistry, GrantBook, NoGrants, OAuthRuntime, Principal,
-    StoredGrants, TokenForm,
+    authorization_server_metadata, authorize_get, authorize_post, external_base_url, hub_audience,
+    protected_resource_metadata, register_client, token_exchange, workspace_audience, AuthContext,
+    AuthorizeForm, AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime,
+    TokenForm,
 };
 use crate::generation::Router as GenerationRouter;
 
@@ -95,7 +91,7 @@ impl Endpoint {
         }
         match self {
             Self::Workspace(context) => {
-                let response = handle_request(context, &Caller::from_auth(auth), body);
+                let response = handle_request(context, auth, body);
                 Handled {
                     response,
                     audit: context.context_audit_snapshot(),
@@ -220,20 +216,14 @@ async fn oauth_register_post(
 struct ListenerState {
     endpoint: Endpoint,
     generation: Option<Arc<GenerationRouter>>,
-    auth: AuthConfig,
     /// 日志目录和 OAuth 客户端注册表的作用域：工作区 id，或 [`HUB_SCOPE`]。
     scope: String,
     /// 授权页上告诉用户"你在授权什么"的那一行。
     authorize_label: String,
     bind_port: u16,
     configured_public_url: String,
-    bearer_token: Option<String>,
     oauth: Option<Arc<OAuthRuntime>>,
     oauth_client_secret: Option<String>,
-    /// bearer 令牌对不上服务令牌时，去这里看是不是哪个 grant 的（RFC-0007）。
-    grants: Arc<dyn GrantBook>,
-    /// 公网入口是 OpenAI 隧道时才有：带着它的请求是 tunnel-client 转进来的。
-    openai_tunnel_key: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -245,7 +235,7 @@ pub fn spawn_listener(
     auth: AuthConfig,
     public_base_url: String,
     oauth_client_secret: Option<String>,
-    oauth_password: Option<String>,
+    _oauth_password: Option<String>,
     oauth_token_secret: Option<String>,
     runtime: RuntimeConfig,
     usage: Arc<ServiceUsage>,
@@ -262,56 +252,23 @@ pub fn spawn_listener(
         &global,
         usage,
     )?);
-    let bearer_token = if auth.bearer_enabled() {
-        let key = "bearer_token";
-        if auth.use_shared_secrets {
-            SecretStore::get_shared(key).map_err(|e| e.to_string())?
-        } else {
-            SecretStore::get(&workspace_id, key).map_err(|e| e.to_string())?
-        }
-    } else {
-        None
-    };
-    // 没有 token 就不要起来。以前是照起不误，结果服务显示 running、
-    // 端口也通，但**任何**请求都拿 401——包括配置正确的客户端。
-    // 用户看到的是"服务好好的，客户端连不上"，最难查的一类问题。
-    // Actions 那侧一直是这么做的（"Actions API key is not configured"），
-    // 这里补齐。
-    if auth.bearer_enabled() && bearer_token.as_deref().is_none_or(str::is_empty) {
-        let scope = if auth.use_shared_secrets {
-            "gld secret shared regen bearer_token"
-        } else {
-            "gld secret regen bearer_token"
-        };
-        return Err(format!(
-            "MCP 认证方式是 bearer，但没有 bearer_token，任何客户端都会拿 401。\
-             先执行 `{scope}`，或改用 `gld ws set mcp.auth=oauth`。"
-        ));
-    }
     let configured_public_url = public_base_url.trim().to_string();
-    let oauth = auth.oauth_enabled().then(|| {
-        Arc::new(OAuthRuntime::new(
-            workspace_audience(&workspace_id),
-            auth.oauth_client_id.clone(),
-            oauth_client_secret.clone(),
-            oauth_password.unwrap_or_default(),
-            oauth_token_secret.unwrap_or_default(),
-            Arc::new(ClientRegistry::load(&workspace_id, &workspace_id)),
-        ))
-    });
+    let oauth = Some(Arc::new(OAuthRuntime::new_mcp_pending(
+        workspace_audience(&workspace_id),
+        auth.oauth_client_id.clone(),
+        oauth_client_secret.clone(),
+        oauth_token_secret.unwrap_or_default(),
+        Arc::new(ClientRegistry::load(&workspace_id, &workspace_id)),
+    )));
     listen(ListenerState {
         endpoint: Endpoint::Workspace(mcp),
         generation,
-        auth,
         scope: workspace_id,
         authorize_label: workspace_display,
         bind_port: port,
         configured_public_url,
-        bearer_token,
         oauth,
         oauth_client_secret,
-        grants: Arc::new(NoGrants),
-        openai_tunnel_key: None,
     })
 }
 
@@ -324,53 +281,27 @@ pub fn spawn_hub_listener(
     port: u16,
     hub: Arc<Hub>,
     nodes: Arc<Nodes>,
-    auth_type: &str,
+    _auth_type: &str,
     public_base_url: String,
     secrets: HubSecrets,
     generation: Option<Arc<GenerationRouter>>,
 ) -> Result<(ShutdownSender, JoinHandle<()>), String> {
-    let auth = AuthConfig {
-        auth_type: auth_type.to_string(),
-        oauth_client_id: secrets.oauth_client_id.clone(),
-        use_shared_secrets: false,
-    };
-    if auth.bearer_enabled() && secrets.bearer_token.is_empty() {
-        return Err(
-            "聚合入口的认证方式是 bearer，但没有 bearer_token，任何客户端都会拿 401。\
-             先执行 `gld secret regen bearer_token`。"
-                .into(),
-        );
-    }
-    // 只有这条入口认 grant：工作区自己的监听器本来就只管一个项目。
-    let grants: Arc<dyn GrantBook> = Arc::new(StoredGrants);
-    let oauth = auth.oauth_enabled().then(|| {
-        Arc::new(
-            OAuthRuntime::new(
-                hub_audience(),
-                secrets.oauth_client_id.clone(),
-                None,
-                secrets.oauth_password.clone(),
-                secrets.oauth_token_secret.clone(),
-                Arc::new(ClientRegistry::load(HUB_SCOPE, HUB_SCOPE)),
-            )
-            .with_grants(grants.clone()),
-        )
-    });
-    let bearer_token = auth.bearer_enabled().then_some(secrets.bearer_token);
+    let oauth = Some(Arc::new(OAuthRuntime::new_mcp_pending(
+        hub_audience(),
+        secrets.oauth_client_id,
+        None,
+        secrets.oauth_token_secret,
+        Arc::new(ClientRegistry::load(HUB_SCOPE, HUB_SCOPE)),
+    )));
     listen(ListenerState {
         endpoint: Endpoint::Hub { hub, nodes },
         generation,
-        auth,
         scope: HUB_SCOPE.into(),
-        authorize_label: "gld 服务：填服务口令可访问全部项目；填 gld grant 发的口令只开它那几个"
-            .into(),
+        authorize_label: "gld 客户端授权".into(),
         bind_port: port,
         configured_public_url: public_base_url.trim().to_string(),
-        bearer_token,
         oauth,
         oauth_client_secret: None,
-        grants,
-        openai_tunnel_key: secrets.openai_tunnel_key,
     })
 }
 
@@ -428,8 +359,8 @@ async fn serve(
         )
         .route("/oauth/token", post(oauth_token_post))
         .layer(CorsLayer::permissive())
-        // 旧 OAuth 路由和浏览器能力 URL 各自鉴权；不把 URL 密钥接入 /mcp。
-        .merge(browser_router())
+        // URL 凭据只用于专用路径；它的认证不会回退到标准 Bearer。
+        .merge(url_router())
         .with_state(state);
 
     append_profile_log(
@@ -515,13 +446,13 @@ fn resolve_oauth_base(state: &ListenerState, headers: &HeaderMap) -> String {
 
 /// URL-only 客户端不一定实现 OAuth / 自定义认证头。独立短期 grant 复用现有
 /// Hub 和权限检查，不开无鉴权入口，也不维护另一套 MCP 会话或执行器。
-fn browser_router() -> Router<ListenerState> {
+fn url_router() -> Router<ListenerState> {
     Router::new()
         .route(
-            "/mcp/browser/{token}",
-            post(mcp_browser_post)
-                .get(mcp_browser_no_stream)
-                .delete(mcp_browser_no_stream),
+            "/mcp/connect/{token}",
+            post(mcp_url_post)
+                .get(mcp_url_no_stream)
+                .delete(mcp_url_no_stream),
         )
         .layer(
             CorsLayer::new()
@@ -542,10 +473,10 @@ fn browser_router() -> Router<ListenerState> {
                     HeaderName::from_static("mcp-protocol-version"),
                 ]),
         )
-        .layer(middleware::map_response(browser_response))
+        .layer(middleware::map_response(url_response))
 }
 
-async fn browser_response(mut response: Response) -> Response {
+async fn url_response(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(CACHE_CONTROL, "no-store".parse().expect("static header"));
@@ -556,63 +487,31 @@ async fn browser_response(mut response: Response) -> Response {
     response
 }
 
-fn require_browser_auth(
-    state: &ListenerState,
-    headers: &HeaderMap,
-    token: &str,
+fn require_url_auth(
+    _state: &ListenerState,
+    _headers: &HeaderMap,
+    _token: &str,
 ) -> Result<AuthContext, Box<Response>> {
-    let origin = headers.get(ORIGIN).map(|value| value.to_str());
-    // 非 UTF-8 / 重复 Origin 不能当成没有 Origin 放行。后台 fetch 可能省略
-    // Origin，缺省仍靠 URL 密钥鉴权；这不把 Origin 当作客户端身份证明。
-    let grant = if state.auth.auth_enabled()
-        && !matches!(origin, Some(Err(_)))
-        && headers.get_all(ORIGIN).iter().count() <= 1
-    {
-        state
-            .grants
-            .by_browser_token(token, origin.and_then(Result::ok))
-    } else {
-        None
-    };
-    match grant {
-        Some(grant) => {
-            Ok(AuthContext::new(Principal::SharedSecret, &state.scope).with_grant(Some(grant)))
-        }
-        None => {
-            // 不记录 URI、路径、密钥或摘要；失败原因也不泄露 grant 是否存在。
-            append_profile_log(
-                &state.scope,
-                "mcp-requests.log",
-                "[auth] rejected status=401 credential=browser_url （地址无效、过期、撤销或 Origin 不匹配）",
-            );
-            Err(Box::new((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "error": "browser_grant_invalid",
-                    "message": "浏览器连接地址无效、已过期、已撤销或 Origin 不匹配；请检查授权或重新创建连接地址"
-                })),
-            ).into_response()))
-        }
-    }
+    Err(Box::new(mcp_auth_not_ready()))
 }
 
-async fn mcp_browser_post(
+async fn mcp_url_post(
     State(state): State<ListenerState>,
     Path(token): Path<String>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let auth = match require_browser_auth(&state, &headers, &token) {
+    let auth = match require_url_auth(&state, &headers, &token) {
         Ok(auth) => auth,
         Err(response) => return *response,
     };
-    if let Err(response) = require_browser_protocol(&headers) {
+    if let Err(response) = require_url_protocol(&headers) {
         return *response;
     }
     dispatch_mcp(state, auth, body).await
 }
 
-fn require_browser_protocol(headers: &HeaderMap) -> Result<(), Box<Response>> {
+fn require_url_protocol(headers: &HeaderMap) -> Result<(), Box<Response>> {
     let versions = headers.get_all("mcp-protocol-version");
     if versions.iter().count() <= 1
         && headers
@@ -636,15 +535,15 @@ fn require_browser_protocol(headers: &HeaderMap) -> Result<(), Box<Response>> {
 
 /// Streamable HTTP 的独立 GET 流是可选的。SDK 接受 405；保持无状态 JSON
 /// 传输，不能给 GET 返回 discovery JSON 冒充 SSE，也不签发可复用的 session。
-async fn mcp_browser_no_stream(
+async fn mcp_url_no_stream(
     State(state): State<ListenerState>,
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = require_browser_auth(&state, &headers, &token) {
+    if let Err(response) = require_url_auth(&state, &headers, &token) {
         return *response;
     }
-    if let Err(response) = require_browser_protocol(&headers) {
+    if let Err(response) = require_url_protocol(&headers) {
         return *response;
     }
     (StatusCode::METHOD_NOT_ALLOWED, [(ALLOW, "POST, OPTIONS")]).into_response()
@@ -883,73 +782,31 @@ fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-/// 验这条请求的鉴权，验过了带出**是怎么过的**。
-///
-/// 以前这里只回答放行还是 401。远端成员要知道是谁在调：一条通往远端的 bridge
-/// 属于某个主体，不属于某个工作区名字（RFC-0002 5.3）。原始令牌到此为止，
-/// 不进 [`AuthContext`]，也就进不了日志和错误消息。
+/// No network MCP identity is constructed before the new credential store is connected.
 fn require_mcp_auth(
-    state: &ListenerState,
-    headers: &HeaderMap,
+    _state: &ListenerState,
+    _headers: &HeaderMap,
 ) -> Result<AuthContext, Box<Response>> {
-    // 放在认证方式前面：经 OpenAI 隧道来的请求不再走 oauth / bearer 那一套，
-    // 能进隧道的只有关联了这条隧道的 ChatGPT 工作区（OpenAI 那边管）。
-    if let Some(expected) = state.openai_tunnel_key.as_deref() {
-        if header_secret_matches(headers, OPENAI_TUNNEL_HEADER, expected) {
-            return Ok(AuthContext::new(Principal::OpenAiTunnel, &state.scope));
-        }
-    }
-    if state.auth.bearer_enabled() {
-        let expected = state.bearer_token.as_deref().unwrap_or("");
-        let Some(refused) = verify_bearer_header(headers, expected) else {
-            return Ok(AuthContext::new(Principal::SharedSecret, &state.scope));
-        };
-        // 不是服务令牌，再看是不是哪个 grant 的（RFC-0007）。
-        let grant = headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(bearer_token)
-            .and_then(|token| state.grants.by_bearer_token(token));
-        return match grant {
-            Some(grant) => {
-                Ok(AuthContext::new(Principal::SharedSecret, &state.scope).with_grant(Some(grant)))
-            }
-            None => Err(Box::new(refused)),
-        };
-    }
-    if state.auth.oauth_enabled() {
-        if let Some(oauth) = state.oauth.as_ref() {
-            let server_url = resolve_oauth_base(state, headers);
-            return match verify_oauth_bearer_header(headers, oauth, &server_url) {
-                Ok(identity) => Ok(AuthContext::new(
-                    Principal::OAuthClient {
-                        client_id: identity.client_id,
-                    },
-                    &state.scope,
-                )
-                .with_grant(identity.grant)),
-                Err(mut response) => {
-                    if response.status() == StatusCode::UNAUTHORIZED {
-                        let metadata_url = protected_resource_metadata_url(&server_url);
-                        if let Ok(value) =
-                            format!("Bearer resource_metadata=\"{metadata_url}\"").parse()
-                        {
-                            response.headers_mut().insert(WWW_AUTHENTICATE, value);
-                        }
-                    }
-                    Err(response)
-                }
-            };
-        }
-    }
-    Ok(AuthContext::anonymous(&state.scope))
+    Err(Box::new(mcp_auth_not_ready()))
+}
+
+fn mcp_auth_not_ready() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "error": "AUTH_NOT_READY",
+            "message": "统一 MCP 授权尚未接入；当前入口拒绝匿名、旧凭据及未绑定 grant 的隧道请求"
+        })),
+    )
+        .into_response()
 }
 
 async fn oauth_authorization_server_metadata(
     State(state): State<ListenerState>,
     headers: HeaderMap,
 ) -> Response {
-    if !state.auth.oauth_enabled() {
+    if state.oauth.is_none() {
         return oauth_not_configured();
     }
     let base = resolve_oauth_base(&state, &headers);
@@ -964,7 +821,7 @@ async fn oauth_protected_resource_metadata(
     State(state): State<ListenerState>,
     headers: HeaderMap,
 ) -> Response {
-    if !state.auth.oauth_enabled() {
+    if state.oauth.is_none() {
         return oauth_not_configured();
     }
     Json(protected_resource_metadata(&resolve_oauth_base(
@@ -1083,16 +940,12 @@ mod tests {
         ListenerState {
             endpoint: Endpoint::Workspace(Arc::new(context)),
             generation: None,
-            auth: AuthConfig::default(),
             scope: "w1".into(),
             authorize_label: "/tmp/x".into(),
             bind_port: 0,
             configured_public_url: String::new(),
-            bearer_token: None,
             oauth: None,
             oauth_client_secret: None,
-            grants: Arc::new(crate::auth::NoGrants),
-            openai_tunnel_key: None,
         }
     }
 
@@ -1173,6 +1026,54 @@ mod tests {
                 .into_response();
 
                 assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            },
+        );
+    }
+
+    #[test]
+    fn all_unconnected_mcp_credentials_are_refused_without_fallback() {
+        run_isolated(
+            module_path!(),
+            "all_unconnected_mcp_credentials_are_refused_without_fallback",
+            || {
+                let root = tempfile::tempdir().expect("fixture");
+                let state = state_named(root.path(), "api");
+                let mut headers = axum::http::HeaderMap::new();
+                for credential in [
+                    None,
+                    Some("Bearer old-service-token"),
+                    Some("Bearer old-grant-token"),
+                    Some("Bearer old-oauth-jwt"),
+                ] {
+                    headers.remove(axum::http::header::AUTHORIZATION);
+                    if let Some(value) = credential {
+                        headers.insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
+                    }
+                    let response = super::require_mcp_auth(&state, &headers).unwrap_err();
+                    assert_eq!(
+                        response.status(),
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    );
+                    assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+                }
+                headers.insert(
+                    gld_core::hub::OPENAI_TUNNEL_HEADER,
+                    "old-tunnel-key".parse().unwrap(),
+                );
+                assert_eq!(
+                    super::require_mcp_auth(&state, &headers)
+                        .unwrap_err()
+                        .status(),
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                );
+                let response =
+                    super::require_url_auth(&state, &headers, "old-url-secret").unwrap_err();
+                let body =
+                    gld_core::async_rt::block_on(axum::body::to_bytes(response.into_body(), 4096))
+                        .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["error"], "AUTH_NOT_READY");
+                assert!(!String::from_utf8_lossy(&body).contains("old-url-secret"));
             },
         );
     }

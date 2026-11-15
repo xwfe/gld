@@ -1,6 +1,5 @@
 pub mod agent;
 pub(crate) mod args;
-pub mod caller;
 mod command_paths;
 pub mod command_spec;
 pub mod context;
@@ -28,7 +27,6 @@ pub mod workspace;
 pub mod workspace_runtime;
 pub mod write_class;
 
-pub use caller::Caller;
 pub use context::{SharedToolContext, ToolContext};
 /// 唯一工具执行入口；MCP 与 Actions 必须调用此函数，不得分叉实现。
 /// 网络进来的调用走 [`call_tool_as`]，把连接的主体一起带上。

@@ -30,7 +30,10 @@ pub fn runtime_for(root: &Path) -> Arc<WorkspaceRuntime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::caller::Caller;
+    use gld_policy::{
+        AuthContext, CallerId, CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject,
+        ProjectScope,
+    };
     use tempfile::tempdir;
 
     /// hub 的场景：同一个目录经不同入口进来是不同的 `ToolContext`（配置指纹
@@ -97,12 +100,23 @@ mod tests {
         ));
     }
 
-    fn caller(client_id: &str) -> Caller {
-        Caller::from_auth(&crate::auth::AuthContext::new(
-            crate::auth::Principal::OAuthClient {
+    fn caller(client_id: &str) -> CallerId {
+        AuthContext::verified_mcp(
+            "hub",
+            Grant {
+                id: "grant-a".into(),
+                name: "test".into(),
+                scope: ProjectScope::AllProjects,
+                permissions: GrantPermissions::default(),
+                status: GrantStatus::Active,
+            },
+            CredentialKind::OAuth,
+            McpSubject::OAuth {
                 client_id: client_id.into(),
             },
-            "hub",
-        ))
+        )
+        .expect("verified test identity")
+        .id()
+        .clone()
     }
 }

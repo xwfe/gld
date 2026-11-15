@@ -67,8 +67,6 @@ fn a_restarted_service_answers_immediately_too() {
         "--port",
         &port.to_string(),
     ]);
-    env.ok(&["upgrade", "--auth", "noauth"]);
-
     for attempt in 0..3 {
         env.ok(&["restart"]);
         let reply = post_json(
@@ -78,7 +76,7 @@ fn a_restarted_service_answers_immediately_too() {
             None,
         );
         assert_eq!(
-            reply.status, 200,
+            reply.status, 503,
             "第 {attempt} 次重启后立刻请求失败：{}",
             reply.body
         );

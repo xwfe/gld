@@ -1,7 +1,7 @@
 //! 到期只表示可以检查，不表示可以删。复用 finish 的锁、资源核对和产物验证。
 
 use super::*;
-use crate::tools::Caller;
+use gld_policy::CallerId;
 use serde_json::{json, Value};
 
 impl Operation {
@@ -28,7 +28,7 @@ impl Store {
         owner: &str,
         cursor: Option<&str>,
         limit: usize,
-        caller: Option<&Caller>,
+        caller: Option<&CallerId>,
     ) -> Result<Value> {
         self.sweep_at(owner, cursor, limit, caller, now_ms())
     }
@@ -38,7 +38,7 @@ impl Store {
         owner: &str,
         cursor: Option<&str>,
         limit: usize,
-        caller: Option<&Caller>,
+        caller: Option<&CallerId>,
         now: u64,
     ) -> Result<Value> {
         if !(1..=16).contains(&limit) || cursor.is_some_and(|id| !is_id(id)) {
@@ -81,7 +81,7 @@ impl Store {
     pub(super) fn expire(
         &self,
         record: &Record,
-        caller: Option<&Caller>,
+        caller: Option<&CallerId>,
         now: u64,
     ) -> Result<bool> {
         let mut op = self.operation(&record.owner, &record.id)?;

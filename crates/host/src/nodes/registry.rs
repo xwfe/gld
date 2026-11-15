@@ -6,23 +6,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use gld_core::auth::{AuthContext, Principal};
-use gld_core::bridge::peer::PeerError;
+use gld_core::auth::AuthContext;
 use gld_core::bridge::session::Offered;
 use gld_core::hub::NodeBridge;
-use gld_core::nodes::config::{self, runs_commands, AuthenticatedMachine, NodeProject};
+use gld_core::nodes::config::{self, AuthenticatedMachine};
 use gld_core::nodes::hub_key::MessageSigner;
-use gld_core::nodes::identity::forwarded_meta;
-use gld_core::nodes::transport::HUB_CALL_TIMEOUT;
 use gld_core::nodes::NativeMember;
 use gld_core::tools::workspace::{tool_err, wrap_tool_result, WorkspaceError};
 
 use super::connection::{Connection, ConnectionError};
 
 const HANDSHAKE: Duration = Duration::from_secs(10);
+const AUTH_NOT_READY_MESSAGE: &str =
+    "Native node authorization forwarding is not connected; no workspace tool was called.";
 
 struct Entry {
     generation: String,
@@ -120,123 +119,12 @@ impl Nodes {
 
     pub fn call(
         &self,
-        auth: &AuthContext,
-        member: &NativeMember,
-        name: &str,
-        mut args: Value,
+        _auth: &AuthContext,
+        _member: &NativeMember,
+        _name: &str,
+        _args: Value,
     ) -> Value {
-        if !auth.is_authenticated() || auth.grant().is_some() {
-            return failure(
-                "NODE_AUTH_REQUIRED",
-                "Native nodes require full service authentication.",
-                false,
-            );
-        }
-        let (hub_id, machines) = match config::snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
-                return failure(
-                    "NODE_REGISTRY_UNAVAILABLE",
-                    "Cannot read the node registry.",
-                    true,
-                )
-            }
-        };
-        if machines
-            .iter()
-            .any(|m| m.id == member.machine_id && m.revoked)
-        {
-            return failure(
-                "MACHINE_REVOKED",
-                "This machine credential was revoked; nothing was sent.",
-                false,
-            );
-        }
-        let live = {
-            let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-            entries.get(&member.machine_id).and_then(|entry| {
-                let registered = machines.iter().any(|m| {
-                    m.id == member.machine_id
-                        && !m.revoked
-                        && m.credential_sha256 == entry.authenticated.machine.credential_sha256
-                        && m.credential_generation
-                            == entry.authenticated.machine.credential_generation
-                        && m.projects
-                            .iter()
-                            .any(|p| p.id == member.remote_workspace_id)
-                });
-                if entry.retired || entry.authenticated.hub_id != hub_id || !registered {
-                    return None;
-                }
-                Some((entry.connection.clone()?, entry.offered.clone()?))
-            })
-        };
-        let Some((connection, offered)) = live else {
-            return failure(
-                "MACHINE_OFFLINE",
-                "The selected machine is offline; nothing was sent.",
-                true,
-            );
-        };
-        if connection.is_closed() {
-            return failure(
-                "MACHINE_OFFLINE",
-                "The selected machine is offline; nothing was sent.",
-                true,
-            );
-        }
-        // 权限以目标机为准，这里只是早点说清楚怎么开：否则调用方只看到“节点没有这个工具”。
-        if runs_commands(name) && member.tool_profile != "commands" {
-            return failure(
-                "NODE_COMMANDS_NOT_ALLOWED",
-                "The operator of this machine has not enabled commands for this project; nothing was sent. They enable it on that machine with `gld node shares --run`.",
-                false,
-            );
-        }
-        if matches!(name, "apply_patch" | "patch_check") && member.read_only() {
-            return failure(
-                "NODE_PROJECT_READ_ONLY",
-                "This project is shared read-only; nothing was sent. The operator of this machine allows file writes with `gld node shares --write`.",
-                false,
-            );
-        }
-        let Some(arguments) = args.as_object_mut() else {
-            return failure(
-                "INVALID_ARGUMENT",
-                "Tool arguments must be an object.",
-                false,
-            );
-        };
-        arguments.insert("workspace".into(), json!(member.remote_workspace_id));
-        if let Err(error) = offered.check(name, &args) {
-            return peer_failure(error);
-        }
-        let meta = match forwarded_meta(auth, &hub_id) {
-            Ok(meta) => meta,
-            Err(_) => {
-                return failure(
-                    "NODE_AUTH_REQUIRED",
-                    "Native nodes require full service authentication.",
-                    false,
-                )
-            }
-        };
-        match connection
-            .with_peer(|peer| peer.call_tool_with_meta(name, args, meta, HUB_CALL_TIMEOUT))
-        {
-            Ok(result) => tag_result(result, member),
-            Err(ConnectionError::Busy) => failure(
-                "MACHINE_BUSY",
-                "This machine connection stayed busy for 5 seconds; this request was not sent. Another call is still running: retry later, or use a smaller yield_time_ms for long commands.",
-                true,
-            ),
-            Err(ConnectionError::Closed) => failure(
-                "MACHINE_OFFLINE",
-                "The selected machine is offline; nothing was sent.",
-                true,
-            ),
-            Err(ConnectionError::Peer(error)) => peer_failure(error),
-        }
+        failure("AUTH_NOT_READY", AUTH_NOT_READY_MESSAGE, false)
     }
 
     /// 持久凭据变更后收回失效连接。锁内读当前代次，避免较早的清理误关新连接。
@@ -331,43 +219,50 @@ impl Reservation {
 }
 
 impl Nodes {
+    fn validate_reservation(&self, machine_id: &str, generation: &str) -> Result<(), String> {
+        let authenticated = {
+            let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if self.stopped.load(Ordering::Acquire) {
+                return Err("HUB_STOPPING".into());
+            }
+            entries
+                .get(machine_id)
+                .filter(|entry| entry.generation == generation && !entry.retired)
+                .ok_or("NODE_CONNECTION_REPLACED")?
+                .authenticated
+                .clone()
+        };
+        if !config::is_current(&authenticated)? {
+            return Err("INVALID_NODE_CREDENTIALS".into());
+        }
+        Ok(())
+    }
+
     fn initialize(
         &self,
         machine_id: &str,
         generation: &str,
         connection: &Arc<Connection>,
     ) -> Result<(), String> {
-        let authenticated = {
-            let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-            entries
-                .get(machine_id)
-                .filter(|e| e.generation == generation && !e.retired)
-                .ok_or("node connection replaced")?
-                .authenticated
-                .clone()
-        };
-        let discovery = AuthContext::new(Principal::SharedSecret, "node-inventory");
-        let meta = forwarded_meta(&discovery, &authenticated.hub_id)?;
-        let (offered, projects) = connection
+        self.validate_reservation(machine_id, generation)?;
+        // Protocol negotiation needs no caller authority. Project discovery must wait for
+        // the trusted forwarding contract; it must never impersonate a local operator.
+        connection
             .with_peer(|peer| {
                 peer.initialize("gld-hub", HANDSHAKE)?;
-                let tools = peer.list_tools(HANDSHAKE)?;
-                let offered = Offered::from_handshake(&tools, peer.server_info());
-                offered.check("list_workspaces", &json!({}))?;
-                let result =
-                    peer.call_tool_with_meta("list_workspaces", json!({}), meta, HANDSHAKE)?;
-                let projects = parse_projects(&result).map_err(PeerError::Handshake)?;
-                Ok((offered, projects))
+                peer.list_tools(HANDSHAKE)?;
+                Ok(())
             })
-            .map_err(|_| "node initialization failed".to_string())?;
-        config::update_projects(&authenticated, &projects)?;
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = entries
-            .get_mut(machine_id)
-            .filter(|e| e.generation == generation && !e.retired)
-            .ok_or("node connection replaced")?;
-        entry.offered = Some(offered);
-        Ok(())
+            .map_err(|error| {
+                match error {
+                    ConnectionError::Busy => "NODE_PROTOCOL_BUSY",
+                    ConnectionError::Closed => "NODE_CONNECTION_CLOSED",
+                    ConnectionError::Peer(_) => "NODE_PROTOCOL_HANDSHAKE_FAILED",
+                }
+                .to_string()
+            })?;
+        self.validate_reservation(machine_id, generation)?;
+        Err(format!("AUTH_NOT_READY: {AUTH_NOT_READY_MESSAGE}"))
     }
 }
 
@@ -385,87 +280,10 @@ impl Drop for Reservation {
     }
 }
 
-fn parse_projects(result: &Value) -> Result<Vec<NodeProject>, String> {
-    if result["isError"] == true || result["structuredContent"]["ok"] != true {
-        return Err("node project discovery failed".into());
-    }
-    let items = result["structuredContent"]["workspaces"]
-        .as_array()
-        .filter(|items| items.len() <= 256)
-        .ok_or("invalid node project list")?;
-    let mut projects = Vec::new();
-    for item in items {
-        if item["kind"] != "local" {
-            return Err("a node may share only its own local projects".into());
-        }
-        let id = item["id"].as_str().ok_or("node project id missing")?;
-        let name = item["name"].as_str().ok_or("node project name missing")?;
-        if id.len() != 32
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || name.is_empty()
-            || name.len() > 256
-            || name.chars().any(char::is_control)
-            || projects.iter().any(|p: &NodeProject| p.id == id)
-        {
-            return Err("invalid or duplicate node project".into());
-        }
-        projects.push(NodeProject {
-            id: id.into(),
-            name: name.into(),
-            // 老节点没有显式授权字段；其本机 profile 不能当成远端写或命令权限。
-            tool_profile: match (item.get("read_only"), item.get("commands")) {
-                (None | Some(Value::Bool(true)), None | Some(Value::Bool(false))) => "read-only",
-                (Some(Value::Bool(false)), None | Some(Value::Bool(false))) => "file-write",
-                (Some(Value::Bool(false)), Some(Value::Bool(true))) => "commands",
-                _ => return Err("invalid node project permission flags".into()),
-            }
-            .into(),
-        });
-    }
-    Ok(projects)
-}
-
 fn workspace_handle(machine_id: &str, workspace_id: &str) -> String {
     let encoded = serde_json::to_vec(&(machine_id, workspace_id)).expect("string pair");
     let digest = format!("{:x}", Sha256::digest(encoded));
     format!("n_{}", &digest[..32])
-}
-
-fn tag_result(mut result: Value, member: &NativeMember) -> Value {
-    let old = result.get("structuredContent").cloned();
-    if let Some(structured) = result
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    {
-        structured.insert("hub_workspace".into(), member.listed());
-    }
-    // 只同步 structuredContent 的等值 JSON 文本副本，不重写远端正文或图片。
-    let updated = result.get("structuredContent").cloned();
-    if let (Some(old), Some(updated), Some(content)) = (
-        old,
-        updated,
-        result.get_mut("content").and_then(Value::as_array_mut),
-    ) {
-        for block in content {
-            if block["type"] == "text"
-                && block["text"].as_str().is_some_and(|text| {
-                    serde_json::from_str::<Value>(text).is_ok_and(|value| value == old)
-                })
-            {
-                block["text"] = json!(updated.to_string());
-            }
-        }
-    }
-    if let Some(object) = result.as_object_mut() {
-        let meta = object.entry("_meta").or_insert_with(|| json!({}));
-        if !meta.is_object() {
-            *meta = json!({});
-        }
-        meta["gld/workspace"] = member.listed();
-    }
-    result
 }
 
 fn failure(code: &'static str, message: &str, retryable: bool) -> Value {
@@ -477,25 +295,15 @@ fn failure(code: &'static str, message: &str, retryable: bool) -> Value {
     }))
 }
 
-fn peer_failure(error: PeerError) -> Value {
-    match error {
-        PeerError::Unsupported { argument: Some(_), .. } =>
-            failure("NODE_ARGUMENT_UNSUPPORTED", "This node does not accept one of the supplied arguments; nothing was sent.", false),
-        PeerError::Unsupported { .. } =>
-            failure("NODE_TOOL_UNSUPPORTED", "This node does not offer this tool; nothing was sent.", false),
-        PeerError::Remote { .. } =>
-            failure("NODE_REQUEST_REJECTED", "The node rejected the JSON-RPC request.", false),
-        PeerError::Write(error) if error.kind() == std::io::ErrorKind::InvalidInput =>
-            failure("NODE_REQUEST_TOO_LARGE", "The request exceeds the node message limit; nothing was sent.", false),
-        PeerError::Write(error) if error.kind() == std::io::ErrorKind::NotConnected =>
-            failure("MACHINE_OFFLINE", "The selected machine is offline; nothing was sent.", true),
-        _ => failure("NODE_OUTCOME_UNKNOWN", "The connection failed before a valid reply arrived. The outcome is unknown; the request was not replayed.", false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::test_home::run_isolated;
+    use gld_core::auth::{
+        ActionsSubject, CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject,
+        ProjectScope,
+    };
+    use serde_json::json;
 
     #[test]
     fn workspace_handles_are_stable_and_machine_scoped() {
@@ -512,72 +320,122 @@ mod tests {
     }
 
     #[test]
-    fn discovery_rejects_duplicate_or_nonlocal_projects() {
-        let local = json!({"id":"a".repeat(32),"name":"api","kind":"local"});
-        let wrap = |items: Value| json!({"structuredContent":{"ok":true,"workspaces":items}});
-        assert!(parse_projects(&wrap(json!([local.clone()]))).is_ok());
-        assert!(parse_projects(&wrap(json!([local.clone(), local]))).is_err());
-        assert!(parse_projects(&wrap(
-            json!([{"id":"b".repeat(32),"name":"api","kind":"node"}])
-        ))
-        .is_err());
-        assert!(parse_projects(&json!({"isError":true})).is_err());
-    }
-
-    #[test]
-    fn discovery_defaults_legacy_profiles_to_read_only_and_requires_boolean_permission() {
-        let mut local =
-            json!({"id":"a".repeat(32),"name":"api","kind":"local","tool_profile":"advanced"});
-        let discover = |item: &Value| {
-            parse_projects(&json!({"structuredContent":{"ok":true,"workspaces":[item]}}))
+    fn no_identity_can_use_the_retired_node_forwarding_path() {
+        let nodes = Nodes::new();
+        let member = NativeMember {
+            id: "n_project".into(),
+            name: "node/project".into(),
+            machine_id: "machine".into(),
+            remote_workspace_id: "project".into(),
+            online: true,
+            revoked: false,
+            tool_profile: "commands".into(),
         };
-        assert_eq!(discover(&local).unwrap()[0].tool_profile, "read-only");
-        local["read_only"] = json!(false);
-        assert_eq!(discover(&local).unwrap()[0].tool_profile, "file-write");
-        local["commands"] = json!(true);
-        assert_eq!(discover(&local).unwrap()[0].tool_profile, "commands");
-        local["read_only"] = json!(true);
-        assert!(discover(&local).is_err(), "commands without file writes");
-        local["commands"] = json!("true");
-        assert!(discover(&local).is_err());
-        local["commands"] = json!(false);
-        assert_eq!(discover(&local).unwrap()[0].tool_profile, "read-only");
-        local.as_object_mut().unwrap().remove("commands");
-        for invalid in [json!("false"), json!(0), Value::Null, json!({})] {
-            local["read_only"] = invalid;
-            assert!(discover(&local).is_err());
+        let grant = Grant {
+            id: "grant-id".into(),
+            name: "fixture".into(),
+            scope: ProjectScope::AllProjects,
+            permissions: GrantPermissions {
+                write: true,
+                ..GrantPermissions::default()
+            },
+            status: GrantStatus::Active,
+        };
+        for auth in [
+            AuthContext::local_operator(),
+            AuthContext::verified_mcp(
+                "hub",
+                grant.clone(),
+                CredentialKind::Token,
+                McpSubject::Token,
+            )
+            .unwrap(),
+            AuthContext::verified_mcp(
+                "hub",
+                grant.clone(),
+                CredentialKind::OAuth,
+                McpSubject::OAuth {
+                    client_id: "client".into(),
+                },
+            )
+            .unwrap(),
+            AuthContext::verified_mcp("hub", grant, CredentialKind::Url, McpSubject::Url).unwrap(),
+            AuthContext::actions("actions", "project", ActionsSubject::ApiKey, true).unwrap(),
+            AuthContext::actions("actions", "project", ActionsSubject::Anonymous, true).unwrap(),
+        ] {
+            let result = nodes.call(&auth, &member, "exec_command", json!({"cmd": "unused"}));
+            assert_eq!(
+                result["structuredContent"]["error"]["code"],
+                "AUTH_NOT_READY"
+            );
+            assert_eq!(result["isError"], true);
         }
     }
 
     #[test]
-    fn routed_result_keeps_images_and_errors_and_replaces_only_the_workspace_tag() {
-        let member = NativeMember {
-            id: "n_hub".into(),
-            name: "machine/api".into(),
-            machine_id: "machine".into(),
-            remote_workspace_id: "target".into(),
-            online: true,
-            revoked: false,
-            tool_profile: "read-only".into(),
-        };
-        let structured =
-            json!({"ok":false,"hub_workspace":{"id":"target"},"error":{"code":"OUTSIDE"}});
-        let image = json!({"type":"image","data":"eA==","mimeType":"image/png"});
-        let result = tag_result(
-            json!({
-                "structuredContent":structured,
-                "content":[{"type":"text","text":structured.to_string()},image],
-                "isError":true,
-            }),
-            &member,
-        );
-        assert_eq!(result["structuredContent"]["hub_workspace"]["id"], "n_hub");
-        assert_eq!(result["structuredContent"]["error"]["code"], "OUTSIDE");
-        assert_eq!(result["isError"], true);
-        assert_eq!(result["content"][1], image);
-        assert_eq!(
-            serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap(),
-            result["structuredContent"]
+    fn readiness_rechecks_current_credentials_and_reservation_generation() {
+        run_isolated(
+            module_path!(),
+            "readiness_rechecks_current_credentials_and_reservation_generation",
+            || {
+                let machine = "22222222222222222222222222222222";
+                let first_token = "synthetic-node-credential-0000000000000001";
+                let second_token = "synthetic-node-credential-0000000000000002";
+                config::register_machine("test-node", Some(machine), first_token).unwrap();
+                let nodes = Arc::new(Nodes::new());
+                let first = nodes
+                    .reserve(config::authenticate(machine, first_token).unwrap())
+                    .unwrap();
+                assert!(nodes
+                    .validate_reservation(machine, &first.generation)
+                    .is_ok());
+                assert_eq!(
+                    nodes
+                        .validate_reservation(machine, "different-generation")
+                        .unwrap_err(),
+                    "NODE_CONNECTION_REPLACED"
+                );
+
+                config::rotate_credential(machine, second_token).unwrap();
+                assert_eq!(
+                    nodes
+                        .validate_reservation(machine, &first.generation)
+                        .unwrap_err(),
+                    "INVALID_NODE_CREDENTIALS"
+                );
+                nodes.close_stale(machine).unwrap();
+                let fresh = nodes
+                    .reserve(config::authenticate(machine, second_token).unwrap())
+                    .unwrap();
+                let current_generation = fresh.generation.clone();
+                drop(first);
+                assert!(nodes
+                    .validate_reservation(machine, &current_generation)
+                    .is_ok());
+
+                config::revoke_machine(machine).unwrap();
+                assert_eq!(
+                    nodes
+                        .validate_reservation(machine, &current_generation)
+                        .unwrap_err(),
+                    "INVALID_NODE_CREDENTIALS"
+                );
+                nodes.close_stale(machine).unwrap();
+                assert_eq!(
+                    nodes
+                        .validate_reservation(machine, &current_generation)
+                        .unwrap_err(),
+                    "NODE_CONNECTION_REPLACED"
+                );
+                nodes.close_all();
+                assert_eq!(
+                    nodes
+                        .validate_reservation(machine, &current_generation)
+                        .unwrap_err(),
+                    "HUB_STOPPING"
+                );
+                drop(fresh);
+            },
         );
     }
 }

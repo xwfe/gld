@@ -1,423 +1,312 @@
-//! ChatGPT 连接器接进来时走的那套 OAuth，从发现文档一路跑到 tools/call。
-//!
-//! 这是服务认证的默认值，也就是绝大多数人第一次接客户端时走的路径，
-//! 而它由「发现文档 → 动态注册 → 授权页 → PKCE 换 token → 带 token 调用」
-//! 五段拼成，任何一段的字段名写错，客户端那边只会显示一句
-//! “无法连接到 MCP 服务器”，从日志里分不出断在哪一段。
-//!
-//! 所以这里不 mock 任何一段：起真的服务，发真的 HTTP，自己算 PKCE。
+//! D18-A keeps OAuth discovery and registration available while MCP authorization is pending.
+//! Positive MCP grant issuance, refresh, project scope and connector restart are D18-B acceptance.
+//! Actions remains a separate protocol and exercises the real PKCE/token/tool path below.
 
 mod common;
 
 use common::env::{free_port, Env};
-use common::http::{get, post_form, post_json, query_param, urlencode};
-use common::oauth::{authorize, connect_a_connector, endpoint_path, pkce, REDIRECT};
+use common::http::{get, post_form, post_json, query_param, urlencode, Reply};
+use common::oauth::{authorize, endpoint_path, pkce, REDIRECT};
+use serde_json::{json, Value};
 
-/// 重启服务不能让已经装好的连接器掉授权。
-///
-/// 这是最常撞上的一条：`gld restart`、改个配置触发的自动重启、重启电脑，
-/// 都会重建 OAuth 运行时。动态注册的客户端只放内存的话，重启后客户端拿着
-/// 没过期的 refresh_token 来续会被判 invalid_client，用户那边表现成
-/// "配置没动过，连接器却突然要重连"，而且只能删掉重建。
-#[test]
-fn connector_survives_a_service_restart() {
-    let env = Env::new();
-    env.write("hello.txt", "restart-marker\n");
+fn start_mcp(env: &Env) -> u16 {
+    env.write("hello.txt", "oauth-project-marker\n");
+    env.ok(&["add", ".", "--name", "oauth"]);
     let port = free_port();
-    env.ok(&["add", ".", "--name", "restart"]);
     env.ok(&["start", "--port", &port.to_string()]);
+    port
+}
 
-    let password = env.service_secret("oauth_password");
-    let (client_id, access, refresh, token_path) = connect_a_connector(port, &password);
-
-    env.ok(&["stop"]);
-    env.ok(&["start"]);
-
-    // 1. 重启前发的 access token 直接还能用，用户完全无感。
-    let after_restart = post_json(
+fn register(port: u16, metadata: &Value) -> String {
+    let reply = post_json(
         port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
-        Some(&access),
+        &endpoint_path(metadata, "registration_endpoint"),
+        &json!({
+            "redirect_uris":[REDIRECT],
+            "client_name":"integration-test",
+            "token_endpoint_auth_method":"none",
+            "grant_types":["authorization_code","refresh_token"],
+            "response_types":["code"]
+        })
+        .to_string(),
+        None,
     );
-    assert_eq!(
-        after_restart.status, 200,
-        "重启前发的 access token 重启后应当照常可用：{}",
-        after_restart.body
-    );
-
-    // 2. 到期续命也要能续——这一步才是以前真正断掉的地方。
-    let refreshed = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &refresh),
-            ("client_id", &client_id),
-        ],
-    );
-    assert_eq!(
-        refreshed.status, 200,
-        "重启后刷新令牌失败，连接器会要求重新授权：{}",
-        refreshed.body
-    );
-    let renewed = refreshed.json()["access_token"]
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    let registered = reply.json();
+    assert!(registered.get("client_secret").is_none());
+    registered["client_id"]
         .as_str()
-        .expect("续期要返回 access_token")
-        .to_string();
-    let with_renewed = post_json(
+        .expect("registered client ID")
+        .to_string()
+}
+
+fn exchange(port: u16, path: &str, client: &str, code: &str, verifier: &str) -> Reply {
+    post_form(
         port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"restart","path":"hello.txt"}}}"#,
-        Some(&renewed),
-    );
-    assert!(
-        with_renewed.body.contains("restart-marker"),
-        "续期后的 token 应当能正常干活：{}",
-        with_renewed.body
-    );
+        path,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", REDIRECT),
+            ("client_id", client),
+            ("code_verifier", verifier),
+        ],
+    )
+}
 
-    // 3. 重新授权这条路也要通：注册表还在，老 client_id 直接能进授权页，
-    //    用户只要再输一次口令，不用把连接器删了重建。
-    let metadata = get(port, "/.well-known/oauth-authorization-server").json();
-    let authorize_path = endpoint_path(&metadata, "authorization_endpoint");
-    let (_, challenge) = pkce();
-    let reauthorized = authorize(port, &authorize_path, &client_id, &challenge, &password);
-    let location = reauthorized
-        .header("location")
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        !query_param(&location, "code").is_empty(),
-        "重启后老 client_id 应当还能走授权页拿 code：{location}"
-    );
-
-    env.ok(&["stop"]);
+fn assert_pending(reply: &Reply) {
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert_eq!(reply.json()["error"], "AUTH_NOT_READY");
+    assert_eq!(reply.header("cache-control"), Some("no-store"));
+    assert!(reply.header("location").is_none());
+    assert!(reply.json().get("access_token").is_none());
+    assert!(reply.json().get("refresh_token").is_none());
 }
 
 #[test]
-fn chatgpt_connector_oauth_flow_works_end_to_end() {
+fn mcp_discovery_and_durable_registration_survive_a_restart_without_authorizing() {
     let env = Env::new();
-    env.write("hello.txt", "oauth-e2e-marker\n");
-    let port = free_port();
-    env.ok(&["add", ".", "--name", "oauth"]);
-    // 不设认证：默认就是 oauth，顺带确认默认值没被改掉。
-    assert_eq!(
-        env.json(&["--json", "ls"])["service"]["config"]["authType"],
-        "oauth",
-        "服务的默认认证方式应当是 oauth"
-    );
-    env.ok(&["start", "--port", &port.to_string()]);
+    let port = start_mcp(&env);
+    let discovery = get(port, "/mcp");
+    assert_eq!(discovery.status, 200);
+    assert_eq!(discovery.json()["protocolVersion"], "2025-06-18");
 
-    let password = env.service_secret("oauth_password");
-
-    // 1. 没凭据的请求必须被拒，并且要告诉客户端去哪儿拿凭据。
-    //    少了 WWW-Authenticate 里的 resource_metadata，ChatGPT 不会发起授权，
-    //    只会直接报连接失败。
-    let denied = post_json(
-        port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
-        None,
-    );
-    assert_eq!(denied.status, 401);
-    let challenge_header = denied
-        .header("www-authenticate")
-        .expect("401 必须带 WWW-Authenticate");
-    assert!(
-        challenge_header.contains("resource_metadata"),
-        "WWW-Authenticate 要指向 protected-resource 元数据，实际：{challenge_header}"
-    );
-
-    // 2. 两份发现文档。
     let protected = get(port, "/.well-known/oauth-protected-resource");
     assert_eq!(protected.status, 200);
-    assert!(
-        protected.json()["authorization_servers"]
-            .as_array()
-            .is_some_and(|servers| !servers.is_empty()),
-        "protected-resource 要指出授权服务器：{}",
-        protected.body
+    assert!(!protected.json()["authorization_servers"]
+        .as_array()
+        .expect("authorization servers")
+        .is_empty());
+    assert_eq!(
+        get(port, "/.well-known/oauth-protected-resource/mcp").json(),
+        protected.json()
     );
 
     let metadata = get(port, "/.well-known/oauth-authorization-server");
     assert_eq!(metadata.status, 200);
     let metadata = metadata.json();
-    assert!(
-        metadata["code_challenge_methods_supported"]
-            .as_array()
-            .is_some_and(|methods| methods.iter().any(|m| m == "S256")),
-        "必须声明支持 S256，ChatGPT 只用 PKCE：{metadata}"
-    );
-    let register_path = endpoint_path(&metadata, "registration_endpoint");
-    let authorize_path = endpoint_path(&metadata, "authorization_endpoint");
-    let token_path = endpoint_path(&metadata, "token_endpoint");
-
-    // 3. 动态注册（DCR）：ChatGPT 不会让人手填 client_id，它自己注册。
-    let registered = post_json(
+    assert!(metadata["code_challenge_methods_supported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|method| method == "S256"));
+    let client_id = register(port, &metadata);
+    let invalid = post_json(
         port,
-        &register_path,
-        &serde_json::json!({
-            "redirect_uris": [REDIRECT],
-            "client_name": "integration-test",
-            "token_endpoint_auth_method": "none",
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
+        &endpoint_path(&metadata, "registration_endpoint"),
+        &json!({
+            "redirect_uris":["not-a-url"]
         })
         .to_string(),
         None,
     );
-    assert!(
-        matches!(registered.status, 200 | 201),
-        "动态注册失败：{} {}",
-        registered.status,
-        registered.body
-    );
-    let client_id = registered.json()["client_id"]
-        .as_str()
-        .expect("注册要返回 client_id")
-        .to_string();
+    assert_eq!(invalid.status, 400);
+    assert_eq!(invalid.json()["error"], "invalid_redirect_uri");
 
-    // 注册只接受声明过的回调地址，否则任何人拿到地址都能把 code 引走。
-    let evil = post_json(
+    let registry = env.home.path().join("data/oauth-clients/hub.json");
+    let before = std::fs::read(&registry).expect("isolated registered client");
+    assert!(String::from_utf8_lossy(&before).contains(&client_id));
+    env.ok(&["stop"]);
+    env.ok(&["start"]);
+    assert_eq!(
+        std::fs::read(&registry).unwrap(),
+        before,
+        "restart replaced the registration"
+    );
+    assert_eq!(
+        get(port, "/.well-known/oauth-authorization-server").json(),
+        metadata
+    );
+
+    let (_, challenge) = pkce();
+    let page = get(port, &format!(
+        "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&state=test-state",
+        endpoint_path(&metadata,"authorization_endpoint"), urlencode(&client_id), urlencode(REDIRECT)
+    ));
+    assert_pending(&page);
+    assert_pending(&post_json(
         port,
-        &register_path,
-        &serde_json::json!({ "redirect_uris": ["not-a-url"] }).to_string(),
+        "/mcp",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
         None,
-    );
-    assert_eq!(evil.status, 400, "非法 redirect_uri 应当被拒");
+    ));
+}
 
-    // 4. 授权页：口令错了不能下发 code。
+#[test]
+fn old_service_password_code_and_tokens_cannot_reenter_mcp_authorization() {
+    let env = Env::new();
+    let port = start_mcp(&env);
+    let metadata = get(port, "/.well-known/oauth-authorization-server").json();
+    let client_id = register(port, &metadata);
+    let authorize_path = endpoint_path(&metadata, "authorization_endpoint");
+    let token_path = endpoint_path(&metadata, "token_endpoint");
+    let password = env.service_secret("oauth_password");
     let (verifier, challenge) = pkce();
-    let page = get(
+    for offered in [
+        password.as_str(),
+        "synthetic-old-grant-password",
+        "wrong-password",
+    ] {
+        let response = authorize(port, &authorize_path, &client_id, &challenge, offered);
+        assert_pending(&response);
+        assert!(!response.body.contains(offered));
+    }
+    assert_pending(&exchange(
         port,
-        &format!(
-            "{authorize_path}?response_type=code&client_id={}&redirect_uri={}\
-             &code_challenge={challenge}&code_challenge_method=S256&state=test-state",
-            urlencode(&client_id),
-            urlencode(REDIRECT)
-        ),
+        &token_path,
+        &client_id,
+        "synthetic-old-code",
+        &verifier,
+    ));
+    assert_pending(&post_form(
+        port,
+        &token_path,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", "synthetic-old-refresh"),
+            ("client_id", &client_id),
+        ],
+    ));
+    let rejected = post_json(port, "/mcp", &json!({
+        "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"apply_patch","arguments":{
+                "workspace":"oauth",
+                "patch":"*** Begin Patch\n*** Add File: forbidden.txt\n+blocked\n*** End Patch\n"
+            }
+        }
+    }).to_string(), Some("synthetic-old-oauth-access"));
+    assert_pending(&rejected);
+    assert!(!env.project.path().join("forbidden.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(env.project.path().join("hello.txt")).unwrap(),
+        "oauth-project-marker\n"
     );
-    assert_eq!(page.status, 200);
-    assert!(page.body.contains("password"), "授权页要有口令输入框");
+}
 
-    let wrong = authorize(
+#[test]
+fn actions_oauth_pkce_refresh_and_tool_calls_remain_independent_of_mcp() {
+    let env = Env::new();
+    let mcp_port = start_mcp(&env);
+    let port = free_port();
+    env.ok(&["set", "oauth", &format!("actions.port={port}")]);
+    env.ok(&["set", "oauth", "actions.auth=oauth"]);
+    env.ok(&["start", "-s", "actions"]);
+    let password = env.json(&[
+        "--json",
+        "secret",
+        "ls",
+        "actions_oauth_password",
+        "--reveal",
+        "-w",
+        "oauth",
+    ])["value"]
+        .as_str()
+        .expect("isolated Actions password")
+        .to_string();
+    let metadata = get(port, "/.well-known/oauth-authorization-server").json();
+    let client_id = register(port, &metadata);
+    let authorize_path = endpoint_path(&metadata, "authorization_endpoint");
+    let token_path = endpoint_path(&metadata, "token_endpoint");
+    let (verifier, challenge) = pkce();
+    let page = get(port, &format!(
+        "{authorize_path}?response_type=code&client_id={}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&state=test-state",
+        urlencode(&client_id), urlencode(REDIRECT)
+    ));
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("password"));
+
+    let denied = authorize(
         port,
         &authorize_path,
         &client_id,
         &challenge,
         "wrong-password",
     );
-    assert!(
-        !wrong
-            .header("location")
-            .unwrap_or_default()
-            .contains("code="),
-        "口令错了不能下发 code：{:?}",
-        wrong.header("location")
-    );
+    assert_eq!(denied.status, 401);
+    assert!(denied.header("location").is_none());
 
-    // 5. 口令对了拿 code。
     let granted = authorize(port, &authorize_path, &client_id, &challenge, &password);
-    let location = granted
-        .header("location")
-        .expect("授权成功要重定向回 redirect_uri")
-        .to_string();
-    assert!(
-        location.starts_with(REDIRECT),
-        "必须重定向回注册时的地址：{location}"
+    assert_eq!(granted.status, 303);
+    let location = granted.header("location").expect("authorization redirect");
+    assert!(location.starts_with(REDIRECT));
+    assert_eq!(query_param(location, "state"), "test-state");
+    let consumed_code = query_param(location, "code");
+    let wrong_verifier = exchange(
+        port,
+        &token_path,
+        &client_id,
+        &consumed_code,
+        &"x".repeat(64),
     );
-    let code = query_param(&location, "code");
-    assert!(!code.is_empty(), "回调要带 code：{location}");
+    assert_eq!(wrong_verifier.status, 400);
+    assert_eq!(wrong_verifier.json()["error"], "invalid_grant");
     assert_eq!(
-        query_param(&location, "state"),
-        "test-state",
-        "state 要原样带回，客户端靠它防 CSRF"
+        exchange(port, &token_path, &client_id, &consumed_code, &verifier).status,
+        400
     );
 
-    // 6. PKCE：verifier 不对换不到 token，且这个 code 立刻作废（防止逐个试）。
-    //    code 是一次性的，所以这里得单独申请一个，不能复用上面那个。
-    let (verifier2, challenge2) = pkce();
-    let second = authorize(port, &authorize_path, &client_id, &challenge2, &password);
-    let code2 = query_param(second.header("location").unwrap_or_default(), "code");
-    let bad_verifier = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &code2),
-            ("redirect_uri", REDIRECT),
-            ("client_id", &client_id),
-            ("code_verifier", &"x".repeat(64)),
-        ],
-    );
-    assert!(
-        bad_verifier.status >= 400,
-        "错误的 code_verifier 必须被拒：{}",
-        bad_verifier.body
-    );
-    let retry = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &code2),
-            ("redirect_uri", REDIRECT),
-            ("client_id", &client_id),
-            ("code_verifier", &verifier2),
-        ],
-    );
-    assert!(
-        retry.status >= 400,
-        "verifier 试错一次后该 code 应当作废：{}",
-        retry.body
-    );
-
-    // 7. redirect_uri 与授权时不一致也必须被拒。
-    let (verifier3, challenge3) = pkce();
-    let third = authorize(port, &authorize_path, &client_id, &challenge3, &password);
-    let code3 = query_param(third.header("location").unwrap_or_default(), "code");
-    let mismatched = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &code3),
-            ("redirect_uri", "https://evil.example.com/cb"),
-            ("client_id", &client_id),
-            ("code_verifier", &verifier3),
-        ],
-    );
-    assert!(
-        mismatched.status >= 400,
-        "redirect_uri 对不上必须被拒：{}",
-        mismatched.body
-    );
-
-    // 8. 正常换 token。
-    let exchanged = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", REDIRECT),
-            ("client_id", &client_id),
-            ("code_verifier", &verifier),
-        ],
-    );
-    assert_eq!(exchanged.status, 200, "换 token 失败：{}", exchanged.body);
+    let fresh = authorize(port, &authorize_path, &client_id, &challenge, &password);
+    let code = query_param(fresh.header("location").unwrap(), "code");
+    let exchanged = exchange(port, &token_path, &client_id, &code, &verifier);
+    assert_eq!(exchanged.status, 200, "{}", exchanged.body);
     let tokens = exchanged.json();
-    let access = tokens["access_token"]
-        .as_str()
-        .expect("access_token")
-        .to_string();
-    let refresh = tokens["refresh_token"]
-        .as_str()
-        .expect("refresh_token")
-        .to_string();
-
-    // 同一个 code 不能用第二次。
-    let replay = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", REDIRECT),
-            ("client_id", &client_id),
-            ("code_verifier", &verifier),
-        ],
-    );
-    assert!(replay.status >= 400, "code 重放必须被拒：{}", replay.body);
-
-    // 9. 拿着 token 真的把 MCP 用起来：握手 → 列工具 → 读文件。
-    let initialized = post_json(
-        port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#,
-        Some(&access),
-    );
+    let access = tokens["access_token"].as_str().unwrap();
+    let refresh = tokens["refresh_token"].as_str().unwrap();
     assert_eq!(
-        initialized.status, 200,
-        "initialize 失败：{}",
-        initialized.body
+        exchange(port, &token_path, &client_id, &code, &verifier).status,
+        400
     );
-    assert!(
-        initialized.json()["result"]["capabilities"]["tools"].is_object(),
-        "握手要声明 tools 能力：{}",
-        initialized.body
-    );
-
-    let listed = post_json(
-        port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
-        Some(&access),
-    );
-    assert_eq!(listed.status, 200);
-    let tool_names: Vec<String> = listed.json()["result"]["tools"]
-        .as_array()
-        .expect("tools 数组")
-        .iter()
-        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
-        .collect();
-    assert!(
-        tool_names.iter().any(|name| name == "read_file"),
-        "工具清单里应当有 read_file：{tool_names:?}"
-    );
-
     let called = post_json(
         port,
+        "/actions/read_file",
+        r#"{"path":"hello.txt"}"#,
+        Some(access),
+    );
+    assert_eq!(called.status, 200, "{}", called.body);
+    assert!(called.body.contains("oauth-project-marker"));
+    assert_eq!(
+        post_json(
+            port,
+            "/actions/read_file",
+            r#"{"path":"hello.txt"}"#,
+            Some(refresh)
+        )
+        .status,
+        401
+    );
+    assert_pending(&post_json(
+        mcp_port,
         "/mcp",
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"oauth","path":"hello.txt"}}}"#,
-        Some(&access),
-    );
-    assert_eq!(called.status, 200);
-    assert!(
-        called.body.contains("oauth-e2e-marker"),
-        "read_file 应当读到工作区里的文件：{}",
-        called.body
-    );
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
+        Some(access),
+    ));
 
-    // 10. refresh 续期后新 token 可用；refresh_token 本身不能当凭据用。
-    let refreshed = post_form(
+    env.ok(&["restart", "-s", "actions"]);
+    let after_restart = post_json(
+        port,
+        "/actions/read_file",
+        r#"{"path":"hello.txt"}"#,
+        Some(access),
+    );
+    assert_eq!(after_restart.status, 200, "{}", after_restart.body);
+    let renewed = post_form(
         port,
         &token_path,
         &[
             ("grant_type", "refresh_token"),
-            ("refresh_token", &refresh),
+            ("refresh_token", refresh),
             ("client_id", &client_id),
         ],
     );
-    assert_eq!(refreshed.status, 200, "refresh 失败：{}", refreshed.body);
-    let renewed = refreshed.json()["access_token"]
-        .as_str()
-        .expect("续期要返回 access_token")
-        .to_string();
-    let with_renewed = post_json(
+    assert_eq!(renewed.status, 200, "{}", renewed.body);
+    let renewed_body = renewed.json();
+    let next_access = renewed_body["access_token"].as_str().unwrap();
+    let read = post_json(
         port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#,
-        Some(&renewed),
+        "/actions/read_file",
+        r#"{"path":"hello.txt"}"#,
+        Some(next_access),
     );
-    assert_eq!(with_renewed.status, 200, "续期后的 token 应当可用");
-
-    let as_access = post_json(
-        port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#,
-        Some(&refresh),
-    );
-    assert_eq!(as_access.status, 401, "refresh_token 不能当访问凭据");
-
-    let forged = post_json(
-        port,
-        "/mcp",
-        r#"{"jsonrpc":"2.0","id":6,"method":"tools/list"}"#,
-        Some("not-a-real-token"),
-    );
-    assert_eq!(forged.status, 401, "伪造的 token 必须被拒");
-
-    env.ok(&["stop"]);
+    assert_eq!(read.status, 200, "{}", read.body);
+    assert!(read.body.contains("oauth-project-marker"));
 }

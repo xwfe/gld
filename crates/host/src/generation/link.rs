@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use gld_core::generation::wire::{
-    auth_from_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op,
+    auth_from_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op, WireAuth,
 };
 use gld_core::generation::CallError;
 use gld_core::home::{data_home, HOME_ENV};
@@ -284,6 +284,12 @@ fn answer_host_call(router: &Router, op: &str) -> Result<Value, String> {
             member,
             tool,
             args,
-        } => Ok(router.node_call(&auth_from_wire(auth), member.into(), &tool, args)),
+        } => {
+            if !matches!(&auth, WireAuth::Mcp { .. }) {
+                return Err("Native forwarding requires a grant-bound MCP identity".into());
+            }
+            let auth = auth_from_wire(auth)?;
+            Ok(router.node_call(&auth, member.into(), &tool, args))
+        }
     }
 }

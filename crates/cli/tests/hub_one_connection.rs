@@ -1,16 +1,14 @@
-//! 服务（RFC-0004 之后唯一的 MCP 入口，内部叫 hub）：一条连接访问多个项目，彼此不串。
+//! 多项目服务在 D18-A 的集成边界：真实 CLI 验证本地项目操作，真实 HTTP 验证拒绝。
 //!
-//! 单元测试（core 的 hub 模块）已经把路由规则逐条钩住了。这里测的是拼起来之后的样子：
-//! 真的守护进程、真的 HTTP、真的认证——尤其是凭据只有一把、日志分开记、
-//! 守护进程重启后还在这几条，只有跑在真服务上才看得见。
+//! MCP 新凭据尚未接通；旧服务/项目主密钥、OAuth、缺凭据都不能得到网络授权。
+//! B 阶段恢复统一 grant 的网络读写、HTTP 项目日志分流和 tools/list 指纹端到端验收。
 
 mod common;
 
 use serde_json::{json, Value};
 
 use common::env::{free_port, Env};
-use common::http::{get, post_json, request};
-use common::oauth::connect_a_connector;
+use common::http::{get, post_form, post_json, request, Reply};
 
 struct Hub {
     env: Env,
@@ -19,16 +17,14 @@ struct Hub {
     token: String,
 }
 
-/// 两个项目 api（项目目录）和 web（另一个临时目录），bearer 认证把服务起起来。
+/// 两个已登记项目；旧 bearer 配置只用于证明它不能恢复网络主凭据权限。
 fn hub_with_two_members() -> Hub {
     let env = Env::new();
     env.write("only-api.txt", "api-marker\n");
     let web_dir = tempfile::tempdir().expect("web dir");
     std::fs::write(web_dir.path().join("only-web.txt"), "web-marker\n").expect("web file");
-
     env.ok(&["add", ".", "--name", "api"]);
     env.ok(&["add", web_dir.path().to_str().unwrap(), "--name", "web"]);
-
     let port = free_port();
     env.ok(&["upgrade", "--port", &port.to_string(), "--auth", "bearer"]);
     env.ok(&["start"]);
@@ -41,39 +37,28 @@ fn hub_with_two_members() -> Hub {
     }
 }
 
-fn rpc(
-    port: u16,
-    path: &str,
-    token: Option<&str>,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> (u16, Value) {
-    let reply = post_json(
+/// 始终走真实 HTTP；不能把本地操作员调用包装成网络授权成功。
+fn rpc(port: u16, path: &str, token: Option<&str>, id: u64, method: &str, params: Value) -> Reply {
+    post_json(
         port,
         path,
         &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string(),
         token,
-    );
-    let body = if reply.status == 200 {
-        reply.json()
-    } else {
-        Value::String(reply.body.clone())
-    };
-    (reply.status, body)
+    )
 }
 
-fn call(hub: &Hub, id: u64, tool: &str, arguments: Value) -> Value {
-    let (status, body) = rpc(
-        hub.port,
-        "/mcp",
-        Some(&hub.token),
-        id,
-        "tools/call",
-        json!({ "name": tool, "arguments": arguments }),
+fn assert_pending(reply: &Reply) {
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert_eq!(
+        reply.header("cache-control"),
+        Some("no-store"),
+        "{}",
+        reply.body
     );
-    assert_eq!(status, 200, "{body}");
-    body["result"]["structuredContent"].clone()
+    let body = reply.json();
+    assert_eq!(body["error"], "AUTH_NOT_READY", "{body}");
+    assert!(body.get("result").is_none(), "{body}");
+    assert!(body.get("session_id").is_none(), "{body}");
 }
 
 fn workspace_id(env: &Env, name: &str) -> String {
@@ -98,118 +83,84 @@ fn request_log(env: &Env, scope: &str) -> String {
 }
 
 #[test]
-fn one_connection_reaches_each_member_and_nothing_crosses_over() {
+fn local_project_operations_remain_isolated_while_network_access_is_pending() {
     let hub = hub_with_two_members();
+    let api_id = workspace_id(&hub.env, "api");
+    let web_id = workspace_id(&hub.env, "web");
+    for (id, workspace, path) in [(101, "api", "only-api.txt"), (202, "web", "only-web.txt")] {
+        let denied = rpc(
+            hub.port,
+            "/mcp",
+            Some(&hub.token),
+            id,
+            "tools/call",
+            json!({ "name": "read_file", "arguments": { "workspace": workspace, "path": path } }),
+        );
+        assert_pending(&denied);
+        assert!(!denied.body.contains("api-marker") && !denied.body.contains("web-marker"));
+    }
+    assert!(request_log(&hub.env, "hub").contains("[auth] rejected"));
+    for scope in [&api_id, &web_id] {
+        assert!(!request_log(&hub.env, scope).contains("[rpc] completed"));
+    }
 
-    let (status, initialized) = rpc(
-        hub.port,
-        "/mcp",
-        Some(&hub.token),
-        1,
-        "initialize",
-        json!({}),
-    );
-    assert_eq!(status, 200, "{initialized}");
-    assert_eq!(initialized["result"]["serverInfo"]["name"], "gld-hub");
-    let instructions = initialized["result"]["instructions"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        instructions.contains("api") && instructions.contains("web"),
-        "{instructions}"
-    );
-
-    // 同一条连接，两个项目各读各的。
-    let api = call(
-        &hub,
-        101,
-        "read_file",
-        json!({ "workspace": "api", "path": "only-api.txt" }),
-    );
-    assert!(api.to_string().contains("api-marker"), "{api}");
-    let web = call(
-        &hub,
-        202,
-        "read_file",
-        json!({ "workspace": "web", "path": "only-web.txt" }),
-    );
-    assert!(web.to_string().contains("web-marker"), "{web}");
-
-    // 同一个相对路径换个项目就是另一个根目录，读不到对方的文件。
-    let crossed = call(
-        &hub,
-        303,
-        "read_file",
-        json!({ "workspace": "web", "path": "only-api.txt" }),
-    );
+    let api = hub
+        .env
+        .local_tool("api", "read_file", json!({ "path": "only-api.txt" }));
+    let web = hub
+        .env
+        .local_tool("web", "read_file", json!({ "path": "only-web.txt" }));
+    assert_eq!(api["content"], "api-marker\n", "{api}");
+    assert_eq!(web["content"], "web-marker\n", "{web}");
+    let crossed = hub
+        .env
+        .local_tool("web", "read_file", json!({ "path": "only-api.txt" }));
     assert_eq!(crossed["ok"], false, "{crossed}");
 
-    // 不带 workspace 不猜。
-    let unrouted = call(&hub, 404, "read_file", json!({ "path": "only-api.txt" }));
+    let patch = "*** Begin Patch\n*** Add File: local-web.txt\n+web-only\n*** End Patch\n";
+    let written = hub
+        .env
+        .local_tool("web", "apply_patch", json!({ "patch": patch }));
+    assert_eq!(written["ok"], true, "{written}");
     assert_eq!(
-        unrouted["error"]["code"], "WORKSPACE_REQUIRED",
-        "{unrouted}"
+        std::fs::read_to_string(hub.web_dir.path().join("local-web.txt")).unwrap(),
+        "web-only\n"
     );
+    assert!(!hub.env.project.path().join("local-web.txt").exists());
 
-    // 日志分开记：api 的日志里只有落到 api 的请求，web 的同理，服务自己的记全部。
-    let api_log = request_log(&hub.env, &workspace_id(&hub.env, "api"));
-    let web_log = request_log(&hub.env, &workspace_id(&hub.env, "web"));
-    let hub_log = request_log(&hub.env, "hub");
-    assert!(
-        api_log.contains("[hub] [rpc] completed id=101"),
-        "{api_log}"
-    );
-    assert!(
-        !api_log.contains("id=202"),
-        "api 的日志里出现了 web 的请求：{api_log}"
-    );
-    assert!(
-        web_log.contains("[hub] [rpc] completed id=202"),
-        "{web_log}"
-    );
-    assert!(
-        !web_log.contains("id=101"),
-        "web 的日志里出现了 api 的请求：{web_log}"
-    );
-    assert!(
-        hub_log.contains("id=101") && hub_log.contains("id=202"),
-        "{hub_log}"
-    );
-
-    // 删掉 web：不重启服务，下一次调用就访问不到了；api 照常。
-    // 报错和填一个从来没有过的名字一模一样——删掉的项目不该还能被认出来。
     hub.env.ok(&["rm", "web", "-y"]);
-    let removed = call(
-        &hub,
-        505,
+    let removed = hub.env.gld(&[
+        "--json",
+        "-w",
+        "web",
+        "tool",
+        "call",
         "read_file",
-        json!({ "workspace": "web", "path": "only-web.txt" }),
-    );
-    let never = call(
-        &hub,
-        506,
-        "read_file",
-        json!({ "workspace": "never-existed", "path": "only-web.txt" }),
-    );
-    assert_eq!(removed["ok"], false, "{removed}");
-    assert_eq!(
-        removed["error"]["code"], never["error"]["code"],
-        "{removed} / {never}"
-    );
-    let still = call(
-        &hub,
-        606,
-        "read_file",
-        json!({ "workspace": "api", "path": "only-api.txt" }),
-    );
+        "path=only-web.txt",
+    ]);
+    assert!(!removed.status.success(), "已移除项目仍能通过本地 CLI 访问");
+    let still = hub
+        .env
+        .local_tool("api", "read_file", json!({ "path": "only-api.txt" }));
     assert_eq!(still["ok"], true, "{still}");
-    drop(hub.web_dir);
+    // 旧 HTTP 凭据仍不能利用被移除项目或不指定 workspace 绕开入口检查。
+    for arguments in [
+        json!({ "workspace": "web", "path": "only-web.txt" }),
+        json!({ "path": "only-api.txt" }),
+    ] {
+        assert_pending(&rpc(
+            hub.port,
+            "/mcp",
+            Some(&hub.token),
+            303,
+            "tools/call",
+            json!({ "name": "read_file", "arguments": arguments }),
+        ));
+    }
 }
 
-/// 服务只有一把钥匙：项目自己留着的凭据（GPT Actions 那套、以前单项目服务那套）
-/// 打不开它；换掉服务的 token，旧的当场失效、新的能用。
 #[test]
-fn the_service_credential_is_the_only_key() {
+fn retired_service_and_project_credentials_never_authorize_network_operations() {
     let hub = hub_with_two_members();
     let project_token = hub.env.json(&[
         "--json",
@@ -221,78 +172,142 @@ fn the_service_credential_is_the_only_key() {
         "api",
     ])["value"]
         .as_str()
-        .expect("project token")
+        .expect("isolated project token")
         .to_string();
-
-    let (no_token, _) = rpc(hub.port, "/mcp", None, 1, "tools/list", json!({}));
-    assert_eq!(no_token, 401);
-    let (with_project_token, _) = rpc(
-        hub.port,
-        "/mcp",
-        Some(&project_token),
-        2,
-        "tools/list",
-        json!({}),
-    );
-    assert_eq!(with_project_token, 401, "项目自己的 token 打开了服务");
-
-    // 换服务的 token：旧的当场失效，新的能用（服务在跑，会自动重启）。
     let fresh = hub.env.json(&["--json", "secret", "regen", "bearer_token"])["value"]
         .as_str()
-        .expect("new token")
+        .expect("isolated regenerated service token")
         .to_string();
-    let (old, _) = rpc(
-        hub.port,
-        "/mcp",
-        Some(&hub.token),
-        5,
-        "tools/list",
-        json!({}),
+
+    for token in [
+        None,
+        Some(hub.token.as_str()),
+        Some(project_token.as_str()),
+        Some(fresh.as_str()),
+    ] {
+        assert_pending(&rpc(hub.port, "/mcp", token, 1, "tools/list", json!({})));
+        for (id, name, arguments) in [
+            (
+                2,
+                "apply_patch",
+                json!({
+                    "workspace": "api",
+                    "patch": "*** Begin Patch\n*** Add File: forbidden.txt\n+not authorized\n*** End Patch\n"
+                }),
+            ),
+            (
+                3,
+                "exec_command",
+                json!({
+                    "workspace": "api", "cmd": "printf unauthorized > command-ran.txt"
+                }),
+            ),
+        ] {
+            let denied = rpc(
+                hub.port,
+                "/mcp",
+                token,
+                id,
+                "tools/call",
+                json!({ "name": name, "arguments": arguments }),
+            );
+            assert_pending(&denied);
+            for secret in [&hub.token, &project_token, &fresh] {
+                assert!(!denied.body.contains(secret), "拒绝响应泄漏凭据");
+            }
+        }
+    }
+    assert!(!hub.env.project.path().join("forbidden.txt").exists());
+    assert!(!hub.env.project.path().join("command-ran.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(hub.env.project.path().join("only-api.txt")).unwrap(),
+        "api-marker\n"
     );
-    assert_eq!(old, 401);
-    let (new, _) = rpc(hub.port, "/mcp", Some(&fresh), 6, "tools/list", json!({}));
-    assert_eq!(new, 200);
+    let log = request_log(&hub.env, "hub");
+    for secret in [&hub.token, &project_token, &fresh] {
+        assert!(!log.contains(secret), "拒绝日志泄漏凭据");
+    }
 }
 
-/// 默认认证是 OAuth（ChatGPT 连接器走的就是它）：服务自己能走完整套授权，
-/// 拿到的令牌按 workspace 参数读各个项目。
 #[test]
-fn oauth_on_the_service_works_end_to_end() {
+fn oauth_discovery_remains_public_but_retired_passwords_and_tokens_are_rejected() {
     let hub = hub_with_two_members();
     hub.env.ok(&["upgrade", "--auth", "oauth"]);
+    let metadata = get(hub.port, "/.well-known/oauth-authorization-server");
+    assert_eq!(metadata.status, 200, "{}", metadata.body);
+    let metadata = metadata.json();
+    assert_eq!(
+        metadata["code_challenge_methods_supported"],
+        json!(["S256"])
+    );
+    let registration_path = common::oauth::endpoint_path(&metadata, "registration_endpoint");
+    let authorization_path = common::oauth::endpoint_path(&metadata, "authorization_endpoint");
+    let registered = post_json(
+        hub.port,
+        &registration_path,
+        &json!({
+            "redirect_uris": ["http://localhost:41817/callback"],
+            "client_name": "pending-hub-test",
+            "token_endpoint_auth_method": "none"
+        })
+        .to_string(),
+        None,
+    );
+    assert_eq!(registered.status, 201, "{}", registered.body);
+    let client_id = registered.json()["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_string();
     let password = hub.env.service_secret("oauth_password");
-    let (_, access, _, _) = connect_a_connector(hub.port, &password);
-    for (workspace, file, marker) in [
-        ("api", "only-api.txt", "api-marker"),
-        ("web", "only-web.txt", "web-marker"),
-    ] {
-        let (status, body) = rpc(
+    let denied = post_form(
+        hub.port,
+        &authorization_path,
+        &[
+            ("response_type", "code"),
+            ("client_id", &client_id),
+            ("redirect_uri", "http://localhost:41817/callback"),
+            ("code_challenge", "pending-code-challenge"),
+            ("code_challenge_method", "S256"),
+            ("password", &password),
+            ("state", "pending-state"),
+        ],
+    );
+    assert_pending(&denied);
+    assert!(denied.header("location").is_none(), "旧口令不能发行授权码");
+    assert!(!denied.body.contains(&password));
+
+    for (workspace, file) in [("api", "only-api.txt"), ("web", "only-web.txt")] {
+        let denied = rpc(
             hub.port,
             "/mcp",
-            Some(&access),
+            Some("retired-oauth-access-token"),
             1,
             "tools/call",
             json!({ "name": "read_file", "arguments": { "workspace": workspace, "path": file } }),
         );
-        assert_eq!(status, 200, "{body}");
-        assert!(body.to_string().contains(marker), "{body}");
+        assert_pending(&denied);
+        assert!(!denied.body.contains("api-marker") && !denied.body.contains("web-marker"));
     }
 }
 
 #[test]
 fn the_service_comes_back_after_a_daemon_restart_unless_it_was_stopped() {
     let hub = hub_with_two_members();
-
     hub.env.ok(&["daemon", "restart"]);
-    let (status, _) = rpc(
+    let discovery = get(hub.port, "/mcp");
+    assert_eq!(discovery.status, 200, "{}", discovery.body);
+    assert_pending(&rpc(
         hub.port,
         "/mcp",
         Some(&hub.token),
         1,
         "tools/list",
         json!({}),
-    );
-    assert_eq!(status, 200, "守护进程重启后服务没有自动恢复");
+    ));
+    let local = hub
+        .env
+        .local_tool("api", "read_file", json!({ "path": "only-api.txt" }));
+    assert_eq!(local["content"], "api-marker\n", "{local}");
 
     hub.env.ok(&["stop"]);
     hub.env.ok(&["daemon", "restart"]);
@@ -304,10 +319,7 @@ fn the_service_comes_back_after_a_daemon_restart_unless_it_was_stopped() {
     );
 }
 
-/// 老路子：经全局入口暴露为 `<入口>/hub/mcp`。服务没声明走入口时，入口不替它转。
-///
-/// 服务现在有自己的隧道（`gld share --tunnel`），这条路不再出现在帮助里，但老配置
-/// 还在用它，所以照样钉住。
+/// 入口 opt-in 仍决定是否转发；转发本身不能授予 MCP 权限。
 #[test]
 fn the_global_gateway_forwards_hub_only_when_asked_to() {
     let hub = hub_with_two_members();
@@ -325,8 +337,7 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
         &gateway_port.to_string(),
     ]);
     hub.env.ok(&["gateway", "start"]);
-
-    let (refused, _) = rpc(
+    let refused = rpc(
         gateway_port,
         "/hub/mcp",
         Some(&hub.token),
@@ -334,35 +345,25 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
         "tools/list",
         json!({}),
     );
-    assert_eq!(refused, 404, "hub 没要求走入口，入口却替它转了");
+    assert_eq!(refused.status, 404, "hub 没要求走入口，入口却替它转了");
 
     hub.env.ok(&["hub", "set", "--global-gateway", "true"]);
-    let (status, listed) = rpc(
+    assert_pending(&rpc(
         gateway_port,
         "/hub/mcp",
         Some(&hub.token),
         2,
         "tools/list",
         json!({}),
-    );
-    assert_eq!(status, 200, "{listed}");
-    let names: Vec<&str> = listed["result"]["tools"]
-        .as_array()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|tool| tool["name"].as_str())
-                .collect()
-        })
-        .unwrap_or_default();
-    assert!(names.contains(&"list_workspaces"), "{names:?}");
-
-    // 公网客户端靠发现文档里的地址找授权页，前缀少了 /hub 就会打到入口根上去。
+    ));
+    let discovery = get(gateway_port, "/hub/mcp");
+    assert_eq!(discovery.status, 200, "{}", discovery.body);
     let shown = hub.env.json(&["--json", "ls"]);
     assert_eq!(
         shown["service"]["publicEndpoint"], "https://gw.example.com/hub/mcp",
         "{shown}"
     );
+
     hub.env.ok(&["upgrade", "--auth", "oauth"]);
     let metadata = get(gateway_port, "/.well-known/oauth-authorization-server/hub");
     assert_eq!(metadata.status, 200, "{}", metadata.body);
@@ -385,53 +386,69 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
         "https://gw.example.com/hub/mcp"
     );
 
-    // 挂着公网入口改 noauth 要当场拒，配置不落盘。
     let refused = hub.env.gld(&["upgrade", "--auth", "noauth"]);
     assert!(
         !refused.status.success(),
         "公网服务改成 noauth 居然保存成功了"
     );
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("noauth"),
-        "{}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("AUTH_REQUIRED"), "{stderr}");
     let shown = hub.env.json(&["--json", "ls"]);
     assert_eq!(shown["service"]["config"]["authType"], "oauth", "{shown}");
+    assert_pending(&rpc(
+        gateway_port,
+        "/hub/mcp",
+        None,
+        3,
+        "initialize",
+        json!({}),
+    ));
 }
 
-/// `gld tool list --served` 拿到的就是客户端 tools/list 拿到的那张表，server_info
-/// 报的是同一个指纹（审查 D04：客户端说"没有这个工具"时，先分清是服务没给还是
-/// 客户端缓存了旧表）。服务没在跑时直说，不拿本地算的表冒充。
 #[test]
-fn tool_list_served_is_the_list_clients_get_and_server_info_agrees() {
+fn served_tool_discovery_remains_available_to_the_local_operator() {
     let hub = hub_with_two_members();
-    let (status, listed) = rpc(
+    assert_pending(&rpc(
         hub.port,
         "/mcp",
         Some(&hub.token),
         1,
         "tools/list",
         json!({}),
-    );
-    assert_eq!(status, 200, "{listed}");
-    let over_http = listed["result"]["tools"].clone();
-
+    ));
     let served = hub.env.json(&["--json", "tool", "list", "--served"]);
-    assert_eq!(
-        served["tools"], over_http,
-        "CLI 看到的和客户端拿到的不是同一张表"
+    let names: Vec<_> = served["tools"]
+        .as_array()
+        .expect("served tools")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"list_workspaces") && names.contains(&"read_file"),
+        "{served}"
     );
-    let fingerprint = served["surface"]["tools_fingerprint"].clone();
-    assert!(fingerprint.is_string(), "{served}");
+    assert!(
+        served["surface"]["tools_fingerprint"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "{served}"
+    );
     assert!(served["build"]["version"].is_string(), "{served}");
-
-    let info = call(&hub, 2, "server_info", json!({ "workspace": "api" }));
+    let again = hub.env.json(&["--json", "tool", "list", "--served"]);
+    assert_eq!(again["tools"], served["tools"], "{again}");
     assert_eq!(
-        info["connection"]["tools_fingerprint"], fingerprint,
+        again["surface"]["tools_fingerprint"],
+        served["surface"]["tools_fingerprint"]
+    );
+
+    let info = hub.env.local_tool("api", "server_info", json!({}));
+    assert_eq!(info["version"], served["build"]["version"], "{info}");
+    assert_eq!(
+        info["build_commit"], served["build"]["build_commit"],
         "{info}"
     );
-
+    assert_eq!(info["protocol_version"], "2025-06-18", "{info}");
+    // B 阶段再验证认证后的 HTTP tools/list 和 server_info.connection 指纹。
     hub.env.ok(&["stop"]);
     let stopped = hub.env.gld(&["tool", "list", "--served"]);
     assert!(!stopped.status.success(), "服务停了还给出一张表");
@@ -439,16 +456,9 @@ fn tool_list_served_is_the_list_clients_get_and_server_info_agrees() {
     assert!(stderr.contains("服务没在跑"), "{stderr}");
 }
 
-/// 支持 2026-07-28 的客户端（官方 TS / Python / Go / C# SDK）先发一个新版 `server/discover`
-/// 探测，拿到"旧服务器"的回答才退回 `initialize`（审查 D13）。服务只讲 2025-06-18，
-/// 指令（hub 规则、Skill 目录）只在 `initialize` 里给——客户端要是没退回来，模型就拿不到。
-///
-/// 请求形状照抄 TS SDK 2.0（`mode: 'auto'`）实测发出的。现在的回法（HTTP 200、`-32601`、
-/// id 原样回）四个 SDK 都认成旧服务器；会让连接失败的改法：回 405 或 5xx（C# / TS 报错）、
-/// id 对不上（TS 等到超时）、回 -32020～-32022、或者给 `server/discover` 一个像样的成功结果
-/// （客户端认定是新协议，之后缺 `resultType` / `ttlMs` 校验不过）。
+/// 协议协商也不能绕开认证；认证后的网络协议降级正向验收列入 B。
 #[test]
-fn a_new_protocol_probe_falls_back_to_initialize() {
+fn protocol_discovery_and_initialize_cannot_bypass_pending_authentication() {
     let hub = hub_with_two_members();
     let bearer = format!("Bearer {}", hub.token);
     let probe = request(
@@ -463,9 +473,7 @@ fn a_new_protocol_probe_falls_back_to_initialize() {
             ("Mcp-Method", "server/discover"),
         ],
         &json!({
-            "jsonrpc": "2.0",
-            "id": "server-discover-probe-1",
-            "method": "server/discover",
+            "jsonrpc": "2.0", "id": "server-discover-probe-1", "method": "server/discover",
             "params": { "_meta": {
                 "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientInfo": { "name": "probe", "version": "0" },
@@ -474,43 +482,26 @@ fn a_new_protocol_probe_falls_back_to_initialize() {
         })
         .to_string(),
     );
-    assert_eq!(probe.status, 200, "{}", probe.body);
-    let answer = probe.json();
-    assert_eq!(
-        answer["id"], "server-discover-probe-1",
-        "id 要原样回：{answer}"
-    );
-    assert_eq!(answer["error"]["code"], -32601, "{answer}");
-    assert!(answer.get("result").is_none(), "{answer}");
-
-    // 退回之后：SDK 在 initialize 里报它支持的最新旧版本 2025-11-25，服务回 2025-06-18。
-    let (status, initialized) = rpc(
+    assert_pending(&probe);
+    let initialized = rpc(
         hub.port,
         "/mcp",
         Some(&hub.token),
         1,
         "initialize",
         json!({
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
+            "protocolVersion": "2025-11-25", "capabilities": {},
             "clientInfo": { "name": "probe", "version": "0" }
         }),
     );
-    assert_eq!(status, 200, "{initialized}");
-    assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
-    assert!(
-        initialized["result"]["instructions"]
-            .as_str()
-            .is_some_and(|text| text.contains("list_workspaces")),
-        "{initialized}"
-    );
+    assert_pending(&initialized);
+    assert!(!initialized.body.contains("api-marker") && !initialized.body.contains("web-marker"));
 }
 
-/// 转发调用记下实际调到的 server 和工具名（只有名字，不记参数）。名字是调用方传的：里面塞换行也伪造不出一行日志。
 #[test]
-fn relayed_calls_log_which_tool_they_reach() {
+fn rejected_relay_requests_do_not_execute_or_inject_argument_content_into_logs() {
     let hub = hub_with_two_members();
-    let (status, _) = rpc(
+    let denied = rpc(
         hub.port,
         "/mcp",
         Some(&hub.token),
@@ -525,21 +516,27 @@ fn relayed_calls_log_which_tool_they_reach() {
             }
         }),
     );
-    assert_eq!(status, 200);
+    assert_pending(&denied);
     let log = request_log(&hub.env, "hub");
-    let line = log
-        .lines()
-        .find(|line| line.contains("tool=call_mcp_tool"))
-        .unwrap_or_else(|| panic!("没有这次调用：{log}"));
-    assert!(
-        line.contains("relay=browser:browser_run_code_unsafe_"),
-        "{line}"
-    );
-    assert!(!log.contains("method=fake"), "换行伪造出了一行：{log}");
-    assert!(!log.contains("secret-argument"), "参数不该进日志：{log}");
+    assert!(log.contains("[auth] rejected"), "{log}");
+    for absent in [
+        "method=fake",
+        "secret-argument",
+        "relay=browser",
+        "tool=call_mcp_tool",
+        hub.token.as_str(),
+    ] {
+        assert!(
+            !log.contains(absent),
+            "未授权请求不应进入工具日志或泄漏参数：{log}"
+        );
+    }
+    for workspace in ["api", "web"] {
+        assert!(!request_log(&hub.env, &workspace_id(&hub.env, workspace)).contains("[rpc]"));
+    }
 }
 
-/// operations.jsonl 里带着这个 operation_id 的那一行（结束时记的那条，不是 started）。
+/// operations.jsonl 中带该 operation_id 的结束记录。
 fn finished_operation(env: &Env, operation_id: &str) -> Value {
     let root = env.home.path().join("harness").join("workspaces");
     std::fs::read_dir(&root)
@@ -553,48 +550,39 @@ fn finished_operation(env: &Env, operation_id: &str) -> Value {
         .unwrap_or_else(|| panic!("operations.jsonl 里没有 {operation_id}"))
 }
 
-/// 补丁失败时，请求日志记一行原因、operations.jsonl 记不含内容的诊断，两边用 operation_id 对上。
-/// 事后要分得清是"只差空白"（比对太严）还是补丁写错了；文件原文和补丁正文不能进这两处。
 #[test]
-fn a_failed_patch_leaves_its_reasons_in_the_logs_without_file_content() {
+fn local_patch_diagnostics_remain_content_free_and_network_patches_do_not_execute() {
     let hub = hub_with_two_members();
-    hub.env
-        .write("lib.rs", "fn a() {\n    let api_file_marker = 1;\n}\n");
-
-    // 上下文行尾多了空白：精确比对对不上，放宽到行尾空白就对上。
+    let original = "fn a() {\n    let api_file_marker = 1;\n}\n";
+    hub.env.write("lib.rs", original);
     let patch = "*** Begin Patch\n*** Update File: lib.rs\n@@\n-    let api_file_marker = 1;   \n+    let patch_body_marker = 2;\n*** End Patch\n";
-    let failed = call(
-        &hub,
+    let denied = rpc(
+        hub.port,
+        "/mcp",
+        Some(&hub.token),
         1,
-        "apply_patch",
-        json!({ "workspace": "api", "patch": patch }),
+        "tools/call",
+        json!({ "name": "apply_patch", "arguments": { "workspace": "api", "patch": patch } }),
     );
+    assert_pending(&denied);
+    assert_eq!(
+        std::fs::read_to_string(hub.env.project.path().join("lib.rs")).unwrap(),
+        original
+    );
+    let network_log = request_log(&hub.env, "hub");
+    assert!(!network_log.contains("[patch]"), "{network_log}");
+
+    let failed = hub
+        .env
+        .local_tool("api", "apply_patch", json!({ "patch": patch }));
     assert_eq!(failed["error"]["code"], "PATCH_FAILED", "{failed}");
     let near_miss = &failed["error"]["details"]["diagnostics"][0]["near_miss"];
     assert_eq!(near_miss["kind"], "trailing_whitespace", "{failed}");
     assert_eq!(near_miss["start_line"], 2, "{failed}");
-    let operation_id = failed["operation_id"].as_str().expect("operation_id");
-
-    let log = request_log(&hub.env, "hub");
-    // 每行开头是 UTC 时间，后面才是内容（审查 §28：以前没有时间，事后查不清几点）。
-    let (stamp, line) = log
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .find(|(_, rest)| rest.starts_with("[patch]"))
-        .unwrap_or_else(|| panic!("没有 [patch] 行：{log}"));
-    assert_eq!(stamp.len(), "2026-10-18T02:05:54Z".len(), "{stamp}");
-    assert!(
-        stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T',
-        "{stamp}"
+    let record = finished_operation(
+        &hub.env,
+        failed["operation_id"].as_str().expect("operation_id"),
     );
-    assert!(
-        line.ends_with(&format!(
-            "tool=apply_patch operation_id={operation_id} code=PATCH_FAILED reasons=context_drifted:trailing_whitespace"
-        )),
-        "{line}"
-    );
-
-    let record = finished_operation(&hub.env, operation_id);
     let summary = &record["result_summary"]["patch"];
     assert_eq!(summary["format"], "codex", "{record}");
     assert_eq!(summary["patch_bytes"], patch.len(), "{record}");
@@ -612,36 +600,38 @@ fn a_failed_patch_leaves_its_reasons_in_the_logs_without_file_content() {
             !record.to_string().contains(leaked),
             "operations 里有内容：{record}"
         );
-        assert!(!log.contains(leaked), "请求日志里有内容：{log}");
+        assert!(
+            !network_log.contains(leaked),
+            "拒绝日志里有内容：{network_log}"
+        );
     }
+    assert_eq!(
+        std::fs::read_to_string(hub.env.project.path().join("lib.rs")).unwrap(),
+        original
+    );
 
-    // 没走到逐段比对的失败也有原因码：信封没收尾。
-    let cut = call(
-        &hub,
-        2,
+    let cut = hub.env.local_tool(
+        "api",
         "apply_patch",
-        json!({ "workspace": "api", "patch": "*** Begin Patch\n*** Update File: lib.rs\n@@\n-x\n" }),
+        json!({ "patch": "*** Begin Patch\n*** Update File: lib.rs\n@@\n-x\n" }),
     );
     assert_eq!(
         cut["error"]["details"]["reason_code"], "envelope_not_closed",
         "{cut}"
     );
-    let log = request_log(&hub.env, "hub");
-    assert!(
-        log.lines().any(
-            |line| line.contains(" [patch] ") && line.ends_with("reasons=envelope_not_closed")
-        ),
-        "{log}"
+    let record = finished_operation(
+        &hub.env,
+        cut["operation_id"].as_str().expect("cut operation_id"),
+    );
+    assert_eq!(
+        record["result_summary"]["patch"]["reason_code"], "envelope_not_closed",
+        "{record}"
     );
 
-    // 成功的不出 [patch] 行，但 operations 照样记写法和大小，才算得出失败率。
     let fixed = "*** Begin Patch\n*** Update File: lib.rs\n@@\n-    let api_file_marker = 1;\n+    let api_file_marker = 2;\n*** End Patch\n";
-    let applied = call(
-        &hub,
-        3,
-        "apply_patch",
-        json!({ "workspace": "api", "patch": fixed }),
-    );
+    let applied = hub
+        .env
+        .local_tool("api", "apply_patch", json!({ "patch": fixed }));
     assert_eq!(applied["ok"], true, "{applied}");
     let record = finished_operation(&hub.env, applied["operation_id"].as_str().expect("id"));
     assert_eq!(
@@ -654,12 +644,9 @@ fn a_failed_patch_leaves_its_reasons_in_the_logs_without_file_content() {
             .is_none(),
         "{record}"
     );
-    let log = request_log(&hub.env, "hub");
     assert_eq!(
-        log.lines()
-            .filter(|line| line.contains(" [patch] "))
-            .count(),
-        2,
-        "{log}"
+        std::fs::read_to_string(hub.env.project.path().join("lib.rs")).unwrap(),
+        "fn a() {\n    let api_file_marker = 2;\n}\n"
     );
+    assert!(!hub.web_dir.path().join("lib.rs").exists());
 }

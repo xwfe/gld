@@ -232,13 +232,34 @@ impl App {
         Ok(saved)
     }
 
-    /// 删除工作区：先停掉它的服务和隧道，再移除配置与密钥。
+    /// 删除工作区：先收回命令，再停服务和隧道，最后移除配置与密钥。
     pub async fn delete_workspace(
         &self,
         listeners: &ListenerManager,
         id: &str,
     ) -> AppResult<WorkspaceProfile> {
+        self.delete_workspace_with_cleanup(listeners, id, |root| {
+            Ok(crate::tools::workspace_runtime::runtime_for(root).terminate_all_sessions())
+        })
+        .await
+    }
+
+    /// 命令在执行代时由宿主提供清理；清理失败前不更动登记和凭据。
+    pub async fn delete_workspace_with_cleanup(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        cleanup: impl FnOnce(&Path) -> Result<usize, String> + Send + 'static,
+    ) -> AppResult<WorkspaceProfile> {
         let profile = self.profile_by_id(id)?;
+        // 目录可能已经不存在（prune）；必须用原登记路径定位仍持有命令的执行代。
+        let root = PathBuf::from(&profile.path);
+        let failed =
+            |error: String| AppError::Message(format!("工作区命令未停止，配置未删除：{error}"));
+        tokio::task::spawn_blocking(move || cleanup(&root))
+            .await
+            .map_err(|error| failed(error.to_string()))?
+            .map_err(failed)?;
         for kind in [ServiceKind::Mcp, ServiceKind::Actions] {
             if listeners.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))? {
                 let _ = self.stop_service(listeners, id, kind).await;

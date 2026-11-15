@@ -28,13 +28,7 @@ fn request_routes_follow_visible_state_without_executing_the_tool() {
     ] {
         assert_eq!(f.hub.execution_route(&auth, &body), expected, "{body}");
     }
-    let limited = auth.with_grant(Some(Grant {
-        id: "grant".into(),
-        name: "only-web".into(),
-        workspaces: vec![f.web.id.clone()],
-        read_only: true,
-        browser: false,
-    }));
+    let limited = granted(McpSubject::Token, &[&f.web.id], true);
     assert_eq!(
         f.hub.execution_route(&limited, &request("api")),
         ExecutionRoute::Unbound

@@ -5,7 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use gld_core::app::{App, GrantSpec, WorkspaceCreateOptions};
+use gld_core::app::{App, WorkspaceCreateOptions};
+use gld_core::auth::{
+    AccessRecord, AccessStore, CredentialKind, CredentialRecord, Grant, GrantPermissions,
+    GrantStatus, ProjectScope,
+};
 use gld_core::planning::{PlanningMode, PlanningService};
 
 #[test]
@@ -58,13 +62,31 @@ fn grant_cleanup_runs_twice_after_the_revocation_is_saved() {
             let profile = app
                 .create_workspace(workspace.path(), WorkspaceCreateOptions::default())
                 .expect("project");
-            let grant = app
-                .add_grant(GrantSpec {
-                    name: "test grant".into(),
-                    workspaces: vec![profile.id],
-                    writable: false,
+            let grant = Grant {
+                id: "cleanup-test".into(),
+                name: "test grant".into(),
+                scope: ProjectScope::Selected(vec![profile.id]),
+                permissions: GrantPermissions::default(),
+                status: GrantStatus::Active,
+            };
+            let store = AccessStore::open_in(&home).expect("isolated access store");
+            store
+                .insert(AccessRecord {
+                    grant: grant.clone(),
+                    credential: CredentialRecord::prepare(
+                        "cleanup-credential".into(),
+                        CredentialKind::Token,
+                        "test-only-material",
+                        1,
+                        1,
+                        None,
+                        vec![],
+                    )
+                    .expect("test material"),
                 })
-                .expect("grant");
+                .expect("fixture");
+            drop(store);
+            let reader = app.access_reader().expect("reader shared with writer");
             let id = grant.id.clone();
             let invocations = AtomicUsize::new(0);
             let (send, receive) = mpsc::channel();
@@ -73,11 +95,20 @@ fn grant_cleanup_runs_twice_after_the_revocation_is_saved() {
                 .remove_grant_with_cleanup(&grant.id, move |grant_id, data_home| {
                     assert_eq!(grant_id, id);
                     assert_eq!(data_home, Some(home.as_path()));
-                    let persisted = App::load()
-                        .expect("fresh app")
-                        .list_grants()
-                        .expect("grants");
-                    assert!(persisted.iter().all(|grant| grant.id != grant_id));
+                    let current = reader.snapshot().expect("current snapshot");
+                    assert_eq!(
+                        current
+                            .by_grant_id(grant_id)
+                            .expect("tombstone")
+                            .grant
+                            .status,
+                        GrantStatus::Revoked,
+                    );
+                    let persisted: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(home.join("access/v1/grants.json")).expect("saved state"),
+                    )
+                    .expect("current format");
+                    assert_eq!(persisted["records"][0]["grant"]["status"], "revoked");
                     let invocation = invocations.fetch_add(1, Ordering::Relaxed) + 1;
                     send.send((invocation, Instant::now()))
                         .expect("record cleanup");

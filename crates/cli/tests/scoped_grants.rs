@@ -1,236 +1,150 @@
-//! grant：一把凭据只开几个项目（RFC-0007）。
-//!
-//! 起真的服务，OAuth 走真的动态注册 → 授权页 → 换令牌，bearer 走真的请求头。范围落在
-//! 哪儿（list_workspaces、调用、工具表）和撤销生效没有，都只从服务的回包里看。
+//! D18-A: retired grant creation and legacy MCP credentials fail closed over real HTTP.
+//! Positive token/OAuth scope, rotation and revocation flows resume with D18-B's issuance entrypoint.
 
 mod common;
 
 use common::env::{free_port, Env};
-use common::http::{post_form, post_json, Reply};
-use common::oauth::connect_a_connector;
+use common::http::{post_json, Reply};
 use serde_json::{json, Value};
 
-fn rpc(port: u16, token: &str, method: &str, params: Value) -> Reply {
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    post_json(port, "/mcp", &body.to_string(), Some(token))
-}
-
-/// 调一个工具，返回它的结构化结果。
-fn call(port: u16, token: &str, name: &str, arguments: Value) -> Value {
-    let reply = rpc(
-        port,
-        token,
-        "tools/call",
-        json!({ "name": name, "arguments": arguments }),
-    );
-    assert_eq!(reply.status, 200, "HTTP 层就失败了：{}", reply.body);
-    let text = reply.json()["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("没有工具结果：{}", reply.body))
-        .to_string();
-    serde_json::from_str(&text).expect("工具结果是 JSON")
-}
-
-fn workspace_names(port: u16, token: &str) -> Vec<String> {
-    let listed = call(port, token, "list_workspaces", json!({}));
-    listed["workspaces"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{listed}"))
-        .iter()
-        .map(|item| item["name"].as_str().unwrap_or_default().to_string())
-        .collect()
-}
-
-/// 两个项目 api、web 都加进服务，按 `auth` 起在空闲端口上。返回端口和 web 的目录。
-fn two_projects(env: &Env, auth: &str) -> (u16, tempfile::TempDir) {
-    env.write("only-api.txt", "api\n");
-    let web = tempfile::tempdir().expect("web dir");
-    std::fs::write(web.path().join("only-web.txt"), "web page\n").expect("web file");
+fn start_service(env: &Env, auth: &str) -> u16 {
     let port = free_port();
+    env.write("private.txt", "project-private-marker\n");
     env.ok(&["add", ".", "--name", "api"]);
-    env.ok(&[
-        "add",
-        web.path().to_str().expect("utf-8 path"),
-        "--name",
-        "web",
-    ]);
     env.ok(&["upgrade", "--port", &port.to_string(), "--auth", auth]);
     env.ok(&["start"]);
-    (port, web)
+    port
 }
 
-/// OAuth：授权页填 grant 的口令，拿到的令牌只看得到 api；服务口令照旧全部。
-/// `gld grant rm` 之后下一次请求 401、刷新令牌换不来新的；同名重建旧令牌也不复活。
-#[test]
-fn an_oauth_grant_sees_only_its_projects_until_it_is_revoked() {
-    let env = Env::new();
-    let (port, _web) = two_projects(&env, "oauth");
-
-    let grant = env.json(&["--json", "grant", "add", "alice", "api"]);
-    let password = grant["oauthPassword"].as_str().expect("口令").to_string();
-    let (client_id, access, refresh, token_path) = connect_a_connector(port, &password);
-
-    assert_eq!(workspace_names(port, &access), vec!["api"]);
-    let refused = call(
+fn rpc(port: u16, token: Option<&str>, method: &str, params: Value) -> Reply {
+    post_json(
         port,
-        &access,
-        "read_file",
-        json!({ "workspace": "web", "path": "only-web.txt" }),
-    );
-    assert_eq!(
-        refused["error"]["code"], "WORKSPACE_NOT_IN_HUB",
-        "{refused}"
-    );
-    assert!(!refused.to_string().contains("web page"), "{refused}");
-    let read = call(
-        port,
-        &access,
-        "read_file",
-        json!({ "workspace": "api", "path": "only-api.txt" }),
-    );
-    assert_eq!(read["ok"], true, "{read}");
-
-    let owner_password = env.service_secret("oauth_password");
-    let (_, owner, _, _) = connect_a_connector(port, &owner_password);
-    let mut all = workspace_names(port, &owner);
-    all.sort();
-    assert_eq!(all, vec!["api", "web"], "服务口令还是全部项目");
-
-    let removed = env.json(&["--json", "grant", "rm", "alice"]);
-    assert_eq!(removed["grant"]["name"], "alice", "{removed}");
-    let after = rpc(port, &access, "tools/list", json!({}));
-    assert_eq!(after.status, 401, "作废后还能用：{}", after.body);
-    let refreshed = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &refresh),
-            ("client_id", &client_id),
-        ],
-    );
-    assert_eq!(
-        refreshed.status, 400,
-        "刷新换出了新令牌：{}",
-        refreshed.body
-    );
-    assert_eq!(refreshed.json()["error"], "invalid_grant");
-    assert_eq!(
-        rpc(port, &owner, "tools/list", json!({})).status,
-        200,
-        "作废 grant 连累了服务口令"
-    );
-
-    // 同名重建：新的一把是新 id，旧令牌照样不能用。
-    env.ok(&["grant", "add", "alice", "api"]);
-    assert_eq!(rpc(port, &access, "tools/list", json!({})).status, 401);
-}
-
-/// bearer：grant 的令牌只看得到自己的项目；只读的那把工具表里没有写和执行，硬发也不行。
-/// 作废一把能写的，它起的后台命令被停掉。
-#[test]
-fn bearer_grants_are_scoped_read_only_when_asked_and_revocation_stops_their_commands() {
-    let env = Env::new();
-    let (port, _web) = two_projects(&env, "bearer");
-
-    // 不带 --write 就是只读。
-    let viewer = env.json(&["--json", "grant", "add", "viewer", "api"]);
-    let viewer = viewer["bearerToken"].as_str().expect("令牌").to_string();
-    assert_eq!(workspace_names(port, &viewer), vec!["api"]);
-
-    let tools = rpc(port, &viewer, "tools/list", json!({})).json();
-    let names: Vec<&str> = tools["result"]["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    assert!(!names.contains(&"exec_command"), "{names:?}");
-    assert!(!names.contains(&"apply_patch"), "{names:?}");
-    assert!(names.contains(&"read_file"), "{names:?}");
-    let refused = rpc(
-        port,
-        &viewer,
-        "tools/call",
-        json!({ "name": "exec_command", "arguments": { "workspace": "api", "cmd": "pwd" } }),
+        "/mcp",
+        &json!({"jsonrpc":"2.0", "id":1, "method":method, "params":params}).to_string(),
+        token,
     )
-    .json();
+}
+
+fn assert_not_ready(reply: &Reply) {
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert_eq!(reply.json()["error"], "AUTH_NOT_READY");
+    assert_eq!(reply.header("cache-control"), Some("no-store"));
+    assert!(!reply.body.contains("project-private-marker"));
+    assert!(reply.json().get("result").is_none());
+}
+
+#[test]
+fn retired_grant_creation_and_reveal_cannot_write_legacy_credentials() {
+    let env = Env::new();
+    env.ok(&["add", ".", "--name", "api"]);
+    assert_eq!(env.json(&["--json", "grant", "ls"]), json!([]));
+    let profiles = env.home.path().join("data/profiles.json");
+    let before = std::fs::read(&profiles).expect("isolated profile data");
+
+    for args in [
+        vec!["grant", "add", "reader", "api"],
+        vec!["--json", "grant", "add", "writer", "api", "--write"],
+    ] {
+        let output = env.gld(&args);
+        assert!(
+            !output.status.success(),
+            "retired creation succeeded: {args:?}"
+        );
+        let error = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(error.contains("AUTH_NOT_READY"), "{error}");
+        assert!(!error.contains("oauthPassword"));
+        assert!(!error.contains("bearerToken"));
+    }
+    let reveal = env.gld(&["--json", "grant", "ls", "--reveal"]);
+    assert!(!reveal.status.success());
+    assert!(String::from_utf8_lossy(&reveal.stderr).contains("AUTH_UNSUPPORTED"));
+    assert_eq!(env.json(&["--json", "grant", "ls"]), json!([]));
     assert_eq!(
-        refused["error"]["data"]["reason"], "unknown_tool",
-        "{refused}"
+        std::fs::read(profiles).unwrap(),
+        before,
+        "rejected creation changed project data"
     );
+}
 
-    let wrong = rpc(port, "not-a-grant-token", "tools/list", json!({}));
-    assert_eq!(wrong.status, 401);
+#[test]
+fn legacy_global_modes_and_bearer_credentials_never_restore_mcp_authority() {
+    for mode in ["oauth", "bearer"] {
+        let env = Env::new();
+        let port = start_service(&env, mode);
+        let service_token = env.service_secret("bearer_token");
+        for token in [
+            None,
+            Some(service_token.as_str()),
+            Some("synthetic-retired-grant-token"),
+        ] {
+            assert_not_ready(&rpc(
+                port,
+                token,
+                "initialize",
+                json!({
+                    "protocolVersion":"2025-06-18",
+                    "capabilities":{},
+                    "clientInfo":{"name":"authorization-rejection-test","version":"1"}
+                }),
+            ));
+            assert_not_ready(&rpc(port, token, "tools/list", json!({})));
+            assert_not_ready(&rpc(
+                port,
+                token,
+                "tools/call",
+                json!({
+                    "name":"read_file", "arguments":{"workspace":"api","path":"private.txt"}
+                }),
+            ));
+        }
+        assert_eq!(env.json(&["--json", "grant", "ls"]), json!([]));
+    }
+    let env = Env::new();
+    let port = start_service(&env, "oauth");
+    let before = env.json(&["--json", "ls"])["service"]["config"].clone();
+    let noauth = env.gld(&["upgrade", "--auth", "noauth"]);
+    assert!(
+        !noauth.status.success(),
+        "anonymous MCP configuration was accepted"
+    );
+    assert!(String::from_utf8_lossy(&noauth.stderr).contains("AUTH_REQUIRED"));
+    assert_eq!(env.json(&["--json", "ls"])["service"]["config"], before);
+    assert_not_ready(&rpc(port, None, "tools/list", json!({})));
+}
 
-    let worker = env.json(&["--json", "grant", "add", "worker", "api", "--write"]);
-    let worker = worker["bearerToken"].as_str().expect("令牌").to_string();
-    let started = call(
+#[test]
+fn rejected_network_writes_have_no_project_side_effects() {
+    let env = Env::new();
+    let port = start_service(&env, "oauth");
+    let patch =
+        "*** Begin Patch\n*** Add File: forbidden.txt\n+must not be written\n*** End Patch\n";
+    let reply = rpc(
         port,
-        &worker,
-        "exec_command",
+        Some("synthetic-retired-write-token"),
+        "tools/call",
         json!({
-            "workspace": "api",
-            "cmd": "python3 -c \"import time; time.sleep(30)\"",
-            "yield_time_ms": 0,
-            "timeout_ms": 60_000
+            "name":"apply_patch", "arguments":{"workspace":"api","patch":patch}
         }),
     );
-    assert_eq!(started["ok"], true, "{started}");
-    assert_eq!(started["status"], "running", "{started}");
-
-    let removed = env.json(&["--json", "grant", "rm", "worker"]);
-    assert_eq!(removed["stoppedCommands"], 1, "{removed}");
-    assert_eq!(rpc(port, &worker, "tools/list", json!({})).status, 401);
+    assert_not_ready(&reply);
+    assert!(!env.project.path().join("forbidden.txt").exists());
     assert_eq!(
-        workspace_names(port, &viewer),
-        vec!["api"],
-        "作废一把连累了另一把"
+        std::fs::read_to_string(env.project.path().join("private.txt")).unwrap(),
+        "project-private-marker\n"
     );
 
-    let listed = env.json(&["--json", "grant", "ls"]);
-    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
-    assert!(
-        !listed.to_string().contains(&viewer),
-        "不带 --reveal 就给了明文：{listed}"
+    let command = rpc(
+        port,
+        None,
+        "tools/call",
+        json!({
+            "name":"exec_command", "arguments":{"workspace":"api","cmd":"echo unauthorized","yield_time_ms":0}
+        }),
     );
-}
-
-/// noauth 下谁连上都是全权，grant 挡不住任何人：有 grant 时不给改成 noauth，noauth 下不给建。
-/// 项目名写错、项目关了 confine-reads 也不建。
-#[test]
-fn a_grant_needs_real_auth_and_real_projects() {
-    let env = Env::new();
-    let _ = two_projects(&env, "bearer");
-    let stderr =
-        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).to_string();
-
-    let typo = env.gld(&["grant", "add", "alice", "nope"]);
-    assert!(!typo.status.success());
-    assert!(stderr(&typo).contains("不在服务里"), "{}", stderr(&typo));
-
-    env.ok(&["set", "web", "confine-reads=false"]);
-    let open = env.gld(&["grant", "add", "alice", "web"]);
-    assert!(!open.status.success());
-    assert!(stderr(&open).contains("confine-reads"), "{}", stderr(&open));
-
-    env.ok(&["grant", "add", "alice", "api"]);
-    let to_noauth = env.gld(&["upgrade", "--auth", "noauth"]);
-    assert!(!to_noauth.status.success(), "有 grant 时改成了 noauth");
-    assert!(
-        stderr(&to_noauth).contains("grant"),
-        "{}",
-        stderr(&to_noauth)
-    );
-    env.ok(&["grant", "rm", "alice"]);
-
-    env.ok(&["upgrade", "--auth", "noauth"]);
-    let refused = env.gld(&["grant", "add", "alice", "api"]);
-    assert!(!refused.status.success());
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("noauth"),
-        "{}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    assert_eq!(env.json(&["--json", "grant", "ls"]), json!([]));
+    assert_not_ready(&command);
+    assert!(!command.body.contains("session_id"));
 }

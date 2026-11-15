@@ -1,7 +1,8 @@
 //! 可重试收尾与持久资源账目。命令发出前记意图，未得到终态的记录不因日志到期而消失。
 
 use super::*;
-use crate::tools::{runs, session::Found, workspace_runtime, Caller};
+use crate::tools::{runs, session::Found, workspace_runtime};
+use gld_policy::CallerId;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,10 +101,10 @@ impl Operation {
     }
 
     /// current_caller 用于读本进程内存会话；没有它时只采用持久终态，不靠 PID 猜。
-    pub fn resources(&mut self, current_caller: Option<&Caller>) -> Result<Value> {
+    pub fn resources(&mut self, current_caller: Option<&CallerId>) -> Result<Value> {
         let runtime = workspace_runtime::runtime_for(&self.record.root);
         let running = runtime
-            .running_commands(current_caller.unwrap_or(&Caller::local()))
+            .running_commands(current_caller.unwrap_or(&CallerId::local_operator()))
             .total();
         let log = runs::RunLog::new(
             self.home.join("runs"),
@@ -168,7 +169,7 @@ impl Operation {
         }))
     }
 
-    pub fn finish(&mut self, paths: &[String], caller: Option<&Caller>) -> Result<Value> {
+    pub fn finish(&mut self, paths: &[String], caller: Option<&CallerId>) -> Result<Value> {
         if paths.len() > 32 {
             return Err(WorkspaceError::invalid_argument("Select at most 32 files"));
         }

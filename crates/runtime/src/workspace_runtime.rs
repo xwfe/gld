@@ -28,7 +28,7 @@
 //!   期间补丁得排队。挡的是"一边跑命令一边改源文件"——那种交叉出来的结果没法
 //!   解释，命令读到的是半新半旧的文件。
 //! - **命令会话归谁**。`exec_command` 起的命令记在"目录 + 调用方主体"这张表
-//!   里（[`gld_policy::Caller`]）。同一个主体换个入口进来读得到自己
+//!   里（[`gld_policy::CallerId`]）。同一个主体换个入口进来读得到自己
 //!   的 `session_id`，换个主体就完全看不见——`read_output` 那边报的是
 //!   `SESSION_NOT_FOUND`，和"这个 id 根本不存在"长得一模一样，不给枚举机会。
 //!
@@ -62,7 +62,7 @@
 //! - **同一个入口上认不出"两个人"的那些情况**。会话表按主体分，但匿名连接
 //!   （`auth_type=noauth`）和共用一条 bearer 令牌的客户端本来就只有一个主体，
 //!   它们之间没有隔离可言。哪些分得开、哪些分不开，列在
-//!   [`gld_policy::Caller`]。
+//!   [`gld_policy::CallerId`]。
 //! - **不是 gld 的写者**——编辑器、`git checkout`、另一个 AI 工具。文件锁是
 //!   劝告锁（advisory），不参与的人照写不误。那一侧靠的是补丁的版本前置条件
 //!   和落盘前复核，两者都不是强 CAS。
@@ -81,7 +81,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::session::SessionStore;
-use gld_policy::Caller;
+use gld_policy::CallerId;
 
 mod locks;
 
@@ -107,7 +107,7 @@ pub struct RuntimePaths {
 ///
 /// 两件东西：写锁，以及这个目录上的命令会话表。
 ///
-/// **会话表按调用方分，一个 [`Caller`] 一张。**不跟着 `ToolContext` 走，
+/// **会话表按调用方分，一个 [`CallerId`] 一张。**不跟着 `ToolContext` 走，
 /// 所以两件事同时成立：
 ///
 /// - 同一个主体不管经哪个 `ToolContext` 进来，看到的是同一张表。hub 里
@@ -115,11 +115,11 @@ pub struct RuntimePaths {
 ///   `session_id` 都还在。
 /// - 不同主体看到的是不同的表，**互相根本看不见**。A 拿着 B 的 `session_id`
 ///   去读，得到 `SESSION_NOT_FOUND`，跟"这个 id 不存在"一个样子，不给枚举
-///   机会。分得开哪些主体、分不开哪些，写在 [`gld_policy::Caller`]。
+///   机会。分得开哪些主体、分不开哪些，写在 [`gld_policy::CallerId`]。
 pub struct WorkspaceRuntime {
     commit_lock: Mutex<()>,
     /// 这个目录上的命令会话表，按调用方分。
-    sessions: Mutex<HashMap<Caller, Arc<SessionStore>>>,
+    sessions: Mutex<HashMap<CallerId, Arc<SessionStore>>>,
     /// 这个目录落过多少次盘（`apply_patch` 提交一次算一次）。
     ///
     /// 只增不减，绕回去要 5.8e11 年。正在跑的命令记下自己起来时的值，差值就是
@@ -149,7 +149,7 @@ pub struct WorkspaceRuntime {
 /// 同一个调用方经 gld 接连写同一个文件留下的版本，旧的在前，最后一个是现在磁盘上的。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OwnWrites {
-    /// [`Caller::key`]。存标识不存 `Caller`，这张表要跟着工作区换代，而 `Grant` 有不落盘的字段。
+    /// [`CallerId::key`]。只保存稳定身份键；权限快照和凭据不进入执行层或工作区交接状态。
     writer: String,
     versions: Vec<String>,
 }
@@ -241,7 +241,7 @@ impl WorkspaceRuntime {
     /// 接不上（中间有人在 gld 之外改过、换了人写、新建的文件）就从这一笔重新记。
     pub fn record_own_write(
         &self,
-        caller: &Caller,
+        caller: &CallerId,
         path: &str,
         before: Option<&str>,
         after: Option<&str>,
@@ -280,7 +280,7 @@ impl WorkspaceRuntime {
     /// 的版本号，是最常见的补丁失败——记录里 9 次版本冲突全是这样，gld 几分钟前刚写过同一个
     /// 文件（审查 §31）。这时没人动过它改的东西，拒了只会让它白重读一遍。别人写过、gld 之外
     /// 改过、gld 重启过（这张表只在内存里），都答"不是"，照旧拒。
-    pub fn wrote_since(&self, caller: &Caller, path: &str, then: &str, now: &str) -> bool {
+    pub fn wrote_since(&self, caller: &CallerId, path: &str, then: &str, now: &str) -> bool {
         let writes = self
             .own_writes
             .lock()
@@ -310,7 +310,7 @@ impl WorkspaceRuntime {
     ///
     /// 内部会挨个问子进程死没死，用 `block_on`，不能在 tokio 异步 worker
     /// 线程里调。
-    pub fn running_commands(&self, caller: &Caller) -> RunningCommands {
+    pub fn running_commands(&self, caller: &CallerId) -> RunningCommands {
         let tables: Vec<(bool, Arc<SessionStore>)> = {
             let sessions = self
                 .sessions
@@ -343,7 +343,7 @@ impl WorkspaceRuntime {
     ///
     /// 同一个 `caller` 拿到的永远是同一张表，跟他经哪个 `ToolContext` 进来
     /// 无关。换一个 `caller` 就是另一张表，两边互相看不见。
-    pub fn sessions_for(&self, caller: &Caller) -> Arc<SessionStore> {
+    pub fn sessions_for(&self, caller: &CallerId) -> Arc<SessionStore> {
         let mut sessions = self
             .sessions
             .lock()
@@ -499,7 +499,7 @@ impl WorkspaceRuntime {
     }
 
     /// `reason` 进命令的终态和运行记录：有人要停是 `killed`，gld 自己要退出是 `interrupted`。
-    fn terminate_sessions(&self, matches: impl Fn(&Caller) -> bool, reason: &str) -> usize {
+    fn terminate_sessions(&self, matches: impl Fn(&CallerId) -> bool, reason: &str) -> usize {
         let stores: Vec<Arc<SessionStore>> = {
             let sessions = self
                 .sessions
@@ -559,7 +559,10 @@ pub fn terminate_all_sessions_everywhere() -> usize {
     terminate_sessions_everywhere(|_| true, "interrupted")
 }
 
-fn terminate_sessions_everywhere(matches: impl Fn(&Caller) -> bool + Copy, reason: &str) -> usize {
+fn terminate_sessions_everywhere(
+    matches: impl Fn(&CallerId) -> bool + Copy,
+    reason: &str,
+) -> usize {
     let runtimes: Vec<Arc<WorkspaceRuntime>> = RUNTIMES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -585,7 +588,9 @@ pub fn running_session_counts() -> Vec<(PathBuf, usize)> {
     runtimes
         .into_iter()
         .filter_map(|(root, runtime)| {
-            let count = runtime.running_commands(&Caller::local()).total();
+            let count = runtime
+                .running_commands(&CallerId::local_operator())
+                .total();
             (count > 0).then_some((root, count))
         })
         .collect()

@@ -21,15 +21,10 @@ impl Hub {
             })
     }
 
-    pub(super) fn work_sessions_offered(
-        &self,
-        settings: &AppSettings,
-        grant: Option<&Grant>,
-    ) -> bool {
+    pub(super) fn work_sessions_offered(&self, settings: &AppSettings, auth: &AuthContext) -> bool {
         settings.hub.work_sessions
-            && self.auth.auth_type != "noauth"
             && self.tool_profile != "read-only"
-            && grant.is_none()
+            && auth.may_manage_workspaces()
     }
 
     fn check_work_access(
@@ -37,14 +32,14 @@ impl Hub {
         auth: &AuthContext,
         settings: &AppSettings,
     ) -> Result<(), WorkspaceError> {
-        if !auth.is_authenticated() || auth.grant().is_some() {
+        if !auth.may_manage_workspaces() {
             return Err(WorkspaceError::Tool {
-                code: "WORK_SESSION_REQUIRES_FULL_AUTH",
-                message: "Managed workspaces require full authenticated service credentials, not noauth or a project grant".into(),
+                code: "WORK_SESSION_REQUIRES_SERVICE_ACCESS",
+                message: "Managed workspaces require the managed_workspaces service capability and project write permission".into(),
                 category: "permission", retryable: false,
             });
         }
-        if !self.work_sessions_offered(settings, None) {
+        if !self.work_sessions_offered(settings, auth) {
             return Err(WorkspaceError::Tool {
                 code: "WORK_SESSIONS_DISABLED",
                 message: "Managed workspaces are disabled or the service is read-only. The operator can enable them with gld upgrade --work-sessions true".into(),
@@ -115,7 +110,7 @@ impl Hub {
                     let record = operation.record.clone();
                     drop(operation);
                     let sweep = store
-                        .sweep(&owner, None, 8, Some(&Caller::from_auth(auth)))
+                        .sweep(&owner, None, 8, Some(auth.id()))
                         .unwrap_or_else(|e| json!({"error":e.message()}));
                     Ok(tool_ok(json!({
                         "workspace": record.id, "created": created, "session": summary(&record),
@@ -125,7 +120,7 @@ impl Hub {
                 }
                 "status" => {
                     let mut operation = store.operation(&owner, text(args, "workspace")?)?;
-                    let resources = operation.resources(Some(&Caller::from_auth(auth)))?;
+                    let resources = operation.resources(Some(auth.id()))?;
                     Ok(tool_ok(
                         json!({"session": summary(&operation.record), "resources":resources}),
                     ))
@@ -148,12 +143,12 @@ impl Hub {
                         operation.set_retention(Some(24))?;
                         json!({"closed":false,"source_files_kept":true,"artifacts":artifacts,"session":summary(&operation.record),"note":"Failed task retained for 24 idle hours; busy or unknown resources still block expiry cleanup."})
                     } else {
-                        operation.finish(&paths, Some(&Caller::from_auth(auth)))?
+                        operation.finish(&paths, Some(auth.id()))?
                     };
                     drop(operation);
                     let mut result = tool_ok(receipt);
                     result["expiry_sweep"] = store
-                        .sweep(&owner, None, 8, Some(&Caller::from_auth(auth)))
+                        .sweep(&owner, None, 8, Some(auth.id()))
                         .unwrap_or_else(|e| json!({"error":e.message()}));
                     Ok(result)
                 }
@@ -212,7 +207,7 @@ impl Hub {
                         &owner,
                         cursor,
                         limit,
-                        Some(&Caller::from_auth(auth)),
+                        Some(auth.id()),
                     )?))
                 }
                 "list" => {
@@ -309,11 +304,7 @@ impl Hub {
             Some(id) => operation.observe_command_result(&id, &result["structuredContent"]),
             None => Ok(()),
         }
-        .and_then(|()| {
-            operation
-                .resources(Some(&Caller::from_auth(auth)))
-                .map(|_| ())
-        });
+        .and_then(|()| operation.resources(Some(auth.id())).map(|_| ()));
         if let Err(error) = recorded {
             // 命令可能已经完成；不把资源记账失败伪装成命令没执行，让模型重跑。
             result["structuredContent"]["cleanup_warning"] = json!(error.message());

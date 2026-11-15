@@ -9,7 +9,7 @@ use axum::{
 };
 
 use crate::auth::{
-    external_base_url, verify_oauth_bearer_header, AuthContext, OAuthRuntime, Principal,
+    external_base_url, verify_oauth_bearer_header, ActionsSubject, AuthContext, OAuthRuntime,
 };
 
 use super::bearer::constant_time_eq;
@@ -17,6 +17,8 @@ use super::bearer::constant_time_eq;
 #[derive(Clone)]
 pub struct AuthConfig {
     pub auth_type: String,
+    pub workspace_id: String,
+    pub write: bool,
     pub api_key: Option<String>,
     pub oauth: Option<Arc<OAuthRuntime>>,
     pub bind_port: u16,
@@ -30,9 +32,13 @@ impl AuthConfig {
         oauth: Option<Arc<OAuthRuntime>>,
         bind_port: u16,
         configured_public_url: String,
+        workspace_id: String,
+        write: bool,
     ) -> Self {
         Self {
             auth_type,
+            workspace_id,
+            write,
             api_key,
             oauth,
             bind_port,
@@ -53,11 +59,7 @@ impl AuthConfig {
     }
 }
 
-/// GPT Actions 这个入口在主体标识里的名字（`noauth:actions`、`bearer:actions`、`oauth:actions:<client>`）。
-///
-/// 以前 Actions 调工具不带身份，落到 [`gld_core::tools::Caller::local`]，和本机 `gld tool call`
-/// 是同一个主体：两边的命令会话、运行记录互相读得到，有了 `list_runs` 还能直接列出来
-/// （独立审查发现）。验完鉴权就在请求上挂一个自己的 [`AuthContext`]。
+/// Actions identities are confined to this protocol and their configured workspace.
 pub const ACTIONS_SCOPE: &str = "actions";
 
 pub async fn require_actions_auth(
@@ -66,9 +68,11 @@ pub async fn require_actions_auth(
     next: Next,
 ) -> Response {
     if auth.no_auth() {
-        request
-            .extensions_mut()
-            .insert(AuthContext::new(Principal::Anonymous, ACTIONS_SCOPE));
+        let context = match actions_context(&auth, ActionsSubject::Anonymous) {
+            Ok(context) => context,
+            Err(response) => return *response,
+        };
+        request.extensions_mut().insert(context);
         return next.run(request).await;
     }
 
@@ -97,9 +101,11 @@ pub async fn require_actions_auth(
             return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response();
         }
 
-        request
-            .extensions_mut()
-            .insert(AuthContext::new(Principal::SharedSecret, ACTIONS_SCOPE));
+        let context = match actions_context(&auth, ActionsSubject::ApiKey) {
+            Ok(context) => context,
+            Err(response) => return *response,
+        };
+        request.extensions_mut().insert(context);
         return next.run(request).await;
     }
 
@@ -123,12 +129,16 @@ pub async fn require_actions_auth(
             Ok(identity) => identity,
             Err(response) => return *response,
         };
-        request.extensions_mut().insert(AuthContext::new(
-            Principal::OAuthClient {
+        let context = match actions_context(
+            &auth,
+            ActionsSubject::OAuth {
                 client_id: identity.client_id,
             },
-            ACTIONS_SCOPE,
-        ));
+        ) {
+            Ok(context) => context,
+            Err(response) => return *response,
+        };
+        request.extensions_mut().insert(context);
         return next.run(request).await;
     }
 
@@ -137,4 +147,66 @@ pub async fn require_actions_auth(
         format!("Unsupported Actions auth type: {}", auth.auth_type),
     )
         .into_response()
+}
+
+fn actions_context(
+    auth: &AuthConfig,
+    subject: ActionsSubject,
+) -> Result<AuthContext, Box<Response>> {
+    AuthContext::actions(ACTIONS_SCOPE, &auth.workspace_id, subject, auth.write).map_err(|_| {
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid Actions authority configuration",
+            )
+                .into_response(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actions_authority_is_workspace_bound_and_explicit() {
+        let auth = AuthConfig::new(
+            "api_key".into(),
+            Some("fixture".into()),
+            None,
+            0,
+            String::new(),
+            "project".into(),
+            false,
+        );
+        let context = actions_context(&auth, ActionsSubject::ApiKey).unwrap();
+        assert_eq!(context.actions_workspace_id(), Some("project"));
+        assert!(context.allows_project("project"));
+        assert!(!context.allows_project("different"));
+        assert!(context.read_only());
+        assert!(context.grant().is_none());
+        assert!(!context.is_local_operator());
+        assert!(!context.may_read_user_prompts());
+        assert!(!context.may_use_machine_mcp());
+        assert!(!context.may_manage_workspaces());
+    }
+
+    #[test]
+    fn anonymous_actions_are_explicit_and_missing_configuration_is_rejected() {
+        let mut auth = AuthConfig::new(
+            "none".into(),
+            None,
+            None,
+            0,
+            String::new(),
+            "project".into(),
+            true,
+        );
+        let context = actions_context(&auth, ActionsSubject::Anonymous).unwrap();
+        assert!(!context.is_authenticated());
+        assert!(!context.is_local_operator());
+        assert!(!context.read_only());
+        auth.workspace_id.clear();
+        assert!(actions_context(&auth, ActionsSubject::Anonymous).is_err());
+    }
 }

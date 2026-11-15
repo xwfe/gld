@@ -1423,9 +1423,9 @@ Options:
 Usage: gld grant [OPTIONS] <COMMAND>
 
 Commands:
-  add      发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
-  browser  为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
-  list     列出全部（默认脱敏，--reveal 显示普通口令和令牌；浏览器 URL 只在创建时显示） [alias: ls]
+  add      尚未开放：旧创建入口已停用，统一 token/oauth/url 签发正在接入
+  browser  已停用：后续统一由 grant add --via url 创建，不再签发旧浏览器地址
+  list     列出新授权的范围、能力、状态和凭据元数据，不返回秘密或摘要 [alias: ls]
   remove   作废：下一次请求起它的令牌就不能用，刷新也换不来新的；它起的命令和委派的 Agent 一起停掉 [alias: rm]
 
 Options:
@@ -1461,7 +1461,7 @@ Options:
 ## gld grant add
 
 ```text
-发一把新的，只开给出的项目（名称、id 或 id 前缀，本地远端都行）
+尚未开放：旧创建入口已停用，统一 token/oauth/url 签发正在接入
 
 Usage: gld grant add [OPTIONS] <NAME> <PROJECT>...
 
@@ -1485,7 +1485,7 @@ Options:
 ## gld grant browser
 
 ```text
-为只接受 URL 的浏览器客户端生成短期连接地址，默认只读；不改变服务 OAuth
+已停用：后续统一由 grant add --via url 创建，不再签发旧浏览器地址
 
 Usage: gld grant browser [OPTIONS] <NAME> [PROJECT]...
 
@@ -1511,12 +1511,12 @@ Options:
 ## gld grant list
 
 ```text
-列出全部（默认脱敏，--reveal 显示普通口令和令牌；浏览器 URL 只在创建时显示）
+列出新授权的范围、能力、状态和凭据元数据，不返回秘密或摘要
 
 Usage: gld grant list [OPTIONS]
 
 Options:
-      --reveal          
+      --reveal          已停用；新存储不保存可恢复的秘密明文
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）

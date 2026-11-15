@@ -168,8 +168,19 @@ async fn two_wss_nodes_each_use_one_peer_for_multiple_real_workspaces() {
             nodes.push(tokio::spawn(async move {
                 let _dirs = dirs;
                 let hub = Arc::new(hub);
-                // 测试中由已通过握手的连接绑定主体；不把网络请求降成 Caller::local。
-                let auth = AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE);
+                // 这里只测试传输；显式注入受限测试身份，不走生产节点授权协议。
+                let auth = AuthContext::verified_mcp(
+                    HUB_SCOPE,
+                    gld_policy::Grant {
+                        id: "transport-test".into(),
+                        name: "Transport test".into(),
+                        scope: gld_policy::ProjectScope::AllProjects,
+                        permissions: gld_policy::GrantPermissions { write: true, ..Default::default() },
+                        status: gld_policy::GrantStatus::Active,
+                    },
+                    gld_policy::CredentialKind::Token,
+                    gld_policy::McpSubject::Token,
+                ).unwrap();
                 loop {
                     // 等下一条请求是正常空闲，不使用“在途 RPC 超时就断线”的 recv_line。
                     let text = match socket.next().await {

@@ -1,4 +1,5 @@
-//! 正式配置的共享范围在停止后修改；运行时查看可用，权限收缩在再次连接时生效。
+//! 正式配置的共享范围只在停止后修改，运行中的离线节点仍持有配置锁。
+//! D18-A 只验证本地配置和机器登记；网络转发在授权协议接通前拒绝。
 
 use super::*;
 
@@ -19,7 +20,7 @@ fn private_output(output: &Output) {
 }
 
 #[test]
-fn cli_sharing_changes_require_a_stopped_node_and_preserve_remaining_project_handles() {
+fn cli_sharing_changes_require_a_stopped_node_and_preserve_its_identity() {
     let hub = Env::new();
     let service = hub.serve("local", "bearer");
     let relay = TlsRelay::new(service.port);
@@ -27,12 +28,10 @@ fn cli_sharing_changes_require_a_stopped_node_and_preserve_remaining_project_han
     let ids = projects(&machine, "share-node");
     let registration = register(&hub, "share-node", TOKEN_A);
     let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
-    value["hub_url"] = json!(format!("https://127.0.0.1:{}", relay.port));
+    value["hub_url"] = json!(format!("https://127.0.0.1:{}", free_port()));
     let path = write_config(&machine, "sharing.json", &value);
     let mut node = NodeProcess::start(&machine, &path);
-    let original = wait_inventory(&service, 2, 2);
-    let api_handle = find(&original, "share-node/api");
-    let web_handle = find(&original, "share-node/web");
+    wait_running(&path);
     let saved = std::fs::read(&path).unwrap();
 
     let shown = shares(&machine, &path, &[]);
@@ -55,10 +54,13 @@ fn cli_sharing_changes_require_a_stopped_node_and_preserve_remaining_project_han
     assert!(String::from_utf8_lossy(&refused.stderr).contains("in use"));
     private_output(&refused);
     assert_eq!(std::fs::read(&path).unwrap(), saved);
-    assert_eq!(read(&service, &api_handle)["content"], "share-node/api\n");
+    assert_eq!(
+        relay.connections(),
+        0,
+        "local lock checks do not need a Hub connection"
+    );
 
     node.stop();
-    wait_inventory(&service, 0, 2);
     let changed = shares(&machine, &path, &[ids[1].as_str()]);
     assert!(
         changed.status.success(),
@@ -78,15 +80,11 @@ fn cli_sharing_changes_require_a_stopped_node_and_preserve_remaining_project_han
         "sharing does not replace identity, credentials or CA"
     );
 
-    let _node = NodeProcess::start(&machine, &path);
-    let current = wait_inventory(&service, 1, 1);
-    assert_eq!(find(&current, "share-node/web"), web_handle);
-    assert!(!current
-        .iter()
-        .any(|workspace| workspace["name"] == "share-node/api"
-            || workspace["name"] == "share-node/unshared"));
-    assert_eq!(read(&service, &web_handle)["content"], "share-node/web\n");
-    assert_eq!(read(&service, &api_handle)["ok"], false);
+    let mut reconnect: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    reconnect["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    write_config(&machine, "sharing.json", &reconnect);
+    assert_node_auth_pending(&NodeProcess::start(&machine, &path).rejected());
+    assert_no_native_projects(&hub);
     assert_no_daemon(&machine);
 }
 
@@ -99,7 +97,7 @@ fn leaving_removes_only_the_local_node_state_and_hub_keeps_the_machine_until_rev
     let ids = projects(&machine, "leaving");
     let registration = register(&hub, "leaving", TOKEN_A);
     let mut value = config(&machine, &relay, &registration, TOKEN_A, &ids);
-    value["hub_url"] = json!(format!("https://localhost:{}", relay.port));
+    value["hub_url"] = json!(format!("https://localhost:{}", free_port()));
     let path = write_config(&machine, "leaving.json", &value);
     let readme = machine.project.path().join("api/README.md");
     let leave = |extra: &[&str]| {
@@ -112,7 +110,7 @@ fn leaving_removes_only_the_local_node_state_and_hub_keeps_the_machine_until_rev
     };
 
     let mut node = NodeProcess::start(&machine, &path);
-    wait_inventory(&service, 2, 2);
+    wait_running(&path);
     assert!(path.exists());
     let refused = leave(&[]);
     assert!(!refused.status.success(), "needs confirmation");
@@ -122,7 +120,6 @@ fn leaving_removes_only_the_local_node_state_and_hub_keeps_the_machine_until_rev
     assert!(String::from_utf8_lossy(&running.stderr).contains("in use"));
     assert!(path.exists());
     node.stop();
-    wait_inventory(&service, 0, 2);
 
     let left = leave(&["--yes"]);
     assert!(
@@ -144,12 +141,12 @@ fn leaving_removes_only_the_local_node_state_and_hub_keeps_the_machine_until_rev
         "nothing left to remove"
     );
 
-    // 登记还在，操作员撤销之前显示离线，不会悄悄消失。
-    let items = wait_inventory(&service, 0, 2);
-    assert_eq!(
-        items.iter().filter(|item| item["kind"] == "node").count(),
-        2
-    );
+    // 本机离开只删除本机配置；Hub 的机器登记留给 Hub 操作员明确撤销。
+    let machines = stored_machines(&hub);
+    assert_eq!(machines.len(), 1);
+    assert_eq!(machines[0]["id"], registration["machine_id"]);
+    assert_eq!(machines[0]["revoked"], false);
+    assert_no_native_projects(&hub);
     let machine_id = registration["machine_id"].as_str().unwrap();
     assert_eq!(
         hub.json(&["--json", "node", "revoke", machine_id])["revoked"],

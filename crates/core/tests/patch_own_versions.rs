@@ -6,9 +6,8 @@ mod common;
 
 use std::fs;
 
-use gld_core::auth::{AuthContext, Principal};
-use gld_core::tools::caller::Caller;
 use gld_core::tools::{call_tool, call_tool_as, ToolContext};
+use gld_policy::{ActionsSubject, AuthContext};
 use serde_json::{json, Value};
 
 fn ctx() -> (tempfile::TempDir, std::path::PathBuf, ToolContext) {
@@ -38,13 +37,16 @@ fn apply(ctx: &ToolContext, from: &str, to: &str, expected: &str) -> Value {
     )
 }
 
-fn stranger() -> Caller {
-    Caller::from_auth(&AuthContext::new(
-        Principal::OAuthClient {
+fn stranger() -> AuthContext {
+    AuthContext::actions(
+        "hub",
+        "test-project",
+        ActionsSubject::OAuth {
             client_id: "stranger".into(),
         },
-        "hub",
-    ))
+        true,
+    )
+    .unwrap()
 }
 
 #[test]

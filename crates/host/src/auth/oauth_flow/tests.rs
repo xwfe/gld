@@ -1,12 +1,12 @@
 use super::*;
-use gld_core::auth::{remove_client_registry, GrantRecord};
+use gld_core::auth::remove_client_registry;
 use gld_core::home::data_home;
 
 use crate::auth::test_home::run_isolated;
 
 const OAUTH_MAX_BODY_BYTES: usize = 8_192;
 
-const AUDIENCE: &str = "gld:ws:test-workspace";
+const AUDIENCE: &str = "gld:actions:test-workspace";
 const PASSWORD: &str = "test-password";
 const TOKEN_SECRET: &str = "token-signing-secret";
 const REDIRECT_URI: &str = "https://chatgpt.com/connector/oauth/test";
@@ -17,7 +17,7 @@ fn runtime(client_id: &str) -> OAuthRuntime {
 }
 
 fn runtime_with(client_id: &str, clients: Arc<ClientRegistry>) -> OAuthRuntime {
-    OAuthRuntime::new(
+    OAuthRuntime::new_actions(
         AUDIENCE.into(),
         client_id.into(),
         None,
@@ -105,187 +105,201 @@ fn refresh_with(oauth: &OAuthRuntime, client_id: &str, refresh_token: String) ->
     )
 }
 
-struct FixedGrants(Mutex<Vec<GrantRecord>>);
-
-impl FixedGrants {
-    fn new(records: Vec<GrantRecord>) -> Self {
-        Self(Mutex::new(records))
-    }
-
-    fn revoke(&self, id: &str) {
-        self.0
-            .lock()
-            .unwrap()
-            .retain(|record| record.grant.id != id);
-    }
-
-    fn find(&self, matches: impl Fn(&GrantRecord) -> bool) -> Option<Grant> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|record| record.browser.is_none() && matches(record))
-            .map(|record| Grant {
-                browser: false,
-                ..record.grant.clone()
-            })
-    }
-}
-
-impl GrantBook for FixedGrants {
-    fn by_id(&self, id: &str) -> Option<Grant> {
-        self.find(|record| record.grant.id == id)
-    }
-
-    fn by_password(&self, password: &str) -> Option<Grant> {
-        self.find(|record| !password.is_empty() && record.oauth_password == password)
-    }
-
-    fn by_bearer_token(&self, token: &str) -> Option<Grant> {
-        self.find(|record| !token.is_empty() && record.bearer_token == token)
-    }
-}
-
-fn grant_record(id: &str, password: &str) -> GrantRecord {
-    GrantRecord {
-        grant: Grant {
-            id: id.into(),
-            name: "alice".into(),
-            workspaces: vec!["ws-a".into()],
-            read_only: false,
-            browser: false,
-        },
-        oauth_password: password.into(),
-        bearer_token: format!("{id}-bearer"),
-        created_at: String::new(),
-        browser: None,
-    }
-}
-
-fn runtime_with_grants(grants: Arc<FixedGrants>) -> OAuthRuntime {
-    runtime("chatgpt-client-test").with_grants(grants)
-}
-
-fn tokens(response: Response) -> (String, String) {
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = body_json(response);
-    (
-        body["access_token"].as_str().expect("access").to_string(),
-        body["refresh_token"].as_str().expect("refresh").to_string(),
+fn pending_mcp() -> OAuthRuntime {
+    OAuthRuntime::new_mcp_pending(
+        AUDIENCE.into(),
+        "chatgpt-client-test".into(),
+        None,
+        TOKEN_SECRET.into(),
+        Arc::new(ClientRegistry::in_memory()),
     )
 }
 
-/// 授权页填 grant 的口令，发出来的令牌只带那个 grant；填服务口令还是全权（RFC-0007）。
 #[test]
-fn a_grant_password_issues_tokens_scoped_to_that_grant() {
-    let grants = Arc::new(FixedGrants::new(vec![grant_record("g1", "grant-pw")]));
-    let oauth = runtime_with_grants(grants);
-    let base = "https://lb.example.com";
-    let client = "chatgpt-client-test";
-
-    let code = authorize_code(&oauth, client, base, "grant-pw");
-    let (access, _) = tokens(exchange_code(&oauth, client, base, code));
-    let identity = oauth.identify_access_token(&access, base).expect("valid");
-    assert_eq!(identity.grant.map(|grant| grant.id), Some("g1".into()));
-
-    let (owner, _) = authorize_and_exchange(&oauth, client, base);
-    let identity = oauth.identify_access_token(&owner, base).expect("valid");
-    assert_eq!(identity.grant, None, "服务口令进来的是全权");
-
-    // 全权令牌的格式和加 grant 之前一样：不写这一格。
-    let payload = owner.split('.').nth(1).unwrap();
-    let claims: Value =
-        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).expect("claims");
-    assert!(claims.get("grant").is_none(), "{claims}");
+fn unconnected_mcp_authorization_refuses_passwords_and_token_exchange() {
+    let oauth = pending_mcp();
+    let refused = authorize_post(
+        &oauth,
+        AuthorizeForm {
+            client_id: "chatgpt-client-test".into(),
+            redirect_uri: REDIRECT_URI.into(),
+            code_challenge: challenge(),
+            code_challenge_method: "S256".into(),
+            state: "state".into(),
+            password: PASSWORD.into(),
+        },
+        "https://service.example.com",
+    );
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(refused.headers().get("location").is_none());
+    assert_eq!(body_json(refused)["error"], "AUTH_NOT_READY");
+    assert!(oauth.pending.lock().unwrap().is_empty());
+    for grant_type in ["authorization_code", "refresh_token"] {
+        let response = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: grant_type.into(),
+                code: "old-code".into(),
+                refresh_token: "old-refresh".into(),
+                ..TokenForm::default()
+            },
+            "https://service.example.com",
+        );
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_json(response)["error"], "AUTH_NOT_READY");
+    }
 }
 
-/// 删掉 grant：它的访问令牌下一次就验不过，刷新令牌也换不来新的；删了再建一个同名、
-/// 同口令的，旧令牌照样不能用——令牌认的是随机 id，不是名字。
 #[test]
-fn revoking_a_grant_voids_its_access_and_refresh_tokens() {
-    let grants = Arc::new(FixedGrants::new(vec![grant_record("g1", "grant-pw")]));
-    let oauth = runtime_with_grants(grants.clone());
-    let base = "https://lb.example.com";
-    let client = "chatgpt-client-test";
-    let code = authorize_code(&oauth, client, base, "grant-pw");
-    let (access, refresh) = tokens(exchange_code(&oauth, client, base, code));
-    let (owner, _) = authorize_and_exchange(&oauth, client, base);
-
-    grants.revoke("g1");
-    assert!(oauth.identify_access_token(&access, base).is_none());
-    let refused = refresh_with(&oauth, client, refresh.clone());
-    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(body_json(refused)["error"], "invalid_grant");
-    assert!(
-        oauth.identify_access_token(&owner, base).is_some(),
-        "全权令牌不受影响"
+fn mcp_never_reinterprets_actions_tokens_as_a_grant() {
+    let actions = runtime("chatgpt-client-test");
+    let (access, refresh) = authorize_and_exchange(
+        &actions,
+        "chatgpt-client-test",
+        "https://service.example.com",
     );
+    let mcp = pending_mcp();
+    assert!(mcp
+        .identify_access_token(&access, "https://service.example.com")
+        .is_none());
+    assert!(mcp
+        .identify_access_token(&refresh, "https://service.example.com")
+        .is_none());
+    let response = authorize_get(
+        &mcp,
+        AuthorizeParams {
+            response_type: "code".into(),
+            client_id: "chatgpt-client-test".into(),
+            redirect_uri: REDIRECT_URI.into(),
+            code_challenge: challenge(),
+            code_challenge_method: "S256".into(),
+            state: String::new(),
+        },
+        None,
+        "https://service.example.com",
+    );
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
 
-    grants
-        .0
-        .lock()
-        .unwrap()
-        .push(grant_record("g2", "grant-pw"));
-    assert!(oauth.identify_access_token(&access, base).is_none());
+fn sign_claim_value(value: &Value) -> String {
+    encode(
+        &Header::new(Algorithm::HS256),
+        value,
+        &EncodingKey::from_secret(TOKEN_SECRET.as_bytes()),
+    )
+    .unwrap()
+}
+
+fn current_claim_value() -> Value {
+    let now = unix_now();
+    json!({
+        "version": ACTIONS_CLAIMS_VERSION,
+        "iss": AUDIENCE, "aud": AUDIENCE, "iat": now, "exp": now + 3600,
+        "scope": "actions", "client_id": "chatgpt-client-test", "token_use": token_use("access")
+    })
+}
+
+#[test]
+fn legacy_optional_grant_and_missing_claims_are_rejected() {
+    let oauth = runtime("chatgpt-client-test");
+    let mut legacy = current_claim_value();
+    legacy.as_object_mut().unwrap().remove("version");
+    legacy["scope"] = json!("mcp");
+    legacy["token_use"] = json!("access");
+    assert!(!oauth.verify_access_token(&sign_claim_value(&legacy), "https://service.example.com"));
+    legacy["grant"] = json!("old-grant");
+    legacy["token_use"] = json!("grant_access");
+    assert!(!oauth.verify_access_token(&sign_claim_value(&legacy), "https://service.example.com"));
+    for missing in ["version", "scope", "client_id", "token_use"] {
+        let mut value = current_claim_value();
+        value.as_object_mut().unwrap().remove(missing);
+        assert!(
+            !oauth.verify_access_token(&sign_claim_value(&value), "https://service.example.com")
+        );
+    }
+    let mut unknown = current_claim_value();
+    unknown["grant"] = json!("ignored-authority-is-forbidden");
+    assert!(!oauth.verify_access_token(&sign_claim_value(&unknown), "https://service.example.com"));
+}
+
+#[test]
+fn signed_claims_must_match_version_scope_use_client_and_expiry() {
+    let oauth = runtime("chatgpt-client-test");
+    assert!(oauth.verify_access_token(
+        &sign_claim_value(&current_claim_value()),
+        "https://service.example.com"
+    ));
+    for (field, invalid) in [
+        ("version", json!(1)),
+        ("scope", json!("mcp")),
+        ("token_use", json!("access")),
+        ("token_use", json!(token_use("refresh"))),
+        ("client_id", json!("unknown-client")),
+        ("client_id", json!("")),
+        ("exp", json!(unix_now() - 1)),
+    ] {
+        let mut value = current_claim_value();
+        value[field] = invalid;
+        assert!(
+            !oauth.verify_access_token(&sign_claim_value(&value), "https://service.example.com"),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn actions_claims_have_no_optional_grant_or_legacy_token_use() {
+    let oauth = runtime("chatgpt-client-test");
+    let (access, refresh) =
+        authorize_and_exchange(&oauth, "chatgpt-client-test", "https://service.example.com");
+    for (token, kind) in [(&access, "access"), (&refresh, "refresh")] {
+        let claims = decode_token_claims(token, TOKEN_SECRET, AUDIENCE).unwrap();
+        assert_eq!(claims.version, ACTIONS_CLAIMS_VERSION);
+        assert_eq!(claims.scope, "actions");
+        assert_eq!(claims.token_use, token_use(kind));
+        assert_ne!(claims.token_use, kind);
+    }
+}
+
+#[test]
+fn authorization_codes_are_single_use_and_pkce_is_required() {
+    let oauth = runtime("chatgpt-client-test");
+    let base = "https://service.example.com";
+    let code = authorize_code(&oauth, "chatgpt-client-test", base, PASSWORD);
+    let bad = token_exchange(
+        &oauth,
+        &HeaderMap::new(),
+        TokenForm {
+            grant_type: "authorization_code".into(),
+            code: code.clone(),
+            redirect_uri: REDIRECT_URI.into(),
+            code_verifier: "a".repeat(43),
+            client_id: "chatgpt-client-test".into(),
+            ..TokenForm::default()
+        },
+        base,
+    );
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(bad)["error"], "invalid_grant");
     assert_eq!(
-        refresh_with(&oauth, client, refresh).status(),
+        exchange_code(&oauth, "chatgpt-client-test", base, code).status(),
+        StatusCode::BAD_REQUEST
+    );
+    let code = authorize_code(&oauth, "chatgpt-client-test", base, PASSWORD);
+    assert_eq!(
+        exchange_code(&oauth, "chatgpt-client-test", base, code.clone()).status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        exchange_code(&oauth, "chatgpt-client-test", base, code).status(),
         StatusCode::BAD_REQUEST
     );
 }
 
-/// 回滚到不认 grant 的旧版本时，grant 的令牌不能被当成全权令牌。旧版本只认
-/// `token_use == "access"` / `"refresh"`，这里照它的判法验一遍。
+/// Actions passwords cannot be replaced by an unrelated MCP grant credential.
 #[test]
-fn a_grant_token_is_refused_by_a_version_that_does_not_know_grants() {
-    let grants = Arc::new(FixedGrants::new(vec![grant_record("g1", "grant-pw")]));
-    let oauth = runtime_with_grants(grants);
-    let base = "https://lb.example.com";
-    let client = "chatgpt-client-test";
-    let code = authorize_code(&oauth, client, base, "grant-pw");
-    let (access, refresh) = tokens(exchange_code(&oauth, client, base, code));
-    let (owner, owner_refresh) = authorize_and_exchange(&oauth, client, base);
-
-    let old_kind = |token: &str| {
-        decode_token_claims(token, TOKEN_SECRET, AUDIENCE)
-            .expect("signature and audience are the same")
-            .token_use
-    };
-    assert_ne!(old_kind(&access), "access", "旧版本会把它当全权访问令牌");
-    assert_ne!(old_kind(&refresh), "refresh", "旧版本会拿它换全权令牌");
-    assert_eq!(old_kind(&owner), "access", "全权令牌格式要和旧版本一样");
-    assert_eq!(old_kind(&owner_refresh), "refresh");
-}
-
-/// 授权码活 5 分钟：这期间 grant 被删了，拿着码也换不出令牌。
-#[test]
-fn a_code_issued_for_a_revoked_grant_cannot_be_exchanged() {
-    let grants = Arc::new(FixedGrants::new(vec![grant_record("g1", "grant-pw")]));
-    let oauth = runtime_with_grants(grants.clone());
-    let base = "https://lb.example.com";
-    let code = authorize_code(&oauth, "chatgpt-client-test", base, "grant-pw");
-    grants.revoke("g1");
-    let refused = exchange_code(&oauth, "chatgpt-client-test", base, code);
-    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(body_json(refused)["error"], "invalid_grant");
-}
-
-/// 刷新 grant 的令牌，新令牌还是那个 grant 的，不会刷成全权。
-#[test]
-fn refreshing_keeps_the_grant() {
-    let grants = Arc::new(FixedGrants::new(vec![grant_record("g1", "grant-pw")]));
-    let oauth = runtime_with_grants(grants);
-    let base = "https://lb.example.com";
-    let client = "chatgpt-client-test";
-    let code = authorize_code(&oauth, client, base, "grant-pw");
-    let (_, refresh) = tokens(exchange_code(&oauth, client, base, code));
-    let (access, _) = tokens(refresh_with(&oauth, client, refresh));
-    let identity = oauth.identify_access_token(&access, base).expect("valid");
-    assert_eq!(identity.grant.map(|grant| grant.id), Some("g1".into()));
-}
-
-/// 没接 grant 的入口（工作区、GPT Actions）不认任何 grant 口令。
-#[test]
-fn an_entry_without_grants_refuses_a_grant_password() {
+fn actions_refuses_an_unrelated_grant_password() {
     let oauth = runtime("chatgpt-client-test");
     let refused = authorize_post(
         &oauth,
@@ -548,10 +562,9 @@ fn restart_keeps_registered_clients_usable() {
     );
 }
 
-/// 注册表整个丢了（文件损坏、从旧版本升上来）也要能续命，
-/// 否则用户得把连接器删了重建——这正是要避免的体验。
+/// A signed token does not restore a client that is absent from the current registry.
 #[test]
-fn refresh_still_works_when_the_registry_is_lost() {
+fn refresh_is_refused_when_the_registered_client_is_missing() {
     let before = runtime_with("chatgpt-client-test", Arc::new(ClientRegistry::in_memory()));
     let client_id = register(&before);
     let (_, refresh) = authorize_and_exchange(&before, &client_id, "https://lb.example.com");
@@ -570,7 +583,8 @@ fn refresh_still_works_when_the_registry_is_lost() {
         },
         "https://lb.example.com",
     );
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(response)["error"], "invalid_client");
 }
 
 /// 换域名、临时隧道换地址、开关全局入口——地址变了，令牌照样有效。
@@ -595,10 +609,9 @@ fn tokens_survive_a_public_url_change() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-/// 升级 gld 之前签发的令牌（`aud` 写的是公网地址）不能当场作废，
-/// 否则一次升级就让所有连接器全部重新授权。
+/// Only the stable audience is accepted; legacy public-URL audiences do not fall back.
 #[test]
-fn tokens_issued_before_the_upgrade_still_verify() {
+fn legacy_public_url_audiences_are_rejected() {
     let oauth = runtime("chatgpt-client-test");
     let legacy_access = create_token(
         "https://lb.example.com",
@@ -609,8 +622,7 @@ fn tokens_issued_before_the_upgrade_still_verify() {
     )
     .expect("legacy access token");
 
-    assert!(oauth.verify_access_token(&legacy_access, "https://lb.example.com"));
-    // 但换个地址就不认了——旧令牌本来就是绑地址签的。
+    assert!(!oauth.verify_access_token(&legacy_access, "https://lb.example.com"));
     assert!(!oauth.verify_access_token(&legacy_access, "https://other.example.com"));
 }
 
