@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +7,8 @@ use crate::error::{AppError, AppResult};
 use crate::global_gateway;
 use crate::platform::platform;
 use crate::runtime::{
-    await_listener_shutdown, is_own_process, port_busy_message, wait_for_port_free, ServiceKind,
+    await_listener_shutdown, is_own_process, port_busy_message, wait_for_port_free,
+    ListenerManager, ServiceKind,
 };
 use crate::tunnel::{
     maybe_start_for_runtime, stop_for_runtime, supervisor as tunnel_supervisor,
@@ -40,16 +40,26 @@ pub struct ServiceOverview {
 
 impl App {
     /// 启动 MCP 或 Actions，并记住它以便下次守护进程启动时恢复。
-    pub async fn start_service(&self, id: &str, kind: ServiceKind) -> AppResult<RuntimeStatusDto> {
-        let status = self.start_inner(id, kind).await?;
+    pub async fn start_service(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        kind: ServiceKind,
+    ) -> AppResult<RuntimeStatusDto> {
+        let status = self.start_inner(listeners, id, kind).await?;
         if status.state == "running" || status.state == "starting" {
             self.remember_runtime_state(id, kind, true)?;
         }
         Ok(status)
     }
 
-    pub async fn stop_service(&self, id: &str, kind: ServiceKind) -> AppResult<RuntimeStatusDto> {
-        let status = self.stop_inner(id, kind).await?;
+    pub async fn stop_service(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        kind: ServiceKind,
+    ) -> AppResult<RuntimeStatusDto> {
+        let status = self.stop_inner(listeners, id, kind).await?;
         self.remember_runtime_state(id, kind, false)?;
         Ok(status)
     }
@@ -57,15 +67,16 @@ impl App {
     /// stop → start，串行化以免和密钥变更触发的重启互相踩踏。
     pub async fn restart_service(
         &self,
+        listeners: &ListenerManager,
         id: &str,
         kind: ServiceKind,
     ) -> AppResult<RuntimeStatusDto> {
-        let _guard = self.restart_gate.lock().await;
-        let was_running = self.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))?;
+        let _guard = listeners.lock_restart().await;
+        let was_running = listeners.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))?;
         if was_running {
-            let _ = self.stop_inner(id, kind).await?;
+            let _ = self.stop_inner(listeners, id, kind).await?;
         }
-        let status = self.start_inner(id, kind).await?;
+        let status = self.start_inner(listeners, id, kind).await?;
         if status.state == "running" || status.state == "starting" {
             self.remember_runtime_state(id, kind, true)?;
         }
@@ -75,11 +86,12 @@ impl App {
     /// 这个工作区的服务已经在跑（或正在起）时返回它的状态，否则 None。
     fn status_if_already_up(
         &self,
+        listeners: &ListenerManager,
         id: &str,
         kind: ServiceKind,
     ) -> AppResult<Option<RuntimeStatusDto>> {
         let profile = self.profile_by_id(id)?;
-        self.with_runtime(|runtime| {
+        listeners.with_runtime(|runtime| {
             Ok(runtime
                 .is_active(id, kind)
                 .then(|| status_for(runtime, &profile, kind)))
@@ -87,9 +99,14 @@ impl App {
     }
 
     /// 刷新并返回服务状态（会探测端口，能发现监听器意外退出）。
-    pub fn service_status(&self, id: &str, kind: ServiceKind) -> AppResult<RuntimeStatusDto> {
+    pub fn service_status(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        kind: ServiceKind,
+    ) -> AppResult<RuntimeStatusDto> {
         let profile = self.profile_by_id(id)?;
-        self.with_runtime(|runtime| {
+        listeners.with_runtime(|runtime| {
             match kind {
                 ServiceKind::Mcp => runtime.refresh_mcp(&profile),
                 ServiceKind::Actions => runtime.refresh_actions(&profile),
@@ -98,13 +115,18 @@ impl App {
         })
     }
 
-    pub fn is_service_running(&self, id: &str, kind: ServiceKind) -> AppResult<bool> {
-        self.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))
+    pub fn is_service_running(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        kind: ServiceKind,
+    ) -> AppResult<bool> {
+        listeners.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))
     }
 
     /// 当前所有运行中的服务。
-    pub fn running_services(&self) -> AppResult<Vec<RunningService>> {
-        self.with_runtime(|runtime| {
+    pub fn running_services(&self, listeners: &ListenerManager) -> AppResult<Vec<RunningService>> {
+        listeners.with_runtime(|runtime| {
             let mut services = Vec::new();
             for kind in [ServiceKind::Mcp, ServiceKind::Actions] {
                 for workspace_id in runtime.running_workspace_ids(kind) {
@@ -116,13 +138,13 @@ impl App {
     }
 
     /// 每个工作区的服务 + 隧道状态。
-    pub async fn overview(&self) -> AppResult<Vec<ServiceOverview>> {
+    pub async fn overview(&self, listeners: &ListenerManager) -> AppResult<Vec<ServiceOverview>> {
         let profiles = self.list_workspaces()?;
         let settings = self.settings()?;
         let tunnels = tunnel_supervisor().lock().await;
         let mut items = Vec::with_capacity(profiles.len());
         for profile in profiles {
-            let (mcp, actions) = self.with_runtime(|runtime| {
+            let (mcp, actions) = listeners.with_runtime(|runtime| {
                 runtime.refresh_mcp(&profile);
                 runtime.refresh_actions(&profile);
                 Ok((
@@ -142,14 +164,17 @@ impl App {
     }
 
     /// 守护进程启动时恢复上一次运行的服务。只执行一次；失败的项写到 stderr，不中断其他项。
-    pub async fn restore_runtime_state(&self) -> AppResult<Vec<RunningService>> {
-        if self.startup_restore_attempted.swap(true, Ordering::SeqCst) {
+    pub async fn restore_runtime_state(
+        &self,
+        listeners: &ListenerManager,
+    ) -> AppResult<Vec<RunningService>> {
+        if !listeners.begin_startup_restore() {
             return Ok(Vec::new());
         }
         let settings = self.settings()?;
         // hub 不看全局的「启动时恢复」开关，理由见 HubConfig::restore_on_launch。
         if settings.hub.restore_on_launch {
-            if let Err(error) = self.start_hub_listener().await {
+            if let Err(error) = self.start_hub_listener(listeners).await {
                 eprintln!("恢复聚合入口失败：{error}");
             }
         }
@@ -171,7 +196,7 @@ impl App {
             if self.profile_by_id(&id).is_err() {
                 continue;
             }
-            match self.start_inner(&id, kind).await {
+            match self.start_inner(listeners, &id, kind).await {
                 Ok(_) => restored.push(RunningService {
                     workspace_id: id,
                     kind,
@@ -183,15 +208,18 @@ impl App {
     }
 
     /// 优雅退出：停掉所有服务、隧道和全局入口，但保留“下次恢复”记录。
-    pub async fn shutdown_all(&self) {
+    pub async fn shutdown_all(&self, listeners: &ListenerManager) {
         // 先收命令，记成 interrupted。后面停服务那几步也会停经它们起的命令，但记的是 killed
         // ——那条路 `gld stop` 也在用，那时确实是有人要停。守护进程退出不是谁要停这条命令，
         // 重启之后读运行记录的人要分得清（审查 D09）。停命令要等子进程收尾，放到阻塞线程里。
         // 委派出去的 Agent 也一样，记成 interrupted。停的时候按档案先发信号、等它收尾，
         // 每个最多十来秒。
         let _ = tokio::task::spawn_blocking(crate::generation::exec::interrupt_everything).await;
-        for service in self.running_services().unwrap_or_default() {
-            if let Err(error) = self.stop_inner(&service.workspace_id, service.kind).await {
+        for service in self.running_services(listeners).unwrap_or_default() {
+            if let Err(error) = self
+                .stop_inner(listeners, &service.workspace_id, service.kind)
+                .await
+            {
                 eprintln!(
                     "停止 {} {} 失败：{error}",
                     service.kind.as_str(),
@@ -214,7 +242,12 @@ impl App {
         .await;
     }
 
-    async fn start_inner(&self, id: &str, kind: ServiceKind) -> AppResult<RuntimeStatusDto> {
+    async fn start_inner(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        kind: ServiceKind,
+    ) -> AppResult<RuntimeStatusDto> {
         self.with_data(|store| validate_service_start(store.list(), id, kind.into()))?;
         let profile = self.profile_by_id(id)?;
 
@@ -224,13 +257,13 @@ impl App {
         // 端口检查看到占用者的 pid 等于自己，会判成"上一次残留的服务"，
         // 回一句「请先停止服务或稍后再试」——可服务本来就该在跑。
         // 症状是再敲一次 gld start 就报错，或者并发的两个 start 挂掉一个。
-        if let Some(status) = self.status_if_already_up(id, kind)? {
+        if let Some(status) = self.status_if_already_up(listeners, id, kind)? {
             return Ok(status);
         }
         if let Err(error) = ensure_port_available(port_for(&profile, kind), kind.label()).await {
             // 上面那次检查之后、这次报错之前，可能正好有另一个 start 把服务拉起来了，
             // 端口就是它占的。再问一次运行时，是自己的服务在跑就不算错。
-            return match self.status_if_already_up(id, kind)? {
+            return match self.status_if_already_up(listeners, id, kind)? {
                 Some(status) => Ok(status),
                 None => Err(error),
             };
@@ -239,11 +272,11 @@ impl App {
             global_gateway::ensure_started().await?;
         }
         let profile = self.profile_by_id(id)?;
-        self.with_runtime(|runtime| match kind {
+        listeners.with_runtime(|runtime| match kind {
             ServiceKind::Mcp => runtime.start_mcp(&profile),
             ServiceKind::Actions => runtime.start_actions(&profile),
         })?;
-        self.sync_tunnel_routes_from_runtime().await?;
+        self.sync_tunnel_routes_from_runtime(listeners).await?;
 
         match maybe_start_for_runtime(&profile, kind.tunnel_kind()).await {
             Ok(Some(url)) => self.persist_tunnel_url(id, kind.tunnel_kind(), &url)?,
@@ -275,7 +308,7 @@ impl App {
                 ),
             );
         }
-        self.with_runtime(|runtime| {
+        listeners.with_runtime(|runtime| {
             match kind {
                 ServiceKind::Mcp => runtime.refresh_mcp(&profile),
                 ServiceKind::Actions => runtime.refresh_actions(&profile),
@@ -288,22 +321,31 @@ impl App {
         })
     }
 
-    async fn stop_inner(&self, id: &str, kind: ServiceKind) -> AppResult<RuntimeStatusDto> {
+    async fn stop_inner(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        kind: ServiceKind,
+    ) -> AppResult<RuntimeStatusDto> {
         let profile = self.profile_by_id(id)?;
         let port = port_for(&profile, kind);
-        let handle = self.with_runtime(|runtime| Ok(runtime.begin_stop(id, kind)))?;
+        let handle = listeners.with_runtime(|runtime| Ok(runtime.begin_stop(id, kind)))?;
         await_listener_shutdown(handle, port).await;
-        self.with_runtime(|runtime| {
+        listeners.with_runtime(|runtime| {
             runtime.finish_stop(id, kind);
             Ok(())
         })?;
         stop_for_runtime(&profile, kind.tunnel_kind()).await?;
-        self.sync_tunnel_routes_from_runtime().await?;
-        self.with_runtime(|runtime| Ok(status_for(runtime, &profile, kind)))
+        self.sync_tunnel_routes_from_runtime(listeners).await?;
+        listeners.with_runtime(|runtime| Ok(status_for(runtime, &profile, kind)))
     }
 
-    pub(super) async fn sync_tunnel_routes_from_runtime(&self) -> AppResult<()> {
-        let active_keys = self.with_runtime(|runtime| Ok(runtime.active_tunnel_service_keys()))?;
+    pub(super) async fn sync_tunnel_routes_from_runtime(
+        &self,
+        listeners: &ListenerManager,
+    ) -> AppResult<()> {
+        let active_keys =
+            listeners.with_runtime(|runtime| Ok(runtime.active_tunnel_service_keys()))?;
         sync_managed_runtime_routes(active_keys).await
     }
 

@@ -9,7 +9,7 @@ use crate::agent_context::{
 };
 use crate::error::{AppError, AppResult};
 use crate::health::{run_health_checks, HealthItem};
-use crate::runtime::ServiceKind;
+use crate::runtime::{ListenerManager, ServiceKind};
 use crate::tools::{history, new_workspace};
 use crate::usage::ServiceUsageStats;
 
@@ -30,9 +30,13 @@ impl App {
     }
 
     /// 本次守护进程生命周期内的请求 / Token 估算统计。
-    pub fn usage_stats(&self, id: &str) -> AppResult<Vec<ServiceUsageStats>> {
+    pub fn usage_stats(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+    ) -> AppResult<Vec<ServiceUsageStats>> {
         self.ensure_workspace_exists(id)?;
-        self.with_runtime(|runtime| {
+        listeners.with_runtime(|runtime| {
             Ok(vec![
                 runtime.usage_stats(id, ServiceKind::Mcp),
                 runtime.usage_stats(id, ServiceKind::Actions),

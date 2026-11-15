@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::App;
 use crate::error::{AppError, AppResult};
-use crate::runtime::ServiceKind;
+use crate::runtime::{ListenerManager, ServiceKind};
 use crate::settings::{FrpProfile, ProxyConfig};
 
 /// FRP 服务器配置（不含 token 明文，只报告是否已设置）。
@@ -152,12 +152,16 @@ impl App {
         })
     }
 
-    pub fn set_global_runtime_settings(&self, runtime: GlobalRuntimeSettingsDto) -> AppResult<()> {
+    pub fn set_global_runtime_settings(
+        &self,
+        listeners: &ListenerManager,
+        runtime: GlobalRuntimeSettingsDto,
+    ) -> AppResult<()> {
         // 刚打开“启动时恢复”时，把当前正在跑的服务当作恢复清单的初始值。
         let should_capture_running = runtime.restore_runtime_state_on_launch
             && !self.settings()?.restore_runtime_state_on_launch;
         let running_snapshot = if should_capture_running {
-            Some(self.with_runtime(|supervisor| {
+            Some(listeners.with_runtime(|supervisor| {
                 Ok((
                     supervisor.running_workspace_ids(ServiceKind::Mcp),
                     supervisor.running_workspace_ids(ServiceKind::Actions),

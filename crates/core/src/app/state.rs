@@ -1,30 +1,23 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::data::DataStore;
 use crate::error::{AppError, AppResult};
-use crate::runtime::RuntimeSupervisor;
 use crate::settings::AppSettings;
 use crate::tools::ToolContext;
 use crate::workspace::WorkspaceProfile;
 
-/// 进程内的应用状态：持久化数据 + 正在运行的监听器 + 命令行工具调用的上下文。
+/// 进程内的应用状态：持久化数据与本地工具上下文。
 ///
-/// 三把锁都是 `std::sync::Mutex`，临界区只做内存读写和同步读写数据文件，
-/// 不在持锁期间 `await`。异步的重启串行化由 [`App::restart_gate`] 负责。
+/// 两把同步锁不跨 await；监听状态及重启/恢复管理由宿主另行创建并显式传入。
 pub struct App {
     data: Mutex<DataStore>,
-    runtime: Mutex<RuntimeSupervisor>,
     /// `gld tool call` 用的工具上下文，按工作区缓存。
     ///
     /// 缓存是为了让连续两次命令行调用共享 exec 会话（先 `exec_command`
     /// 再 `read_output`）。改了工作区配置必须失效，否则会继续用旧的
     /// 工具集和命令白名单，见 [`App::invalidate_tool_context`]。
     tool_contexts: Mutex<HashMap<String, Arc<ToolContext>>>,
-    /// 串行化 MCP / Actions 的 stop→start，避免密钥保存与表单保存同时拆同一个监听器。
-    pub(super) restart_gate: tokio::sync::Mutex<()>,
-    pub(super) startup_restore_attempted: AtomicBool,
 }
 
 impl App {
@@ -34,10 +27,7 @@ impl App {
         store.init_shared_secrets()?;
         Ok(Self {
             data: Mutex::new(store),
-            runtime: Mutex::new(RuntimeSupervisor::default()),
             tool_contexts: Mutex::new(HashMap::new()),
-            restart_gate: tokio::sync::Mutex::new(()),
-            startup_restore_attempted: AtomicBool::new(false),
         })
     }
 
@@ -70,17 +60,6 @@ impl App {
             .map_err(|_| AppError::Message("data store poisoned".into()))?;
         // 整段读-改-写都拿着文件锁，并且先重读磁盘：内存里这份只是缓存，文件才是准的。
         let _file = guard.lock_latest()?;
-        f(&mut guard)
-    }
-
-    pub(super) fn with_runtime<R>(
-        &self,
-        f: impl FnOnce(&mut RuntimeSupervisor) -> AppResult<R>,
-    ) -> AppResult<R> {
-        let mut guard = self
-            .runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(&mut guard)
     }
 

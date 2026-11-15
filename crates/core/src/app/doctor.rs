@@ -23,7 +23,7 @@ use crate::hub::{
     HUB_SCOPE,
 };
 use crate::platform::platform;
-use crate::runtime::{is_own_process, ServiceKind};
+use crate::runtime::{is_own_process, ListenerManager, ServiceKind};
 use crate::settings::{AppSettings, HubConfig};
 use crate::workspace::WorkspaceProfile;
 
@@ -116,7 +116,7 @@ pub type SecretLookup<'a> = &'a dyn Fn(&str, &str, bool) -> bool;
 
 impl App {
     /// 跑一遍全部体检项。
-    pub async fn doctor(&self) -> AppResult<Diagnosis> {
+    pub async fn doctor(&self, listeners: &ListenerManager) -> AppResult<Diagnosis> {
         let profiles = self.list_workspaces()?;
         let settings = self.settings()?;
         let secret_present = |workspace_id: &str, key: &str, shared: bool| -> bool {
@@ -148,12 +148,13 @@ impl App {
             hub::runtime::tunnel_snapshot().await.as_ref(),
         ));
         checks.extend(config_checks(&profiles, &settings, &secret_present));
-        checks.extend(self.port_checks(&profiles, &settings).await?);
+        checks.extend(self.port_checks(listeners, &profiles, &settings).await?);
         Ok(Diagnosis { checks })
     }
 
     async fn port_checks(
         &self,
+        listeners: &ListenerManager,
         profiles: &[WorkspaceProfile],
         settings: &AppSettings,
     ) -> AppResult<Vec<DoctorCheck>> {
@@ -166,7 +167,7 @@ impl App {
         for profile in profiles {
             for kind in ServiceKind::ALL {
                 let running =
-                    self.with_runtime(|runtime| Ok(runtime.is_running(&profile.id, kind)))?;
+                    listeners.with_runtime(|runtime| Ok(runtime.is_running(&profile.id, kind)))?;
                 // 项目自己的 MCP 端口是单项目服务留下的（RFC-0004 之后没有命令会
                 // 去监听它）：没在跑就不报，免得为一个用不上的端口让人去改配置。
                 // Actions 没在跑、也没配过公网入口，就是没在用，同理。

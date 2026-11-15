@@ -147,14 +147,14 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |
 | `auth/` | Bearer、OAuth Authorization Code + PKCE + DCR + Refresh Token，以及 grant 凭据/撤销存储；纯主体和范围来自 `gld-policy`。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
 | `bridge/`、`nodes/` | CCNM 会话、原生节点的身份/项目权限与连接生命周期；共同使用 `gld-transport` 的 Peer 和能力表，保留各自的租约、单连接和断线语义 |
-| `runtime/` | 进程内 MCP / Actions 监听器的启停、端口检测与释放等待 |
+| `runtime/` | ListenerManager 持有监听表、工作区重启锁与一次恢复标记；RuntimeSupervisor 执行监听器启停、端口检测与释放等待 |
 | `tunnel/`、`global_gateway.rs` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
 | `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的组合模型与读写，纯共享配置类型来自 `gld-protocol` |
 | `platform/` | 端口占用查询、进程存活 / 终止、可执行文件查找，按 OS 分实现 |
 | `home.rs` | 数据目录解析（`GLD_HOME` / `~/.config/gld`），全项目唯一的路径来源 |
 | `async_rt.rs` | 重导出 runtime 的 tokio 垫片；全局运行时只有一份，同步工具借它驱动子进程 I/O |
-| **`app/`** | **应用服务层**：`App` 持有 `DataStore`、`RuntimeSupervisor` 和命令行工具调用的 `ToolContext` 缓存，每个子模块是一组用例；`app/doctor.rs` 的纯配置检查不依赖磁盘，可直接单测 |
+| **`app/`** | **应用服务层**：`App` 持有 `DataStore` 和命令行工具调用的 `ToolContext` 缓存；监听状态由宿主显式传入 ListenerManager，每个子模块是一组用例；`app/doctor.rs` 的纯配置检查不依赖磁盘，可直接单测 |
 
 `app` 是应用用例门面；工具传输另经上表中的工具分发入口。桌面版里的 Tauri command
 在这里改成普通的 `impl App` 方法，供命令行、守护进程和测试复用。
@@ -172,6 +172,16 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 `App::set_workspace_fields` 存完会重启受影响且正在运行的服务
 （按 `service_config_changed` 逐侧比 JSON 快照）。加了新字段就自动被覆盖，
 不需要额外登记"这个字段要不要重启"。
+
+### 应用状态与监听管理
+
+宿主先 `App::load()` 读取数据并补齐共享密钥，再单独创建 `ListenerManager`；后者不读配置。
+daemon 的状态查询、请求分发、恢复与退出共用一个 Arc，CLI 的直连 Backend 也在第一次调用时创建并缓存一对资源。
+运行态相关的 App Rust 方法显式接收 `&ListenerManager`，不在方法里临时创建，也没有隐藏的默认管理器。
+
+App 保留数据文件锁、重读磁盘和工具上下文失效规则。ListenerManager 拥有原 Supervisor 的同步锁、
+工作区 restart 的异步锁、SeqCst 的恢复标记；失败也消耗本次恢复机会。Hub 的进程级 LIFECYCLE 仍独立，
+不把普通 start/stop、恢复或退出放进新的重启大锁。工具/委派的执行位置仍按执行代入口另行组合。
 
 ### 宿主与执行代之间的请求归属
 
@@ -240,9 +250,9 @@ Rust 调用者需使用 `Hub::new(config, bridge)`；`Hub::nodes()` 已移除，
 
 ## 并发与锁
 
-- `App` 内部两把 `std::sync::Mutex`（数据、运行时），临界区只做内存操作和一次同步落盘，
-  从不在持锁期间 `await`。
-- 跨 `await` 的串行化用 `tokio::sync::Mutex`：`App::restart_gate`（MCP / Actions 的 stop→start）
+- `App` 的数据与工具缓存、ListenerManager 的监听表分别使用 `std::sync::Mutex`，同步锁不跨 `await`；
+  数据读改写仍在文件锁内先重读磁盘。
+- 跨 `await` 的串行化用 `tokio::sync::Mutex`：ListenerManager 的工作区重启锁（MCP / Actions 的 stop→start）
   和 `tunnel::supervisor()`（frpc / cloudflared 的进程操作）。
 - 守护进程每个连接一个 tokio 任务，`dispatch` 再包一层 `spawn`：业务代码 panic
   只影响那条连接，并转成 `RpcError::Internal` 回给客户端。

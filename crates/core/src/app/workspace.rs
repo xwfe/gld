@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::App;
 use crate::error::{AppError, AppResult};
 use crate::logs::append_profile_log;
-use crate::runtime::ServiceKind;
+use crate::runtime::{ListenerManager, ServiceKind};
 use crate::tunnel::drop_workspace as drop_tunnel_workspace;
 use crate::workspace::resources::{
     assign_free_workspace_ports, validate_workspace_resources, validate_workspace_resources_update,
@@ -169,6 +169,7 @@ impl App {
     /// 值没变（`auth=oauth` 设成本来就是 oauth）则一个都不重启，免得白白掐断客户端。
     pub async fn set_workspace_fields(
         &self,
+        listeners: &ListenerManager,
         id: &str,
         assignments: &[(String, String)],
     ) -> AppResult<WorkspaceUpdate> {
@@ -186,10 +187,13 @@ impl App {
             if !service_config_changed(&before, &saved, kind) {
                 continue;
             }
-            if !self.is_service_running(id, kind).unwrap_or(false) {
+            if !self
+                .is_service_running(listeners, id, kind)
+                .unwrap_or(false)
+            {
                 continue;
             }
-            match self.restart_service(id, kind).await {
+            match self.restart_service(listeners, id, kind).await {
                 Ok(_) => restarted.push(kind),
                 Err(error) => restart_failures.push(RestartFailure {
                     service: kind,
@@ -229,15 +233,19 @@ impl App {
     }
 
     /// 删除工作区：先停掉它的服务和隧道，再移除配置与密钥。
-    pub async fn delete_workspace(&self, id: &str) -> AppResult<WorkspaceProfile> {
+    pub async fn delete_workspace(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+    ) -> AppResult<WorkspaceProfile> {
         let profile = self.profile_by_id(id)?;
         for kind in [ServiceKind::Mcp, ServiceKind::Actions] {
-            if self.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))? {
-                let _ = self.stop_service(id, kind).await;
+            if listeners.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))? {
+                let _ = self.stop_service(listeners, id, kind).await;
             }
         }
         drop_tunnel_workspace(id).await?;
-        self.with_runtime(|runtime| {
+        listeners.with_runtime(|runtime| {
             runtime.drop_workspace(&profile);
             Ok(())
         })?;

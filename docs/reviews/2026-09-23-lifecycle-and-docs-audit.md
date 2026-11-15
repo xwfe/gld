@@ -5289,3 +5289,41 @@ Cargo manifest/lock、CI、私有协议、nodes 的 client/connection/reconnect/
 构建和测试走本地 shell；gld 只用于运行版本查询，未出现新的 gld 工具错误，也未宣布历史间歇问题已修复。
 
 状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。
+
+
+## 124. D17-F3.1：应用状态与监听管理分开，由宿主显式装配（2026-11-15）
+
+从干净的 `main@598ed40` 开始，比本地 `origin/main` 超前 8 个提交。先核对 App 字段、生命周期锁及真实消费者，
+将 F3 分为监听管理与执行代选路两片。本片不改变工具/委派/撤销的选路，D18 授权仍未实施。
+
+### 124.1 所有者、调用链与保留行为
+
+App 只持 DataStore 和工具缓存，App::load 仍读取真实数据目录并初始化共享密钥。
+原 RuntimeSupervisor 同步锁、工作区 restart 异步锁、startup_restore_attempted 原子标记归 ListenerManager。
+它是具体的现有资源组合，不读配置，不新增 provider/执行器/注册表，也不由 App 隐式默认构造。
+
+daemon 在 App::load 后、启动执行代前显式创建一个管理器，同一 Arc 贯穿状态查询、每个 IPC 请求、启动恢复和退出。
+CLI 直连 Backend 缓存自己的 App/ListenerManager 对，后续调用复用。29 个运行态相关 App 方法显式接收同一管理器，
+包含服务、Hub 配置、凭据、工作区删除/prune、恢复设置、用量/体检和隧道路由的传递链。
+
+- 数据锁 → 文件锁 → 重读的顺序、工具缓存查/放与失效时点不变。
+- Supervisor 的同步锁不跨 await，poison 继续恢复内部状态；restart 锁只覆盖原工作区 stop→start 路径。
+- 启动恢复仍先 SeqCst swap，再读配置；失败也只尝试一次，不把普通 start/stop、恢复、退出纳入新锁。
+- Hub 的全局 LIFECYCLE 保持原实例与覆盖范围；启动失败、隧道降级、日志和退出顺序未改变。
+- 工具、批准/停止、撤销及 Planning 的全局 Router 依赖本片未改，留给下一片 F3.2；不能把 F3.1 通过当作整个 F3 完成。
+
+### 124.2 验证与独立审查
+
+迁移前 App 单测 67 条通过；迁移后同组 67 条及新增的管理器单测 2 条通过。
+新增测试核对 12 个并发请求只能取得一次恢复机会、不同管理器各自独立，以及持重启锁仍能读取监听表。
+整合检查曾发现 daemon 的 direct dispatch 调用漏传新参数，已补齐；全 workspace/all-targets check 通过。
+独立只读审查核对构造点、锁范围、恢复/失败语义、全部调用者和配置更新路径，未发现生产回归；当前架构中的旧所有者描述已同步。
+
+### 124.3 本机验证与交付范围
+
+macOS、隔离 GLD_HOME：Manager 两条单测、App 67 条、service_lifecycle 7 条、start_and_upgrade 14 条全部通过。
+`cargo check --workspace --all-targets --locked` 退出 0；全仓 `cargo test --workspace --all-targets --locked`
+为 **70 个目标，1439 passed / 0 failed / 0 ignored**；严格 Clippy 与格式检查均退出 0。
+
+本片只改变 Rust 状态所有权和显式参数；请求/响应、工具、CLI 帮助、配置、Cargo 依赖与锁文件、CI 均未改变。
+本轮不推送、不部署，未操作真实授权配置，未做真实跨平台或在线升级验收。当前状态仍是 F3 进行中。

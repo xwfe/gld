@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use gld_core::app::{App, WorkspaceTarget};
+use gld_core::runtime::ListenerManager;
 use gld_core::workspace::WorkspaceProfile;
 use serde::Serialize;
 use serde_json::Value;
@@ -20,6 +21,7 @@ pub struct DaemonContext {
 
 pub async fn dispatch(
     app: &Arc<App>,
+    listeners: &ListenerManager,
     daemon: Option<&DaemonContext>,
     request: Request,
 ) -> Result<Value, RpcError> {
@@ -69,13 +71,15 @@ pub async fn dispatch(
             assignments,
         } => {
             let profile = resolve(app, &target)?;
-            ok(&app.set_workspace_fields(&profile.id, &assignments).await?)
+            ok(&app
+                .set_workspace_fields(listeners, &profile.id, &assignments)
+                .await?)
         }
         R::DeleteWorkspace { target } => {
             let profile = resolve(app, &target)?;
-            ok(&app.delete_workspace(&profile.id).await?)
+            ok(&app.delete_workspace(listeners, &profile.id).await?)
         }
-        R::Prune { confirmed } => ok(&app.prune(confirmed).await?),
+        R::Prune { confirmed } => ok(&app.prune(listeners, confirmed).await?),
         R::UseWorkspace { target } => {
             let profile = resolve(app, &target)?;
             app.set_last_workspace(&profile.id)?;
@@ -85,26 +89,26 @@ pub async fn dispatch(
         // ---- 服务 ----
         R::StartService { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.start_service(&profile.id, kind).await?)
+            ok(&app.start_service(listeners, &profile.id, kind).await?)
         }
         R::StopService { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.stop_service(&profile.id, kind).await?)
+            ok(&app.stop_service(listeners, &profile.id, kind).await?)
         }
         R::RestartService { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.restart_service(&profile.id, kind).await?)
+            ok(&app.restart_service(listeners, &profile.id, kind).await?)
         }
         R::ServiceStatus { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.service_status(&profile.id, kind)?)
+            ok(&app.service_status(listeners, &profile.id, kind)?)
         }
-        R::Overview => ok(&app.overview().await?),
+        R::Overview => ok(&app.overview(listeners).await?),
 
         // ---- 隧道 ----
         R::TunnelStart { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.start_tunnel(&profile.id, kind).await?)
+            ok(&app.start_tunnel(listeners, &profile.id, kind).await?)
         }
         R::TunnelStop { target, kind } => {
             let profile = resolve(app, &target)?;
@@ -112,11 +116,11 @@ pub async fn dispatch(
         }
         R::TunnelRestart { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.restart_tunnel(&profile.id, kind).await?)
+            ok(&app.restart_tunnel(listeners, &profile.id, kind).await?)
         }
         R::TunnelTest { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.test_tunnel(&profile.id, kind).await?)
+            ok(&app.test_tunnel(listeners, &profile.id, kind).await?)
         }
         R::TunnelStatus { target, kind } => {
             let profile = resolve(app, &target)?;
@@ -147,22 +151,22 @@ pub async fn dispatch(
 
         // ---- 聚合入口 ----
         R::HubStatus => ok(&app.hub_status().await?),
-        R::SetHubConfig { config } => ok(&app.set_hub_config(config).await?),
+        R::SetHubConfig { config } => ok(&app.set_hub_config(listeners, config).await?),
         R::HubAddMembers { targets } => ok(&app.add_hub_members(&targets).await?),
         R::HubRemoveMembers { targets } => ok(&app.remove_hub_members(&targets).await?),
         R::HubAddRemote { spec } => ok(&app.add_ccnm_member(spec).await?),
         R::HubRemoveRemote { selector } => ok(&app.remove_ccnm_member(&selector).await?),
-        R::HubStart => ok(&app.start_hub().await?),
+        R::HubStart => ok(&app.start_hub(listeners).await?),
         R::HubStop => ok(&app.stop_hub().await?),
         R::HubSecret { key } => ok(&app.hub_secret(&key)?),
-        R::RegenerateHubSecret { key } => ok(&app.regenerate_hub_secret(&key).await?),
+        R::RegenerateHubSecret { key } => ok(&app.regenerate_hub_secret(listeners, &key).await?),
         R::SetHubSecret { key, value } => {
-            app.set_hub_secret(&key, &value).await?;
+            app.set_hub_secret(listeners, &key, &value).await?;
             ok(&true)
         }
         R::HubJoinAll => ok(&app.join_all_workspaces()?),
         R::HubHealth => ok(&app.hub_health().await?),
-        R::HubEnsureStarted => ok(&app.ensure_hub_started().await?),
+        R::HubEnsureStarted => ok(&app.ensure_hub_started(listeners).await?),
         R::HubUsage => ok(&gld_core::hub::runtime::usage().await),
         R::HubLogs { max_bytes } => ok(&app.hub_logs(max_bytes)?),
 
@@ -173,19 +177,24 @@ pub async fn dispatch(
         }
         R::SetWorkspaceSecret { target, key, value } => {
             let profile = resolve(app, &target)?;
-            app.set_workspace_secret(&profile.id, &key, &value).await?;
+            app.set_workspace_secret(listeners, &profile.id, &key, &value)
+                .await?;
             ok(&true)
         }
         R::RegenerateWorkspaceSecret { target, key } => {
             let profile = resolve(app, &target)?;
-            ok(&app.regenerate_workspace_secret(&profile.id, &key).await?)
+            ok(&app
+                .regenerate_workspace_secret(listeners, &profile.id, &key)
+                .await?)
         }
         R::SharedSecret { key } => ok(&app.shared_secret(&key)?),
         R::SetSharedSecret { key, value } => {
-            app.set_shared_secret(&key, &value).await?;
+            app.set_shared_secret(listeners, &key, &value).await?;
             ok(&true)
         }
-        R::RegenerateSharedSecret { key } => ok(&app.regenerate_shared_secret(&key).await?),
+        R::RegenerateSharedSecret { key } => {
+            ok(&app.regenerate_shared_secret(listeners, &key).await?)
+        }
 
         // ---- 设置 ----
         R::Proxy => ok(&app.proxy()?),
@@ -195,7 +204,7 @@ pub async fn dispatch(
         }
         R::RuntimeSettings => ok(&app.global_runtime_settings()?),
         R::SetRuntimeSettings { runtime } => {
-            app.set_global_runtime_settings(runtime)?;
+            app.set_global_runtime_settings(listeners, runtime)?;
             ok(&app.global_runtime_settings()?)
         }
         R::ListGrants => ok(&app.list_grants()?),
@@ -399,7 +408,7 @@ pub async fn dispatch(
 
         // ---- 观察 ----
         R::Doctor => {
-            let mut diagnosis = app.doctor().await?;
+            let mut diagnosis = app.doctor(listeners).await?;
             // 直连模式跑在命令行进程里，查出来的不是守护进程的会话和授权。
             if daemon.is_some() && app.uses_screen_capture()? {
                 diagnosis.checks.push(probe_desktop().await?.check);
@@ -422,7 +431,7 @@ pub async fn dispatch(
         }
         R::Usage { target } => {
             let profile = resolve(app, &target)?;
-            ok(&app.usage_stats(&profile.id)?)
+            ok(&app.usage_stats(listeners, &profile.id)?)
         }
         R::AgentContext { target } => {
             let profile = resolve(app, &target)?;

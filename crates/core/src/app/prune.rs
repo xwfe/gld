@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use super::App;
 use crate::error::AppResult;
+use crate::runtime::ListenerManager;
 use crate::workspace::WorkspaceProfile;
 
 pub use gld_protocol::daemon::{Leftover, MissingProject, PruneFailure, PruneReport};
@@ -28,7 +29,11 @@ impl App {
     ///
     /// 给了就删，但只删**这次重新扫出来、并且在 `confirmed` 里**的：用户看清单、确认、再发回来，
     /// 中间可能有目录被加了回来、有命令刚起——那些这次扫不出来，自然不删；用户没看到过的新残留也不删。
-    pub async fn prune(&self, confirmed: Option<PruneReport>) -> AppResult<PruneReport> {
+    pub async fn prune(
+        &self,
+        listeners: &ListenerManager,
+        confirmed: Option<PruneReport>,
+    ) -> AppResult<PruneReport> {
         let home = crate::home::data_home()?;
         let profiles = self.list_workspaces()?;
         let scan_home = home.clone();
@@ -46,7 +51,7 @@ impl App {
         let mut failures = Vec::new();
         let mut kept_projects = HashSet::new();
         for project in &plan.missing_projects {
-            if let Err(error) = self.delete_workspace(&project.id).await {
+            if let Err(error) = self.delete_workspace(listeners, &project.id).await {
                 kept_projects.insert(project.id.clone());
                 failures.push(PruneFailure {
                     target: project.id.clone(),

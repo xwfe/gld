@@ -21,7 +21,7 @@ use crate::global_gateway;
 use crate::hub::runtime::{HubState, TunnelOutcome};
 use crate::hub::{self, HubSecrets, HUB_SCOPE, HUB_SECRET_KEYS, HUB_TUNNEL_SECRET_KEYS};
 use crate::logs::append_profile_log;
-use crate::runtime::ServiceKind;
+use crate::runtime::{ListenerManager, ServiceKind};
 use crate::settings::{AppSettings, HubConfig};
 use crate::tunnel::standalone::{self, CloudflareSpec, OpenAiSpec};
 use crate::workspace::WorkspaceProfile;
@@ -161,7 +161,11 @@ impl App {
     ///
     /// 成员和恢复标记不在这里改，传进来的值一律忽略：命令行是"读旧配置 → 改 → 整体发回"，
     /// 两条命令并发时，认传进来的成员表就会把另一条刚加的成员冲掉。
-    pub async fn set_hub_config(&self, config: HubConfig) -> AppResult<HubStatusDto> {
+    pub async fn set_hub_config(
+        &self,
+        listeners: &ListenerManager,
+        config: HubConfig,
+    ) -> AppResult<HubStatusDto> {
         if config.local_port == 0 {
             return Err(AppError::Message("端口必须在 1-65535".into()));
         }
@@ -188,7 +192,7 @@ impl App {
         let settings = self.settings()?;
         let before = settings.hub.clone();
         if config.local_port != before.local_port {
-            self.validate_hub_port(config.local_port)?;
+            self.validate_hub_port(listeners, config.local_port)?;
         }
         let tunnel_type = match config.tunnel_type.trim() {
             "" | "none" | "off" => "none".to_string(),
@@ -227,7 +231,7 @@ impl App {
                 Ok(())
             })?;
             if hub::runtime::state().await != HubState::Stopped {
-                self.restart_after_change().await?;
+                self.restart_after_change(listeners).await?;
             }
         }
         self.hub_status().await
@@ -235,8 +239,8 @@ impl App {
 
     /// 配置已经落盘之后按它重启。起不来时要说清楚：配置存下了，但服务现在是停的——
     /// 只报一句"端口被占"的话，用户会以为这次改动没生效、服务还是老样子在跑。
-    async fn restart_after_change(&self) -> AppResult<()> {
-        self.start_hub_listener().await.map_err(|error| {
+    async fn restart_after_change(&self, listeners: &ListenerManager) -> AppResult<()> {
+        self.start_hub_listener(listeners).await.map_err(|error| {
             AppError::Message(format!(
                 "新配置已经保存，但服务重启失败、现在是停的：{error}\n修好后 gld start。"
             ))
@@ -247,7 +251,7 @@ impl App {
     ///
     /// `gld start` 走这里：重复敲一次不该掉客户端连接，Cloudflare 临时地址也不该
     /// 因此换掉。真要重启用 [`Self::start_hub`]（`gld restart`）。
-    pub async fn ensure_hub_started(&self) -> AppResult<HubStatusDto> {
+    pub async fn ensure_hub_started(&self, listeners: &ListenerManager) -> AppResult<HubStatusDto> {
         let running = matches!(hub::runtime::state().await, HubState::Running { .. });
         let tunnel_failed = hub::runtime::public_base()
             .await
@@ -259,7 +263,7 @@ impl App {
             })?;
             return self.hub_status().await;
         }
-        self.start_hub().await
+        self.start_hub(listeners).await
     }
 
     /// 把工作区加进 hub。不重启：hub 每次请求都重新读成员表。
@@ -444,8 +448,8 @@ impl App {
     }
 
     /// 启动（已在跑就按当前配置重启），并记住下次守护进程启动时恢复。
-    pub async fn start_hub(&self) -> AppResult<HubStatusDto> {
-        self.start_hub_listener().await?;
+    pub async fn start_hub(&self, listeners: &ListenerManager) -> AppResult<HubStatusDto> {
+        self.start_hub_listener(listeners).await?;
         self.update_settings(|settings| {
             settings.hub.restore_on_launch = true;
             Ok(())
@@ -479,7 +483,12 @@ impl App {
 
     /// 自己定一项凭据（记得住的授权口令、Cloudflare Tunnel Token）；服务在跑就重启，
     /// 否则监听器里还是旧值。
-    pub async fn set_hub_secret(&self, key: &str, value: &str) -> AppResult<()> {
+    pub async fn set_hub_secret(
+        &self,
+        listeners: &ListenerManager,
+        key: &str,
+        value: &str,
+    ) -> AppResult<()> {
         if !HUB_TUNNEL_SECRET_KEYS.contains(&key) {
             validate_hub_key(key)?;
         }
@@ -491,7 +500,7 @@ impl App {
         }
         self.with_data(|store| store.set_app_secret(HUB_SCOPE, key, value))?;
         if hub::runtime::state().await != HubState::Stopped {
-            self.restart_after_change().await?;
+            self.restart_after_change(listeners).await?;
         }
         Ok(())
     }
@@ -532,21 +541,25 @@ impl App {
     }
 
     /// 重新生成一项凭据；hub 在跑就重启，否则监听器里还是旧值。
-    pub async fn regenerate_hub_secret(&self, key: &str) -> AppResult<String> {
+    pub async fn regenerate_hub_secret(
+        &self,
+        listeners: &ListenerManager,
+        key: &str,
+    ) -> AppResult<String> {
         validate_hub_key(key)?;
         let value = self.with_data(|store| store.regenerate_app_secret(HUB_SCOPE, key))?;
         if hub::runtime::state().await != HubState::Stopped {
-            self.restart_after_change().await?;
+            self.restart_after_change(listeners).await?;
         }
         Ok(value)
     }
 
     /// 按当前配置（重）起监听器，不动恢复标记。守护进程启动恢复时也走这里。
-    pub(super) async fn start_hub_listener(&self) -> AppResult<()> {
+    pub(super) async fn start_hub_listener(&self, listeners: &ListenerManager) -> AppResult<()> {
         let _one_at_a_time = LIFECYCLE.lock().await;
         let settings = self.settings()?;
         let config = settings.hub.clone();
-        self.validate_hub_port(config.local_port)?;
+        self.validate_hub_port(listeners, config.local_port)?;
         // 保存时已经拦过一道；这里再拦是防手工改过数据文件、或老配置恢复起来。
         reject_public_noauth(&config)?;
         if config.use_global_gateway {
@@ -677,7 +690,7 @@ impl App {
     ///
     /// 项目登记时还会分到一个 MCP 端口，那是单项目服务留下的（RFC-0004 之后没有
     /// 命令会去监听它），所以只在那个服务真的跑着时才算冲突；Actions 端口照算。
-    fn validate_hub_port(&self, port: u16) -> AppResult<()> {
+    fn validate_hub_port(&self, listeners: &ListenerManager, port: u16) -> AppResult<()> {
         if self.settings()?.global_gateway.local_port == port {
             return Err(AppError::Message(format!(
                 "端口 {port} 已经是全局入口的本地端口，换一个：gld upgrade --port <端口>"
@@ -686,7 +699,7 @@ impl App {
         for profile in self.list_workspaces()? {
             let mcp_clash = profile.runtime.local_port == port
                 && self
-                    .is_service_running(&profile.id, ServiceKind::Mcp)
+                    .is_service_running(listeners, &profile.id, ServiceKind::Mcp)
                     .unwrap_or(false);
             if mcp_clash || profile.actions.local_port == port {
                 return Err(AppError::Message(format!(
