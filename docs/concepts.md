@@ -773,8 +773,9 @@ coding 会话采用前述 2 分钟 / 挂后台命令 10 分钟的规则。
 
 ### 只开几个项目：gld grant
 
-> **后续设计，尚未实施：**[RFC-0015](rfc/0015-unified-client-access.md) 将 grant 扩展为统一客户端授权，
-> 新建默认动态包含全部项目，点名项目才限定范围；旧授权不自动扩权。以下是当前版本规则。
+> **后续设计，尚未实施：**[RFC-0015](rfc/0015-unified-client-access.md) 将 grant 统一为三种接入方式的共同授权，
+> 默认动态包含全部项目，写权限和服务级能力分别显式授予；不兼容旧授权格式或命令，切换时需重新授权。
+> 以下是当前版本规则，现有凭据不会因规划更新发生变化。
 
 标准 OAuth / bearer 客户端用下面的 `grant add`。只能填一个 URL 的浏览器扩展（DeepSeek 网页上的 SuperAssistant）
 用 `gld grant browser web-mcp api --ttl 8h`（`--all` 开服务里现有的全部项目）：生成一个短期地址，默认只读、最长 24 小时，不动服务原来的 OAuth；

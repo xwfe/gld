@@ -3,9 +3,9 @@
 日期：2026-09-24。状态：**已实施**，本机服务已升级；2026-10-04 在 ChatGPT 上用 grant 口令授权实测过（[审查 §9](../reviews/2026-09-23-lifecycle-and-docs-audit.md#本机升级到-684acdd-与-chatgpt-只读-grant-实测2026-09-25--10-04)）。来源：[2026-09-23 审查](../reviews/2026-09-23-lifecycle-and-docs-audit.md) D07、
 [RFC-0004 §4](0004-one-service-many-projects.md#4-代价和跨仓评审-x07-的关系) 留下的缺口。
 
-> 2026-11-14 后续决定：[RFC-0015](0015-unified-client-access.md) 规划统一 OAuth / token / URL 凭据，
-> 新建授权默认覆盖当前及未来登记的全部项目，旧记录仍保留原固定范围。
-> 实施排入 [D18](../../task_plan.md)，尚未改变本文描述的现行命令与授权行为；普通 grant 的新期限/轮换也由该 RFC 定义。
+> 2026-11-15 后续决定：[RFC-0015](0015-unified-client-access.md) 按用户要求采用不兼容旧代码的统一授权模型，
+> 默认动态包含当前及未来项目，OAuth / token / URL 共用管理；旧命令、授权格式与令牌不作适配，切换时重新授权。
+> 实施排入 [D18](../../task_plan.md)；本文保留现有版本行为与历史依据，新设计尚未改变运行中的授权。
 
 ## 1. 要解决什么
 

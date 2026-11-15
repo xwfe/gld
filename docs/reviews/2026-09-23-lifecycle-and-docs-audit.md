@@ -5470,3 +5470,51 @@ App 通过 `WorkspaceListeners` 与 `ListenerHost` 使用实际需要的状态/�
 仓库读写和构建走本地 shell；gld 只用于现网版本查询，未出现新 gld 工具错误。未触发远端 CI，未做跨机、Windows/Linux 实机或线上真实连接器验收。
 
 状态和架构文档同步后，命令参考、生成脚本、隐私路径与相对链接 9 条复验通过。
+
+## 131. D18 重新设计：移除旧兼容，统一授权模型（2026-11-15）
+
+本轮从干净的 `main@3f485055` 开始，本地比 `origin/main` 超前 15 个提交。
+用户明确要求“不需要兼容旧代码，重新优化”，替代 §122 中旧命令、数据和协议兼容的规划。
+D17-F 源码边界及本机验证已完成（§126–§130）；本轮只改设计与排期，D18 代码没有实施。
+
+**源码核对后的设计调整：**
+
+- 标准 MCP 认证在 `host/src/mcp.rs`，OAuth 发行在 `host/src/auth/oauth_flow.rs`；
+  授权用例、存储和 OAuth 注册表留 core，纯模型在 policy、wire DTO 在 protocol，runtime 只接稳定身份。
+  复用已有 crate 边界与单一授权服务，不为三种凭据建 crate、插件框架或另一套执行器。
+- 统一 grant add/ls/rotate/rm；默认专用 token 和动态 AllProjects。移除 browser/reveal 旧入口、
+  MCP OAuth/bearer/noauth 全局切换、缺失 grant 即全权、旧格式导入与旧协议互转。
+  URL 新地址使用 `/mcp/connect/<secret>`；旧路径无别名。OAuth 轮换同时废止旧 access/refresh。
+- 所有外部 MCP 入口必须绑定明确 GrantId，覆盖当前专用隧道全权旁路和单工作区 NoGrants 路径。
+  本机操作员、MCP 和 Actions 的主体显式区分，Actions 不用缺少 grant 表示权限。
+  用户级 Prompt、本机 MCP 和托管空间通过显式服务能力保留；全部项目、写权限和服务能力分别判断。
+- 新存储只接受当前 schema，旧文件不自动导入或擦除；旧授权需重建，旧 token/refresh 拒绝。
+  未改变格式的 OAuth 注册、client_id、签名基础设施及项目文件可复用，不为清理兼容而故意破坏数据。
+  单写端提交后发布只读索引，请求不全盘读取、不展开复制全部项目、不另设延迟撤销的 TTL 缓存。
+
+**独立审查发现并已修正：**
+
+移除 master 身份后，若继续“所有 grant 拒绝 CCNM 写”，原有远程 coding 能力会整体消失。
+依据 `core/src/hub/mod.rs` 和 `core/src/bridge/session.rs`，将其归回项目范围、write、成员 max_mode
+与凭据限制的交集，Selected/All 一致，不新增 RemoteCoding 服务能力或开关。
+C 阶段复用 Lease 和 bridge，补唯一写槽、CallerId 归属、原子 begin/call/end、重复 begin 复用及过时 end 拒绝；
+凭据修订号与成员代次分开，轮换保持 owner，撤销与成员权限收紧清理租约，验证完成后才能完整切换。
+ActionsClient 显式变体也已补齐。复核确认这两处问题已消除；节点发行方由受信连接的 HubId 确定。
+
+RFC-0015 重写，task_plan 更新 A–E 顺序与完成标准，RFC-0007/0014、connect-clients、concepts 同步边界。
+现有用户文档仍描述当前版本可用命令，清楚标出未来破坏性变化；历史审查没有改写。
+
+**验证（macOS，隔离 GLD_HOME）：**
+
+- 文档命令、私人路径、相对链接 3 个目标共 6 条定向通过。
+- `cargo test --workspace --all-targets --locked`：72 个目标，**1442 passed / 0 failed / 0 ignored**。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 通过。
+- 本轮只改 Markdown，没有改运行代码或 CLI 帮助；源码回归不代表新授权功能已实现或完成真实客户端验收。
+
+**工具记录：** 一次多文件 apply_patch 的 task_plan hunks 未按文件顺序排列，被拒为
+`PATCH_FAILED / context_out_of_order`（顶层 INVALID_ARGUMENT）；回包确认 files_changed=false。
+按建议重读后调整顺序，并将局部文字替换补全为完整行，整个补丁重试成功。这是补丁构造问题，没有覆盖并发改动。
+全仓测试运行期间末次设计修改只触及 Markdown，最终文档另做定向复验。
+
+本轮未创建/轮换/撤销真实授权，未读取凭据配置，未部署、重启、推送、发布或做真实客户端切换。
+下一项源码工作仍是 task_plan 的 D18-A；当前运行连接与凭据不会因本轮文档提交改变。

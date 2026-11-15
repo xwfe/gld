@@ -14,8 +14,9 @@ gld ls                     # 地址、凭据、项目表；加 --reveal 显示�
 > 改服务的端口、认证用 `gld upgrade`，改公网入口用 `gld share`；它们改完会自动重启服务，
 > 不用再敲 `gld restart`。改某个项目的配置用 `gld set <项目> key=value`，下一次调用就生效。
 
-> **接入简化已排入计划，尚未实施：**[RFC-0015](rfc/0015-unified-client-access.md) 将统一 OAuth、API token 和浏览器 URL 的 grant 管理，
-> 新授权默认覆盖当前及后续登记的全部项目，并让 API token 与 OAuth 共存。下面仍是当前版本可用的配置方法。
+> **接入简化已排入计划，尚未实施：**[RFC-0015](rfc/0015-unified-client-access.md) 将统一 OAuth、API token 和 URL 的 grant 管理，
+> 默认动态覆盖当前及后续登记的全部项目。新设计取消旧命令和授权格式兼容，切换时需重建授权、更新 URL 或重新走 OAuth。
+> 下面仍是当前版本可用的配置方法；这里的旧命令不代表新版本会保留别名。
 
 ## 本机客户端（Claude Code、Cursor、Codex 等）
 
