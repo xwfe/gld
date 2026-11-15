@@ -15,7 +15,9 @@ use crate::error::{AppError, AppResult};
 use crate::nodes::local_config::{check_private_file, create_private_file};
 
 mod authorize;
+mod lifecycle;
 mod model;
+pub use lifecycle::{GrantCreation, IssuedAccess};
 pub use model::{AccessRecord, CredentialRecord, MAX_URL_TTL_SECONDS};
 
 #[cfg(test)]
@@ -33,6 +35,7 @@ struct AccessFile {
 /// 一次已提交的不可变状态。请求通过 AccessReader 取得当前值，不单独缓存认证结果。
 #[derive(Debug)]
 pub struct AccessSnapshot {
+    initialized: bool,
     records: Vec<AccessRecord>,
     grants: HashMap<String, usize>,
     credentials: HashMap<String, usize>,
@@ -40,8 +43,9 @@ pub struct AccessSnapshot {
 }
 
 impl AccessSnapshot {
-    fn build(records: Vec<AccessRecord>) -> AppResult<Self> {
+    fn build(records: Vec<AccessRecord>, initialized: bool) -> AppResult<Self> {
         let mut snapshot = Self {
+            initialized,
             records,
             grants: HashMap::new(),
             credentials: HashMap::new(),
@@ -75,6 +79,11 @@ impl AccessSnapshot {
             }
         }
         Ok(snapshot)
+    }
+
+    /// 区分尚未创建新存储与已经提交的空存储；不根据授权条数猜测迁移状态。
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
     }
 
     pub fn records(&self) -> &[AccessRecord] {
@@ -149,7 +158,11 @@ impl AccessStore {
         create_directory(parent)?;
         let lock = open_lock(&path.with_extension("lock"))?;
         let records = read_file(&path)?;
-        let snapshot = Arc::new(AccessSnapshot::build(records)?);
+        let initialized = records.is_some();
+        let snapshot = Arc::new(AccessSnapshot::build(
+            records.unwrap_or_default(),
+            initialized,
+        )?);
         Ok(Self {
             path,
             writer: Mutex::new(()),
@@ -226,7 +239,7 @@ impl AccessStore {
             .map_err(|_| invalid("Authorization writer lock is poisoned"))?;
         let mut records = self.snapshot()?.records.clone();
         let result = mutate(&mut records)?;
-        let candidate = Arc::new(AccessSnapshot::build(records)?);
+        let candidate = Arc::new(AccessSnapshot::build(records, true)?);
         let bytes = serde_json::to_vec_pretty(&AccessFile {
             schema_version: SCHEMA_VERSION,
             records: candidate.records.clone(),
@@ -302,9 +315,9 @@ fn open_existing(path: &Path, writable: bool) -> AppResult<File> {
     Ok(file)
 }
 
-fn read_file(path: &Path) -> AppResult<Vec<AccessRecord>> {
+fn read_file(path: &Path) -> AppResult<Option<Vec<AccessRecord>>> {
     match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(invalid("Cannot inspect authorization data")),
         Ok(_) => {}
     }
@@ -317,7 +330,7 @@ fn read_file(path: &Path) -> AppResult<Vec<AccessRecord>> {
     if saved.schema_version != SCHEMA_VERSION {
         return Err(invalid("Unsupported authorization schema version"));
     }
-    Ok(saved.records)
+    Ok(Some(saved.records))
 }
 
 fn replace_file(path: &Path, bytes: &[u8]) -> AppResult<()> {

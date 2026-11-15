@@ -76,6 +76,12 @@ API token 是独立签发的凭据，不要求用户从 OAuth 回调中复制 ac
 OAuth 确认口令使用生成的高熵随机值，只保存摘要；口令、API token、URL secret 与 access/refresh 不可跨用途使用。
 三种方式使用统一的期限解析、验证材料封装和撤销入口，OAuth 的发行、刷新、PKCE 留在自己的流程模块。
 
+创建凭据采用 `gld_token_v1.<id>.<secret>`、`gld_oauth_v1.<id>.<secret>`、`gld_url_v1.<id>.<secret>`。
+公开 id 为 32 位小写十六进制 UUID；secret 为 32 字节随机值的无 padding base64url，严格核对用途、版本及规范编码。
+存储摘要覆盖完整凭据串；解析只定位公开 ID，不表示通过认证。HTTP 的 OAuth access token 另走 OAuth 格式，
+确认口令和 URL 材料不会因长得像 token 就进入标准 Bearer 通道。
+期限统一接受正整数加 `s/m/h/d`，以及仅 token 可用的 `none`；空白、零、负数、小数和溢出均拒绝。
+
 `rotate` 对三种方式都保留 GrantId 和 CallerId，原子替换创建凭据并递增凭据修订号。
 token/URL 的旧秘密立即拒绝；OAuth 同时使旧确认口令及旧修订号签发的 access/refresh 失效，客户端重新授权。
 API token/URL 不给新 `--ttl` 时沿用原有效时长、从轮换时重新计时；不限期 token 仍不限期。

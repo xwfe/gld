@@ -1,8 +1,8 @@
 # 架构
 
-> **当前源码处于 D18-A 授权基础阶段。**统一授权类型、稳定调用方身份、独立授权存储与新执行代契约已接入内核；
+> **新授权的客户端接入仍在分步实现。**统一授权类型、稳定调用方身份、独立授权存储与新执行代契约已接入内核；
 > HTTP MCP（包括单工作区、Hub、URL 和隧道入口）及原生节点转发暂以 `AUTH_NOT_READY` 拒绝。
-> Actions 的独立认证仍支持。新凭据签发、验证和轮换待 B，远端权限与租约待 C，统一 CLI 待 D；
+> Actions 的独立认证仍支持。三类材料签发与轮换内核已具备，HTTP 验证待 B3，远端权限与租约待 C，统一 CLI 待 D；
 > 这不是客户端接入完成或已上线的声明。范围与后续验收见 [RFC-0015](rfc/0015-unified-client-access.md)。
 
 ## 按信任边界组织 crate
@@ -250,7 +250,14 @@ HTTP 的来源提取、格式分派和三类入口接线仍由 host 完成；此
 凭据只保存摘要与校验元数据，不保存签发明文。`GrantDto` 只返回 id、name、scope、permissions、status，
 以及 credential 的 id、kind、revision、issuedAtUnixSecs、expiresAtUnixSecs；列表和 Debug 不带摘要或秘密。
 列表也包含撤销状态，读到一条记录不等于它能通过认证。创建旧 grant / browser grant 的 App 用例暂返回
-`AUTH_NOT_READY`，不写旧字段；签发与完整轮换留待 B，统一命令留待 D。
+`AUTH_NOT_READY`，不写旧字段；统一命令与客户端交付留待 D。
+
+`auth/credential.rs` 共用用途格式、期限解析和 ring 随机源；秘密为 32 字节随机值，
+公开定位 ID 使用 UUID，解析只接受固定版本/用途及规范 base64url，不尝试其他用途。
+`AccessStore::create_grant` 与 `rotate_grant` 通过既有原子提交边界返回 `IssuedAccess`；后者在写锁内
+读取当前记录、检查修订溢出并只替换凭据，避免回写过时权限。返回类型不序列化整条存储记录，
+`IssuedSecret` 的 Debug 脱敏且不实现 Clone/Deserialize；应用交付单独投影元数据与秘密。
+快照另存初始化标记，区分缺失新文件与合法空文件；只有成功提交才将缺失状态改为已初始化。
 
 撤销先提交新存储并发布 revoked 状态，再按 Grant ID 清理对应命令、待审批和运行中的 Agent 任务，
 并保留既有延迟复查。其他 grant 不受清理影响；同名重建不能复用已撤销 ID。

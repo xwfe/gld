@@ -3,9 +3,9 @@
 gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟直觉常常不一样。
 这篇只讲"它是什么、什么时候该用、用错了会怎样"，具体怎么配大多在各自的文档里（浏览器那节例外，配置步骤就写在这里）。
 
-> **当前源码处于 D18-A 授权基础阶段。**统一身份、授权存储和内核权限边界已落地；
+> **新授权的客户端接入仍在分步实现。**统一身份、授权存储和内核权限边界已落地；
 > HTTP MCP（含 Hub、单工作区、URL、隧道入口）和原生节点转发暂返回 `AUTH_NOT_READY`。
-> 新 grant 签发、轮换及统一 CLI 尚未接通，不能据本页的工具说明判断客户端现在可连接。
+> 三类凭据的材料签发与轮换内核已具备，HTTP 适配与统一 CLI 尚未接通，不能据此配置真实客户端。
 > Actions 的独立认证仍支持。后续接入顺序见 [RFC-0015](rfc/0015-unified-client-access.md)，本页不代表已上线。
 
 各节都能单独看，按需跳：
@@ -807,14 +807,20 @@ Grant 表示“允许谁访问哪些项目、做哪些操作”，凭据表示�
 
 | 接入方式 | 用途 | 当前阶段 |
 | --- | --- | --- |
-| OAuth | 支持浏览器授权的标准 MCP 客户端；同一 grant 的不同 client_id 独立隔离 | MCP 新授权签发、token/refresh 验证及修订检查待 B；Actions 独立 OAuth 仍支持 |
-| API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | core 已逐次验证当前摘要、用途、状态和期限；签发、HTTP 接线与轮换用例待 B，CLI 待 D |
-| URL | 只能填写 Server URI 的客户端，如图示 SuperAssistant；短期 capability URL | 有效期与 Origin 约束已进入存储校验，新 URL 入口暂返回 AUTH_NOT_READY，签发与接通待 B/D |
+| OAuth | 支持浏览器授权的标准 MCP 客户端；同一 grant 的不同 client_id 独立隔离 | core 已创建/轮换确认口令；access/refresh 签发、验证与修订检查待 B3；Actions 独立 OAuth 仍支持 |
+| API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | core 已创建/轮换材料并逐次验证当前授权；HTTP 接线待 B3，CLI 待 D |
+| URL | 只能填写 Server URI 的客户端，如图示 SuperAssistant；短期 capability URL | core 已创建/轮换限期材料并校验 Origin；完整地址交付和 HTTP 入口待 B3/D |
 
 统一 CLI 规划使用同一组 add / ls / rotate / rm，不再要求用户区分 grant 与 grant browser。
-**当前创建用例明确返回 `AUTH_NOT_READY`**，不会生成伪凭据或继续写旧 grants。
+**当前 CLI 的旧创建入口仍返回 `AUTH_NOT_READY`**；新内核用例不写旧 grants。
 旧 `grant browser`、服务口令和 `--reveal` 不能作为这一阶段的接入办法；
-OAuth 与 token 共存、失败不降级及一次性展示等完整行为仍需后续实现和验收。
+OAuth 与 token 的 HTTP 共存、失败不降级及客户端交付仍需后续实现和验收。
+
+三种创建凭据共用严格期限解析：`s`、`m`、`h`、`d` 表示秒、分、时、天，数值必须是正整数。
+token 默认 30 天，显式 `none` 表示不限期；URL 默认 8 小时、最多 24 小时；OAuth 确认口令拒绝 TTL 参数。
+创建和轮换仅在保存成功后返回新秘密，存储只留摘要。秘密丢失后用轮换取得新值，列表无法找回。
+轮换保留 GrantId、公开凭据 ID 和 CallerId，在同一写锁内递增修订号；不指定期限时沿用原有效时长并重新计时。
+并发轮换逐个提交，只有最后一次提交的秘密有效；保存失败仍使用原凭据，撤销后的授权不能轮换或复活。
 
 已落地的权限约束：
 
