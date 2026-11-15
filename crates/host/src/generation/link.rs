@@ -227,17 +227,28 @@ impl Link {
             };
             match frame {
                 GenerationFrame::Ready { identity } => {
-                    if let Some(ready) = ready.take() {
-                        let _ = ready.send(Ok(identity));
+                    let Some(ready) = ready.take() else {
+                        break "执行代重复发送 ready".to_string();
+                    };
+                    if let Some(reason) = identity.incompatibility() {
+                        let _ = ready.send(Err(reason.clone()));
+                        break reason;
                     }
+                    let _ = ready.send(Ok(identity));
                 }
                 GenerationFrame::Refused { reason } => break format!("它拒绝了：{reason}"),
                 GenerationFrame::Reply { id, ok, value } => {
+                    if ready.is_some() {
+                        break "执行代在 ready 之前发送 reply".to_string();
+                    }
                     if let Some(reply) = self.lock_pending().remove(&id) {
                         let _ = reply.send(if ok { Ok(value) } else { Err(value) });
                     }
                 }
                 GenerationFrame::HostCall { id, op } => {
+                    if ready.is_some() {
+                        break "执行代在 ready 之前发送 host_call".to_string();
+                    }
                     let Some(router) = router.upgrade() else {
                         continue;
                     };

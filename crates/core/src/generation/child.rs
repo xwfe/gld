@@ -62,7 +62,20 @@ pub fn serve() -> AppResult<()> {
         .map_err(|error| AppError::Message(format!("读宿主消息失败：{error}")))?;
     let _ = hello_seen.send(());
     match hello.as_deref().map(serde_json::from_str::<HostFrame>) {
-        Some(Ok(HostFrame::Hello { .. })) => {}
+        Some(Ok(HostFrame::Hello {
+            generation_protocol,
+        })) => {
+            if generation_protocol != super::GENERATION_PROTOCOL {
+                let reason = format!(
+                    "宿主执行代协议 {generation_protocol} 和这个执行代的 {} 不一样",
+                    super::GENERATION_PROTOCOL
+                );
+                let _ = writer.send(&GenerationFrame::Refused {
+                    reason: reason.clone(),
+                });
+                return Err(AppError::Message(reason));
+            }
+        }
         // 宿主没打招呼就走了，或者发的不是这个协议：没人要这一代。
         _ => return Err(AppError::Message("宿主没有发来可用的 hello".into())),
     }

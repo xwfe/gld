@@ -749,6 +749,9 @@ coding 会话采用前述 2 分钟 / 挂后台命令 10 分钟的规则。
 
 服务分两个进程。`gld daemon run` 拿着端口、隧道、OAuth 和配置，工具和命令在它起的子进程 `gld daemon generation` 里跑（这个子进程叫执行代，见 [RFC-0008](rfc/0008-continuous-upgrades.md) §3.4）。平时看不出区别，`gld ps` 和 `gld daemon status` 报的 pid 都是前者。
 
+宿主与执行代必须使用匹配的协议和状态格式。版本不匹配时，准备换代报错，项目仍由原执行代处理；
+新执行代会在读取项目配置前拒绝不匹配的宿主握手，排队的工具不会执行。
+
 子进程意外退出时，端口、地址、已发的 token 和连接器的授权都不动，服务自动起一个新的，下一次调用接着用。受影响的只有这些：
 
 - **正在跑的那次调用**收到 JSON-RPC 错误，`error.data.reason` 是 `generation_lost`，`retryable` 是 `false`：调用可能已经产生了副作用，结果未知，gld 不替你重放。先用 `list_runs` 之类查清现状，再决定要不要重来。

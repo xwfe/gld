@@ -99,12 +99,16 @@ MCP 必须携带 grant、凭据种类与主体；Actions 必须携带 workspace_
 
 | 契约 | 当前版本 | 边界 |
 | --- | --- | --- |
-| daemon `PROTOCOL_VERSION` | 19 | grant DTO 只返回授权及凭据元数据；旧守护进程不接受新请求形状 |
+| daemon `PROTOCOL_VERSION` | 19 | CLI 与 daemon 须匹配；grant DTO 只返回新模型的授权及凭据元数据 |
 | `GENERATION_PROTOCOL` / `GENERATION_PROTOCOL_MIN` | 2 / 2 | 只接纳明确主体的新执行代消息，不与协议 1 混跑 |
-| `STATE_FORMAT` | 2 | 阻止旧格式执行代参与共享状态的读写；旧授权不会因此被导入 |
+| `STATE_FORMAT` | 2 | 不匹配格式的执行代不能进入可调用集合；旧授权不会因此被导入 |
 
 版本核验在换代前完成。新增协议字段先改此 crate，再更新分发和拒绝旧版本的测试，不让 protocol 引用实现层来解决依赖。
 新存储的 schema_version 独立为 1，不能把它与执行代的 STATE_FORMAT 混为一个版本号。
+
+执行代收到 Hello 后先检查宿主 generation_protocol，再读取 DataStore。宿主 Link 收到首个 Ready 时
+立即检查执行代的协议和状态格式，通过后才处理 Reply 或 HostCall；提前发业务消息或重复 Ready 都关闭连接。
+Router 保留准备和切换时的身份复核。这是双方的拒绝边界，不增加旧格式转换；Hello 本身不携带 STATE_FORMAT。
 
 ## runtime：工作区与命令执行
 

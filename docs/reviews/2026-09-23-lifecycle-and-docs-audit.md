@@ -5591,3 +5591,26 @@ concepts、architecture、security、connect-clients、project-lifecycle、READM
 
 本轮未读取、创建、轮换或撤销真实凭据，未换装二进制、重启运行服务、推送或发布。
 A 不是完整客户端接入版本；三种凭据签发与认证、动态远端授权、统一命令和真实客户端切换分别由 B/C/D/E 完成。
+
+## 133. 2026-11-15：D18 执行代在握手完成前拒绝不匹配消息
+
+**范围：**用户要求先按 RFC-0015 复核旧写者、会话与版本边界，验证后小步提交，不推送、不部署。
+从 `cd0103b` 复核发现，执行代收到 Hello 只匹配消息种类，未校验宿主的 generation_protocol；
+宿主 Link 又可能在 Router 校验 Ready 身份前处理 HostCall。只提升版本常量没有关闭这两个执行窗口。
+
+**修正：**child 在读取 DataStore 前检查 Hello 的协议；不匹配发送 Refused 并退出。
+Link 在首个 Ready 当场校验协议及状态格式，通过后才处理 Reply/HostCall；提前业务消息、重复 Ready 均关闭连接。
+Router 保留准备和切换时的复核。没有改变帧形状或版本值，没有增加旧版本转换。
+Hello 不携带 STATE_FORMAT，状态格式由宿主检查执行代 Ready；文档不再宣称所有状态读取都由这个字段提前拦截。
+
+**验证：**隔离 GLD_HOME 的 `cargo test -p gld --test generation_boundary --locked --offline`：
+**31 passed / 0 failed / 0 ignored**。新增真实 stdio 场景同时验证：
+
+- 损坏配置配旧/未来 Hello，先得到协议 Refused，配置字节保持；
+- 已登记项目排队有效 LocalTool/apply_patch，旧/未来 Hello 不产生文件；完全相同的操作配当前 Hello 成功写入；
+- 旧协议、旧状态、Ready 前 HostCall/Reply、重复 Ready 都准备失败，原路由、执行代进程及服务归属保持。
+
+定向测试首轮在链接阶段因 `errno=28` 失败，未进入测试。清理本轮单独历史构建目录中八个库的可重建产物，
+Cargo 报告释放 **1.2 GiB**；保留历史 gld 测试程序后重跑通过。`df`、`du` 与预检的 `cp` 被 gld 命令白名单拒绝；
+没有扩大白名单或用其他解释器执行这些被拒命令，改用 check_command 明确允许的包级 Cargo clean。
+concepts 与 architecture 同步解释拒绝时点。没有改动运行服务或真实授权。

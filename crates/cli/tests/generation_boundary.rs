@@ -559,6 +559,110 @@ fn ready_frame(protocol: u32, state: u32) -> String {
     )
 }
 
+#[test]
+fn an_incompatible_host_is_refused_before_reading_state_or_executing_calls() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    fn exchange(
+        home: &std::path::Path,
+        protocol: u32,
+        op: &Value,
+        expected_marker: Option<&std::path::Path>,
+    ) -> Output {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gld"))
+            .args(["daemon", "generation"])
+            .env("GLD_HOME", home)
+            .current_dir(home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let hello = json!({"frame":"hello", "generation_protocol":protocol});
+        let call = json!({"frame":"call", "id":1, "op":op.to_string()});
+        let mut input = child.stdin.take();
+        // 执行代可能在后续调用写入管道前就拒绝 hello。
+        let _ = input
+            .as_mut()
+            .unwrap()
+            .write_all(format!("{hello}\n{call}\n").as_bytes());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if expected_marker.is_some_and(|path| path.exists()) {
+                drop(input.take());
+            }
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!("执行代没有在握手/写入后退出：{output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(input);
+        child.wait_with_output().unwrap()
+    }
+
+    fn assert_protocol_refused(output: Output, protocol: u32) {
+        assert!(!output.status.success(), "{output:?}");
+        let frames: Vec<Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["frame"], "refused", "{frames:?}");
+        let reason = frames[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("宿主执行代协议"), "{reason}");
+        assert!(reason.contains(&protocol.to_string()), "{reason}");
+    }
+
+    let current = gld_core::generation::GENERATION_PROTOCOL;
+    for protocol in [current - 1, current + 1] {
+        let home = tempfile::tempdir().unwrap();
+        let data = home.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let profiles = data.join("profiles.json");
+        let original = b"deliberately invalid state: do not read before checking hello";
+        std::fs::write(&profiles, original).unwrap();
+        let output = exchange(home.path(), protocol, &json!({"op":"ping"}), None);
+        assert_protocol_refused(output, protocol);
+        assert_eq!(std::fs::read(&profiles).unwrap(), original);
+        assert!(!home.path().join("access").exists());
+        assert!(!home.path().join("daemon.sock").exists());
+    }
+
+    // 登记真实项目；同一条有效写操作先验拒绝，再用当前协议证明能执行。
+    let env = Env::new();
+    env.ok(&["--no-autostart", "add", ".", "--name", "api"]);
+    let profiles = env.home.path().join("data/profiles.json");
+    let original = std::fs::read(&profiles).unwrap();
+    let data: Value = serde_json::from_slice(&original).unwrap();
+    let workspace_id = data["profiles"][0]["id"].as_str().unwrap();
+    let marker = env.project.path().join("handshake-write.txt");
+    let op = serde_json::to_value(gld_core::generation::wire::Op::LocalTool {
+        workspace_id: workspace_id.into(),
+        name: "apply_patch".into(),
+        args: json!({
+            "patch":"*** Begin Patch\n*** Add File: handshake-write.txt\n+executed\n*** End Patch\n"
+        }),
+    })
+    .unwrap();
+    for protocol in [current - 1, current + 1] {
+        let output = exchange(env.home.path(), protocol, &op, None);
+        assert_protocol_refused(output, protocol);
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read(&profiles).unwrap(), original);
+    }
+    let output = exchange(env.home.path(), current, &op, Some(&marker));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed\n");
+    assert_eq!(std::fs::read(&profiles).unwrap(), original);
+}
+
 /// 不管新版本坏成什么样，失败都发生在动路由之前，在线服务一点不受影响。
 #[test]
 fn a_bad_new_version_fails_before_the_live_service_notices() {
@@ -595,6 +699,35 @@ done"#,
         ),
         ("hangs", "sleep 300".into(), "没有就绪"),
         ("refuses", refuses, "拒绝"),
+        (
+            "duplicate-ready",
+            format!(
+                "read hello\n{}\n{}\nsleep 300",
+                ready_frame(current, state),
+                ready_frame(current, state)
+            ),
+            "不应答",
+        ),
+        (
+            "old-protocol",
+            format!("read hello\n{}\nsleep 300", ready_frame(current - 1, state)),
+            "协议",
+        ),
+        (
+            "old-state",
+            format!("read hello\n{}\nsleep 300", ready_frame(current, state - 1)),
+            "状态格式",
+        ),
+        (
+            "early-host-call",
+            "read hello\nprintf '%s\\n' '{\"frame\":\"host_call\",\"id\":1,\"op\":\"{\\\"op\\\":\\\"node_members\\\"}\"}'\nsleep 300".into(),
+            "ready 之前",
+        ),
+        (
+            "early-reply",
+            "read hello\nprintf '%s\\n' '{\"frame\":\"reply\",\"id\":1,\"ok\":true,\"value\":\"null\"}'\nsleep 300".into(),
+            "ready 之前",
+        ),
         (
             "wrong-protocol",
             format!("read hello\n{}\nsleep 300", ready_frame(current + 1, state)),
