@@ -26,7 +26,7 @@ use crate::auth::{
     ClientRegistrationRequest, ClientRegistry, GrantBook, NoGrants, OAuthRuntime, Principal,
     StoredGrants, TokenForm,
 };
-use crate::generation::CallError;
+use crate::generation::{CallError, ServiceGeneration};
 use crate::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER};
 use crate::local_network;
 use crate::logs::append_profile_log;
@@ -81,10 +81,16 @@ impl Endpoint {
     /// 两支都要 `auth`：它是这次调用的主体，命令会话按它分表。不传的话，
     /// 这个入口上所有连接共用一张表，谁都能拿别人的 `session_id` 去读
     /// （见 [`crate::tools::caller`]）。
-    fn handle(&self, scope: &str, auth: &AuthContext, body: &Value) -> Handled {
+    fn handle(
+        &self,
+        scope: &str,
+        auth: &AuthContext,
+        body: &Value,
+        generation: Option<&dyn ServiceGeneration>,
+    ) -> Handled {
         // 宿主进程里工具不在本进程跑，鉴权已经验完，发给执行代。
-        if let Some(router) = crate::generation::router() {
-            return self.handle_routed(&router, scope, auth, body);
+        if let Some(generation) = generation {
+            return self.handle_routed(generation, scope, auth, body);
         }
         match self {
             Self::Workspace(context) => {
@@ -112,16 +118,18 @@ impl Endpoint {
 
     fn handle_routed(
         &self,
-        router: &crate::generation::Router,
+        generation: &dyn ServiceGeneration,
         scope: &str,
         auth: &AuthContext,
         body: &Value,
     ) -> Handled {
         let routed = match self {
             Self::Workspace(context) => {
-                router.workspace_mcp(scope, context.workspace.root(), auth, body)
+                generation.workspace_mcp(scope, context.workspace.root(), auth, body)
             }
-            Self::Hub { hub, .. } => router.hub_mcp(hub.execution_route(auth, body), auth, body),
+            Self::Hub { hub, .. } => {
+                generation.hub_mcp(hub.execution_route(auth, body), auth, body)
+            }
         };
         match routed {
             Ok(reply) => Handled {
@@ -210,6 +218,7 @@ async fn oauth_register_post(
 #[derive(Clone)]
 struct ListenerState {
     endpoint: Endpoint,
+    generation: Option<Arc<dyn ServiceGeneration>>,
     auth: AuthConfig,
     /// 日志目录和 OAuth 客户端注册表的作用域：工作区 id，或 [`HUB_SCOPE`]。
     scope: String,
@@ -239,6 +248,7 @@ pub fn spawn_listener(
     oauth_token_secret: Option<String>,
     runtime: RuntimeConfig,
     usage: Arc<ServiceUsage>,
+    generation: Option<Arc<dyn ServiceGeneration>>,
 ) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
     let workspace_display = workspace_path.display().to_string();
     let global = AppSettings::load_or_default();
@@ -290,6 +300,7 @@ pub fn spawn_listener(
     });
     listen(ListenerState {
         endpoint: Endpoint::Workspace(mcp),
+        generation,
         auth,
         scope: workspace_id,
         authorize_label: workspace_display,
@@ -315,6 +326,7 @@ pub fn spawn_hub_listener(
     auth_type: &str,
     public_base_url: String,
     secrets: HubSecrets,
+    generation: Option<Arc<dyn ServiceGeneration>>,
 ) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
     let auth = AuthConfig {
         auth_type: auth_type.to_string(),
@@ -346,6 +358,7 @@ pub fn spawn_hub_listener(
     let bearer_token = auth.bearer_enabled().then_some(secrets.bearer_token);
     listen(ListenerState {
         endpoint: Endpoint::Hub { hub, nodes },
+        generation,
         auth,
         scope: HUB_SCOPE.into(),
         authorize_label: "gld 服务：填服务口令可访问全部项目；填 gld grant 发的口令只开它那几个"
@@ -686,7 +699,11 @@ async fn dispatch_mcp(state: ListenerState, auth: AuthContext, body: Value) -> R
 
     let endpoint = state.endpoint.clone();
     let scope = state.scope.clone();
-    let result = tokio::task::spawn_blocking(move || endpoint.handle(&scope, &auth, &body)).await;
+    let generation = state.generation.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        endpoint.handle(&scope, &auth, &body, generation.as_deref())
+    })
+    .await;
     match result {
         Ok(handled) => {
             let response = handled.response;
@@ -1056,6 +1073,7 @@ mod tests {
         .with_workspace_name(workspace_name);
         ListenerState {
             endpoint: Endpoint::Workspace(Arc::new(context)),
+            generation: None,
             auth: AuthConfig::default(),
             scope: "w1".into(),
             authorize_label: "/tmp/x".into(),

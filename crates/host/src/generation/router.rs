@@ -12,19 +12,22 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::runtime::Handle;
 
-use super::host::Link;
-use super::wire::{auth_to_wire, Op, WireNative};
-use super::{current_build_identity, GENERATION_PROTOCOL, MAX_LIVE_GENERATIONS, STATE_FORMAT};
-use crate::auth::AuthContext;
-use crate::nodes::registry::{NativeMember, Nodes};
-use crate::settings::HubConfig;
-use gld_protocol::generation::ExecutionRoute;
+use gld_core::auth::AuthContext;
+use gld_core::generation::wire::{auth_to_wire, Op, WireNative};
+use gld_core::generation::{current_build_identity, CallError, McpReply, ServiceGeneration};
+use gld_core::hub::{known_owner_keys, node_bridge_failure, NodeBridge};
+use gld_core::nodes::registry::NativeMember;
+use gld_core::settings::HubConfig;
+use gld_protocol::generation::{ExecutionRoute, GENERATION_PROTOCOL, STATE_FORMAT};
+
+use super::link::Link;
+use super::MAX_LIVE_GENERATIONS;
+
+pub use gld_core::generation::root_key;
 
 /// 启动和替换时等子进程就绪的上限。
-pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+const READY_TIMEOUT: Duration = Duration::from_secs(15);
 
-// 保留旧 Rust 导入路径；归属键不属于宿主路由器实现。
-pub use super::root_key;
 /// 当前代刚挂、替代的还没起来时，新请求等这么久；再久就如实报不可用。
 const ADMIT_WAIT: Duration = Duration::from_secs(10);
 /// Agent 收尾最多 15 秒，再留一点给命令。
@@ -50,45 +53,6 @@ const RESTART_BACKOFF: [Duration; 5] = [
     Duration::from_secs(5),
     Duration::from_secs(10),
 ];
-
-/// 转发失败的三种情况，调用方靠它决定告诉客户端什么。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallError {
-    /// 请求没发到执行代，确定没执行。
-    Unavailable(String),
-    /// 发出去之后执行代没了：结果未知，可能已经产生副作用，绝不能自动重放。
-    Lost,
-    /// 控制类操作等超时。
-    TimedOut,
-    /// 执行代回了错误。
-    Refused(String),
-}
-
-impl CallError {
-    /// 确定没有执行，客户端可以放心重试。其余情况工具可能已经跑过（`Lost`，或者跑完了回包发不出来、
-    /// panic 的 `Refused`），重试有可能把副作用做两遍，只能让调用方自己查。
-    pub fn surely_not_executed(&self) -> bool {
-        matches!(self, Self::Unavailable(_))
-    }
-}
-
-impl std::fmt::Display for CallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unavailable(reason) => write!(f, "执行代不可用：{reason}"),
-            Self::Lost => write!(f, "执行代在处理这次调用时退出了，结果未知"),
-            Self::TimedOut => write!(f, "等执行代回复超时"),
-            Self::Refused(reason) => write!(f, "{reason}"),
-        }
-    }
-}
-
-/// 一次 MCP 请求的结果，监听器拿它写日志和回包。
-pub struct McpReply {
-    pub response: Value,
-    pub member: Option<String>,
-    pub audit: Value,
-}
 
 struct OwnedWorkspace {
     generation: u64,
@@ -127,7 +91,7 @@ pub struct Router {
     handle: Handle,
     me: Weak<Router>,
     on_generations_changed: Box<dyn Fn(&Router) + Send + Sync>,
-    nodes: Mutex<Option<Arc<Nodes>>>,
+    nodes: Mutex<Option<Arc<dyn NodeBridge>>>,
     started: Instant,
 }
 
@@ -469,7 +433,7 @@ impl Router {
     }
 
     fn release_stale_owners(&self, link: &Link) {
-        let Ok(known) = crate::hub::known_owner_keys() else {
+        let Ok(known) = known_owner_keys() else {
             return;
         };
         let Ok(status) = link.call(&Op::Status, Some(CONTROL_TIMEOUT)) else {
@@ -504,14 +468,14 @@ impl Router {
 
     // ---- Hub 生命周期 ----
 
-    pub fn set_nodes(&self, nodes: Option<Arc<Nodes>>) {
+    fn set_nodes(&self, nodes: Option<Arc<dyn NodeBridge>>) {
         *self
             .nodes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = nodes;
     }
 
-    fn nodes(&self) -> Option<Arc<Nodes>> {
+    fn nodes(&self) -> Option<Arc<dyn NodeBridge>> {
         self.nodes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -536,12 +500,12 @@ impl Router {
     ) -> Value {
         match self.nodes() {
             Some(nodes) => nodes.call(auth, &member, tool, args),
-            None => crate::hub::node_bridge_failure("服务没在跑"),
+            None => node_bridge_failure("服务没在跑"),
         }
     }
 
     /// 服务（重新）起来：所有代都按新配置建 Hub。启动检查每次监听器启动只跑一轮，只给当前代。
-    pub fn hub_configure(&self, config: &HubConfig) {
+    fn hub_configure(&self, config: &HubConfig) {
         let (links, current) = {
             let mut state = self.lock();
             state.hub_config = Some(config.clone());
@@ -561,7 +525,7 @@ impl Router {
         }
     }
 
-    pub fn hub_shutdown(&self) {
+    fn hub_shutdown(&self) {
         let links = {
             let mut state = self.lock();
             state.hub_config = None;
@@ -1251,6 +1215,52 @@ impl Router {
             "retired": retired,
             "last_failure": last_failure,
         })
+    }
+}
+
+impl ServiceGeneration for Router {
+    fn hub_mcp(
+        &self,
+        route: ExecutionRoute,
+        auth: &AuthContext,
+        body: &Value,
+    ) -> Result<McpReply, CallError> {
+        Self::hub_mcp(self, route, auth, body)
+    }
+
+    fn workspace_mcp(
+        &self,
+        workspace_id: &str,
+        root: &Path,
+        auth: &AuthContext,
+        body: &Value,
+    ) -> Result<McpReply, CallError> {
+        Self::workspace_mcp(self, workspace_id, root, auth, body)
+    }
+
+    fn actions_call(
+        &self,
+        workspace_id: &str,
+        root: &Path,
+        auth: &AuthContext,
+        tool: &str,
+        arguments: &Value,
+    ) -> Result<Value, CallError> {
+        Self::actions_call(self, workspace_id, root, auth, tool, arguments)
+    }
+
+    fn hub_started(&self, config: &HubConfig, nodes: Arc<dyn NodeBridge>) {
+        self.set_nodes(Some(nodes));
+        self.hub_configure(config);
+    }
+
+    fn hub_stopping(&self) {
+        self.hub_shutdown();
+        self.set_nodes(None);
+    }
+
+    fn served_tools(&self) -> Result<Value, CallError> {
+        Self::served_tools(self)
     }
 }
 

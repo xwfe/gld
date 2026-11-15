@@ -242,7 +242,7 @@ pub trait NodeBridge: Send + Sync {
 pub use gld_protocol::generation::ExecutionRoute;
 
 /// 经宿主问节点失败时给模型的回包。等不到回复时节点可能已经执行了，所以不能叫它直接重试。
-pub(crate) fn node_bridge_failure(message: &str) -> Value {
+pub fn node_bridge_failure(message: &str) -> Value {
     plain_result(tool_err(WorkspaceError::Tool {
         code: "NODE_RESULT_UNKNOWN",
         message: format!(

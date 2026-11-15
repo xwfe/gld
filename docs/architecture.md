@@ -10,11 +10,12 @@
 | `crates/runtime` / `gld-runtime` | 工作区路径、文件/补丁、命令、会话、输出、写锁与运行记录；配置和存储位置由调用侧显式传入 |
 | `crates/agent` / `gld-agent` | Agent 档案、任务存储与委派进程生命周期；消费 runtime 的私有文件、环境过滤与脱敏接口 |
 | `crates/core` / `gld-core` | 工具授权、任务/Planning、Agent 审批/审核与应用编排，以及尚未分离的宿主，消费五个底层 crate |
+| `crates/host` / `gld-host` | 执行代 Router、子进程 Link 与生命周期；消费 core 的执行入口和共享管道适配 |
 | `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
-依赖为 CLI → daemon/core，daemon → core/protocol，core → policy/protocol/transport/runtime/agent，agent → runtime，runtime → policy/protocol；五个底层 crate 不反向依赖 core。
-`crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖，随全仓测试执行。
+依赖为 CLI → daemon/core，daemon → host/core/protocol，host → core/protocol，core → policy/protocol/transport/runtime/agent，agent → runtime，runtime → policy/protocol；五个底层 crate 不反向依赖 core。
+`crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖及 core 不反向依赖宿主，随全仓测试执行。
 旧 `core::auth`、`core::tools::caller/write_class`、`core::bridge::peer/session` 的公开路径通过 re-export 继续可用。
 配置、应用 DTO 和 daemon 协议的旧类型路径也保持同一类型；带副作用的方法入口调整见下节。
 Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
@@ -187,7 +188,8 @@ App 保留数据文件锁、重读磁盘和工具上下文失效规则。Listene
 
 `DaemonContext` 持有启动时创建的同一个 `Arc<Router>`。工具、批准/停止委派和升级从这里选执行代，
 直连请求没有这个上下文，只调用 App 的本地入口；任何路由错误都不转成本地执行。
-HTTP/Hub 等宿主适配暂时仍通过 `generation::install` 使用同一 Router，具体实现的迁移留给 F4。
+daemon 同时把这个 Router 作为 `ServiceGeneration` 交给 ListenerManager；MCP、Actions 与 Hub 不再查进程全局 Router。
+Hub 启动时保存自己的桥，失败或停止只清理这次启动挂接的执行代。
 
 App 的 Rust 本地入口明确命名为 `call_tool_local`、`approve_agent_task_local`、`stop_agent_task_local`、
 `remove_grant_local`、`set_planning_mode_local`。宿主转发工具时在阻塞线程里重新读当前目录，不使用较早的 selector 快照；
@@ -195,11 +197,15 @@ App 的 Rust 本地入口明确命名为 `call_tool_local`、`approve_agent_task
 
 撤销和 Planning 分别使用各自的 `*_with_cleanup` 窄回调：App 负责先落盘、错误文案与清理时点，
 daemon 闭包只选择实际执行资源。撤销仍立即清一次、35 秒后用同一 Router 再清，每次重新查询可路由执行代；
-Plan 清理失败时保留已保存的模式和原报错。原 `generation::exec` 公共兼容入口保留，但 App 不再依赖它。
+Plan 清理失败时保留已保存的模式和原报错。
 
 退出由 daemon 按关闭 IPC 监听 → Router interrupt_all → App shutdown_services → Router shutdown →
 清 IPC/进程记录的顺序组合，先记 interrupted 再停服务，不改变启动恢复记录。
-App 的初始化、目录、凭据与日志仍消费既有真实存储适配，不把它们描述成纯配置或已完成 F4 的宿主迁移。
+App 的初始化、目录、凭据与日志仍消费既有存储适配。
+
+Rust 的具体路由器入口现为 `gld_host::generation::Router`。旧的 `core::generation::{install, router()}`
+与依赖全局路由的 `generation::exec` 已移除；调用方从持有的 Router 调用，直连则走显式本地入口。
+不保留遇到路由失败时会静默转成本地执行的兼容替身。旧的 `generation::router::root_key` 仍是同一算法的重导出。
 
 ### 宿主与执行代之间的请求归属
 

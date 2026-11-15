@@ -17,7 +17,7 @@ use crate::protocol::{Request, RpcError};
 pub struct DaemonContext {
     pub info: Box<dyn Fn() -> crate::protocol::DaemonInfo + Send + Sync>,
     pub request_shutdown: Box<dyn Fn() + Send + Sync>,
-    pub router: Arc<gld_core::generation::Router>,
+    pub router: Arc<gld_host::generation::Router>,
 }
 
 pub async fn dispatch(
@@ -507,7 +507,7 @@ fn agent_reply(
 /// 这些操作要等子进程应答，放阻塞线程。
 async fn upgrade(
     daemon: Option<&DaemonContext>,
-    run: impl FnOnce(&gld_core::generation::Router) -> Result<Value, String> + Send + 'static,
+    run: impl FnOnce(&gld_host::generation::Router) -> Result<Value, String> + Send + 'static,
 ) -> Result<Value, RpcError> {
     let Some(context) = daemon else {
         return Err(RpcError::protocol("当前不是守护进程，没有执行代可操作"));

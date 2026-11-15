@@ -1,10 +1,11 @@
 //! 宿主显式持有的监听状态；不加载应用数据，也不选择工具执行位置。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::RuntimeSupervisor;
 use crate::error::AppResult;
+use crate::generation::ServiceGeneration;
 
 /// 同一个宿主的监听表、工作区重启锁和启动恢复标记必须作为一份资源传递。
 #[derive(Default)]
@@ -15,15 +16,28 @@ pub struct ListenerManager {
 }
 
 impl ListenerManager {
+    pub fn with_generation(generation: Arc<dyn ServiceGeneration>) -> Self {
+        Self {
+            runtime: Mutex::new(RuntimeSupervisor::with_generation(generation)),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn generation(&self) -> Option<Arc<dyn ServiceGeneration>> {
+        self.runtime().generation.clone()
+    }
+
+    fn runtime(&self) -> MutexGuard<'_, RuntimeSupervisor> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub(crate) fn with_runtime<R>(
         &self,
         f: impl FnOnce(&mut RuntimeSupervisor) -> AppResult<R>,
     ) -> AppResult<R> {
-        let mut guard = self
-            .runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(&mut guard)
+        f(&mut self.runtime())
     }
 
     pub(crate) async fn lock_restart(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -39,7 +53,6 @@ impl ListenerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn startup_restore_is_claimed_once_per_manager() {

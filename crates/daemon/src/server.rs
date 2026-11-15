@@ -49,9 +49,9 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     ipc::cleanup(&paths.socket);
 
     let app = Arc::new(App::load()?);
-    let listeners = Arc::new(ListenerManager::default());
     // 配置先就位再起执行代：它要读数据文件，第一次运行时文件是上面 App::load 建的。
     let router = start_generations(&paths)?;
+    let listeners = Arc::new(ListenerManager::with_generation(router.clone()));
     let listener = ipc::bind(&paths.socket).map_err(|error| {
         AppError::Message(format!("绑定 {} 失败：{error}", paths.socket.display()))
     })?;
@@ -171,13 +171,13 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
 }
 
 /// 起第一个执行代，之后每次代数变化把 pid 写回 `daemon.json`。
-fn start_generations(paths: &DaemonPaths) -> AppResult<Arc<gld_core::generation::Router>> {
+fn start_generations(paths: &DaemonPaths) -> AppResult<Arc<gld_host::generation::Router>> {
     let exe = std::env::current_exe()
         .map_err(|error| AppError::Message(format!("找不到自己的可执行文件：{error}")))?;
     let record_path = paths.record.clone();
     // 一把锁：两次变化并发时，后写的必须是更新的那份。
     let writing = std::sync::Mutex::new(());
-    let router = gld_core::generation::Router::start(
+    let router = gld_host::generation::Router::start(
         exe,
         Box::new(move |router| {
             let _guard = writing.lock().unwrap_or_else(|e| e.into_inner());
@@ -191,7 +191,6 @@ fn start_generations(paths: &DaemonPaths) -> AppResult<Arc<gld_core::generation:
         }),
     )
     .map_err(AppError::Message)?;
-    gld_core::generation::install(Arc::clone(&router));
     Ok(router)
 }
 

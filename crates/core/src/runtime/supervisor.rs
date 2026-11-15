@@ -7,6 +7,7 @@ use crate::async_rt::JoinHandle;
 
 use crate::actions;
 use crate::error::AppResult;
+use crate::generation::ServiceGeneration;
 use crate::logs::append_profile_log;
 use crate::mcp;
 use crate::platform::platform;
@@ -39,11 +40,19 @@ struct RuntimeEntry {
 
 #[derive(Default)]
 pub struct RuntimeSupervisor {
+    pub(super) generation: Option<Arc<dyn ServiceGeneration>>,
     entries: HashMap<(String, ServiceKind), RuntimeEntry>,
     usage: HashMap<(String, ServiceKind), Arc<ServiceUsage>>,
 }
 
 impl RuntimeSupervisor {
+    pub(super) fn with_generation(generation: Arc<dyn ServiceGeneration>) -> Self {
+        Self {
+            generation: Some(generation),
+            ..Self::default()
+        }
+    }
+
     pub fn mcp_status(&self, profile: &WorkspaceProfile) -> RuntimeStatusDto {
         self.status(profile, ServiceKind::Mcp)
     }
@@ -319,6 +328,7 @@ impl RuntimeSupervisor {
                     oauth_token_secret,
                     profile.runtime.clone(),
                     usage.clone(),
+                    self.generation.clone(),
                 )
             }
             ServiceKind::Actions => {
@@ -377,6 +387,7 @@ impl RuntimeSupervisor {
                     oauth_token_secret,
                     policy,
                     usage.clone(),
+                    self.generation.clone(),
                 )
             }
         };

@@ -20,6 +20,7 @@ use crate::auth::{
     external_base_url, register_client, token_exchange, AuthContext, AuthorizeForm,
     AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, Principal, TokenForm,
 };
+use crate::generation::ServiceGeneration;
 use crate::logs::append_profile_log;
 use crate::tools::{self, is_allowed_tool, policy::PolicySettings, wrap_tool_result, ToolContext};
 use crate::usage::ServiceUsage;
@@ -34,6 +35,7 @@ struct AppState {
     /// 工具发给执行代时要说清是哪个项目。
     workspace_id: String,
     ctx: Arc<ToolContext>,
+    generation: Option<Arc<dyn ServiceGeneration>>,
     openapi: Arc<RwLock<Value>>,
     auth: Arc<AuthConfig>,
     workspace_path: String,
@@ -69,6 +71,7 @@ pub fn spawn_listener(
     oauth_token_secret: Option<String>,
     policy: PolicySettings,
     usage: Arc<ServiceUsage>,
+    generation: Option<Arc<dyn ServiceGeneration>>,
 ) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
     if auth_type == "api_key" && api_key.as_ref().is_none_or(String::is_empty) {
         return Err("Actions API key is not configured".into());
@@ -116,6 +119,7 @@ pub fn spawn_listener(
             oauth_client_secret,
             policy,
             usage,
+            generation,
             shutdown_rx,
         )
         .await;
@@ -151,6 +155,7 @@ async fn serve(
     oauth_client_secret: Option<String>,
     policy: PolicySettings,
     usage: Arc<ServiceUsage>,
+    generation: Option<Arc<dyn ServiceGeneration>>,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let workspace = tools::new_workspace(workspace_path.clone()).map_err(|e| e.message())?;
@@ -195,6 +200,7 @@ async fn serve(
         workspace_id: profile_id.to_string(),
         workspace_path: ctx.workspace_path(),
         ctx,
+        generation,
         openapi: Arc::new(RwLock::new(openapi_doc)),
         auth: auth.clone(),
         bind_port: actions_port,
@@ -424,8 +430,9 @@ async fn execute_action(
         let ctx = Arc::clone(&state.ctx);
         let name = tool_name.clone();
         let workspace_id = state.workspace_id.clone();
-        move || match crate::generation::router() {
-            Some(router) => router
+        let generation = state.generation.clone();
+        move || match generation {
+            Some(generation) => generation
                 .actions_call(
                     &workspace_id,
                     ctx.workspace.root(),

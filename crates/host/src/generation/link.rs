@@ -11,11 +11,14 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::router::{CallError, Router};
-use super::wire::{
+use gld_core::generation::wire::{
     auth_from_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op,
 };
-use super::{BuildIdentity, GENERATION_PROTOCOL};
+use gld_core::generation::CallError;
+use gld_core::home::{data_home, HOME_ENV};
+use gld_protocol::generation::{BuildIdentity, GENERATION_PROTOCOL};
+
+use super::router::Router;
 
 /// 成功时是编码好的 JSON 文本，由等它的线程解析：读线程要给所有调用收包，不该替谁花这个时间。
 type Reply = Result<String, String>;
@@ -43,11 +46,11 @@ impl Link {
         router: Weak<Router>,
         ready_timeout: Duration,
     ) -> Result<Arc<Self>, String> {
-        let home = crate::home::data_home().map_err(|error| error.to_string())?;
+        let home = data_home().map_err(|error| error.to_string())?;
         let mut command = Command::new(exe);
         command
             .args(["daemon", "generation"])
-            .env(crate::home::HOME_ENV, &home)
+            .env(HOME_ENV, &home)
             .current_dir(&home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -186,6 +189,7 @@ impl Link {
             return;
         }
         #[cfg(unix)]
+        #[allow(unsafe_code)]
         {
             // SAFETY: 子进程是 process_group(0) 起的，进程组号就是它的 pid。
             // 上面看过还没 wait，wait 也要拿这把锁，所以 pid 还没被回收，不会杀错。

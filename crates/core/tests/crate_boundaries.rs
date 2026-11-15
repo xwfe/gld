@@ -31,6 +31,22 @@ fn extracted_crates_keep_their_dependency_boundaries() {
     let metadata: Value = serde_json::from_slice(&output.stdout).expect("Cargo metadata JSON");
     let packages = metadata["packages"].as_array().expect("packages");
 
+    let core = packages
+        .iter()
+        .find(|package| package["name"] == "gld-core")
+        .expect("缺少 gld-core");
+    assert!(
+        core["dependencies"]
+            .as_array()
+            .expect("core dependencies")
+            .iter()
+            .all(|dependency| !matches!(
+                dependency["name"].as_str(),
+                Some("gld-host" | "gld-daemon")
+            )),
+        "core 不得反向依赖宿主或 daemon（包括测试、可选、构建与平台依赖）"
+    );
+
     for (name, normal, development) in [
         ("gld-policy", &["serde"][..], &["serde_json"][..]),
         ("gld-protocol", &["serde", "serde_json"][..], &[][..]),
@@ -64,6 +80,11 @@ fn extracted_crates_keep_their_dependency_boundaries() {
             "gld-agent",
             &["gld-runtime", "serde", "serde_json", "toml", "uuid", "libc"][..],
             &["tempfile"][..],
+        ),
+        (
+            "gld-host",
+            &["gld-core", "gld-protocol", "serde_json", "tokio", "libc"][..],
+            &[][..],
         ),
     ] {
         let package = packages

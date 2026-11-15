@@ -603,7 +603,7 @@ impl App {
         } else {
             self.start_hub_tunnel(&config, "").await
         };
-        hub::runtime::start(&config, outcome, secrets).await?;
+        hub::runtime::start(&config, outcome, secrets, listeners.generation()).await?;
         // 和工作区服务一样，报 running 之前确认它真的开始应答，理由见 wait_until_answering。
         if !wait_until_answering(config.local_port, ServiceKind::Mcp, READY_PROBE_BUDGET).await {
             append_profile_log(

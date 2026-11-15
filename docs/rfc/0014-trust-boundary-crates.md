@@ -79,10 +79,10 @@ daemon 的协议又引用 core 的应用 DTO。模块名字区分了职责，但
 | `gld-runtime` | 工作区路径、文件、补丁、命令、会话、输出、写锁与运行记录 | policy、必要的 protocol、已有 toexec 原语及平台实现 |
 | `gld-agent` | 已有 Agent profile/store/run 与进程生命周期 | runtime 的实际执行接口；其余沿用现有序列化、配置解析与进程依赖 |
 | `gld-core` | 工具分发、任务/验收/Planning、能力暴露、应用用例与适配组合 | 调用已经抽出的底层能力 |
-| 宿主边界 | HTTP/OAuth、凭据/配对、公网入口、节点连接与执行代路由 | 最后从 core 移出；由 daemon 的组合入口装配应用和监听器 |
-| `gld-daemon` / CLI | 本机 IPC、进程服务生命周期、命令行与展示 | daemon 依赖 core / protocol；CLI 消费现有应用与 daemon 入口 |
+| `gld-host` | 执行代 Router/Link、对外监听、认证会话与节点/网关连接 | 只消费 core 与协议等底层入口；由 daemon 装配。各片进度见 task_plan |
+| `gld-daemon` / CLI | 本机 IPC、进程服务生命周期、命令行与展示 | daemon 组合 host / core / protocol；CLI 消费现有应用与 daemon 入口 |
 
-宿主最后收口时再确定单独的 `gld-host` crate 是否值得保留：退出条件是执行器能独立编译、宿主能独立拥有网络连接，
+Router 和 Link 有独立的资源生命周期，作为 `gld-host` 的首个实际消费者。退出条件是执行器能独立编译、宿主能独立拥有网络连接，
 且 core 不反向引用宿主实现。确实需要跨边界调用的地方，围绕已有操作传入窄接口或函数；
 不预先建设万能 `Executor`、`Provider`、插件注册中心或 DI 容器。
 
@@ -115,6 +115,14 @@ App/ListenerManager 与执行代 Router 的显式装配见[架构](../architectu
 
 节点连接的具体装配与 Rust 接口见[架构：原生节点连接的所有者](../architecture.md)。
 应用侧 NodeBridge 只保留查询和调用；显式关闭继续由实际持有连接的宿主负责，不用丢弃引用来代替。
+
+物理迁移按资源分片：
+
+- **Router/Link：** 重用 core 的子进程入口、身份/路径转换、管道帧编解码和 owner 清单。监听与 Hub 启停只接入各自需要的执行代操作，不读全局具体 Router。
+- **HTTP/OAuth：** 工作区 MCP 应用分发仍被 child 使用，留 core；HTTP 监听、OAuth 会话、令牌和元数据适配由宿主负责。
+  `ClientRegistry`、`StoredGrants`、`SecretStore` 仍复用实际文件、作用域和数据锁；撤销继续逐请求读取，不新建另一份凭据存储。
+- **网关与监听管理：** Hub 直连与网关 WebSocket 必须复用当前宿主表；配置、公网地址持久化和失败顺序先核对再搬。
+  `App` 不重新拥有监听器或重启锁。CCNM/本机 MCP 的执行代状态不因宿主迁移改变。
 
 清理 owner 时仍每轮读当前数据；读失败就保留原 owner。无 Router 的本地调用路径、配置/凭据格式、
 关闭顺序与公开协议保持；这些后续职责的迁移需要各自的集成回归，不由第一步的路径测试代替。

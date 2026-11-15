@@ -657,12 +657,24 @@ version = "0.10.1"
 dependencies = [
  "fs2",
  "gld-core",
+ "gld-host",
  "gld-protocol",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "gld-host"
+version = "0.10.1"
+dependencies = [
+ "gld-core",
+ "gld-protocol",
+ "libc",
+ "serde_json",
  "tokio",
 ]
 

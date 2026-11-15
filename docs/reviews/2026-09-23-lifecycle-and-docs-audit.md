@@ -5383,3 +5383,23 @@ Cargo manifest/lock、CI、CLI 帮助、共享协议和 D18 授权行为保持�
 F3 完成不代表宿主实现已移出 core：HTTP/Hub/凭据和日志适配、Router/Link 的物理边界仍按 F4 处理。
 
 状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。
+
+## 126. D17-F4.1：宿主 Router/Link 迁入 gld-host（2026-11-15）
+
+从干净的 `main@0c8bc3a` 开始，本地比 `origin/main` 超前 10 个提交。先核对两个方向的真实依赖：
+
+- Router/Link 用 core 的 owner 清单、身份/路径转换、私有管道与 NodeBridge；child 的归属复核、会话和工具分发留 core。
+- HTTP 的 MCP/Actions 路由与 Hub 启停原来反查全局 Router；`RuntimeSupervisor` 负责构造监听和读凭据，App 依赖其状态。
+- OAuth handler 持注册表和授权运行态；持久 grant 逐请求读 DataStore，SecretStore/ClientRegistry 复用文件与锁。
+  网关读取项目和 Hub 配置、持久化取到的公网地址，并把节点 socket 交给同一个活动 Hub，而非另建一条代理连接。
+
+结论是 `gld-host → gld-core`，不是把 App/Hub/child 整包搬走。新 crate 先接已经可用的 Router/Link，不建空壳。
+daemon 的同一 Router 显式交给 IPC 和现有监听适配；HubRuntime 保存自己的桥，先挂节点桥再配置各代，
+失败/正常停时先停各代 Hub 再摘桥，原 Nodes 关闭仍在 CCNM 和本机 MCP 之间。MCP/Actions 认证、阻塞线程、
+Actions 写锁与路由失败不回退本地的分支保持。Rust 具体 Router 路径迁至 host；无仓内消费者的旧全局入口移除，
+保留共享 root_key 和结果类型路径，不为兼容再留一套全局选路逻辑。
+
+macOS 离线、隔离 GLD_HOME：host 独立 check、全 workspace/all-targets check 通过；依赖边界与执行代单测 8 条，
+CLI Actions/网关、换代、原生节点、OAuth、grant 共 86 条通过。Actions 原隔离用例补断言：HTTP 与 CLI 的命令
+确实由同一个执行代 PID 启动，不是在宿主本地开另一份会话。独立静态审查未发现阻断回归。
+锁文件仅增加工作区内部包、依赖边，没有外部升级；协议、凭据文件、连接、重试与启停语义未改。不推送、不部署。
