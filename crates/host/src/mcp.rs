@@ -14,6 +14,19 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use gld_core::async_rt::{self, JoinHandle};
+use gld_core::generation::CallError;
+use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER, SERVER_NAME};
+use gld_core::local_network;
+use gld_core::logs::append_profile_log;
+use gld_core::mcp::handle_request;
+use gld_core::nodes::{endpoint, registry::Nodes};
+use gld_core::runtime::ShutdownSender;
+use gld_core::secret::SecretStore;
+use gld_core::settings::AppSettings;
+use gld_core::tools::{build_tool_context, patch::failure_log_fields, Caller, SharedToolContext};
+use gld_core::usage::ServiceUsage;
+use gld_core::workspace::{AuthConfig, RuntimeConfig};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
@@ -26,19 +39,7 @@ use crate::auth::{
     ClientRegistrationRequest, ClientRegistry, GrantBook, NoGrants, OAuthRuntime, Principal,
     StoredGrants, TokenForm,
 };
-use crate::generation::{CallError, ServiceGeneration};
-use crate::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER};
-use crate::local_network;
-use crate::logs::append_profile_log;
-use crate::mcp::server::{handle_request, SharedState};
-use crate::nodes::registry::Nodes;
-use crate::secret::SecretStore;
-use crate::settings::AppSettings;
-use crate::tools::{build_tool_context, Caller};
-use crate::usage::ServiceUsage;
-use crate::workspace::{AuthConfig, RuntimeConfig};
-
-pub type ShutdownSender = oneshot::Sender<()>;
+use crate::generation::Router as GenerationRouter;
 
 /// 监听器背后是谁在答 JSON-RPC。
 ///
@@ -47,8 +48,8 @@ pub type ShutdownSender = oneshot::Sender<()>;
 #[derive(Clone)]
 enum Endpoint {
     /// 一个工作区自己的 MCP 服务。
-    Workspace(SharedState),
-    /// 聚合入口：每次调用按 `workspace` 参数分到成员，见 [`crate::hub`]。
+    Workspace(SharedToolContext),
+    /// 聚合入口：每次调用按 `workspace` 参数分到成员，见 [`gld_core::hub`]。
     Hub { hub: Arc<Hub>, nodes: Arc<Nodes> },
 }
 
@@ -65,7 +66,7 @@ impl Endpoint {
     fn server_name(&self) -> String {
         match self {
             Self::Workspace(context) => context.server_name().to_string(),
-            Self::Hub { .. } => crate::hub::SERVER_NAME.to_string(),
+            Self::Hub { .. } => SERVER_NAME.to_string(),
         }
     }
 
@@ -80,13 +81,13 @@ impl Endpoint {
     ///
     /// 两支都要 `auth`：它是这次调用的主体，命令会话按它分表。不传的话，
     /// 这个入口上所有连接共用一张表，谁都能拿别人的 `session_id` 去读
-    /// （见 [`crate::tools::caller`]）。
+    /// （见 [`gld_core::tools::caller`]）。
     fn handle(
         &self,
         scope: &str,
         auth: &AuthContext,
         body: &Value,
-        generation: Option<&dyn ServiceGeneration>,
+        generation: Option<&GenerationRouter>,
     ) -> Handled {
         // 宿主进程里工具不在本进程跑，鉴权已经验完，发给执行代。
         if let Some(generation) = generation {
@@ -118,7 +119,7 @@ impl Endpoint {
 
     fn handle_routed(
         &self,
-        generation: &dyn ServiceGeneration,
+        generation: &GenerationRouter,
         scope: &str,
         auth: &AuthContext,
         body: &Value,
@@ -218,7 +219,7 @@ async fn oauth_register_post(
 #[derive(Clone)]
 struct ListenerState {
     endpoint: Endpoint,
-    generation: Option<Arc<dyn ServiceGeneration>>,
+    generation: Option<Arc<GenerationRouter>>,
     auth: AuthConfig,
     /// 日志目录和 OAuth 客户端注册表的作用域：工作区 id，或 [`HUB_SCOPE`]。
     scope: String,
@@ -248,12 +249,12 @@ pub fn spawn_listener(
     oauth_token_secret: Option<String>,
     runtime: RuntimeConfig,
     usage: Arc<ServiceUsage>,
-    generation: Option<Arc<dyn ServiceGeneration>>,
-) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
+    generation: Option<Arc<GenerationRouter>>,
+) -> Result<(ShutdownSender, JoinHandle<()>), String> {
     let workspace_display = workspace_path.display().to_string();
     let global = AppSettings::load_or_default();
     // 和命令行 `gld tool call` 共用同一个构建入口，两边看到的工具集与策略必然一致。
-    let mcp: SharedState = Arc::new(build_tool_context(
+    let mcp = Arc::new(build_tool_context(
         workspace_path,
         &workspace_name,
         auth.clone(),
@@ -326,8 +327,8 @@ pub fn spawn_hub_listener(
     auth_type: &str,
     public_base_url: String,
     secrets: HubSecrets,
-    generation: Option<Arc<dyn ServiceGeneration>>,
-) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
+    generation: Option<Arc<GenerationRouter>>,
+) -> Result<(ShutdownSender, JoinHandle<()>), String> {
     let auth = AuthConfig {
         auth_type: auth_type.to_string(),
         oauth_client_id: secrets.oauth_client_id.clone(),
@@ -373,16 +374,14 @@ pub fn spawn_hub_listener(
     })
 }
 
-fn listen(
-    state: ListenerState,
-) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
+fn listen(state: ListenerState) -> Result<(ShutdownSender, JoinHandle<()>), String> {
     let port = state.bind_port;
     // 在返回 Running 之前完成 bind，避免后台任务里的端口冲突被伪装成启动成功。
     let allow_lan_access = AppSettings::load_or_default().allow_lan_access;
     let listener = bind_listener(port, allow_lan_access)?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let profile_id = state.scope.clone();
-    let handle = crate::async_rt::spawn(async move {
+    let handle = async_rt::spawn(async move {
         let result = serve(listener, port, allow_lan_access, state, shutdown_rx).await;
         if let Err(err) = &result {
             append_profile_log(
@@ -489,7 +488,7 @@ async fn node_connect(
     let Endpoint::Hub { nodes, .. } = state.endpoint else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    crate::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
+    endpoint::upgrade(nodes, machine_id, headers, ws).await
 }
 
 async fn node_pair(
@@ -499,13 +498,13 @@ async fn node_pair(
     if !matches!(state.endpoint, Endpoint::Hub { .. }) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    crate::nodes::endpoint::pair(request).await
+    endpoint::pair(request).await
 }
 
 fn mcp_discovery_payload(state: &ListenerState) -> Value {
     json!({
         "name": state.endpoint.server_name(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": gld_core::VERSION,
         "protocolVersion": "2025-06-18"
     })
 }
@@ -752,7 +751,7 @@ async fn dispatch_mcp(state: ListenerState, auth: AuthContext, body: Value) -> R
             }
             if tool_name == "apply_patch" || tool_name == "patch_check" {
                 let structured = response.pointer("/result/structuredContent");
-                if let Some(fields) = structured.and_then(crate::tools::patch::failure_log_fields) {
+                if let Some(fields) = structured.and_then(failure_log_fields) {
                     let operation_id = structured
                         .and_then(|value| value.get("operation_id"))
                         .and_then(Value::as_str)
@@ -1055,21 +1054,31 @@ fn relay_target(tool_name: &str, body: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::header::CACHE_CONTROL;
-    use axum::response::IntoResponse;
-
-    use super::{bind_listener, mcp_discovery, mcp_discovery_payload, Endpoint, ListenerState};
-    use crate::tools::ToolContext;
-    use crate::workspace::AuthConfig;
-    use axum::extract::State;
+    use std::path::Path;
     use std::sync::Arc;
 
-    fn state_named(workspace_name: &str) -> ListenerState {
-        let context = ToolContext::for_test(
-            crate::home::test_scratch_dir("workspace"),
-            crate::home::test_scratch_dir("harness"),
+    use axum::extract::State;
+    use axum::http::header::CACHE_CONTROL;
+    use axum::response::IntoResponse;
+    use gld_core::tools::{PolicySettings, ToolContext, Workspace};
+    use gld_core::workspace::AuthConfig;
+
+    use super::{bind_listener, mcp_discovery, mcp_discovery_payload, Endpoint, ListenerState};
+    use crate::auth::test_home::run_isolated;
+
+    fn state_named(root: &Path, workspace_name: &str) -> ListenerState {
+        let workspace = Workspace::new(root.to_path_buf(), Vec::new()).expect("workspace");
+        let context = ToolContext::from_workspace_with_harness_root(
+            workspace,
+            AuthConfig {
+                auth_type: "noauth".into(),
+                ..AuthConfig::default()
+            },
+            PolicySettings::default(),
+            "full".into(),
+            "trusted".into(),
+            root.join("harness"),
         )
-        .expect("context")
         .with_workspace_name(workspace_name);
         ListenerState {
             endpoint: Endpoint::Workspace(Arc::new(context)),
@@ -1116,31 +1125,55 @@ mod tests {
         assert!(bind_listener(port, false).is_err());
     }
 
-    #[tokio::test]
-    async fn discovery_reports_the_current_package_version() {
-        let discovery = mcp_discovery_payload(&state_named("api"));
+    #[test]
+    fn discovery_reports_the_current_package_version() {
+        run_isolated(
+            module_path!(),
+            "discovery_reports_the_current_package_version",
+            || {
+                let root = tempfile::tempdir().expect("fixture");
+                let discovery = mcp_discovery_payload(&state_named(root.path(), "api"));
 
-        assert_eq!(discovery["version"], env!("CARGO_PKG_VERSION"));
+                assert_eq!(discovery["version"], env!("CARGO_PKG_VERSION"));
+            },
+        );
     }
 
     /// 服务器名要跟着工作区走。
     ///
     /// 这里以前写死 `coding-tools-mcp`（上游项目的名字）：接了三个工作区，
     /// 客户端的服务器列表里就是三个一模一样的条目，谁也分不出谁是哪个项目。
-    #[tokio::test]
-    async fn discovery_names_the_workspace() {
-        assert_eq!(mcp_discovery_payload(&state_named("api"))["name"], "api");
-        // 没有工作区名时（命令行直连、测试）回落到项目名，不能是空串——
-        // 空的 serverInfo.name 在有些客户端那儿直接显示成一行空白。
-        assert_eq!(mcp_discovery_payload(&state_named(""))["name"], "gld");
+    #[test]
+    fn discovery_names_the_workspace() {
+        run_isolated(module_path!(), "discovery_names_the_workspace", || {
+            let root = tempfile::tempdir().expect("fixture");
+            assert_eq!(
+                mcp_discovery_payload(&state_named(root.path(), "api"))["name"],
+                "api"
+            );
+            // 空的 serverInfo.name 在有些客户端那儿直接显示成一行空白。
+            assert_eq!(
+                mcp_discovery_payload(&state_named(root.path(), ""))["name"],
+                "gld"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn discovery_prevents_stale_tool_catalog_caching() {
-        let response = mcp_discovery(State(state_named("api")))
-            .await
-            .into_response();
+    #[test]
+    fn discovery_prevents_stale_tool_catalog_caching() {
+        run_isolated(
+            module_path!(),
+            "discovery_prevents_stale_tool_catalog_caching",
+            || {
+                let root = tempfile::tempdir().expect("fixture");
+                let response = gld_core::async_rt::block_on(mcp_discovery(State(state_named(
+                    root.path(),
+                    "api",
+                ))))
+                .into_response();
 
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+                assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            },
+        );
     }
 }

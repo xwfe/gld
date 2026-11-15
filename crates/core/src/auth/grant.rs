@@ -162,15 +162,15 @@ fn matching_secret(offered: &str, secret: impl Fn(&GrantRecord) -> &String) -> O
 
 /// 测试里用的固定一组 grant。
 #[cfg(test)]
-pub struct FixedGrants(pub std::sync::Mutex<Vec<GrantRecord>>);
+struct FixedGrants(std::sync::Mutex<Vec<GrantRecord>>);
 
 #[cfg(test)]
 impl FixedGrants {
-    pub fn new(records: Vec<GrantRecord>) -> Self {
+    fn new(records: Vec<GrantRecord>) -> Self {
         Self(std::sync::Mutex::new(records))
     }
 
-    pub fn revoke(&self, id: &str) {
+    fn revoke(&self, id: &str) {
         self.0
             .lock()
             .unwrap()

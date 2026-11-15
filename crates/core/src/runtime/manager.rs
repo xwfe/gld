@@ -3,28 +3,39 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::RuntimeSupervisor;
+use super::{ListenerBinder, RuntimeSupervisor};
 use crate::error::AppResult;
 use crate::generation::ServiceGeneration;
 
 /// 同一个宿主的监听表、工作区重启锁和启动恢复标记必须作为一份资源传递。
-#[derive(Default)]
 pub struct ListenerManager {
     runtime: Mutex<RuntimeSupervisor>,
+    binder: Arc<dyn ListenerBinder>,
+    generation: Option<Arc<dyn ServiceGeneration>>,
     restart_gate: tokio::sync::Mutex<()>,
     startup_restore_attempted: AtomicBool,
 }
 
 impl ListenerManager {
-    pub fn with_generation(generation: Arc<dyn ServiceGeneration>) -> Self {
+    pub fn new(
+        binder: Arc<dyn ListenerBinder>,
+        generation: Option<Arc<dyn ServiceGeneration>>,
+    ) -> Self {
         Self {
-            runtime: Mutex::new(RuntimeSupervisor::with_generation(generation)),
-            ..Self::default()
+            runtime: Mutex::new(RuntimeSupervisor::new(binder.clone())),
+            binder,
+            generation,
+            restart_gate: tokio::sync::Mutex::new(()),
+            startup_restore_attempted: AtomicBool::new(false),
         }
     }
 
+    pub(crate) fn binder(&self) -> &dyn ListenerBinder {
+        &*self.binder
+    }
+
     pub(crate) fn generation(&self) -> Option<Arc<dyn ServiceGeneration>> {
-        self.runtime().generation.clone()
+        self.generation.clone()
     }
 
     fn runtime(&self) -> MutexGuard<'_, RuntimeSupervisor> {
@@ -53,10 +64,44 @@ impl ListenerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hub::{Hub, HubSecrets};
+    use crate::nodes::registry::Nodes;
+    use crate::runtime::{BoundListener, ServiceKind};
+    use crate::settings::HubConfig;
+    use crate::usage::ServiceUsage;
+    use crate::workspace::WorkspaceProfile;
+
+    struct UnusedBinder;
+
+    impl ListenerBinder for UnusedBinder {
+        fn bind_workspace(
+            &self,
+            _: &WorkspaceProfile,
+            _: ServiceKind,
+            _: u16,
+            _: Arc<ServiceUsage>,
+        ) -> AppResult<Result<BoundListener, String>> {
+            unreachable!("test does not start services")
+        }
+        fn bind_hub(
+            &self,
+            _: &HubConfig,
+            _: Arc<Hub>,
+            _: Arc<Nodes>,
+            _: String,
+            _: HubSecrets,
+        ) -> Result<BoundListener, String> {
+            unreachable!("test does not start services")
+        }
+    }
+
+    fn test_manager() -> ListenerManager {
+        ListenerManager::new(Arc::new(UnusedBinder), None)
+    }
 
     #[test]
     fn startup_restore_is_claimed_once_per_manager() {
-        let manager = Arc::new(ListenerManager::default());
+        let manager = Arc::new(test_manager());
         let claimed = std::thread::scope(|scope| {
             let attempts: Vec<_> = (0..12)
                 .map(|_| {
@@ -71,12 +116,12 @@ mod tests {
         });
         assert_eq!(claimed, 1);
         assert!(!manager.begin_startup_restore());
-        assert!(ListenerManager::default().begin_startup_restore());
+        assert!(test_manager().begin_startup_restore());
     }
 
     #[tokio::test]
     async fn restart_gate_does_not_hold_the_listener_table_lock() {
-        let manager = ListenerManager::default();
+        let manager = test_manager();
         let gate = manager.lock_restart().await;
         assert!(manager.restart_gate.try_lock().is_err());
         assert_eq!(manager.with_runtime(|_| Ok(7)).unwrap(), 7);

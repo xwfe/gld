@@ -1,25 +1,13 @@
 mod bearer;
 mod client_registry;
 mod grant;
-mod oauth;
-mod oauth_flow;
 
-pub use bearer::verify_bearer_header;
-pub(crate) use bearer::{bearer_token, header_secret_matches};
-pub use client_registry::{remove_scope as remove_client_registry, ClientRegistry};
+pub use bearer::{bearer_token, constant_time_eq_str};
+pub use client_registry::{
+    remove_scope as remove_client_registry, ClientRegistry, RegisteredClient, RegistrationError,
+};
 pub use gld_policy::{AuthContext, Grant, Principal};
-#[cfg(test)]
-pub use grant::FixedGrants;
 pub use grant::{
     BrowserCredential, GrantBook, GrantRecord, NoGrants, StoredGrants,
     DEFAULT_BROWSER_GRANT_TTL_SECONDS, DEFAULT_BROWSER_ORIGIN, MAX_BROWSER_GRANT_TTL_SECONDS,
-};
-pub use oauth::{
-    actions_audience, authorization_server_metadata, external_base_url, hub_audience,
-    protected_resource_metadata, protected_resource_metadata_url, workspace_audience,
-};
-pub use oauth_flow::{
-    authorize_get, authorize_post, register_client, token_exchange, verify_oauth_bearer_header,
-    AccessIdentity, AuthorizeForm, AuthorizeParams, ClientRegistrationRequest, OAuthRuntime,
-    TokenForm,
 };

@@ -17,6 +17,7 @@ use std::time::Duration;
 use gld_core::app::App;
 use gld_core::runtime::ListenerManager;
 use gld_core::{AppError, AppResult};
+use gld_host::listener_manager;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 
@@ -51,7 +52,7 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     let app = Arc::new(App::load()?);
     // 配置先就位再起执行代：它要读数据文件，第一次运行时文件是上面 App::load 建的。
     let router = start_generations(&paths)?;
-    let listeners = Arc::new(ListenerManager::with_generation(router.clone()));
+    let listeners = Arc::new(listener_manager(Some(router.clone())));
     let listener = ipc::bind(&paths.socket).map_err(|error| {
         AppError::Message(format!("绑定 {} 失败：{error}", paths.socket.display()))
     })?;

@@ -1,6 +1,6 @@
 [package]
 name = "gld-host"
-description = "Host-side routing and lifecycle for GLD execution generations"
+description = "Host-side routing, listeners and authentication for GLD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,8 +10,18 @@ rust-version.workspace = true
 [dependencies]
 gld-core = { workspace = true }
 gld-protocol = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
+axum = { version = "0.8", features = ["form", "ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+base64 = "0.22"
+jsonwebtoken = "9"
+sha2 = "0.10"
 tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

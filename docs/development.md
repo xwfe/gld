@@ -44,6 +44,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | 宿主节点所有权 | core 的 hub/tests/node_bridge；CLI 的 native_nodes/ownership | 桥接错误与离线成员保留、关闭顺序、换代保持同一 WSS、Hub 重启后原进程重连、直连/网关共用登记表 |
 | 监听管理所有权 | core 的 runtime/manager；CLI 的 service_lifecycle/start_and_upgrade | 一次恢复、独立锁范围、同实例启停/状态、配置更新与重启 |
 | 应用清理与执行代装配 | core 的 app_cleanup；daemon 的 typed agent reply；CLI 的 daemon_lifecycle/generation_boundary/agent_delegation/scoped_grants/planning_output | 先落盘后清理、真实 35 秒复清、错误保真、直连与执行代分支、退出终态 |
+| 宿主 HTTP / OAuth | `crates/host/src/auth/`、`mcp.rs`、`actions/`；CLI 的 oauth_connector_flow / scoped_grants / actions_and_gateway | 错误与元数据、动态注册/PKCE/刷新、持久化损坏拒绝、鉴权和工具选路 |
 | 工具契约 | `crates/core/tests/call_tool_contract.rs` | 每个 profile 暴露的工具集与返回结构 |
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |

@@ -1219,36 +1219,6 @@ impl Router {
 }
 
 impl ServiceGeneration for Router {
-    fn hub_mcp(
-        &self,
-        route: ExecutionRoute,
-        auth: &AuthContext,
-        body: &Value,
-    ) -> Result<McpReply, CallError> {
-        Self::hub_mcp(self, route, auth, body)
-    }
-
-    fn workspace_mcp(
-        &self,
-        workspace_id: &str,
-        root: &Path,
-        auth: &AuthContext,
-        body: &Value,
-    ) -> Result<McpReply, CallError> {
-        Self::workspace_mcp(self, workspace_id, root, auth, body)
-    }
-
-    fn actions_call(
-        &self,
-        workspace_id: &str,
-        root: &Path,
-        auth: &AuthContext,
-        tool: &str,
-        arguments: &Value,
-    ) -> Result<Value, CallError> {
-        Self::actions_call(self, workspace_id, root, auth, tool, arguments)
-    }
-
     fn hub_started(&self, config: &HubConfig, nodes: Arc<dyn NodeBridge>) {
         self.set_nodes(Some(nodes));
         self.hub_configure(config);

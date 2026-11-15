@@ -1,12 +1,9 @@
-//! 仍由 core 组合的监听器所需的具体执行代操作；不负责 CLI、Agent 或子进程管理。
+//! 宿主路由结果与 Hub 生命周期编排所需的操作。
 
-use std::path::Path;
 use std::sync::Arc;
 
-use gld_protocol::generation::ExecutionRoute;
 use serde_json::Value;
 
-use crate::auth::AuthContext;
 use crate::hub::NodeBridge;
 use crate::settings::HubConfig;
 
@@ -49,30 +46,8 @@ pub struct McpReply {
     pub audit: Value,
 }
 
-/// 宿主为监听器提供的执行代转发与 Hub 生命周期。
-/// 只有未装配时才走本地执行，转发错误不允许回退本地。
+/// Hub 的启停与已发布工具表跨执行代操作；HTTP 路由由宿主直接执行。
 pub trait ServiceGeneration: Send + Sync {
-    fn hub_mcp(
-        &self,
-        route: ExecutionRoute,
-        auth: &AuthContext,
-        body: &Value,
-    ) -> Result<McpReply, CallError>;
-    fn workspace_mcp(
-        &self,
-        workspace_id: &str,
-        root: &Path,
-        auth: &AuthContext,
-        body: &Value,
-    ) -> Result<McpReply, CallError>;
-    fn actions_call(
-        &self,
-        workspace_id: &str,
-        root: &Path,
-        auth: &AuthContext,
-        tool: &str,
-        arguments: &Value,
-    ) -> Result<Value, CallError>;
     fn hub_started(&self, config: &HubConfig, nodes: Arc<dyn NodeBridge>);
     fn hub_stopping(&self);
     fn served_tools(&self) -> Result<Value, CallError>;

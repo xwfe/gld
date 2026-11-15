@@ -128,7 +128,7 @@ impl Backend {
                     None => {
                         let loaded = LocalApplication {
                             app: Arc::new(App::load()?),
-                            listeners: Arc::new(ListenerManager::default()),
+                            listeners: Arc::new(gld_daemon::local_listeners()),
                         };
                         *app = Some(loaded.clone());
                         loaded

@@ -623,7 +623,6 @@ dependencies = [
  "gld-runtime",
  "gld-transport",
  "image",
- "jsonwebtoken",
  "libc",
  "percent-encoding",
  "regex",
@@ -643,7 +642,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "toml",
- "tower-http",
  "uuid",
  "walkdir",
  "which",
@@ -671,11 +669,19 @@ dependencies = [
 name = "gld-host"
 version = "0.10.1"
 dependencies = [
+ "axum",
+ "base64",
  "gld-core",
  "gld-protocol",
+ "jsonwebtoken",
  "libc",
+ "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
+ "tower-http",
+ "uuid",
 ]
 
 [[package]]

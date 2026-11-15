@@ -32,3 +32,8 @@ pub use lifecycle::{DaemonPaths, DaemonProbe, DaemonRecord};
 pub use protocol::{
     DaemonInfo, Request, Response, RpcError, FIRST_PROTOCOL_WITH_GENERATIONS, PROTOCOL_VERSION,
 };
+
+/// 直连仍有真实监听适配，但不装配执行代。
+pub fn local_listeners() -> gld_core::runtime::ListenerManager {
+    gld_host::listener_manager(None)
+}

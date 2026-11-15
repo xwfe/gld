@@ -28,7 +28,6 @@ toexec-fs = { workspace = true }
 toexec-mcp = { workspace = true }
 toexec-skill = { workspace = true }
 axum = { version = "0.8", features = ["form", "ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 # 与现有 axum 0.8.9 的可选 WebSocket 依赖同版，不为了节点链路升级 HTTP 栈。
 tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
@@ -42,7 +41,6 @@ regex = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.22"
 percent-encoding = "2"
-jsonwebtoken = "9"
 sha2 = "0.10"
 shlex = "1"
 shell-words = "1"

@@ -55,7 +55,7 @@ impl AuthConfig {
 
 /// GPT Actions 这个入口在主体标识里的名字（`noauth:actions`、`bearer:actions`、`oauth:actions:<client>`）。
 ///
-/// 以前 Actions 调工具不带身份，落到 [`crate::tools::Caller::local`]，和本机 `gld tool call`
+/// 以前 Actions 调工具不带身份，落到 [`gld_core::tools::Caller::local`]，和本机 `gld tool call`
 /// 是同一个主体：两边的命令会话、运行记录互相读得到，有了 `list_runs` 还能直接列出来
 /// （独立审查发现）。验完鉴权就在请求上挂一个自己的 [`AuthContext`]。
 pub const ACTIONS_SCOPE: &str = "actions";

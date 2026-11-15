@@ -12,9 +12,8 @@ use super::{Hub, HubSecrets};
 use crate::async_rt::JoinHandle;
 use crate::error::{AppError, AppResult};
 use crate::generation::ServiceGeneration;
-use crate::mcp::ShutdownSender;
 use crate::nodes::registry::Nodes;
-use crate::runtime::await_listener_shutdown;
+use crate::runtime::{await_listener_shutdown, ListenerManager, ShutdownSender};
 use crate::settings::HubConfig;
 use crate::tunnel::standalone::StandaloneTunnel;
 
@@ -74,8 +73,9 @@ pub async fn start(
     config: &HubConfig,
     outcome: TunnelOutcome,
     secrets: HubSecrets,
-    generation: Option<Arc<dyn ServiceGeneration>>,
+    listeners: &ListenerManager,
 ) -> AppResult<()> {
+    let generation = listeners.generation();
     let mut guard = RUNTIME.lock().await;
     if let Some(previous) = guard.take() {
         stop_runtime(previous).await;
@@ -88,14 +88,12 @@ pub async fn start(
         let config = config.clone();
         let _ = tokio::task::spawn_blocking(move || generation.hub_started(&config, nodes)).await;
     }
-    let spawned = crate::mcp::spawn_hub_listener(
-        config.local_port,
+    let spawned = listeners.binder().bind_hub(
+        config,
         hub.clone(),
         nodes.clone(),
-        &config.auth_type,
         outcome.public_base.clone(),
         secrets,
-        generation.clone(),
     );
     let (shutdown, handle) = match spawned {
         Ok(listener) => listener,

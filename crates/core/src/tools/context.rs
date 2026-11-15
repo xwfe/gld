@@ -192,12 +192,12 @@ impl ToolContext {
         self
     }
 
-    pub(crate) fn with_usage(mut self, usage: Arc<ServiceUsage>) -> Self {
+    pub fn with_usage(mut self, usage: Arc<ServiceUsage>) -> Self {
         self.usage = usage;
         self
     }
 
-    pub(crate) fn usage(&self) -> Arc<ServiceUsage> {
+    pub fn usage(&self) -> Arc<ServiceUsage> {
         self.usage.clone()
     }
 

@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::local_network;
-use crate::settings::AppSettings;
 use axum::{
     extract::{Form, Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -11,6 +9,15 @@ use axum::{
     routing::{get, post},
     Extension, Router,
 };
+use gld_core::async_rt::{self, JoinHandle};
+use gld_core::local_network;
+use gld_core::logs::append_profile_log;
+use gld_core::runtime::ShutdownSender;
+use gld_core::settings::AppSettings;
+use gld_core::tools::{
+    self, is_allowed_tool, policy::PolicySettings, wrap_tool_result, ToolContext,
+};
+use gld_core::usage::ServiceUsage;
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::cors::CorsLayer;
@@ -20,22 +27,17 @@ use crate::auth::{
     external_base_url, register_client, token_exchange, AuthContext, AuthorizeForm,
     AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, Principal, TokenForm,
 };
-use crate::generation::ServiceGeneration;
-use crate::logs::append_profile_log;
-use crate::tools::{self, is_allowed_tool, policy::PolicySettings, wrap_tool_result, ToolContext};
-use crate::usage::ServiceUsage;
+use crate::generation::Router as GenerationRouter;
 
 use super::auth::{require_actions_auth, AuthConfig};
 use super::openapi;
-
-pub type ShutdownSender = oneshot::Sender<()>;
 
 #[derive(Clone)]
 struct AppState {
     /// 工具发给执行代时要说清是哪个项目。
     workspace_id: String,
     ctx: Arc<ToolContext>,
-    generation: Option<Arc<dyn ServiceGeneration>>,
+    generation: Option<Arc<GenerationRouter>>,
     openapi: Arc<RwLock<Value>>,
     auth: Arc<AuthConfig>,
     workspace_path: String,
@@ -71,8 +73,8 @@ pub fn spawn_listener(
     oauth_token_secret: Option<String>,
     policy: PolicySettings,
     usage: Arc<ServiceUsage>,
-    generation: Option<Arc<dyn ServiceGeneration>>,
-) -> Result<(ShutdownSender, crate::async_rt::JoinHandle<()>), String> {
+    generation: Option<Arc<GenerationRouter>>,
+) -> Result<(ShutdownSender, JoinHandle<()>), String> {
     if auth_type == "api_key" && api_key.as_ref().is_none_or(String::is_empty) {
         return Err("Actions API key is not configured".into());
     }
@@ -105,7 +107,7 @@ pub fn spawn_listener(
     let listener = bind_listener(actions_port, allow_lan_access)?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let profile_id = workspace_id.to_string();
-    let handle = crate::async_rt::spawn(async move {
+    let handle = async_rt::spawn(async move {
         let result = serve(
             listener,
             actions_port,
@@ -155,16 +157,16 @@ async fn serve(
     oauth_client_secret: Option<String>,
     policy: PolicySettings,
     usage: Arc<ServiceUsage>,
-    generation: Option<Arc<dyn ServiceGeneration>>,
+    generation: Option<Arc<GenerationRouter>>,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let workspace = tools::new_workspace(workspace_path.clone()).map_err(|e| e.message())?;
     let ctx = Arc::new(
         ToolContext::from_workspace(
             workspace,
-            crate::workspace::AuthConfig {
+            gld_core::workspace::AuthConfig {
                 auth_type: auth_type.clone(),
-                ..crate::workspace::AuthConfig::default()
+                ..gld_core::workspace::AuthConfig::default()
             },
             policy.clone(),
             "full".into(),

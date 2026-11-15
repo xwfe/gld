@@ -3,8 +3,8 @@
 //! 这一层不知道命令行、守护进程或任何 UI 的存在。它只提供：
 //!
 //! - [`tools`]：统一工具内核（文件 / Patch / 命令 / Git / History / Planning）；
-//! - [`mcp`] 与 [`actions`]：两条 HTTP transport，最终都进入 `tools::call_tool`；
-//! - [`auth`]：Bearer 与 OAuth（Authorization Code + PKCE + DCR + Refresh Token）；
+//! - [`mcp`]：MCP 应用消息分发，HTTP 入口由宿主绑定；
+//! - [`auth`]：主体模型、持久凭据、客户端注册表；OAuth HTTP 会话由宿主处理；
 //! - [`tunnel`] 与 [`global_gateway`]：FRP / Cloudflare 隧道与共享公网入口；
 //! - [`runtime`]：单个进程内 MCP / Actions 监听器的生命周期；
 //! - [`app`]：面向调用方的应用服务层（工作区、密钥、设置、启停），
@@ -18,7 +18,6 @@
 /// `server_info` 的 `build_commit` 都读它。
 pub const BUILD_COMMIT: Option<&str> = option_env!("GLD_BUILD_COMMIT");
 
-pub mod actions;
 pub mod agent_context;
 pub mod agents;
 pub mod app;

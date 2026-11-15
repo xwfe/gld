@@ -83,8 +83,21 @@ fn extracted_crates_keep_their_dependency_boundaries() {
         ),
         (
             "gld-host",
-            &["gld-core", "gld-protocol", "serde_json", "tokio", "libc"][..],
-            &[][..],
+            &[
+                "gld-core",
+                "gld-protocol",
+                "serde",
+                "serde_json",
+                "tokio",
+                "uuid",
+                "axum",
+                "tower-http",
+                "base64",
+                "jsonwebtoken",
+                "sha2",
+                "libc",
+            ][..],
+            &["tempfile"][..],
         ),
     ] {
         let package = packages

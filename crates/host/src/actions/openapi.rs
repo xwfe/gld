@@ -1,6 +1,6 @@
 use serde_json::{json, Map, Value};
 
-use crate::tools::{is_allowed_tool, MUTATING_TOOLS};
+use gld_core::tools::{is_allowed_tool, MUTATING_TOOLS};
 
 /// 这份文档里的 `security` 决定 GPT 调用时带不带凭据。
 ///
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn core_openapi_exposes_grep_text_as_read_only() {
-        let tools = crate::tools::list_tools_for_profile("core");
+        let tools = gld_core::tools::list_tools_for_profile("core");
         let schema = build_openapi(&tools, "https://actions.example.com", "none");
         let operation = &schema["paths"]["/actions/grep_text"]["post"];
 
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(operation["x-openai-isConsequential"], false);
         assert_eq!(
             operation["requestBody"]["content"]["application/json"]["schema"],
-            crate::tools::registry::input_schema("grep_text")
+            gld_core::tools::registry::input_schema("grep_text")
         );
     }
 }

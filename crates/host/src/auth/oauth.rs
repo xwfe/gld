@@ -1,22 +1,6 @@
 use axum::http::HeaderMap;
 use serde_json::{json, Value};
 
-use crate::workspace::AuthConfig;
-
-impl AuthConfig {
-    pub fn oauth_enabled(&self) -> bool {
-        self.auth_type == "oauth"
-    }
-
-    pub fn bearer_enabled(&self) -> bool {
-        self.auth_type == "bearer"
-    }
-
-    pub fn auth_enabled(&self) -> bool {
-        self.auth_type != "noauth"
-    }
-}
-
 /// 令牌里写的 `iss` / `aud`。
 ///
 /// 故意不用公网地址：地址是会变的（临时隧道每次重启换一个、换域名、
@@ -193,16 +177,6 @@ pub fn protected_resource_metadata_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn oauth_enabled_only_for_oauth_type() {
-        let mut auth = AuthConfig::default();
-        assert!(auth.oauth_enabled());
-        auth.auth_type = "bearer".into();
-        assert!(!auth.oauth_enabled());
-        auth.auth_type = "noauth".into();
-        assert!(!auth.oauth_enabled());
-    }
 
     #[test]
     fn authorization_metadata_includes_token_auth_methods() {
