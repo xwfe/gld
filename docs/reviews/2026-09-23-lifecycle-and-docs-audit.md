@@ -5734,3 +5734,25 @@ gld.read_file 几次因猜错模块路径返回 NOT_FOUND；改用实际路径�
 concepts、architecture、security、RFC 与唯一任务状态表已同步。B2 仅完成可信应用内核，
 三类 HTTP 入口、OAuth access/refresh 修订失效、隧道绑定、远端权限及统一 CLI 仍按 B3/C/D 接续。
 没有操作真实授权、推送、部署、换装程序或重启在用服务。
+
+## 138. 2026-11-16：D18-B3.1 HTTP 凭据来源先行分类
+
+新建 `crates/host/src/auth/source.rs`，在存储验证之前分类 Bearer 专用 token、OAuth access Bearer、URL secret 和受信隧道头。
+专用 token 格式按版本与用途严格解析；格式损坏或 URL/OAuth 确认口令冒充 token 时不再尝试其他格式。
+多个 Authorization 或隧道头，以及标准 Bearer 与隧道头、URL secret 与任何额外认证头同时存在时，
+先以 `400 / CONFLICTING_CREDENTIAL_SOURCES` 拒绝，响应 no-store/no-referrer，不回显秘密。
+上述检查已经接到 `require_mcp_auth` / `require_url_auth`，但有效格式仍统一返回 AUTH_NOT_READY，
+没有放开 HTTP、OAuth、URL、隧道、原生节点或单工作区任何真实工具执行；旧拒绝测试按新的冲突合同更新。
+
+定向 `cargo test -p gld-host --lib --locked` 实测 **55 passed / 0 failed**。
+补充隔离 GLD_HOME 的 `cargo test --workspace --all-targets --locked --quiet` 全仓回归最终退出 0；
+首次执行时旧 browser_grants 集成测试仍预期冲突来源返回 503，实际按新合同返回 400，
+更新该测试为 400、固定错误码、no-store/no-referrer 和秘密不回显后，全仓重跑通过。
+`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出 0。
+agent_manage 探测结果：本项目 `delegation=off`，所有列出的 agent 都标记 `installed=false`；
+本轮未启动 subagent，不将设计审查或计划当作实际子代理执行。没有改变项目委派设置。
+
+后续 B3.2 必须把应用中已存在的共享 AccessReader 从宿主装配层显式注入监听器，
+每个请求读取最新授权，不在 host 另开 AccessStore 或缓存已认证身份。随后接 OAuth access/refresh
+签发和修订验证、URL Origin、隧道来源绑定，再完成单工作区项目上限与 RFC-0015 正向测试。
+当前小步只验证来源冲突与拒绝边界，不代表新的客户端可连接。

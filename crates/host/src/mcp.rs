@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::auth::source::{self, CredentialSource};
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, external_base_url, hub_audience,
     protected_resource_metadata, register_client, token_exchange, workspace_audience, AuthContext,
@@ -489,9 +490,17 @@ async fn url_response(mut response: Response) -> Response {
 
 fn require_url_auth(
     _state: &ListenerState,
-    _headers: &HeaderMap,
-    _token: &str,
+    headers: &HeaderMap,
+    token: &str,
 ) -> Result<AuthContext, Box<Response>> {
+    // 先拒绝重复来源；新验证尚未接线，合法格式仍不取得工具访问权。
+    match source::url(headers, token) {
+        Err("conflicting_credential_sources") => return Err(Box::new(mcp_source_conflict())),
+        Ok(CredentialSource::Url { id, secret }) => {
+            let _ = (id, secret);
+        }
+        _ => {}
+    }
     Err(Box::new(mcp_auth_not_ready()))
 }
 
@@ -785,9 +794,36 @@ fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
 /// No network MCP identity is constructed before the new credential store is connected.
 fn require_mcp_auth(
     _state: &ListenerState,
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
 ) -> Result<AuthContext, Box<Response>> {
+    match source::standard(headers) {
+        Err("duplicate_credential_source" | "conflicting_credential_sources") => {
+            return Err(Box::new(mcp_source_conflict()));
+        }
+        Ok(CredentialSource::Token { id, secret }) => {
+            let _ = (id, secret);
+        }
+        Ok(CredentialSource::OAuthBearer(value) | CredentialSource::Tunnel(value)) => {
+            let _ = value;
+        }
+        _ => {}
+    }
     Err(Box::new(mcp_auth_not_ready()))
+}
+
+fn mcp_source_conflict() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [
+            (CACHE_CONTROL, "no-store"),
+            (REFERRER_POLICY, "no-referrer"),
+        ],
+        Json(json!({
+            "error": "CONFLICTING_CREDENTIAL_SOURCES",
+            "message": "请求同时提供多个认证来源"
+        })),
+    )
+        .into_response()
 }
 
 fn mcp_auth_not_ready() -> Response {
@@ -1064,7 +1100,7 @@ mod tests {
                     super::require_mcp_auth(&state, &headers)
                         .unwrap_err()
                         .status(),
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    axum::http::StatusCode::BAD_REQUEST
                 );
                 let response =
                     super::require_url_auth(&state, &headers, "old-url-secret").unwrap_err();
@@ -1072,7 +1108,7 @@ mod tests {
                     gld_core::async_rt::block_on(axum::body::to_bytes(response.into_body(), 4096))
                         .unwrap();
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(value["error"], "AUTH_NOT_READY");
+                assert_eq!(value["error"], "CONFLICTING_CREDENTIAL_SOURCES");
                 assert!(!String::from_utf8_lossy(&body).contains("old-url-secret"));
             },
         );

@@ -3,6 +3,7 @@
 mod bearer;
 mod oauth;
 mod oauth_flow;
+pub(crate) mod source;
 #[cfg(test)]
 pub(crate) mod test_home;
 

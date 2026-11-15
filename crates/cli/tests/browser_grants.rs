@@ -162,7 +162,11 @@ fn cors_preflight_does_not_authenticate_or_enable_a_credential_fallback() {
         ],
         &body(),
     );
-    assert_not_ready(&rejected);
+    assert_eq!(rejected.status, 400, "{}", rejected.body);
+    assert_eq!(rejected.json()["error"], "CONFLICTING_CREDENTIAL_SOURCES");
+    assert_eq!(rejected.header("cache-control"), Some("no-store"));
+    assert_eq!(rejected.header("referrer-policy"), Some("no-referrer"));
+    assert!(!rejected.body.contains(SECRET));
     let log = std::fs::read_to_string(env.home.path().join("logs/hub/mcp-requests.log"))
         .expect("rejection log");
     assert!(log.contains("[auth] rejected"));
