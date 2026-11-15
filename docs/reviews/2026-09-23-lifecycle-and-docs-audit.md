@@ -5403,3 +5403,26 @@ macOS 离线、隔离 GLD_HOME：host 独立 check、全 workspace/all-targets c
 CLI Actions/网关、换代、原生节点、OAuth、grant 共 86 条通过。Actions 原隔离用例补断言：HTTP 与 CLI 的命令
 确实由同一个执行代 PID 启动，不是在宿主本地开另一份会话。独立静态审查未发现阻断回归。
 锁文件仅增加工作区内部包、依赖边，没有外部升级；协议、凭据文件、连接、重试与启停语义未改。不推送、不部署。
+
+## 127. D17-F4.2：MCP/Actions HTTP、OAuth 与监听凭据接入归宿主（2026-11-15）
+
+`daf3ce6` 只迁真实 HTTP 入口和会话。宿主读取监听启动凭据、创建 OAuthRuntime、绑定端口；
+core 保留 `mcp::handle_request` 给工作区监听/执行代共用，Supervisor 继续管理运行状态与停止顺序。
+`ListenerBinder` 接两个实际绑定入口；HTTP 路由直接用宿主 Router，core 只需执行代 Hub 启停和已发布工具表。
+
+`SecretStore`、`ClientRegistry`、`StoredGrants` 复用原路径、作用域、文件锁与撤销读取；节点 bearer 解析与 grant 比对仍是同一实现。
+JWT、授权码、PKCE、签名受众、刷新、浏览器凭据、Actions 写锁、错误回包保持。外层凭据 AppError 仍直接返回，
+内层绑定错误记录服务失败；凭据错误留下 Starting 属基线已有问题，本片不修改失败重试。
+
+macOS 离线、隔离 GLD_HOME：40 条原 HTTP/认证测试迁随实现，AuthConfig 1 条留 core 声明侧。
+6 条测试用独立子进程，校验精确执行一条。all-targets 首查发现 fixture 漏 revoke、构造器名称和局部变量冲突；修正后通过。
+宿主 40 条、CLI 相关 6 组共 53 条、严格 Clippy 和依赖边界通过。独立静态审查无阻断发现，外部锁定包不变。
+
+## 128. D17-F4.3：全局网关迁入宿主（2026-11-15）
+
+网关监听、流式 HTTP 转发、转发头清理、路由 opt-in、隧道和公开地址回写整体移至 host，原函数仅改导入路径。
+App 只保留网关配置操作；Hub 与工作区服务持原先的次序，在绑定前通过一个显式入口确保网关已启动。
+退出仍先停止工作区和 Hub，再停网关，最后退执行代；节点 Upgrade 继续用活动 Hub 的原登记表，不新增一张表。
+
+macOS 离线、隔离 GLD_HOME：host 独立编译、网关 2 条单测和 Actions/网关、原生节点、OAuth、服务生命周期 62 条通过。
+Cargo.lock 仅宿主增加两个既有依赖边。未改协议、未推送、未部署。

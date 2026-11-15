@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use super::App;
 use crate::error::{AppError, AppResult};
-use crate::global_gateway;
 use crate::platform::platform;
 use crate::runtime::{
     await_listener_shutdown, is_own_process, port_busy_message, wait_for_port_free,
@@ -207,7 +206,7 @@ impl App {
         Ok(restored)
     }
 
-    /// 关闭服务、隧道和全局入口，保留恢复记录；命令收尾与执行代退出由宿主编排。
+    /// 关闭工作区服务与 Hub，保留恢复记录；全局网关与执行代由宿主关闭。
     pub async fn shutdown_services(&self, listeners: &ListenerManager) {
         for service in self.running_services(listeners).unwrap_or_default() {
             if let Err(error) = self
@@ -223,9 +222,6 @@ impl App {
         }
         // 不动 restore_on_launch：这是守护进程退出，不是用户要停 hub，下次启动还得恢复。
         crate::hub::runtime::stop().await;
-        if let Err(error) = global_gateway::stop().await {
-            eprintln!("停止全局入口失败：{error}");
-        }
     }
 
     async fn start_inner(
@@ -255,7 +251,7 @@ impl App {
             };
         }
         if uses_global_gateway(&profile, kind) {
-            global_gateway::ensure_started().await?;
+            listeners.binder().ensure_gateway().await?;
         }
         let profile = self.profile_by_id(id)?;
         listeners.with_runtime(|runtime| match kind {

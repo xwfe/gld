@@ -92,6 +92,8 @@ fn extracted_crates_keep_their_dependency_boundaries() {
                 "uuid",
                 "axum",
                 "tower-http",
+                "reqwest",
+                "futures-util",
                 "base64",
                 "jsonwebtoken",
                 "sha2",

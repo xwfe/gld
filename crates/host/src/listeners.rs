@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures_util::future::BoxFuture;
 use gld_core::generation::ServiceGeneration;
 use gld_core::hub::{Hub, HubSecrets};
 use gld_core::nodes::registry::Nodes;
@@ -31,6 +32,10 @@ struct HttpListeners {
 }
 
 impl ListenerBinder for HttpListeners {
+    fn ensure_gateway(&self) -> BoxFuture<'_, AppResult<()>> {
+        Box::pin(async { crate::global_gateway::ensure_started().await.map(|_| ()) })
+    }
+
     fn bind_workspace(
         &self,
         profile: &WorkspaceProfile,

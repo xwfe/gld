@@ -1,7 +1,6 @@
 use super::workspace_fields::resolve_frp_profile;
 use super::App;
 use crate::error::AppResult;
-use crate::global_gateway::{self, GatewayHealthItem, GlobalGatewayStatusDto};
 use crate::settings::GlobalGatewayConfig;
 
 impl App {
@@ -21,21 +20,5 @@ impl App {
             settings.global_gateway = config;
             Ok(())
         })
-    }
-
-    pub async fn start_gateway(&self) -> AppResult<GlobalGatewayStatusDto> {
-        global_gateway::ensure_started().await
-    }
-
-    pub async fn stop_gateway(&self) -> AppResult<()> {
-        global_gateway::stop().await
-    }
-
-    pub async fn gateway_status(&self) -> GlobalGatewayStatusDto {
-        global_gateway::status().await
-    }
-
-    pub async fn gateway_health(&self) -> Vec<GatewayHealthItem> {
-        global_gateway::health().await
     }
 }

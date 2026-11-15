@@ -15,6 +15,8 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 axum = { version = "0.8", features = ["form", "ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 base64 = "0.22"
 jsonwebtoken = "9"
 sha2 = "0.10"

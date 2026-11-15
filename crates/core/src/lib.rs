@@ -5,7 +5,7 @@
 //! - [`tools`]：统一工具内核（文件 / Patch / 命令 / Git / History / Planning）；
 //! - [`mcp`]：MCP 应用消息分发，HTTP 入口由宿主绑定；
 //! - [`auth`]：主体模型、持久凭据、客户端注册表；OAuth HTTP 会话由宿主处理；
-//! - [`tunnel`] 与 [`global_gateway`]：FRP / Cloudflare 隧道与共享公网入口；
+//! - [`tunnel`]：FRP / Cloudflare 等隧道工具与配置接入；
 //! - [`runtime`]：单个进程内 MCP / Actions 监听器的生命周期；
 //! - [`app`]：面向调用方的应用服务层（工作区、密钥、设置、启停），
 //!   命令行与守护进程都只通过它操作状态。
@@ -28,7 +28,6 @@ pub mod computer;
 pub mod data;
 pub mod error;
 pub mod generation;
-pub mod global_gateway;
 pub mod harness;
 pub mod health;
 pub mod home;

@@ -11,11 +11,11 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::data::DataStore;
-use crate::error::{AppError, AppResult};
-use crate::local_network;
-use crate::settings::{AppSettings, GlobalGatewayConfig};
-use crate::tunnel::standalone::{self, CloudflareSpec, FrpSpec, StandaloneTunnel};
+use gld_core::data::DataStore;
+use gld_core::error::{AppError, AppResult};
+use gld_core::local_network;
+use gld_core::settings::{AppSettings, GlobalGatewayConfig};
+use gld_core::tunnel::standalone::{self, CloudflareSpec, FrpSpec, StandaloneTunnel};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -99,7 +99,7 @@ struct GatewayRuntime {
     config: GlobalGatewayConfig,
     public_url: String,
     shutdown: Option<oneshot::Sender<()>>,
-    handle: crate::async_rt::JoinHandle<()>,
+    handle: gld_core::async_rt::JoinHandle<()>,
     running: bool,
     tunnel: Option<StandaloneTunnel>,
 }
@@ -139,7 +139,7 @@ pub async fn ensure_started() -> AppResult<GlobalGatewayStatusDto> {
     let listener = bind_listener(config.local_port, settings.allow_lan_access)?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let port = config.local_port;
-    let handle = crate::async_rt::spawn(async move {
+    let handle = gld_core::async_rt::spawn(async move {
         if let Err(error) = serve(listener, shutdown_rx).await {
             eprintln!("global gateway stopped: {error}");
         }
@@ -509,10 +509,10 @@ async fn hub_node_connect(
     if !matches!(enabled, Ok(true)) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(nodes) = crate::hub::runtime::nodes().await else {
+    let Some(nodes) = gld_core::hub::runtime::nodes().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    crate::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
+    gld_core::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
 }
 
 async fn proxy_hub_path(

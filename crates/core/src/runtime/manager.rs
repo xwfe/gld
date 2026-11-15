@@ -74,6 +74,10 @@ mod tests {
     struct UnusedBinder;
 
     impl ListenerBinder for UnusedBinder {
+        fn ensure_gateway(&self) -> futures_util::future::BoxFuture<'_, AppResult<()>> {
+            unreachable!("test does not start a gateway")
+        }
+
         fn bind_workspace(
             &self,
             _: &WorkspaceProfile,

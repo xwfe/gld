@@ -8,6 +8,7 @@ use std::sync::Arc;
 use gld_core::app::{App, WorkspaceTarget};
 use gld_core::runtime::ListenerManager;
 use gld_core::workspace::WorkspaceProfile;
+use gld_host::global_gateway;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -142,13 +143,13 @@ pub async fn dispatch(
             app.set_gateway_config(config)?;
             ok(&app.gateway_config()?)
         }
-        R::GatewayStart => ok(&app.start_gateway().await?),
+        R::GatewayStart => ok(&global_gateway::ensure_started().await?),
         R::GatewayStop => {
-            app.stop_gateway().await?;
-            ok(&app.gateway_status().await)
+            global_gateway::stop().await?;
+            ok(&global_gateway::status().await)
         }
-        R::GatewayStatus => ok(&app.gateway_status().await),
-        R::GatewayHealth => ok(&app.gateway_health().await),
+        R::GatewayStatus => ok(&global_gateway::status().await),
+        R::GatewayHealth => ok(&global_gateway::health().await),
 
         // ---- 聚合入口 ----
         R::HubStatus => ok(&app.hub_status().await?),

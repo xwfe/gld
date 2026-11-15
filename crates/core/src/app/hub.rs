@@ -17,7 +17,6 @@ use super::workspace_fields::{
 use super::{App, WorkspaceTarget};
 use crate::bridge::member::{CcnmMember, Mode};
 use crate::error::{AppError, AppResult};
-use crate::global_gateway;
 use crate::hub::runtime::{HubState, TunnelOutcome};
 use crate::hub::{self, HubSecrets, HUB_SCOPE, HUB_SECRET_KEYS, HUB_TUNNEL_SECRET_KEYS};
 use crate::logs::append_profile_log;
@@ -571,7 +570,7 @@ impl App {
                         .into(),
                 ));
             }
-            global_gateway::ensure_started().await?;
+            listeners.binder().ensure_gateway().await?;
         }
         let openai = config.tunnel_type == "openai";
         let secrets = self.with_data(|store| {

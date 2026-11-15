@@ -10,7 +10,7 @@
 | `crates/runtime` / `gld-runtime` | 工作区路径、文件/补丁、命令、会话、输出、写锁与运行记录；配置和存储位置由调用侧显式传入 |
 | `crates/agent` / `gld-agent` | Agent 档案、任务存储与委派进程生命周期；消费 runtime 的私有文件、环境过滤与脱敏接口 |
 | `crates/core` / `gld-core` | 工具授权、任务/Planning、Agent 审批/审核与应用编排，以及尚未分离的宿主，消费五个底层 crate |
-| `crates/host` / `gld-host` | 执行代 Router/Link、MCP/Actions HTTP 监听、OAuth 会话与监听启动时的凭据读取；复用 core 的执行与持久化接口 |
+| `crates/host` / `gld-host` | 执行代 Router/Link、MCP/Actions HTTP 监听、OAuth 会话、全局网关；复用 core 的执行与凭据存储接口 |
 | `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
@@ -21,7 +21,7 @@
 Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
 
 core 不负责 clap 命令行解析，
-但仍包含网关/原生节点接入、应用编排、隧道和本机 MCP 子进程管理。Agent 进程归 agent，工作区命令执行归 runtime；
+但仍包含原生节点接入、应用编排、隧道和本机 MCP 子进程管理。Agent 进程归 agent，工作区命令执行归 runtime；
 daemon 负责守护进程自身的 IPC 与生命周期，cli 负责参数解析、请求组装和终端展示。不能把“core 不依赖 daemon”
 写成“core 没有网络或进程代码”。纯规则按已建立的边界下沉，应用编排留在 core；契约测试继续约束入口一致性。
 
@@ -149,7 +149,7 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 | `auth/` | 持久 grant/撤销和 OAuth 客户端注册表；纯主体和范围来自 `gld-policy`。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
 | `bridge/`、`nodes/` | CCNM 会话、原生节点的身份/项目权限与连接生命周期；共同使用 `gld-transport` 的 Peer 和能力表，保留各自的租约、单连接和断线语义 |
 | `runtime/` | ListenerManager 持有监听表、工作区重启锁与一次恢复标记；RuntimeSupervisor 执行监听器启停、端口检测与释放等待 |
-| `tunnel/`、`global_gateway.rs` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
+| `tunnel/` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
 | `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的组合模型与读写，纯共享配置类型来自 `gld-protocol` |
 | `platform/` | 端口占用查询、进程存活 / 终止、可执行文件查找，按 OS 分实现 |
@@ -199,7 +199,7 @@ App 的 Rust 本地入口明确命名为 `call_tool_local`、`approve_agent_task
 daemon 闭包只选择实际执行资源。撤销仍立即清一次、35 秒后用同一 Router 再清，每次重新查询可路由执行代；
 Plan 清理失败时保留已保存的模式和原报错。
 
-退出由 daemon 按关闭 IPC 监听 → Router interrupt_all → App shutdown_services → Router shutdown →
+退出由 daemon 按关闭 IPC 监听 → Router interrupt_all → App shutdown_services → 宿主网关 stop → Router shutdown →
 清 IPC/进程记录的顺序组合，先记 interrupted 再停服务，不改变启动恢复记录。
 App 的初始化、目录、凭据与日志仍消费既有存储适配。
 
@@ -216,6 +216,10 @@ Supervisor 继续决定服务状态和启停顺序，宿主读取该监听器的
 
 OAuth 签名、受众、meta、动态注册、PKCE 和刷新逻辑原样迁移。注册表仍由 core 的 `ClientRegistry` 以原作用域写盘，
 `StoredGrants` 仍逐请求重读同一份数据，HTTP 不另建持久凭据表。内存授权码仍只随当前 HTTP 会话存活。
+
+全局网关进程内状态、HTTP 转发和退出归 `gld_host::global_gateway`。App 留网关配置读写；Hub 或工作区服务在绑定之前
+通过同一个宿主入口确保已启用的网关启动，失败不绕过网关直接绑定。`public_url` 回写继续使用原 DataStore 文件锁；
+宿主网关复用活动 Hub 的 Nodes，不单独启动节点连接。
 
 ### 宿主与执行代之间的请求归属
 

@@ -164,6 +164,9 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     let stopping = router.clone();
     let _ = tokio::task::spawn_blocking(move || stopping.interrupt_all()).await;
     app.shutdown_services(&listeners).await;
+    if let Err(error) = gld_host::global_gateway::stop().await {
+        eprintln!("停止全局入口失败：{error}");
+    }
     let _ = tokio::task::spawn_blocking(move || router.shutdown()).await;
     ipc::cleanup(&paths.socket);
     let _ = std::fs::remove_file(&paths.record);

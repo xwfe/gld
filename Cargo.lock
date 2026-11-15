@@ -671,10 +671,12 @@ version = "0.10.1"
 dependencies = [
  "axum",
  "base64",
+ "futures-util",
  "gld-core",
  "gld-protocol",
  "jsonwebtoken",
  "libc",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

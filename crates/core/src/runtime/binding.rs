@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use futures_util::future::BoxFuture;
+
 use super::ServiceKind;
 use crate::hub::{Hub, HubSecrets};
 use crate::nodes::registry::Nodes;
@@ -14,6 +16,9 @@ pub type ShutdownSender = tokio::sync::oneshot::Sender<()>;
 pub type BoundListener = (ShutdownSender, crate::async_rt::JoinHandle<()>);
 
 pub trait ListenerBinder: Send + Sync {
+    /// 启动选择经全局入口暴露的监听器前，先确保入口在跑。
+    fn ensure_gateway(&self) -> BoxFuture<'_, AppResult<()>>;
+
     /// 凭据读取出错直接返回 AppError；绑定/监听失败由 Supervisor 记为服务失败。
     fn bind_workspace(
         &self,
