@@ -97,7 +97,7 @@ Router 和 Link 有独立的资源生命周期，作为 `gld-host` 的首个实�
 | --- | --- | --- |
 | `Hub` | 可见项目、工具暴露、授权/Planning、工作会话、上下文、结果包装，以及执行前的归属复核 | 原生节点的实际连接；已有 `NodeBridge::{members,call}` 可传递调用，不另造通用接口 |
 | `generation` | 执行代 child、工作区状态与交接、身份转换和双方共用的路径归属语义 | Router、子进程 Link、执行代选择与替换 |
-| `App` | 数据与工具上下文、业务用例 | 当前内嵌的 RuntimeSupervisor、监听器重启串行化及服务/隧道管理，需要 daemon 明确装配 |
+| `App` | 数据与工具上下文、业务用例 | daemon 装配 host 的实际 Supervisor 与 Hub/网关控制；App 留重启/恢复协调和配置用例 |
 | 认证与持久化 | policy 的已认证主体、授权范围；调用方需要的数据模型 | Bearer/OAuth HTTP 适配、客户端注册表、凭据读取、日志和目录选择；不能把 DataStore/home 伪装成纯配置 |
 
 实际请求顺序保持：HTTP 验证身份 → Hub 计算归属 → Router 选择执行代 → 私有管道 →
@@ -122,7 +122,7 @@ App/ListenerManager 与执行代 Router 的显式装配见[架构](../architectu
 - **HTTP/OAuth：** 工作区 MCP 应用分发仍被 child 使用，留 core；HTTP 监听、OAuth 会话、令牌和元数据适配由宿主负责。
   `ClientRegistry`、`StoredGrants`、`SecretStore` 仍复用实际文件、作用域和数据锁；撤销继续逐请求读取，不新建另一份凭据存储。
 - **网关与监听管理：** Hub 直连与网关 WebSocket 必须复用当前宿主表；配置、公网地址持久化和失败顺序先核对再搬。
-  `App` 不重新拥有监听器或重启锁。CCNM/本机 MCP 的执行代状态不因宿主迁移改变。
+  daemon 复用一份 ListenerManager；物理状态属于宿主实现，不放回 App。CCNM/本机 MCP 的执行代状态不随宿主迁移。
 
 清理 owner 时仍每轮读当前数据；读失败就保留原 owner。无 Router 的本地调用路径、配置/凭据格式、
 关闭顺序与公开协议保持；这些后续职责的迁移需要各自的集成回归，不由第一步的路径测试代替。

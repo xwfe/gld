@@ -10,13 +10,14 @@
 | `crates/runtime` / `gld-runtime` | 工作区路径、文件/补丁、命令、会话、输出、写锁与运行记录；配置和存储位置由调用侧显式传入 |
 | `crates/agent` / `gld-agent` | Agent 档案、任务存储与委派进程生命周期；消费 runtime 的私有文件、环境过滤与脱敏接口 |
 | `crates/core` / `gld-core` | 工具授权、任务/Planning、Agent 审批/审核与应用编排，以及尚未分离的宿主，消费五个底层 crate |
-| `crates/host` / `gld-host` | 执行代 Router/Link、MCP/Actions HTTP、OAuth、网关、Hub 监听与节点连接；复用 core 的执行与凭据存储接口 |
+| `crates/host` / `gld-host` | 执行代 Router/Link、MCP/Actions HTTP、OAuth、网关、Hub/工作区监听管理与节点连接；复用 core 的执行与凭据存储接口 |
 | `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
 依赖为 CLI → daemon/core，daemon → host/core/protocol，host → core/protocol，core → policy/protocol/transport/runtime/agent，agent → runtime，runtime → policy/protocol；五个底层 crate 不反向依赖 core。
 `crates/core/tests/crate_boundaries.rs` 用 Cargo metadata 检查底层依赖及 core 不反向依赖宿主，随全仓测试执行。
-旧 `core::auth`、`core::tools::caller/write_class`、`core::bridge::peer/session` 的公开路径通过 re-export 继续可用。
+`core::auth` 的主体模型、`core::tools::caller/write_class` 和 `core::bridge::peer/session` 保留原类型路径；
+OAuth HTTP 入口归 `gld_host::auth`。
 配置、应用 DTO 和 daemon 协议的旧类型路径也保持同一类型；带副作用的方法入口调整见下节。
 Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
 
@@ -148,7 +149,7 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 | `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`gld-host::hub_runtime` 管宿主起停，连同服务自己的隧道和原生节点表 |
 | `auth/` | 持久 grant/撤销和 OAuth 客户端注册表；纯主体和范围来自 `gld-policy`。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
 | `bridge/`、`nodes/` | CCNM 会话、原生节点的身份/项目权限与连接生命周期；共同使用 `gld-transport` 的 Peer 和能力表，保留各自的租约、单连接和断线语义 |
-| `runtime/` | ListenerManager 持有监听表、工作区重启锁与一次恢复标记；RuntimeSupervisor 执行监听器启停、端口检测与释放等待 |
+| `runtime/` | 应用侧监听接口与同步协调锁；实际 RuntimeSupervisor、监听任务和端口状态在 `gld-host` |
 | `tunnel/` | frpc / cloudflared 子进程：项目的 GPT Actions 那几条归 `TunnelSupervisor`；服务和旧的全局入口各一条，归 `tunnel/standalone.rs`（跟着各自的监听器起停） |
 | `planning/`、`harness/` | Goal / Plan / Execution Ledger；Durable Task |
 | `data/`、`settings/`、`workspace/`、`secret/` | `profiles.json` 的组合模型与读写，纯共享配置类型来自 `gld-protocol` |
@@ -176,12 +177,13 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 
 ### 应用状态与监听管理
 
-宿主先 `App::load()` 读取数据并补齐共享密钥，再单独创建 `ListenerManager`；后者不读配置。
+宿主先 `App::load()` 读取数据并补齐共享密钥；`gld_host::listener_manager` 显式创建 ListenerManager 与工作区监督器。
+管理器不读配置，应用方法只通过 `ListenerHost` 和 `WorkspaceListeners` 使用实际需要的生命周期操作。
 daemon 的状态查询、请求分发、恢复与退出共用一个 Arc，CLI 的直连 Backend 也在第一次调用时创建并缓存一对资源。
 运行态相关的 App Rust 方法显式接收 `&ListenerManager`，不在方法里临时创建，也没有隐藏的默认管理器。
 
-App 保留数据文件锁、重读磁盘和工具上下文失效规则。ListenerManager 拥有原 Supervisor 的同步锁、
-工作区 restart 的异步锁、SeqCst 的恢复标记；失败也消耗本次恢复机会。Hub 的进程级 LIFECYCLE 仍独立，
+App 保留数据文件锁、重读磁盘和工具上下文失效规则。ListenerManager 持有宿主监督器的同一同步锁，另保留
+工作区重启锁与一次恢复标记；失败也消耗本次恢复机会。停止先发信号，放锁等端口，再摘表；Hub 的 LIFECYCLE 仍独立，
 不把普通 start/stop、恢复或退出放进新的重启大锁。工具/委派的执行位置仍按执行代入口另行组合。
 
 ### daemon 显式选择执行位置
@@ -209,10 +211,10 @@ Rust 的具体路由器入口现为 `gld_host::generation::Router`。旧的 `cor
 
 ### HTTP 监听和凭据读取
 
-`gld-host` 同时提供 MCP（单工作区和 Hub）与 Actions HTTP 入口。core 的 `ListenerHost` 只暴露现有 Hub 与网关控制和工作区监听绑定；
-Supervisor 继续决定服务状态和启停顺序，宿主读取该监听器的 `SecretStore` 凭据、创建 OAuth 会话、同步绑定和返回停止信号。
+`gld-host` 提供 MCP（单工作区和 Hub）与 Actions HTTP 入口并持有实际监听状态。core 的 `ListenerHost` 只暴露现有 Hub 与网关控制，
+`WorkspaceListeners` 支持应用在原锁内读快照、推进状态。宿主读取启用监听所需的 `SecretStore` 凭据、创建 OAuth 会话并同步绑定端口。
 装配凭据的读取失败与监听器绑定失败仍按两层错误处理，不合并为一种运行状态。daemon 和 CLI 直连都显式构造实际 adapter；
-只有 daemon 的 adapter 有执行代。旧 `core::mcp/actions::spawn_listener` 和 OAuth HTTP Rust 入口移到宿主侧，协议和 URL 不变。
+只有 daemon 的 adapter 有执行代。直接构造过去的 core Supervisor/HTTP 入口的 Rust 调用者改用宿主的装配入口。协议和 URL 不变。
 
 OAuth 签名、受众、meta、动态注册、PKCE 和刷新逻辑原样迁移。注册表仍由 core 的 `ClientRegistry` 以原作用域写盘，
 `StoredGrants` 仍逐请求重读同一份数据，HTTP 不另建持久凭据表。内存授权码仍只随当前 HTTP 会话存活。
@@ -230,7 +232,7 @@ MCP 的 HTTP 入口在完成认证后，调用 `Hub::execution_route(auth, body)
 
 同目录的归属键由 `generation::root_key` 生成：路径可解析时规范化，无法解析时保留原路径。
 `generation::router::root_key` 仅为旧 Rust 导入路径的重导出，没有第二份实现。
-这只是请求归属的依赖分离；节点连接、认证存储、App 装配和 Router 的其余宿主依赖见
+完整宿主依赖及迁移依据见
 [RFC-0014 的宿主依赖分析](rfc/0014-trust-boundary-crates.md)，实施进度只看 task_plan。
 
 ### 原生节点连接的所有者
@@ -248,8 +250,8 @@ Hub 的 `NodeBridge`。直连 WebSocket 从监听器自己的 state 取得它；
 私有 `shutdown_with` 只为保留这个顺序提供一次节点清理位置；`Hub::shutdown()` 不关闭注入的桥，
 NodeBridge 不新增关闭方法，丢弃 Arc 也不能替代显式关闭。执行代替换不关闭宿主的节点连接。
 
-Rust 调用者需使用 `Hub::new(config, bridge)`；`Hub::nodes()` 已移除，宿主从自己持有的 Nodes 取连接表。
-`spawn_hub_listener` 新增 Nodes 参数，必须传入与该 Hub 桥接相同的表。HTTP、节点/执行代协议、配置、
+宿主使用 `Hub::new(config, bridge)` 并持有 Nodes，不再经 `Hub::nodes()` 取连接表。
+直接监听器与应用桥由同一处装配，使用同一个节点表。HTTP、节点/执行代协议、配置、
 错误回包及客户端重连规则不变；服务端登记、配对 HTTP 适配和 socket 接入归 `gld_host::nodes`；节点本地执行、配对持久化、共享传输和成员模型留 core。
 
 ## daemon：协议与进程

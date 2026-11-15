@@ -1,6 +1,6 @@
 [package]
 name = "gld-host"
-description = "Host-side routing, listeners and authentication for GLD"
+description = "Host-side listeners, gateway, authentication and execution-generation routing for GLD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

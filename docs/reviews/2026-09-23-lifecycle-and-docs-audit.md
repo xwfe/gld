@@ -5440,3 +5440,33 @@ core 的 Axum 只剩测试使用，Cargo metadata 拦住生产反向宿主依赖
 绑定编译首查发现迁移后两处原模块路径，修正为已有 StartupSweep 与 HUB_SCOPE；全 workspace/all-targets check 通过。
 宿主登记表 4 条和跨凭据 reservation 1 条随实现运行；CLI 原生节点/换代/Hub/服务启停 93 条通过。
 独立审查核对同表、失败不发布、停机、转发头、身份和存储，不作为真机/线上验收，不推送、不部署。
+
+
+## 130. D17-F4.5：工作区监听管理与宿主边界收口（2026-11-15）
+
+接续 F4.4（`b59cfb4`）。真实工作区监听表、用量、端口、停止信号和任务句柄由宿主 `RuntimeSupervisor` 实现。
+App 通过 `WorkspaceListeners` 与 `ListenerHost` 使用实际需要的状态/操作；同一 ListenerManager 继续串行化重启、
+只恢复一次，在原同步锁内读状态、标记停止，放锁等监听器和端口，再摘表并同步隧道路由。
+`Hub` 的应用逻辑、DataStore/SecretStore/ClientRegistry、grant 逐请求撤销、节点客户端及共享传输留 core；
+没有 core→host 反向依赖，生产 core 构建不含 Axum/jsonwebtoken。工具进程、私有帧、协议版本、CLI 帮助与 D18 未改。
+原 Supervisor 4 条单测随实现迁移，App 锁与恢复单测保留；独立审查未发现新回归。
+
+**验证（macOS，绝对隔离 GLD_HOME、离线锁定依赖）：**
+
+- `cargo check -p gld-core --locked --offline` 与 `cargo check -p gld-host --locked --offline` 均通过。
+- host 单测 50 条、core 管理器 2 条、服务启停/Actions/网关/升级 25 条定向通过。
+- `cargo test --workspace --all-targets --locked`：**72 个目标，1442 passed / 0 failed / 0 ignored**。
+  严格 Clippy、rustfmt、依赖边界通过。Cargo.lock 对比 F4 起点，277 个外部包的名称、版本、来源与校验和相同。
+- `cargo check --workspace --all-targets --locked --offline --target x86_64-pc-windows-msvc` 被现有 ring 依赖构建拦住，
+  C 编译未找到目标系统的 `assert.h`；F4 起点 `0c8bc3a` 用同一命令重现相同错误。未安装 SDK，不算 Windows 编译或真机通过。
+
+**两份构建兼容（本机回环、隧道关闭、不经代理、合成工作区与凭据）：** 源自 `0c8bc3a` 的基准制品和本轮迁移后的制品，
+均为 0.10.1。脚本 `target/d17-f4-validation/check-mixed-builds.py` 接收 `--before`、`--after` 两份可执行文件；
+1）旧宿主 OAuth 发现、DCR、PKCE 和读取；2）旧宿主 prepare/switch 新执行代，用 `server_info` 确认实际接管并用旧 access token 读；
+3）同原数据目录独立启动新宿主，验证原 access、refresh 以及旧 client_id 重新拿授权码；4）新宿主切到旧执行代，续期后的 access token 仍可读取。
+双向切代保持当时宿主 PID 和入口；第 3 步是独立重启，不是零中断。脚本试跑曾把 `--auth` 误传给 start，改成先 upgrade 再 start 后通过；非产品回归。
+
+本轮未推送、部署、换装或操作真实项目/授权。`server_info` 查询现网仍为 `0.10.1 / 1717aaf41685`，35 项工具，指纹 `6022dd56440b0ea9`。
+仓库读写和构建走本地 shell；gld 只用于现网版本查询，未出现新 gld 工具错误。未触发远端 CI，未做跨机、Windows/Linux 实机或线上真实连接器验收。
+
+状态和架构文档同步后，命令参考、生成脚本、隐私路径与相对链接 9 条复验通过。

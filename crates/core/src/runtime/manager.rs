@@ -1,23 +1,23 @@
 //! 宿主显式持有的监听状态；不加载应用数据，也不选择工具执行位置。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
-use super::{ListenerHost, RuntimeSupervisor};
+use super::{ListenerHost, WorkspaceListeners};
 use crate::error::AppResult;
 
 /// 同一个宿主的监听表、工作区重启锁和启动恢复标记必须作为一份资源传递。
 pub struct ListenerManager {
-    runtime: Mutex<RuntimeSupervisor>,
+    runtime: Mutex<Box<dyn WorkspaceListeners>>,
     host: Arc<dyn ListenerHost>,
     restart_gate: tokio::sync::Mutex<()>,
     startup_restore_attempted: AtomicBool,
 }
 
 impl ListenerManager {
-    pub fn new(host: Arc<dyn ListenerHost>) -> Self {
+    pub fn new(host: Arc<dyn ListenerHost>, runtime: Box<dyn WorkspaceListeners>) -> Self {
         Self {
-            runtime: Mutex::new(RuntimeSupervisor::new(host.clone())),
+            runtime: Mutex::new(runtime),
             host,
             restart_gate: tokio::sync::Mutex::new(()),
             startup_restore_attempted: AtomicBool::new(false),
@@ -28,17 +28,15 @@ impl ListenerManager {
         &*self.host
     }
 
-    fn runtime(&self) -> MutexGuard<'_, RuntimeSupervisor> {
-        self.runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     pub(crate) fn with_runtime<R>(
         &self,
-        f: impl FnOnce(&mut RuntimeSupervisor) -> AppResult<R>,
+        f: impl FnOnce(&mut dyn WorkspaceListeners) -> AppResult<R>,
     ) -> AppResult<R> {
-        f(&mut self.runtime())
+        let mut guard = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(guard.as_mut())
     }
 
     pub(crate) async fn lock_restart(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -54,30 +52,24 @@ impl ListenerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::async_rt::JoinHandle;
     use crate::hub::runtime::{HubState, TunnelOutcome, TunnelSnapshot};
     use crate::hub::HubSecrets;
-    use crate::runtime::{BoundListener, ServiceKind};
+    use crate::runtime::ServiceKind;
     use crate::settings::HubConfig;
-    use crate::usage::ServiceUsage;
-    use crate::workspace::WorkspaceProfile;
+    use crate::tunnel::TunnelServiceKind;
+    use crate::usage::ServiceUsageStats;
+    use crate::workspace::{RuntimeStatusDto, WorkspaceProfile};
     use futures_util::future::BoxFuture;
+    use std::collections::HashSet;
 
-    struct UnusedHost;
+    struct UnusedListeners;
 
-    impl ListenerHost for UnusedHost {
+    impl ListenerHost for UnusedListeners {
         fn ensure_gateway(&self) -> futures_util::future::BoxFuture<'_, AppResult<()>> {
             unreachable!("test does not start a gateway")
         }
 
-        fn bind_workspace(
-            &self,
-            _: &WorkspaceProfile,
-            _: ServiceKind,
-            _: u16,
-            _: Arc<ServiceUsage>,
-        ) -> AppResult<Result<BoundListener, String>> {
-            unreachable!("test does not start services")
-        }
         fn start_hub<'a>(
             &'a self,
             _: &'a HubConfig,
@@ -103,8 +95,44 @@ mod tests {
         }
     }
 
+    impl WorkspaceListeners for UnusedListeners {
+        fn status(&self, _: &WorkspaceProfile, _: ServiceKind) -> RuntimeStatusDto {
+            unreachable!()
+        }
+        fn start(&mut self, _: &WorkspaceProfile, _: ServiceKind) -> AppResult<RuntimeStatusDto> {
+            unreachable!()
+        }
+        fn refresh(&mut self, _: &WorkspaceProfile, _: ServiceKind) {
+            unreachable!()
+        }
+        fn running_workspace_ids(&self, _: ServiceKind) -> Vec<String> {
+            unreachable!()
+        }
+        fn usage_stats(&self, _: &str, _: ServiceKind) -> ServiceUsageStats {
+            unreachable!()
+        }
+        fn is_running(&self, _: &str, _: ServiceKind) -> bool {
+            unreachable!()
+        }
+        fn is_active(&self, _: &str, _: ServiceKind) -> bool {
+            unreachable!()
+        }
+        fn drop_workspace(&mut self, _: &WorkspaceProfile) {
+            unreachable!()
+        }
+        fn active_tunnel_service_keys(&self) -> HashSet<(String, TunnelServiceKind)> {
+            unreachable!()
+        }
+        fn begin_stop(&mut self, _: &str, _: ServiceKind) -> Option<JoinHandle<()>> {
+            unreachable!()
+        }
+        fn finish_stop(&mut self, _: &str, _: ServiceKind) {
+            unreachable!()
+        }
+    }
+
     fn test_manager() -> ListenerManager {
-        ListenerManager::new(Arc::new(UnusedHost))
+        ListenerManager::new(Arc::new(UnusedListeners), Box::new(UnusedListeners))
     }
 
     #[test]

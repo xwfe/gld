@@ -2,19 +2,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::async_rt::JoinHandle;
+use gld_core::async_rt::{self, JoinHandle};
+use gld_core::logs::append_profile_log;
+use gld_core::platform::platform;
+use gld_core::runtime::{
+    await_listener_shutdown_blocking, is_own_process, port_busy_message,
+    wait_for_port_free_blocking, ServiceKind, WorkspaceListeners,
+};
+use gld_core::tunnel::{cleanup_orphan_for_runtime, TunnelServiceKind};
+use gld_core::usage::{ServiceUsage, ServiceUsageStats};
+use gld_core::workspace::{RuntimeStatusDto, WorkspaceProfile};
+use gld_core::{AppError, AppResult};
 
-use crate::error::AppResult;
-use crate::logs::append_profile_log;
-use crate::platform::platform;
-use crate::runtime::port::{is_own_process, port_busy_message, wait_for_port_free_blocking};
-use crate::tunnel::{cleanup_orphan_for_runtime, TunnelServiceKind};
-use crate::usage::{ServiceUsage, ServiceUsageStats};
-use crate::workspace::{RuntimeStatusDto, WorkspaceProfile};
-
-use super::{ListenerHost, ShutdownSender};
-
-pub use gld_protocol::service::ServiceKind;
+use crate::generation::Router;
+use crate::listeners::{bind_workspace, ShutdownSender};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimePhase {
@@ -34,26 +35,40 @@ struct RuntimeEntry {
     missing_port_checks: u8,
 }
 
-pub struct RuntimeSupervisor {
-    host: Arc<dyn ListenerHost>,
+pub(crate) struct RuntimeSupervisor {
+    router: Option<Arc<Router>>,
     entries: HashMap<(String, ServiceKind), RuntimeEntry>,
     usage: HashMap<(String, ServiceKind), Arc<ServiceUsage>>,
 }
 
 impl RuntimeSupervisor {
-    pub(super) fn new(host: Arc<dyn ListenerHost>) -> Self {
+    pub(crate) fn new(router: Option<Arc<Router>>) -> Self {
         Self {
-            host,
+            router,
             entries: HashMap::new(),
             usage: HashMap::new(),
         }
     }
 
-    pub fn mcp_status(&self, profile: &WorkspaceProfile) -> RuntimeStatusDto {
-        self.status(profile, ServiceKind::Mcp)
+    fn sync_stop_and_wait(&mut self, profile: &WorkspaceProfile, kind: ServiceKind) {
+        let port = port_for(profile, kind);
+        let handle = self.begin_stop(&profile.id, kind);
+        if handle.is_some() {
+            await_listener_shutdown_blocking(handle, port);
+        } else if platform()
+            .find_pid_listening_on_port(port)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            wait_for_port_free_blocking(port, Duration::from_secs(3));
+        }
+        self.finish_stop(&profile.id, kind);
     }
+}
 
-    pub fn running_workspace_ids(&self, kind: ServiceKind) -> Vec<String> {
+impl WorkspaceListeners for RuntimeSupervisor {
+    fn running_workspace_ids(&self, kind: ServiceKind) -> Vec<String> {
         let mut ids = self
             .entries
             .iter()
@@ -68,11 +83,7 @@ impl RuntimeSupervisor {
         ids
     }
 
-    pub fn actions_status(&self, profile: &WorkspaceProfile) -> RuntimeStatusDto {
-        self.status(profile, ServiceKind::Actions)
-    }
-
-    pub fn usage_stats(&self, workspace_id: &str, kind: ServiceKind) -> ServiceUsageStats {
+    fn usage_stats(&self, workspace_id: &str, kind: ServiceKind) -> ServiceUsageStats {
         let service = match kind {
             ServiceKind::Mcp => "mcp",
             ServiceKind::Actions => "actions",
@@ -83,26 +94,8 @@ impl RuntimeSupervisor {
             .unwrap_or_else(|| ServiceUsage::empty(workspace_id, service))
     }
 
-    pub fn start_mcp(&mut self, profile: &WorkspaceProfile) -> AppResult<RuntimeStatusDto> {
-        self.start(profile, ServiceKind::Mcp)
-    }
-
-    pub fn start_actions(&mut self, profile: &WorkspaceProfile) -> AppResult<RuntimeStatusDto> {
-        self.start(profile, ServiceKind::Actions)
-    }
-
-    #[allow(dead_code)] // Kept for sync callers (tests / teardown helpers).
-    pub fn restart_mcp(&mut self, profile: &WorkspaceProfile) -> AppResult<RuntimeStatusDto> {
-        self.restart(profile, ServiceKind::Mcp)
-    }
-
-    #[allow(dead_code)] // Kept for sync callers (tests / teardown helpers).
-    pub fn restart_actions(&mut self, profile: &WorkspaceProfile) -> AppResult<RuntimeStatusDto> {
-        self.restart(profile, ServiceKind::Actions)
-    }
-
     /// True when the service for this workspace is currently running.
-    pub fn is_running(&self, workspace_id: &str, kind: ServiceKind) -> bool {
+    fn is_running(&self, workspace_id: &str, kind: ServiceKind) -> bool {
         matches!(
             self.entries
                 .get(&(workspace_id.to_string(), kind))
@@ -115,7 +108,7 @@ impl RuntimeSupervisor {
     ///
     /// 判断"要不要再启动一次"时看这个而不是 [`Self::is_running`]：
     /// Starting 阶段监听器可能已经把端口绑上了，再走一遍启动流程就会撞端口。
-    pub fn is_active(&self, workspace_id: &str, kind: ServiceKind) -> bool {
+    fn is_active(&self, workspace_id: &str, kind: ServiceKind) -> bool {
         matches!(
             self.entries
                 .get(&(workspace_id.to_string(), kind))
@@ -124,20 +117,12 @@ impl RuntimeSupervisor {
         )
     }
 
-    pub fn refresh_mcp(&mut self, profile: &WorkspaceProfile) {
-        self.refresh(profile, ServiceKind::Mcp);
-    }
-
-    pub fn refresh_actions(&mut self, profile: &WorkspaceProfile) {
-        self.refresh(profile, ServiceKind::Actions);
-    }
-
-    pub fn drop_workspace(&mut self, profile: &WorkspaceProfile) {
+    fn drop_workspace(&mut self, profile: &WorkspaceProfile) {
         self.sync_stop_and_wait(profile, ServiceKind::Mcp);
         self.sync_stop_and_wait(profile, ServiceKind::Actions);
     }
 
-    pub fn active_tunnel_service_keys(&self) -> HashSet<(String, TunnelServiceKind)> {
+    fn active_tunnel_service_keys(&self) -> HashSet<(String, TunnelServiceKind)> {
         self.entries
             .iter()
             .filter_map(|((workspace_id, kind), entry)| match entry.phase {
@@ -153,7 +138,7 @@ impl RuntimeSupervisor {
             .collect()
     }
 
-    pub fn begin_stop(&mut self, workspace_id: &str, kind: ServiceKind) -> Option<JoinHandle<()>> {
+    fn begin_stop(&mut self, workspace_id: &str, kind: ServiceKind) -> Option<JoinHandle<()>> {
         let key = (workspace_id.to_string(), kind);
         let entry = self.entries.get_mut(&key)?;
 
@@ -166,7 +151,7 @@ impl RuntimeSupervisor {
         handle
     }
 
-    pub fn finish_stop(&mut self, workspace_id: &str, kind: ServiceKind) {
+    fn finish_stop(&mut self, workspace_id: &str, kind: ServiceKind) {
         self.entries.remove(&(workspace_id.to_string(), kind));
     }
 
@@ -249,7 +234,7 @@ impl RuntimeSupervisor {
             self.entries.get(&key).map(|e| &e.phase),
             Some(RuntimePhase::Stopping)
         ) {
-            return Err(crate::error::AppError::Message(format!(
+            return Err(AppError::Message(format!(
                 "{}正在停止，请稍后再试",
                 kind.label().trim()
             )));
@@ -286,11 +271,11 @@ impl RuntimeSupervisor {
                     kind.stderr_log_name(),
                     &format!("[start] {message}"),
                 );
-                return Err(crate::error::AppError::Message(message));
+                return Err(AppError::Message(message));
             }
         }
 
-        let spawn_result = self.host.bind_workspace(profile, kind, port, usage)?;
+        let spawn_result = bind_workspace(profile, kind, port, usage, self.router.clone())?;
 
         match spawn_result {
             Ok((shutdown, handle)) => {
@@ -338,40 +323,6 @@ impl RuntimeSupervisor {
         Ok(self.status(profile, kind))
     }
 
-    /// Stop the current service (if running), then immediately start a new one.
-    /// This is the canonical "restart" — used when the user regenerates a key or
-    /// toggles the shared-secret switch, so the listener picks up the new value.
-    ///
-    /// stop_internal sends the graceful-shutdown signal but the OS port may not
-    /// be freed instantly (the old listener's socket is closed on the tokio
-    /// event loop). We retry `start` with a short back-off to smooth over this
-    /// window.
-    #[allow(dead_code)]
-    fn restart(
-        &mut self,
-        profile: &WorkspaceProfile,
-        kind: ServiceKind,
-    ) -> AppResult<RuntimeStatusDto> {
-        self.sync_stop_and_wait(profile, kind);
-        self.start(profile, kind)
-    }
-
-    fn sync_stop_and_wait(&mut self, profile: &WorkspaceProfile, kind: ServiceKind) {
-        let port = port_for(profile, kind);
-        let handle = self.begin_stop(&profile.id, kind);
-        if handle.is_some() {
-            crate::runtime::port::await_listener_shutdown_blocking(handle, port);
-        } else if platform()
-            .find_pid_listening_on_port(port)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            wait_for_port_free_blocking(port, Duration::from_secs(3));
-        }
-        self.finish_stop(&profile.id, kind);
-    }
-
     fn refresh(&mut self, profile: &WorkspaceProfile, kind: ServiceKind) {
         let key = (profile.id.clone(), kind);
         let port = port_for(profile, kind);
@@ -392,7 +343,7 @@ impl RuntimeSupervisor {
                 if should_mark_runtime_error(entry, listening) {
                     if let Some(handle) = entry.handle.take() {
                         handle.abort();
-                        crate::async_rt::spawn(async move {
+                        async_rt::spawn(async move {
                             let _ = handle.await;
                         });
                     }
@@ -449,7 +400,7 @@ impl RuntimeSupervisor {
         };
 
         let profile = profile.clone();
-        crate::async_rt::spawn(async move {
+        async_rt::spawn(async move {
             if let Err(error) = cleanup_orphan_for_runtime(&profile, tunnel_kind, false).await {
                 append_profile_log(
                     &profile.id,

@@ -93,7 +93,7 @@ impl App {
         listeners.with_runtime(|runtime| {
             Ok(runtime
                 .is_active(id, kind)
-                .then(|| status_for(runtime, &profile, kind)))
+                .then(|| runtime.status(&profile, kind)))
         })
     }
 
@@ -106,11 +106,8 @@ impl App {
     ) -> AppResult<RuntimeStatusDto> {
         let profile = self.profile_by_id(id)?;
         listeners.with_runtime(|runtime| {
-            match kind {
-                ServiceKind::Mcp => runtime.refresh_mcp(&profile),
-                ServiceKind::Actions => runtime.refresh_actions(&profile),
-            }
-            Ok(status_for(runtime, &profile, kind))
+            runtime.refresh(&profile, kind);
+            Ok(runtime.status(&profile, kind))
         })
     }
 
@@ -144,11 +141,11 @@ impl App {
         let mut items = Vec::with_capacity(profiles.len());
         for profile in profiles {
             let (mcp, actions) = listeners.with_runtime(|runtime| {
-                runtime.refresh_mcp(&profile);
-                runtime.refresh_actions(&profile);
+                runtime.refresh(&profile, ServiceKind::Mcp);
+                runtime.refresh(&profile, ServiceKind::Actions);
                 Ok((
-                    runtime.mcp_status(&profile),
-                    runtime.actions_status(&profile),
+                    runtime.status(&profile, ServiceKind::Mcp),
+                    runtime.status(&profile, ServiceKind::Actions),
                 ))
             })?;
             items.push(ServiceOverview {
@@ -254,10 +251,7 @@ impl App {
             listeners.host().ensure_gateway().await?;
         }
         let profile = self.profile_by_id(id)?;
-        listeners.with_runtime(|runtime| match kind {
-            ServiceKind::Mcp => runtime.start_mcp(&profile),
-            ServiceKind::Actions => runtime.start_actions(&profile),
-        })?;
+        listeners.with_runtime(|runtime| runtime.start(&profile, kind))?;
         self.sync_tunnel_routes_from_runtime(listeners).await?;
 
         match maybe_start_for_runtime(&profile, kind.tunnel_kind()).await {
@@ -291,11 +285,8 @@ impl App {
             );
         }
         listeners.with_runtime(|runtime| {
-            match kind {
-                ServiceKind::Mcp => runtime.refresh_mcp(&profile),
-                ServiceKind::Actions => runtime.refresh_actions(&profile),
-            }
-            let status = status_for(runtime, &profile, kind);
+            runtime.refresh(&profile, kind);
+            let status = runtime.status(&profile, kind);
             if status.state == "error" {
                 return Err(AppError::Message(status.local_message));
             }
@@ -319,7 +310,7 @@ impl App {
         })?;
         stop_for_runtime(&profile, kind.tunnel_kind()).await?;
         self.sync_tunnel_routes_from_runtime(listeners).await?;
-        listeners.with_runtime(|runtime| Ok(status_for(runtime, &profile, kind)))
+        listeners.with_runtime(|runtime| Ok(runtime.status(&profile, kind)))
     }
 
     pub(super) async fn sync_tunnel_routes_from_runtime(
@@ -368,17 +359,6 @@ impl App {
             }
             Ok(())
         })
-    }
-}
-
-fn status_for(
-    runtime: &crate::runtime::RuntimeSupervisor,
-    profile: &WorkspaceProfile,
-    kind: ServiceKind,
-) -> RuntimeStatusDto {
-    match kind {
-        ServiceKind::Mcp => runtime.mcp_status(profile),
-        ServiceKind::Actions => runtime.actions_status(profile),
     }
 }
 

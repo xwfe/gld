@@ -9,12 +9,13 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
 
 use crate::generation::Router;
+use crate::listeners::ShutdownSender;
 use crate::nodes::registry::Nodes;
 use gld_core::async_rt::JoinHandle;
 use gld_core::error::{AppError, AppResult};
 use gld_core::hub::runtime::{HubState, StartupSweep, TunnelOutcome, TunnelSnapshot};
 use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE};
-use gld_core::runtime::{await_listener_shutdown, ShutdownSender};
+use gld_core::runtime::await_listener_shutdown;
 use gld_core::settings::HubConfig;
 use gld_core::tunnel::standalone::StandaloneTunnel;
 

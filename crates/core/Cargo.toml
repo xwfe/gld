@@ -1,6 +1,6 @@
 [package]
 name = "gld-core"
-description = "Workspace-first MCP / GPT Actions runtime core (tool kernel, listeners, auth, tunnels)"
+description = "Workspace-first tool dispatch, application policies and persistent state for GLD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
