@@ -183,6 +183,24 @@ App 保留数据文件锁、重读磁盘和工具上下文失效规则。Listene
 工作区 restart 的异步锁、SeqCst 的恢复标记；失败也消耗本次恢复机会。Hub 的进程级 LIFECYCLE 仍独立，
 不把普通 start/stop、恢复或退出放进新的重启大锁。工具/委派的执行位置仍按执行代入口另行组合。
 
+### daemon 显式选择执行位置
+
+`DaemonContext` 持有启动时创建的同一个 `Arc<Router>`。工具、批准/停止委派和升级从这里选执行代，
+直连请求没有这个上下文，只调用 App 的本地入口；任何路由错误都不转成本地执行。
+HTTP/Hub 等宿主适配暂时仍通过 `generation::install` 使用同一 Router，具体实现的迁移留给 F4。
+
+App 的 Rust 本地入口明确命名为 `call_tool_local`、`approve_agent_task_local`、`stop_agent_task_local`、
+`remove_grant_local`、`set_planning_mode_local`。宿主转发工具时在阻塞线程里重新读当前目录，不使用较早的 selector 快照；
+批准只取任务记录的根目录，不额外读取报告或 diff，返回的任务仍先按原类型反序列化。
+
+撤销和 Planning 分别使用各自的 `*_with_cleanup` 窄回调：App 负责先落盘、错误文案与清理时点，
+daemon 闭包只选择实际执行资源。撤销仍立即清一次、35 秒后用同一 Router 再清，每次重新查询可路由执行代；
+Plan 清理失败时保留已保存的模式和原报错。原 `generation::exec` 公共兼容入口保留，但 App 不再依赖它。
+
+退出由 daemon 按关闭 IPC 监听 → Router interrupt_all → App shutdown_services → Router shutdown →
+清 IPC/进程记录的顺序组合，先记 interrupted 再停服务，不改变启动恢复记录。
+App 的初始化、目录、凭据与日志仍消费既有真实存储适配，不把它们描述成纯配置或已完成 F4 的宿主迁移。
+
 ### 宿主与执行代之间的请求归属
 
 MCP 的 HTTP 入口在完成认证后，调用 `Hub::execution_route(auth, body)`，将已有 `ExecutionRoute`

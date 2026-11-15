@@ -84,6 +84,7 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     spawn_signal_handler(shutdown_tx.clone());
 
     let context = Arc::new(DaemonContext {
+        router: router.clone(),
         info: {
             let app = app.clone();
             let listeners = listeners.clone();
@@ -158,7 +159,11 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
 
     logging::info("shutdown requested; stopping services");
     drop(listener);
-    app.shutdown_all(&listeners).await;
+    // 先记 interrupted，再停服务；服务的正常 stop 会将命令记为 killed。
+    let stopping = router.clone();
+    let _ = tokio::task::spawn_blocking(move || stopping.interrupt_all()).await;
+    app.shutdown_services(&listeners).await;
+    let _ = tokio::task::spawn_blocking(move || router.shutdown()).await;
     ipc::cleanup(&paths.socket);
     let _ = std::fs::remove_file(&paths.record);
     logging::info("daemon exited cleanly");

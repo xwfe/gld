@@ -5327,3 +5327,59 @@ macOS、隔离 GLD_HOME：Manager 两条单测、App 67 条、service_lifecycle 
 
 本片只改变 Rust 状态所有权和显式参数；请求/响应、工具、CLI 帮助、配置、Cargo 依赖与锁文件、CI 均未改变。
 本轮不推送、不部署，未操作真实授权配置，未做真实跨平台或在线升级验收。当前状态仍是 F3 进行中。
+
+
+## 125. D17-F3.2：daemon 显式装配执行代选路与清理（2026-11-15）
+
+接续已提交的 F3.1（`d6b95db`），起点工作区干净，比本地 origin/main 超前 9 个提交。
+本片保持监听管理器装配，移除 App 对全局 Router 的选择，把工具、委派、撤销、Planning 和退出接回宿主的同一实例。
+
+### 125.1 实际接线与不变量
+
+- DaemonContext 显式持有 server 创建的 Arc<Router>；工具、批准/停止、升级据此转发，直连模式才进 App 的 *_local。
+  请求、响应与协议版本不变；路由错误不回退本地，避免在宿主另开命令会话、写序号或 Agent LIVE 表。
+- 工具仍在原 spawn_blocking 时点按 ID 重读配置目录，不提前 canonicalize；批准仍从 agents::get 取根目录，
+  不读取报告/diff。批准/停止回包仍反序列化 AgentTask，保持传输错误与 json error 的类型和文案。
+- grant 先删持久记录，只解析一次 data_home，再立即清理、安排原 35 秒复清，最后查询成员生成回包。
+  旧 helper 两次各查 OnceLock；daemon 接单前已安装且不会重装，新闭包持同一 Router，与旧生产路径一致；
+  两次仍各自查询当前 routable 集合，包含 draining、不缓存 link。
+- Plan 仍先保存状态，仅进入 Plan 时在原阻塞线程清理；失败保留已落盘的模式及原错误文案。
+- 退出首尾从 App 移到 server，保持关 IPC 监听 → interrupt_all → shutdown_services → Router shutdown → 清 IPC/记录。
+  App 的 shutdown_services 只保留原中段，不修改恢复标记。
+- 旧 generation::exec 公共 helper 保留兼容，但 App 不再消费；HTTP/Hub 的既有全局适配继续使用同一 Router，留 F4 迁移。
+  App::load 仍读取并初始化真实数据；本片不把目录、凭据和日志包装成无副作用配置，不实施 D18。
+
+### 125.2 新增边界回归与独立审查
+
+core 的 app_cleanup 使用每用例独立子进程与绝对 GLD_HOME：Plan 清理回调观察到模式已经保存，返回错误后仍为 Plan；
+撤销使用同一个有状态闭包，两次重新加载 App 均已看不到 grant，立即回包计数为首轮结果，两次回调实际间隔至少 35 秒。
+两条专项测试 **2 passed / 0 failed，35.02 秒**，未缩短或参数化生产定时。
+
+daemon 的一条定向单测验证路由错误仍为原 Message、畸形任务 JSON 仍为 Json/json error，而不是直接透传 Value。
+CLI 的 agent_delegation 9、daemon_lifecycle 13、generation_boundary 28、planning_output 2、scoped_grants 3 全部通过。
+独立只读审查对照 d6b95db 核对时点、类型/错误、直连分支、退出顺序和动态 owner 查询，没有发现生产回归。
+
+### 125.3 最终验证与范围
+
+本机 macOS、隔离 GLD_HOME；新增 app_cleanup 为独立测试目标，子进程成功输出不混入父测试统计。
+
+| 命令 / 范围 | 实际结果 |
+| --- | --- |
+| `cargo check --workspace --all-targets --locked` | 退出 0 |
+| core app_cleanup | 2 passed / 0 failed，包含真实 35 秒等待 |
+| daemon 路由任务回包单测 | 1 passed / 0 failed |
+| CLI 五组工具/委派/撤销/Planning/换代回归 | 55 passed / 0 failed |
+| `cargo test --workspace --all-targets --locked` 最终复验 | **71 个目标，1442 passed / 0 failed / 0 ignored**，退出 0 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+
+首轮全仓测试通过后，严格 Clippy 拦住新增单测中的两处 err().expect；改为 expect_err 后重新跑单测、
+严格 Clippy、格式和全仓测试，均通过。未关闭 lint，未改变生产错误处理。
+
+Cargo manifest/lock、CI、CLI 帮助、共享协议和 D18 授权行为保持。本轮不推送、不部署，不改真实项目/凭据/个人配置，
+未做 Windows/Linux 实机、真实跨机、跨版本二进制或线上升级验收。
+收尾查询运行服务仍为 `0.10.1 / 1717aaf41685`，连接工具 35 项、指纹 `6022dd56440b0ea9`。
+代码与测试走本地 shell；gld 只查询运行版本。独立审查的文件连接器白名单不含仓库，改用 shell 读取，非 gld 工具错误。
+F3 完成不代表宿主实现已移出 core：HTTP/Hub/凭据和日志适配、Router/Link 的物理边界仍按 F4 处理。
+
+状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。

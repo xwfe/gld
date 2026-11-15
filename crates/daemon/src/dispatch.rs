@@ -1,7 +1,7 @@
 //! 协议 → 业务的唯一翻译层。
 //!
-//! 每个 [`Request`] 变体对应一次 [`App`] 调用，结果统一序列化成 JSON。
-//! 命令行直连模式和守护进程模式都走这个函数，所以两边不可能行为不一致。
+//! 每个 [`Request`] 变体映射到应用操作或执行代请求，结果统一序列化成 JSON。
+//! 直连模式使用本地应用操作，守护进程显式把执行请求交给它持有的 Router。
 
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ use crate::protocol::{Request, RpcError};
 pub struct DaemonContext {
     pub info: Box<dyn Fn() -> crate::protocol::DaemonInfo + Send + Sync>,
     pub request_shutdown: Box<dyn Fn() + Send + Sync>,
+    pub router: Arc<gld_core::generation::Router>,
 }
 
 pub async fn dispatch(
@@ -213,10 +214,16 @@ pub async fn dispatch(
         R::RemoveGrant { selector } => {
             // 停命令要等子进程收尾（每条最多 1.5 秒），不能占异步 worker。
             let app = app.clone();
-            let removed = tokio::task::spawn_blocking(move || app.remove_grant(&selector))
-                .await
-                .map_err(|error| RpcError::internal(format!("作废 grant 的任务失败：{error}")))?
-                .map_err(RpcError::from)?;
+            let router = daemon.map(|context| context.router.clone());
+            let removed = tokio::task::spawn_blocking(move || match router {
+                Some(router) => app.remove_grant_with_cleanup(&selector, move |grant_id, _home| {
+                    router.revoke_grant(grant_id)
+                }),
+                None => app.remove_grant_local(&selector),
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("作废 grant 的任务失败：{error}")))?
+            .map_err(RpcError::from)?;
             ok(&removed)
         }
         R::ListAgentTasks => ok(&app.list_agent_tasks()?),
@@ -229,13 +236,24 @@ pub async fn dispatch(
         } => {
             // 起 Agent 前要问一次 `--version`（最多 5 秒）、拍 git 快照，不能占异步 worker。
             let app = app.clone();
-            let started = tokio::task::spawn_blocking(move || {
-                app.approve_agent_task(
+            let router = daemon.map(|context| context.router.clone());
+            let started = tokio::task::spawn_blocking(move || match router {
+                Some(router) => {
+                    let root = app.agent_task_root(&task_id)?;
+                    agent_reply(router.approve_agent(
+                        &root,
+                        &task_id,
+                        agent.as_deref(),
+                        model.as_deref(),
+                        effort.as_deref(),
+                    ))
+                }
+                None => app.approve_agent_task_local(
                     &task_id,
                     agent.as_deref(),
                     model.as_deref(),
                     effort.as_deref(),
-                )
+                ),
             })
             .await
             .map_err(|error| RpcError::internal(format!("放行委派的任务失败：{error}")))?
@@ -246,10 +264,14 @@ pub async fn dispatch(
         R::StopAgentTask { task_id } => {
             // 要经管道问执行代，不占异步 worker。
             let app = app.clone();
-            let stopped = tokio::task::spawn_blocking(move || app.stop_agent_task(&task_id))
-                .await
-                .map_err(|error| RpcError::internal(format!("停止委派的任务失败：{error}")))?
-                .map_err(RpcError::from)?;
+            let router = daemon.map(|context| context.router.clone());
+            let stopped = tokio::task::spawn_blocking(move || match router {
+                Some(router) => agent_reply(router.stop_agent(&task_id)),
+                None => app.stop_agent_task_local(&task_id),
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("停止委派的任务失败：{error}")))?
+            .map_err(RpcError::from)?;
             ok(&stopped)
         }
         R::McpServers => ok(&app.mcp_servers()?),
@@ -293,7 +315,19 @@ pub async fn dispatch(
         }
         R::SetPlanningMode { target, mode } => {
             let profile = resolve(app, &target)?;
-            ok(&app.set_planning_mode(&profile.id, mode).await?)
+            let state = match daemon {
+                Some(context) => {
+                    let router = context.router.clone();
+                    app.set_planning_mode_with_cleanup(&profile.id, mode, move |root| {
+                        router
+                            .terminate_workspace(root)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await?
+                }
+                None => app.set_planning_mode_local(&profile.id, mode).await?,
+            };
+            ok(&state)
         }
         R::CreateGoal {
             target,
@@ -400,10 +434,20 @@ pub async fn dispatch(
             // 工具内核是同步 API，内部用 block_on 驱动子进程，不能占用异步 worker 线程。
             let app = app.clone();
             let id = profile.id;
-            tokio::task::spawn_blocking(move || app.call_tool(&id, &name, args))
-                .await
-                .map_err(|error| RpcError::internal(format!("工具调用任务失败：{error}")))?
-                .map_err(RpcError::from)
+            let router = daemon.map(|context| context.router.clone());
+            tokio::task::spawn_blocking(move || match router {
+                Some(router) => {
+                    // 与旧 App 入口相同，在阻塞线程里重读当前目录，不沿用更早的 selector 快照。
+                    let root = app.tool_workspace_root(&id)?;
+                    router
+                        .local_tool(&id, &root, &name, &args)
+                        .map_err(|error| gld_core::AppError::Message(error.to_string()))
+                }
+                None => app.call_tool_local(&id, &name, args),
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("工具调用任务失败：{error}")))?
+            .map_err(RpcError::from)
         }
 
         // ---- 观察 ----
@@ -440,26 +484,35 @@ pub async fn dispatch(
         R::GlobalAgentContext => ok(&app.global_agent_context()),
 
         // ---- 升级 ----
-        R::UpgradeStatus => upgrade(|router| Ok(router.status())).await,
+        R::UpgradeStatus => upgrade(daemon, |router| Ok(router.status())).await,
         R::UpgradePrepare { exe, timeout_secs } => {
-            upgrade(move |router| {
+            upgrade(daemon, move |router| {
                 router.prepare(&exe, std::time::Duration::from_secs(timeout_secs))
             })
             .await
         }
-        R::UpgradeSwitch => upgrade(|router| router.switch()).await,
-        R::UpgradeAbort => upgrade(|router| router.abort()).await,
+        R::UpgradeSwitch => upgrade(daemon, |router| router.switch()).await,
+        R::UpgradeAbort => upgrade(daemon, |router| router.abort()).await,
         // ---- 软件 ----
     }
 }
 
+fn agent_reply(
+    reply: Result<Value, gld_core::generation::CallError>,
+) -> gld_core::AppResult<gld_core::agents::store::AgentTask> {
+    let value = reply.map_err(|error| gld_core::AppError::Message(error.to_string()))?;
+    Ok(serde_json::from_value(value)?)
+}
+
 /// 这些操作要等子进程应答，放阻塞线程。
 async fn upgrade(
+    daemon: Option<&DaemonContext>,
     run: impl FnOnce(&gld_core::generation::Router) -> Result<Value, String> + Send + 'static,
 ) -> Result<Value, RpcError> {
-    let Some(router) = gld_core::generation::router() else {
+    let Some(context) = daemon else {
         return Err(RpcError::protocol("当前不是守护进程，没有执行代可操作"));
     };
+    let router = context.router.clone();
     tokio::task::spawn_blocking(move || run(&router))
         .await
         .map_err(|error| RpcError::internal(format!("升级操作失败：{error}")))?
@@ -519,4 +572,21 @@ fn resolve(app: &App, target: &WorkspaceTarget) -> Result<WorkspaceProfile, RpcE
 
 fn ok<T: Serialize>(value: &T) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|error| RpcError::internal(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_reply;
+    use gld_core::generation::CallError;
+    use gld_core::AppError;
+
+    #[test]
+    fn routed_agent_replies_preserve_transport_and_json_errors() {
+        let lost = agent_reply(Err(CallError::Lost)).expect_err("transport error");
+        assert!(matches!(&lost, AppError::Message(_)));
+        assert_eq!(lost.to_string(), CallError::Lost.to_string());
+        let malformed = agent_reply(Ok(serde_json::json!({}))).expect_err("invalid task");
+        assert!(matches!(&malformed, AppError::Json(_)));
+        assert!(malformed.to_string().starts_with("json error: "));
+    }
 }

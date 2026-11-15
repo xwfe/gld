@@ -32,10 +32,10 @@
 | daemon 单实例与 IPC | `crates/daemon/src/lifecycle.rs`：`daemon.lock` 的跨进程排他锁；`server.rs`：进程内 App 与 IPC accept loop | 同一 `GLD_HOME` 不能直接并排启动两个普通 daemon；绕开锁不是交接协议 |
 | restart | `crates/cli/src/commands/daemon.rs`：`Restart` 先看盘上运行记录，有命令在跑就不重启（`--force` 跳过），之后 `stop` 再 `start` | 不是滚动切换；原入口存在停服窗口 |
 | Hub 的端口与 tunnel | `crates/core/src/hub/runtime.rs`：`HubRuntime` 持有监听任务、shutdown sender、Hub、Nodes、work_session 启动检查、tunnel；`start` 先停止旧 runtime；`stop_runtime` 关闭监听、停止 tunnel、调用 Hub shutdown | 对外连接及隧道不独立于 daemon 存活；重启不能保持原连接 |
-| 进程退出与命令 | `crates/core/src/app/runtime.rs`：`shutdown_all` 在停止服务前、后都调用 `terminate_all_sessions_everywhere`，中间还 `agents::interrupt_all` 停委派的 Agent | 正常退出也会终止运行中命令和 Agent；不只是 `--force` 才有影响 |
+| 进程退出与命令 | `crates/daemon/src/server.rs`：Router interrupt_all → App shutdown_services → Router shutdown，命令与委派先记 interrupted 再停服务 | 正常退出也会终止运行中命令和 Agent；不只是 `--force` 才有影响 |
 | graceful shutdown | `crates/core/src/runtime/port.rs`：监听任务等待约 3 秒，超时后 `abort` | 只是有截止时间的退出等待，不能证明长请求完整结束 |
 | Hub 内部连接 | `crates/core/src/hub/runtime.rs` 组合关闭：Hub scope 会话 → ccnm 远端连接 → 宿主持有的 Nodes → machine relay；应用 Hub 不关闭注入的节点桥 | 等待 HTTP 监听退出不足以保持其他 Hub 会话 |
-| MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；Actions 监听器（`actions/listener.rs`）、`gld tool call`（`dispatch.rs` → `App::call_tool`）是另外两条进同一批工具的入口；没有升级用的在途请求登记及 admission gate | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
+| MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；Actions 监听器（`actions/listener.rs`）、`gld tool call`（dispatch 显式选 Router 或 App::call_tool_local）是另外两条进同一批工具的入口；执行代的 admission 与工作区交接不等于宿主端口交接 | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
 | OAuth 身份 | `crates/core/src/auth/oauth_flow.rs` 与 `client_registry.rs`：签名 secret、client registry 等可持久化；授权码 pending map 是 OAuthRuntime 内存状态 | 复用密钥有利于保留已签发 token，但进行中的授权流程仍可能丢失 |
 | 原生节点 | `crates/core/src/nodes/registry.rs`：`Nodes` 持有每台机器唯一的一条 WSS；连接从 Hub 监听器的 `/nodes/v1/connect/{machine_id}`（或全局入口）进来，`Hub` 经 NodeBridge 转发到宿主的同一张表 | 连接挂在公网入口上，不能跟着执行代走；换代断连接等于每台机器都要重连 |
 | 委派的 Agent | `crates/agent/src/run.rs`：`LIVE` 表和子进程都在起它的进程里，`agent_manage start` 和 `gld agent approve/stop` 都能起或停；任务记录和 owner 锁在盘上 | 属于工作区执行状态；停和放行必须到起它的进程里做，看记录不用 |
@@ -43,7 +43,7 @@
 | exec 会话 | `crates/core/src/tools/session.rs`：ExecSession 持有进程 Child、ChildStdin、输出 reader task、内存状态；run record 另行落盘 | 持久化日志不等于接管进程和 stdin；重启后读取历史不能算命令连续运行与交互能力保留 |
 | workspace 执行状态 | `crates/core/src/tools/workspace_runtime.rs`：SessionStore、workspace 写入序号与运行归属均在进程内；文件写锁通过同一 `GLD_HOME` 下的 fs2 锁协调 | 只把 session ID 路由回旧代仍不足够；新旧代并行写同一 workspace 会漏记对方的写入序号 |
 | 配置存储 | `crates/core/src/data/store.rs`：整个数据文件读改写以进程内 Mutex 串行；正常架构依赖单 daemon 单写者。工具路径（`tools/`、`hub/`、`agents/`、`managed_workspaces/`、`machine_mcp/`、`bridge/`）现在只读不写它，写入都在 `App`、`nodes::config`、`nodes::pairing`、`secret/`、`global_gateway.rs` | 两代普通 App 共同写配置可能覆盖彼此修改；不能只取消 daemon 单实例锁 |
-| 现有 global gateway | `crates/core/src/global_gateway.rs`：有流式 HTTP 转发实现，但其 runtime 和 tunnel 也归同一 daemon，且被 `App::shutdown_all` 停止 | 转发代码可以复用；现有生命周期本身不提供升级隔离 |
+| 现有 global gateway | `crates/core/src/global_gateway.rs`：有流式 HTTP 转发实现，但其 runtime 和 tunnel 也归同一 daemon，且被 `App::shutdown_services` 停止 | 转发代码可以复用；现有生命周期本身不提供升级隔离 |
 
 另一个容易误用的接口是 SIGHUP：该基线的 `server.rs` 将其作为退出信号处理，没有原地热加载含义（节点进程 `nodes/client.rs` 也一样）。`restore_runtime_state` 只根据保存的配置重新启动服务，不恢复原进程的连接、授权 pending map、stdin 管道或运行时任务。
 
@@ -82,7 +82,7 @@
 5. 旧执行代没有在途调用、活动命令、所属 workspace 或未完成状态交接后，才允许退出。升级等待超时仅报告“尚有旧代运行”，不能走当前三秒超时后 abort 的路径。
 6. 候选失败时，在未产生新状态迁移的范围内保留或恢复原路由。回退代码不撤销已经执行的工具副作用；持久化格式不兼容时必须在激活前拒绝，而不能依靠回退补救。
 
-可复用 `global_gateway.rs` 的请求和响应流转发代码，但必须将它的监听及 tunnel 生命周期移出会被替换的执行代。仅原样保留当前 `App::shutdown_all` 调用关系无法达到上述效果。
+可复用 `global_gateway.rs` 的请求和响应流转发代码，但必须将它的监听及 tunnel 生命周期移出会被替换的执行代。仅原样保留当前 `App::shutdown_services` 调用关系无法达到上述效果。
 
 ### 3.4 第一版怎么落地（2026-10-30 按当前源码定的）
 

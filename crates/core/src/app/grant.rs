@@ -2,6 +2,7 @@
 //!
 //! 范围怎么在请求里生效在 [`crate::hub`]，钥匙怎么验在 [`crate::auth`]。这里只管登记。
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -229,8 +230,21 @@ impl App {
         })
     }
 
-    /// 作废一把：下一次请求起它的令牌 401，刷新也换不来新的；它起的命令一起停掉。
-    pub fn remove_grant(&self, selector: &str) -> AppResult<GrantRemoved> {
+    pub fn remove_grant_local(&self, selector: &str) -> AppResult<GrantRemoved> {
+        self.remove_grant_with_cleanup(selector, |grant_id, data_home| {
+            (
+                crate::tools::workspace_runtime::terminate_grant_sessions(grant_id),
+                data_home.map_or(0, |home| crate::agents::stop_for_grant(home, grant_id)),
+            )
+        })
+    }
+
+    /// 先撤销凭据，再用同一个清理操作收回在途命令和委派。
+    pub fn remove_grant_with_cleanup(
+        &self,
+        selector: &str,
+        cleanup: impl Fn(&str, Option<&Path>) -> (usize, usize) + Send + 'static,
+    ) -> AppResult<GrantRemoved> {
         let selector = selector.trim();
         let removed = self.with_data(|store| {
             let found = store
@@ -259,14 +273,13 @@ impl App {
         // 委派的 Agent 是全权跑的，撤销了还接着跑说不过去；等放行的也作废，免得用户在本机顺手放了。
         // 数据目录找不到时任务记录也读不到，就当没有可停的。
         let data_home = crate::home::data_home().ok();
-        let (stopped_commands, stopped_agent_tasks) =
-            crate::generation::exec::terminate_grant(&grant_id, data_home.as_deref());
+        let (stopped_commands, stopped_agent_tasks) = cleanup(&grant_id, data_home.as_deref());
         // 删之前已经过了鉴权的那一次调用还在跑：它要起命令的话，可能正排在写锁上（最多等
         // 30 秒），起来时已经在上面那次清理之后了，没人读得到、停得掉，一直跑到它自己的
         // timeout（上限 10 分钟）。35 秒后再清一次，委派任务同理。
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(35));
-            crate::generation::exec::terminate_grant(&grant_id, data_home.as_deref());
+            cleanup(&grant_id, data_home.as_deref());
         });
         let members = self.hub_member_names()?;
         Ok(GrantRemoved {

@@ -110,6 +110,9 @@ child 还原身份 → Hub 再核对归属 → `call_tool_as`。两边名单不�
 3. 将本地工具、委派、撤销、服务启停与执行代路由的装配归到 daemon；明确认证存储、日志和目录输入。
 4. 再按实际依赖迁移 Router/Link、HTTP/OAuth、网关和监听管理，决定独立 host crate。core 不通过兼容重导出反向绑定宿主。
 
+App/ListenerManager 与执行代 Router 的显式装配见[架构](../architecture.md)。
+数据与工具缓存仍由 App 管，宿主传入监听管理和各自的具体清理回调；不引入统一执行器来隐藏直连与执行代分支。
+
 节点连接的具体装配与 Rust 接口见[架构：原生节点连接的所有者](../architecture.md)。
 应用侧 NodeBridge 只保留查询和调用；显式关闭继续由实际持有连接的宿主负责，不用丢弃引用来代替。
 
