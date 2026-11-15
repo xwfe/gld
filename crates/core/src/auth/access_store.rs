@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::nodes::local_config::{check_private_file, create_private_file};
 
+mod authorize;
 mod model;
 pub use model::{AccessRecord, CredentialRecord, MAX_URL_TTL_SECONDS};
 

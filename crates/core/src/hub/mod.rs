@@ -1827,6 +1827,7 @@ mod tests {
         ServiceCapabilities,
     };
 
+    mod access_scope;
     mod node_bridge;
     mod routing;
 

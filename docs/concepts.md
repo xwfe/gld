@@ -784,6 +784,9 @@ Prune 会记录失败项并继续处理其余项目；dry-run 不清理资源。
 新授权模型默认使用 `AllProjects`：涵盖当前及之后登记到服务的项目，不是在创建 grant 时抄一份项目名单。
 因此新建并登记项目后不需要重新给每个 AllProjects grant 添加项目；任意未登记路径不会自动变成项目。
 
+内核每次发现和调用都按当前 Hub 成员判断，成员移除后立即不可见；空服务以后加入项目也适用。
+某个新成员关闭了 confine-reads 时，该项目返回 `GRANT_NEEDS_CONFINED_READS`，其他合法项目仍可调用。
+
 **全部项目只是项目范围，默认仍只读、没有服务能力。** write、用户级 Prompt、本机 MCP 和托管空间分别受权限检查，
 AllProjects 也不会共享别人的命令会话或托管空间。实际工具还要与项目配置、工具档、读取边界和远端上限相交；
 这些动态远端检查和租约接线仍有 C 阶段工作。
@@ -795,6 +798,7 @@ write 可以带来以执行账号运行命令的能力，项目范围不是操�
 
 需要固定范围时使用 `Selected`，按稳定项目 ID 保存；删除后重新登记得到新 ID，旧 Selected 不会自动扩大。
 它与 AllProjects 共用下面的统一授权和凭据生命周期；项目名称不作为权限归属标识。
+从 Hub 移出后重新加入同一项目 ID，原 Selected 仍有效；项目改名也不改变范围。
 
 ### 统一授权：gld grant
 
@@ -804,7 +808,7 @@ Grant 表示“允许谁访问哪些项目、做哪些操作”，凭据表示�
 | 接入方式 | 用途 | 当前阶段 |
 | --- | --- | --- |
 | OAuth | 支持浏览器授权的标准 MCP 客户端；同一 grant 的不同 client_id 独立隔离 | MCP 新授权签发、token/refresh 验证及修订检查待 B；Actions 独立 OAuth 仍支持 |
-| API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | 摘要、种类和修订的存储模型已完成，生成与签发/轮换待 B，CLI 待 D |
+| API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | core 已逐次验证当前摘要、用途、状态和期限；签发、HTTP 接线与轮换用例待 B，CLI 待 D |
 | URL | 只能填写 Server URI 的客户端，如图示 SuperAssistant；短期 capability URL | 有效期与 Origin 约束已进入存储校验，新 URL 入口暂返回 AUTH_NOT_READY，签发与接通待 B/D |
 
 统一 CLI 规划使用同一组 add / ls / rotate / rm，不再要求用户区分 grant 与 grant browser。
@@ -830,6 +834,11 @@ OAuth 与 token 共存、失败不降级及一次性展示等完整行为仍需�
 新授权独立保存到 `<数据目录>/access/v1/grants.json`，单写端先保存再发布共享快照；
 列表只返回授权和凭据元数据，不含秘密或摘要。撤销先提交 revoked，再清理该 grant 的命令和 Agent，
 保留既有延迟复查，其他 grant 不受影响。同名重建使用新的 ID，旧 ID 不复活。
+
+稳定身份不等于固定权限：token 的 core 验证入口每次取得已提交的当前权限。
+权限收紧后，下一次调用的项目列表、上下文和实际操作同步受限；改名、轮换和重开存储仍使用原 CallerId。
+旧 caller 的运行和 Agent 记录保留原归属，不映射给新授权；同名新 GrantId 也不能继承前一份记录。
+这里描述的是已验证的内核边界，三类 HTTP 入口仍需后续接通。
 
 旧 `profiles.json` 里的 grants 仅原样保留内容，缺省不会新建字段；不读取它进行认证，也不自动导入。
 新存储拒绝旧结构和坏数据，失败不会覆盖原件或回退成空授权。后续完整切换需要重新授权；

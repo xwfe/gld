@@ -5,6 +5,55 @@ fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+#[test]
+fn reopening_legacy_runs_preserves_bytes_without_adopting_the_new_caller() {
+    use gld_policy::{
+        AuthContext, CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject, ProjectScope,
+    };
+
+    let home = tempdir().expect("home");
+    let root = home.path().join("runs");
+    let session = id();
+    let legacy = "oauth:hub:alpha";
+    let log = RunLog::new(root.clone(), "p", legacy);
+    let writer = log.start(&session, "true", None, 0, None).expect("记录");
+    writer.append(true, b"legacy output\n");
+    writer.finish("exited", Some(0), 0);
+    drop(writer);
+    let path = log.dir().join(&session).join(RECORD);
+    let before = fs::read(&path).expect("旧记录");
+    drop(log);
+
+    let caller = AuthContext::verified_mcp(
+        "hub",
+        Grant {
+            id: "grant-alpha".into(),
+            name: "alpha".into(),
+            scope: ProjectScope::AllProjects,
+            permissions: GrantPermissions::default(),
+            status: GrantStatus::Active,
+        },
+        CredentialKind::OAuth,
+        McpSubject::OAuth {
+            client_id: "alpha".into(),
+        },
+    )
+    .expect("新身份");
+    let current = RunLog::new(root.clone(), "p", caller.id().key());
+    assert!(current.load(&session).is_none());
+    assert!(current.list().is_empty());
+    assert_eq!(fs::read(&path).expect("仍然留存"), before);
+
+    let reopened = RunLog::new(root, "p", legacy);
+    let record = reopened.load(&session).expect("原归属可重读");
+    assert_eq!(record.caller, legacy);
+    assert_eq!(reopened.list(), vec![record.clone()]);
+    assert_eq!(
+        reopened.stream_bytes(&record, "stdout").0,
+        b"legacy output\n"
+    );
+}
+
 /// 输出超过两段时只留最新两段，偏移和整条流对得上：读出来的就是流的最后那部分。
 #[test]
 fn a_long_stream_keeps_its_last_two_segments_with_true_offsets() {

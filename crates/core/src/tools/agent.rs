@@ -400,6 +400,175 @@ mod tests {
     use super::*;
 
     #[test]
+    fn persisted_runs_and_agent_tasks_follow_grant_identity_across_reopen_and_rotation() {
+        use crate::auth::access_store::{AccessRecord, AccessStore, CredentialRecord};
+        use crate::tools::runs::RunLog;
+        use gld_policy::{CredentialKind, Grant, GrantPermissions, GrantStatus, ProjectScope};
+
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = || {
+            ToolContext::for_test(workspace.path().into(), home.path().join("harness"))
+                .expect("context")
+        };
+        let ctx = context();
+        let project_id = crate::tools::runs::project_id(&canonical(ctx.workspace.root()));
+        let access = AccessStore::open_in(home.path()).expect("access");
+        let mut record = AccessRecord {
+            grant: Grant {
+                id: "grant-original".into(),
+                name: "client".into(),
+                scope: ProjectScope::AllProjects,
+                permissions: GrantPermissions {
+                    write: true,
+                    ..Default::default()
+                },
+                status: GrantStatus::Active,
+            },
+            credential: CredentialRecord::prepare(
+                "credential-original".into(),
+                CredentialKind::Token,
+                "test-secret-original",
+                1,
+                100,
+                None,
+                Vec::new(),
+            )
+            .expect("credential"),
+        };
+        access.insert(record.clone()).expect("insert");
+        let caller = access
+            .reader()
+            .authenticate_token("hub", "credential-original", "test-secret-original", 100)
+            .expect("authenticated");
+        let original_key = caller.id().key().to_string();
+        let tasks_root = agents::store::root(home.path());
+        let runs_root = home.path().join("runs");
+        let own = uuid::Uuid::new_v4().to_string();
+        let legacy = uuid::Uuid::new_v4().to_string();
+        for (id, owner) in [(&own, original_key.as_str()), (&legacy, "grant:client")] {
+            let task: agents::store::AgentTask = serde_json::from_value(json!({
+                "task_id": id,
+                "project_id": project_id,
+                "workspace_root": workspace.path(),
+                "workspace_name": "test",
+                "agent": "codex",
+                "caller": owner,
+                "grant": {"id": "grant-original", "name": "client"},
+                "prompt_preview": "test",
+                "state": "awaiting_review",
+                "created_at_ms": 100
+            }))
+            .expect("task");
+            agents::store::write(
+                &agents::store::task_dir(&tasks_root, &project_id, id),
+                &task,
+            )
+            .expect("persist task");
+            RunLog::new(runs_root.clone(), &project_id, owner)
+                .start(id, "true", None, 0, None)
+                .expect("persist run")
+                .finish("exited", Some(0), 0);
+        }
+        let legacy_dir = agents::store::task_dir(&tasks_root, &project_id, &legacy);
+        let legacy_bytes = std::fs::read(legacy_dir.join(agents::store::TASK_FILE)).unwrap();
+        drop(ctx);
+        drop(caller);
+        drop(access);
+
+        // 每次从持久授权和任务重新读取；不复用原 AuthContext 或内存会话。
+        for change in 0..4 {
+            let access = AccessStore::open_in(home.path()).expect("reopen access");
+            match change {
+                1 => record.grant.permissions.write = false,
+                2 => record.grant.name = "renamed-client".into(),
+                3 => {
+                    record.credential = CredentialRecord::prepare(
+                        "credential-original".into(),
+                        CredentialKind::Token,
+                        "test-secret-rotated",
+                        2,
+                        100,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("rotated credential");
+                }
+                _ => {}
+            }
+            access.update(record.clone()).expect("update");
+            drop(access);
+            let access = AccessStore::open_in(home.path()).expect("reopen updated access");
+            let reader = access.reader();
+            let secret = if change == 3 {
+                assert!(reader
+                    .authenticate_token("hub", "credential-original", "test-secret-original", 100)
+                    .is_err());
+                "test-secret-rotated"
+            } else {
+                "test-secret-original"
+            };
+            let caller = reader
+                .authenticate_token("hub", "credential-original", secret, 100)
+                .expect("current credential");
+            assert_eq!(caller.id().key(), original_key);
+            assert_eq!(caller.grant().unwrap().permissions.write, change == 0);
+            let ctx = context();
+            let listed = list(&ctx, &caller, home.path());
+            assert_eq!(listed["tasks"].as_array().unwrap().len(), 1);
+            assert_eq!(listed["tasks"][0]["task_id"], own);
+            assert!(
+                this_project_task(&ctx, &caller, home.path(), &json!({"task_id": own})).is_ok()
+            );
+            assert!(
+                this_project_task(&ctx, &caller, home.path(), &json!({"task_id": legacy})).is_err()
+            );
+            let runs = RunLog::new(runs_root.clone(), &project_id, caller.id().key());
+            assert_eq!(runs.list().len(), 1);
+            assert!(runs.load(&own).is_some());
+            assert!(runs.load(&legacy).is_none());
+        }
+
+        let access = AccessStore::open_in(home.path()).expect("reopen access");
+        access.revoke("grant-original").expect("revoke");
+        record.grant.id = "grant-recreated".into();
+        record.credential.id = "credential-recreated".into();
+        access.insert(record).expect("recreate with same name");
+        drop(access);
+        let access = AccessStore::open_in(home.path()).expect("reopen recreated access");
+        let caller = access
+            .reader()
+            .authenticate_token("hub", "credential-recreated", "test-secret-rotated", 100)
+            .expect("recreated credential");
+        let ctx = context();
+        assert!(list(&ctx, &caller, home.path())["tasks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        for id in [&own, &legacy] {
+            assert!(
+                this_project_task(&ctx, &caller, home.path(), &json!({"task_id": id})).is_err()
+            );
+        }
+        let runs = RunLog::new(runs_root.clone(), &project_id, caller.id().key());
+        assert!(runs.list().is_empty());
+        assert!(runs.load(&own).is_none());
+        assert!(runs.load(&legacy).is_none());
+        assert_eq!(agents::list(home.path(), Some(&project_id)).len(), 2);
+        assert_eq!(
+            std::fs::read(legacy_dir.join(agents::store::TASK_FILE)).unwrap(),
+            legacy_bytes
+        );
+        assert_eq!(
+            agents::store::read(&legacy_dir).unwrap().caller,
+            "grant:client"
+        );
+        assert!(RunLog::new(runs_root, &project_id, &original_key)
+            .load(&own)
+            .is_some());
+    }
+
+    #[test]
     fn same_grant_different_oauth_clients_cannot_share_agent_tasks() {
         use gld_policy::{
             CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject, ProjectScope,

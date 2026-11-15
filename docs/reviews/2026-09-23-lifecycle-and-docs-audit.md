@@ -5614,3 +5614,26 @@ Hello 不携带 STATE_FORMAT，状态格式由宿主检查执行代 Ready；文�
 Cargo 报告释放 **1.2 GiB**；保留历史 gld 测试程序后重跑通过。`df`、`du` 与预检的 `cp` 被 gld 命令白名单拒绝；
 没有扩大白名单或用其他解释器执行这些被拒命令，改用 check_command 明确允许的包级 Cargo clean。
 concepts 与 architecture 同步解释拒绝时点。没有改动运行服务或真实授权。
+
+## 134. 2026-11-15：D18-B1 当前授权读取端与本机项目范围验证
+
+**实现：**core 新增 `AccessReader::authenticate_token`，每次按公开凭据 ID 取得最新已提交快照，
+校验 Token 用途、Active 状态、期限和摘要后创建本次 AuthContext。没有连接级权限缓存、旧存储回退或 OAuth/URL 猜测分派。
+CallerId 继续只承载稳定身份；权限编辑与凭据轮换不进入会话键。HTTP 提取与接入仍由后续宿主适配完成。
+
+**范围验证：**真实 AccessStore 校验后调用 Hub，验证零成员、加入、移除、同 ID 重加、项目改名与同名新 ID。
+All 使用当前成员；Selected 保留原 ID，非 Hub 成员不因 All 可见。发现列表、初始化说明、名称/ID 解析、
+错误候选、workspace_context 和实际工具调用都用当前范围。写入正向对照成功，收紧权限后硬发同类操作被拒且无文件副作用。
+新增 confine-reads=false 成员只拒绝该项目，不影响其他 All 范围项目。
+
+**归属验证：**RunLog 与 Agent 存储实际落盘并重开，经新的 token 校验取得授权。
+降写权、改名和轮换仍能查询原 CallerId 的记录；旧秘密轮换后拒绝。撤销后同名新 GrantId 看不到原任务或运行记录。
+旧 caller 记录保持原字节和归属，没有迁移为新授权或自动赋予 All。
+
+**定向验证：**AccessStore/认证 **11/11**，Hub access_scope **3/3**，runtime 旧记录 **1/1**，
+core 持久 Agent/运行归属 **1/1**，共 **16 passed / 0 failed / 0 ignored**；均使用隔离 GLD_HOME。
+独立只读审查未发现 P1/P2；审查指出同 ID 重加缺口后补测通过。
+concepts、architecture、security 与任务计划同步。未更改 CLI 帮助、协议字段或锁文件，没有开放网络 MCP。
+
+创建默认 All、Selected 创建校验、签发/轮换用例和旧授权重建提示仍需 B2；
+三类宿主入口与真实客户端是 B3/E，CCNM 租约和原生节点交集仍属 C。本轮内核测试不替代这些正向验收。
