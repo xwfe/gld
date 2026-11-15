@@ -81,13 +81,23 @@ pub struct LegacyProfilesOnlyFile {
     pub profiles: Vec<WorkspaceProfile>,
 }
 
-/// 旧授权只作为未解释的数据保留；任何认证和写入用例都不读取它。
+/// 旧授权只作为未解释的数据保留；仅判断是否需要提示重建，不作为授权来源。
 #[derive(Clone, Default)]
 pub struct OpaqueLegacyGrants(Option<serde_json::Value>);
 
 impl OpaqueLegacyGrants {
     fn is_absent(&self) -> bool {
         self.0.is_none()
+    }
+
+    pub(crate) fn requires_rebuild(&self) -> bool {
+        match self.0.as_ref() {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Array(values)) => !values.is_empty(),
+            Some(serde_json::Value::Object(values)) => !values.is_empty(),
+            Some(serde_json::Value::String(value)) => !value.is_empty(),
+            Some(_) => true,
+        }
     }
 }
 
@@ -120,6 +130,26 @@ impl<'de> Deserialize<'de> for OpaqueLegacyGrants {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rebuild_detection_does_not_interpret_legacy_fields() {
+        assert!(!OpaqueLegacyGrants::default().requires_rebuild());
+        for (value, expected) in [
+            (json!(null), false),
+            (json!([]), false),
+            (json!({}), false),
+            (json!(""), false),
+            (json!([null]), true),
+            (json!({"unknown": null}), true),
+            (json!(" "), true),
+            (json!(0), true),
+            (json!(false), true),
+        ] {
+            let opaque: OpaqueLegacyGrants = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(opaque.requires_rebuild(), expected);
+            assert_eq!(serde_json::to_value(opaque).unwrap(), value);
+        }
+    }
 
     #[test]
     fn legacy_authorization_is_opaque_and_absent_data_stays_absent() {

@@ -5699,3 +5699,38 @@ OAuth/URL 材料重开后保留修订及 Origin，以及稳定 CallerId 随当�
 
 RFC、concepts、architecture 与任务计划同步。没有新增依赖、修改锁文件或协议 DTO；
 HTTP、CLI 与真实客户端交付不包含在本小步的通过结论内。未触碰真实授权、推送或部署。
+
+## 137. 2026-11-15：D18-B2 应用创建范围、旧授权重建提示与完整验证
+
+**应用用例：**新增 GrantCreate 与 GrantIssued，默认 token、AllProjects、只读、服务能力为空。
+创建接收可信宿主实际使用的 Hub；省略项目不读取成员快照，零成员或成员发现故障时仍可建立 All。
+Selected 复用运行时的完整 ID、名称、大小写名称、至少四位 ID 前缀规则，去重后只保存稳定 ID；
+非成员、路径、歧义和 unconfined 本地项目拒绝。Remote/Native 在范围解析中只保存 ID，未放开其实际执行。
+显式 service-access 只适用于 All 的 token/OAuth，URL 和 Selected 拒绝；write 仍单独授予。
+
+**旧授权：**仅检查 opaque JSON 是否非空，不解释字段。新文件缺失且存在旧授权时，读取、轮换与撤销
+统一返回 AUTH_REBUILD_REQUIRED；首次新建直接使用新存储，不被提示阻断、不修改旧 JSON。
+检查旧数据后复核新快照，避免并发首次创建已完成却误报；合法空新文件优先，损坏新文件拒绝且不回退。
+真实 App 创建→轮换→当前 token 验证确认秘密变化、旧秘密拒绝、CallerId 保持和列表无秘密/摘要。
+
+**定向验证：**授权模块 33 项、App 授权 10 项、Hub 范围解析 6 项、旧数据模型 2 项，共
+**51 passed / 0 failed / 0 ignored**。包括失败首次提交仍提示重建、合法空存储优先、损坏原件保留、
+Selected 失败不发布和 All 显式服务能力。涉及 AppData 的测试持有既有可重入文件锁，防止进程共享测试目录互相污染。
+独立审查未发现 P1/P2，复核了首次创建、list/rm/rotate 一致诊断、秘密交付及锁顺序。
+
+**完整验证：**冻结源码后，macOS 隔离 GLD_HOME 执行 `cargo test --workspace --all-targets --locked`，
+**73 个目标、1484 passed / 0 failed / 0 ignored**，退出 0，运行期间 workspace_writes_since_start 为 0。
+完整 stdout 分四个 32768 字节页读取，73 个 test result 与 stderr 的 73 个运行目标对应。
+`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 均通过。
+CLI 帮助、daemon/执行代 DTO、协议版本和锁文件均未改；未把内核与格式解析测试当成 HTTP 正向接入证据。
+旧写者和异版程序真实演练仍沿用 §135 的历史结果，本轮没有重建历史程序或重跑该演练。
+
+**工具与协作：**两名 gpt-6.1-sol、medium 子代理分别处理材料/旧数据边界和范围解析/独立审查；
+主代理完成存储与应用编排、统一构建、日志统计和提交。避免并行 Cargo 与重复仓库盘点。
+gld.exec_command 首次完整回归的 900000ms 预算被 POLICY_REJECTED（timeout_too_long）拒绝，
+按返回的普通命令十分钟上限改成 600000ms 后正常完成，没有改变执行策略。
+gld.read_file 几次因猜错模块路径返回 NOT_FOUND；改用实际路径读取，未修改访问策略或真实配置。
+
+concepts、architecture、security、RFC 与唯一任务状态表已同步。B2 仅完成可信应用内核，
+三类 HTTP 入口、OAuth access/refresh 修订失效、隧道绑定、远端权限及统一 CLI 仍按 B3/C/D 接续。
+没有操作真实授权、推送、部署、换装程序或重启在用服务。

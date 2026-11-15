@@ -1,15 +1,56 @@
-//! 统一授权的应用入口。凭据发行在认证接入完成前明确拒绝，管理只使用新存储。
+//! 统一授权的应用入口；创建默认值只作用于显式新建，不解释旧授权。
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::App;
-use crate::auth::{AccessRecord, CredentialKind, GrantPermissions, GrantStatus, ProjectScope};
+use crate::auth::{
+    AccessRecord, CredentialKind, CredentialTtl, GrantCreation, GrantPermissions, GrantStatus,
+    IssuedAccess, IssuedSecret, ProjectScope, ServiceCapabilities,
+};
 use crate::error::{AppError, AppResult};
+use crate::hub::Hub;
 
 pub use gld_protocol::daemon::{BrowserGrantSpec, GrantSpec};
+
+/// 可信应用入口的创建参数；wire/CLI 适配不在此处猜测缺失权限。
+#[derive(Debug)]
+pub struct GrantCreate {
+    pub name: String,
+    pub projects: Vec<String>,
+    pub all: bool,
+    pub via: CredentialKind,
+    pub write: bool,
+    pub service_access: bool,
+    pub ttl: Option<CredentialTtl>,
+    pub allowed_origins: Vec<String>,
+}
+
+impl GrantCreate {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            projects: Vec::new(),
+            all: false,
+            via: CredentialKind::Token,
+            write: false,
+            service_access: false,
+            ttl: None,
+            allowed_origins: Vec::new(),
+        }
+    }
+}
+
+/// 只由成功创建/轮换返回；列表和存储没有恢复该秘密的接口。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantIssued {
+    pub grant: GrantDto,
+    pub secret: IssuedSecret,
+}
 
 /// 仅管理元数据，不能用于重新交付或验证秘密。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +83,41 @@ pub struct GrantRemoved {
 }
 
 impl App {
+    pub fn create_grant(&self, spec: GrantCreate, hub: &Hub) -> AppResult<GrantIssued> {
+        let scope = hub.grant_scope(&spec.projects, spec.all)?;
+        let permissions = GrantPermissions {
+            write: spec.write,
+            service: ServiceCapabilities {
+                user_prompts: spec.service_access,
+                machine_mcp: spec.service_access,
+                managed_workspaces: spec.service_access,
+            },
+        };
+        // 首次创建不经过重建提示：这是从旧授权切换后建立新授权的入口。
+        let issued = self.access_store()?.create_grant(
+            GrantCreation {
+                name: spec.name,
+                scope,
+                permissions,
+                kind: spec.via,
+                ttl: spec.ttl,
+                allowed_origins: spec.allowed_origins,
+            },
+            now_unix_secs()?,
+        )?;
+        Ok(issued.into())
+    }
+
+    pub fn rotate_grant(
+        &self,
+        selector: &str,
+        ttl: Option<CredentialTtl>,
+    ) -> AppResult<GrantIssued> {
+        let store = self.access_store()?;
+        self.require_current_authorization(&store)?;
+        Ok(store.rotate_grant(selector, ttl, now_unix_secs()?)?.into())
+    }
+
     pub fn list_grants(&self) -> AppResult<Vec<GrantDto>> {
         let current = self.access_reader()?.snapshot()?;
         Ok(current.records().iter().map(grant_dto).collect())
@@ -72,6 +148,7 @@ impl App {
     ) -> AppResult<GrantRemoved> {
         let selector = selector.trim();
         let store = self.access_store()?;
+        self.require_current_authorization(&store)?;
         let current = store.snapshot()?;
         let record = current
             .by_grant_id(selector)
@@ -102,7 +179,23 @@ impl App {
 }
 
 fn issuance_not_ready() -> AppError {
-    AppError::Message("AUTH_NOT_READY: 当前版本尚未启用统一凭据签发，旧授权创建入口已停用。".into())
+    AppError::Message("AUTH_NOT_READY: 旧授权创建入口已停用，统一命令接口尚未接通。".into())
+}
+
+fn now_unix_secs() -> AppResult<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| AppError::Message("系统时钟早于 Unix 起点，无法签发凭据。".into()))
+}
+
+impl From<IssuedAccess> for GrantIssued {
+    fn from(issued: IssuedAccess) -> Self {
+        Self {
+            grant: grant_dto(&issued.record),
+            secret: issued.secret,
+        }
+    }
 }
 
 fn grant_dto(record: &AccessRecord) -> GrantDto {

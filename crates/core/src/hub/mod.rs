@@ -42,6 +42,7 @@
 //! gld 本机也有 `search_text` 和 `list_files`，跟 ccnm 的同名工具根本不是
 //! 一个契约（分页、参数、错误码都不同）。
 
+mod grant_scope;
 mod native;
 #[cfg(test)]
 mod node_transport_tests;

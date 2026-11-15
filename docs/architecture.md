@@ -259,6 +259,13 @@ HTTP 的来源提取、格式分派和三类入口接线仍由 host 完成；此
 `IssuedSecret` 的 Debug 脱敏且不实现 Clone/Deserialize；应用交付单独投影元数据与秘密。
 快照另存初始化标记，区分缺失新文件与合法空文件；只有成功提交才将缺失状态改为已初始化。
 
+`App::create_grant` 接收可信宿主实际使用的 Hub，直接调用其 `grant_scope`，没有第二套成员发现或名称解析。
+默认 All 不访问成员快照；Selected 只取一次当前快照，保存去重稳定 ID 并校验本地读取限制。
+应用将创建结果投影为 `GrantIssued { grant, secret }`；`GrantDto` 的列表形状保持不变。
+App 读取授权时只判断旧 opaque JSON 是否非空；新文件缺失才报 `AUTH_REBUILD_REQUIRED`，
+检查旧数据后再次确认新快照是否已初始化，避免与首次创建竞争时误报。创建本身直接进入新存储，
+没有旧授权转换、扩权或删除；损坏新文件仍先报格式错误。
+
 撤销先提交新存储并发布 revoked 状态，再按 Grant ID 清理对应命令、待审批和运行中的 Agent 任务，
 并保留既有延迟复查。其他 grant 不受清理影响；同名重建不能复用已撤销 ID。
 
