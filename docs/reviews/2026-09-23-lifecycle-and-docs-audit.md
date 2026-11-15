@@ -5426,3 +5426,17 @@ App 只保留网关配置操作；Hub 与工作区服务持原先的次序，在
 
 macOS 离线、隔离 GLD_HOME：host 独立编译、网关 2 条单测和 Actions/网关、原生节点、OAuth、服务生命周期 62 条通过。
 Cargo.lock 仅宿主增加两个既有依赖边。未改协议、未推送、未部署。
+
+## 129. D17-F4.4：Hub 监听与原生节点服务端归宿主（2026-11-15）
+
+活动 Hub 的监听任务、隧道、唯一 Nodes 表与配对 HTTP/Upgrade/WSS 收发迁入 host。直连入口、网关和 daemon 节点操作
+仍取同一宿主表；Router 复用 NodeBridge，执行代不接触真实节点 socket。App 通过 ListenerHost 控制 Hub，
+保留配置、启动前验证与重启锁；宿主内部直接调用 Router，不再需要临时的 ServiceGeneration 接口。
+
+保持凭据代次检查、登记锁与关闭顺序，旧 reservation 不能修改或释放新登记。节点成员/双向管道转换、
+配对存储、客户端退避与共享传输留 core；8 MiB 上限和 60 秒调用预算仍共用。未改变鉴权、回包、路由或 D18。
+core 的 Axum 只剩测试使用，Cargo metadata 拦住生产反向宿主依赖和直接 HTTP/OAuth 实现依赖。
+
+绑定编译首查发现迁移后两处原模块路径，修正为已有 StartupSweep 与 HUB_SCOPE；全 workspace/all-targets check 通过。
+宿主登记表 4 条和跨凭据 reservation 1 条随实现运行；CLI 原生节点/换代/Hub/服务启停 93 条通过。
+独立审查核对同表、失败不发布、停机、转发头、身份和存储，不作为真机/线上验收，不推送、不部署。

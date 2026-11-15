@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use gld_core::nodes::config::{self, AuthenticatedMachine, NodeProject};
-use gld_core::nodes::registry::Nodes;
+use gld_host::nodes::registry::Nodes;
 
 const CHILD: &str = "GLD_TEST_NODE_REGISTRY_CHILD";
 const TEST: &str = "stale_pending_reservations_cannot_survive_credential_changes";

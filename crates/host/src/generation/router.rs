@@ -14,9 +14,9 @@ use tokio::runtime::Handle;
 
 use gld_core::auth::AuthContext;
 use gld_core::generation::wire::{auth_to_wire, Op, WireNative};
-use gld_core::generation::{current_build_identity, CallError, McpReply, ServiceGeneration};
+use gld_core::generation::{current_build_identity, CallError, McpReply};
 use gld_core::hub::{known_owner_keys, node_bridge_failure, NodeBridge};
-use gld_core::nodes::registry::NativeMember;
+use gld_core::nodes::NativeMember;
 use gld_core::settings::HubConfig;
 use gld_protocol::generation::{ExecutionRoute, GENERATION_PROTOCOL, STATE_FORMAT};
 
@@ -1218,19 +1218,15 @@ impl Router {
     }
 }
 
-impl ServiceGeneration for Router {
-    fn hub_started(&self, config: &HubConfig, nodes: Arc<dyn NodeBridge>) {
+impl Router {
+    pub(crate) fn hub_started(&self, config: &HubConfig, nodes: Arc<dyn NodeBridge>) {
         self.set_nodes(Some(nodes));
         self.hub_configure(config);
     }
 
-    fn hub_stopping(&self) {
+    pub(crate) fn hub_stopping(&self) {
         self.hub_shutdown();
         self.set_nodes(None);
-    }
-
-    fn served_tools(&self) -> Result<Value, CallError> {
-        Self::served_tools(self)
     }
 }
 

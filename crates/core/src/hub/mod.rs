@@ -65,7 +65,7 @@ use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
 use crate::machine_mcp::{self, installed::Installed, relay::Relay};
 use crate::nodes::config::NodeAccess;
-use crate::nodes::registry::NativeMember;
+use crate::nodes::NativeMember;
 use crate::planning::PlanningService;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{
@@ -509,8 +509,9 @@ impl Hub {
         self.shutdown_with(|| {});
     }
 
-    // 宿主在 CCNM 与本机 MCP 之间关闭自己的节点连接，保持原先的关闭顺序。
-    fn shutdown_with(&self, close_nodes: impl FnOnce()) {
+    /// 宿主在 CCNM 与本机 MCP 之间关闭自己的节点连接，保持原先的关闭顺序。
+    /// 调用方须在阻塞线程里调用，且只关此 Hub 对应的节点表。
+    pub fn shutdown_with(&self, close_nodes: impl FnOnce()) {
         let contexts: Vec<CachedContext> = self
             .contexts
             .lock()

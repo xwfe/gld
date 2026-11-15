@@ -14,7 +14,7 @@ use std::path::Path;
 pub use gld_protocol::generation::{
     BuildIdentity, GENERATION_PROTOCOL, GENERATION_PROTOCOL_MIN, STATE_FORMAT,
 };
-pub use service::{CallError, McpReply, ServiceGeneration};
+pub use service::{CallError, McpReply};
 
 // 归属键仍由双方共用；Router 的实现已归 gld-host。
 pub mod router {

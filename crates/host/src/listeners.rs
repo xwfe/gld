@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
-use gld_core::generation::ServiceGeneration;
-use gld_core::hub::{Hub, HubSecrets};
-use gld_core::nodes::registry::Nodes;
-use gld_core::runtime::{BoundListener, ListenerBinder, ListenerManager, ServiceKind};
+use gld_core::hub::runtime::{HubState, TunnelOutcome, TunnelSnapshot};
+use gld_core::hub::HubSecrets;
+use gld_core::runtime::{BoundListener, ListenerHost, ListenerManager, ServiceKind};
 use gld_core::secret::SecretStore;
 use gld_core::settings::HubConfig;
 use gld_core::tools::policy::PolicySettings;
@@ -16,22 +15,18 @@ use gld_core::workspace::WorkspaceProfile;
 use gld_core::AppResult;
 
 use crate::generation::Router;
-use crate::{actions, mcp};
+use crate::{actions, hub_runtime, mcp};
 
 /// 本机直连与 daemon 复用相同的 HTTP 适配；后一条路径的容器里只有一个 Router。
 pub fn listener_manager(router: Option<Arc<Router>>) -> ListenerManager {
-    let binder = Arc::new(HttpListeners {
-        router: router.clone(),
-    });
-    let generation = router.map(|router| -> Arc<dyn ServiceGeneration> { router });
-    ListenerManager::new(binder, generation)
+    ListenerManager::new(Arc::new(HttpListeners { router }))
 }
 
 struct HttpListeners {
     router: Option<Arc<Router>>,
 }
 
-impl ListenerBinder for HttpListeners {
+impl ListenerHost for HttpListeners {
     fn ensure_gateway(&self) -> BoxFuture<'_, AppResult<()>> {
         Box::pin(async { crate::global_gateway::ensure_started().await.map(|_| ()) })
     }
@@ -142,23 +137,34 @@ impl ListenerBinder for HttpListeners {
         })
     }
 
-    fn bind_hub(
-        &self,
-        config: &HubConfig,
-        hub: Arc<Hub>,
-        nodes: Arc<Nodes>,
-        public_base: String,
+    fn start_hub<'a>(
+        &'a self,
+        config: &'a HubConfig,
+        outcome: TunnelOutcome,
         secrets: HubSecrets,
-    ) -> Result<BoundListener, String> {
-        mcp::spawn_hub_listener(
-            config.local_port,
-            hub,
-            nodes,
-            &config.auth_type,
-            public_base,
+    ) -> BoxFuture<'a, AppResult<()>> {
+        Box::pin(hub_runtime::start(
+            config,
+            outcome,
             secrets,
             self.router.clone(),
-        )
+        ))
+    }
+
+    fn stop_hub(&self) -> BoxFuture<'_, ()> {
+        Box::pin(hub_runtime::stop())
+    }
+    fn attach_hub_tunnel(&self, outcome: TunnelOutcome) -> BoxFuture<'_, ()> {
+        Box::pin(hub_runtime::attach_tunnel(outcome))
+    }
+    fn hub_state(&self) -> BoxFuture<'_, HubState> {
+        Box::pin(hub_runtime::state())
+    }
+    fn hub_public_base(&self) -> BoxFuture<'_, Option<(String, String)>> {
+        Box::pin(hub_runtime::public_base())
+    }
+    fn hub_tunnel_snapshot(&self) -> BoxFuture<'_, Option<TunnelSnapshot>> {
+        Box::pin(hub_runtime::tunnel_snapshot())
     }
 }
 

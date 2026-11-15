@@ -35,17 +35,20 @@ fn extracted_crates_keep_their_dependency_boundaries() {
         .iter()
         .find(|package| package["name"] == "gld-core")
         .expect("缺少 gld-core");
-    assert!(
-        core["dependencies"]
-            .as_array()
-            .expect("core dependencies")
-            .iter()
-            .all(|dependency| !matches!(
-                dependency["name"].as_str(),
-                Some("gld-host" | "gld-daemon")
-            )),
-        "core 不得反向依赖宿主或 daemon（包括测试、可选、构建与平台依赖）"
-    );
+    let core_dependencies = core["dependencies"].as_array().expect("core dependencies");
+    for dependency in core_dependencies {
+        let name = dependency["name"].as_str().expect("dependency name");
+        assert!(
+            !matches!(name, "gld-host" | "gld-daemon"),
+            "core 不得反向依赖 {name}（包括测试、可选、构建与平台依赖）"
+        );
+        if dependency["kind"] != "dev" {
+            assert!(
+                !matches!(name, "axum" | "tower-http" | "jsonwebtoken"),
+                "core 生产代码不得直接依赖宿主 HTTP / OAuth 实现 {name}"
+            );
+        }
+    }
 
     for (name, normal, development) in [
         ("gld-policy", &["serde"][..], &["serde_json"][..]),
@@ -89,6 +92,7 @@ fn extracted_crates_keep_their_dependency_boundaries() {
                 "serde",
                 "serde_json",
                 "tokio",
+                "tokio-tungstenite",
                 "uuid",
                 "axum",
                 "tower-http",

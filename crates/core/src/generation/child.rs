@@ -25,7 +25,7 @@ use crate::error::{AppError, AppResult};
 use crate::hub::{context_fingerprint, Hub, NodeBridge};
 use crate::managed_workspaces::startup::StartupSweep;
 use crate::mcp::handle_request;
-use crate::nodes::registry::NativeMember;
+use crate::nodes::NativeMember;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{canonical_tool_name, exposed_tool_names};
 use crate::tools::workspace_runtime::{self, WorkspaceHandoff};
@@ -440,7 +440,7 @@ impl Generation {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(HubSlot { hub, sweep });
     }
 
-    /// 和原来 `hub::runtime::stop_runtime` 里的同一段：停启动检查、收 Hub 入口起的命令、关远端。
+    /// 执行代自己的清理步骤：停启动检查、收 Hub 入口起的命令、关远端。
     fn shutdown_hub(&self) {
         let slot = self
             .hub

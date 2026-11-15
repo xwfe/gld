@@ -94,10 +94,10 @@ impl App {
         Ok(self.settings()?.hub)
     }
 
-    pub async fn hub_status(&self) -> AppResult<HubStatusDto> {
+    pub async fn hub_status(&self, listeners: &ListenerManager) -> AppResult<HubStatusDto> {
         let config = self.settings()?.hub;
         let profiles = self.list_workspaces()?;
-        let (state, detail) = match hub::runtime::state().await {
+        let (state, detail) = match listeners.host().hub_state().await {
             HubState::Running { .. } => ("running", String::new()),
             HubState::Stopped if config.members.is_empty() && !config.work_sessions => {
                 ("stopped", "还没有项目：gld start <项目目录>".to_string())
@@ -115,7 +115,7 @@ impl App {
         };
         // 跑着就以这次实际拿到的为准：Cloudflare 临时地址每次都变，配置里推不出来。
         // 停着就按配置推；全局入口的临时地址是它直接写进文件的，所以从磁盘读。
-        let (public_base, tunnel_error) = match hub::runtime::public_base().await {
+        let (public_base, tunnel_error) = match listeners.host().hub_public_base().await {
             Some(running) if state == "running" => running,
             _ => (
                 hub::public_base_url(&AppSettings::load_or_default()),
@@ -229,11 +229,11 @@ impl App {
                 settings.hub = saved;
                 Ok(())
             })?;
-            if hub::runtime::state().await != HubState::Stopped {
+            if listeners.host().hub_state().await != HubState::Stopped {
                 self.restart_after_change(listeners).await?;
             }
         }
-        self.hub_status().await
+        self.hub_status(listeners).await
     }
 
     /// 配置已经落盘之后按它重启。起不来时要说清楚：配置存下了，但服务现在是停的——
@@ -251,8 +251,10 @@ impl App {
     /// `gld start` 走这里：重复敲一次不该掉客户端连接，Cloudflare 临时地址也不该
     /// 因此换掉。真要重启用 [`Self::start_hub`]（`gld restart`）。
     pub async fn ensure_hub_started(&self, listeners: &ListenerManager) -> AppResult<HubStatusDto> {
-        let running = matches!(hub::runtime::state().await, HubState::Running { .. });
-        let tunnel_failed = hub::runtime::public_base()
+        let running = matches!(listeners.host().hub_state().await, HubState::Running { .. });
+        let tunnel_failed = listeners
+            .host()
+            .hub_public_base()
             .await
             .is_some_and(|(_, error)| !error.is_empty());
         if running && !tunnel_failed {
@@ -260,7 +262,7 @@ impl App {
                 settings.hub.restore_on_launch = true;
                 Ok(())
             })?;
-            return self.hub_status().await;
+            return self.hub_status(listeners).await;
         }
         self.start_hub(listeners).await
     }
@@ -268,6 +270,7 @@ impl App {
     /// 把工作区加进 hub。不重启：hub 每次请求都重新读成员表。
     pub async fn add_hub_members(
         &self,
+        listeners: &ListenerManager,
         targets: &[WorkspaceTarget],
     ) -> AppResult<HubMembershipChange> {
         let profiles = targets
@@ -290,7 +293,7 @@ impl App {
         Ok(HubMembershipChange {
             changed,
             unchanged,
-            status: self.hub_status().await?,
+            status: self.hub_status(listeners).await?,
         })
     }
 
@@ -304,7 +307,11 @@ impl App {
     /// 字段全部由操作员给：node 和 workspace 都是 **ccnm 那边配置里的名字**，
     /// 不是 host、不是路径。gld 不解析 SSH 凭据，也不知道对面的根目录在哪
     /// （RFC-0002 5.1）。
-    pub async fn add_ccnm_member(&self, spec: CcnmMemberSpec) -> AppResult<HubMembershipChange> {
+    pub async fn add_ccnm_member(
+        &self,
+        listeners: &ListenerManager,
+        spec: CcnmMemberSpec,
+    ) -> AppResult<HubMembershipChange> {
         let member = build_ccnm_member(spec)?;
         let existing = self.ccnm_members()?;
         if let Some(clash) = existing
@@ -342,7 +349,7 @@ impl App {
         Ok(HubMembershipChange {
             changed: vec![dto],
             unchanged: Vec::new(),
-            status: self.hub_status().await?,
+            status: self.hub_status(listeners).await?,
         })
     }
 
@@ -350,7 +357,11 @@ impl App {
     ///
     /// 和本地成员不同，本地的"移出 hub"只是不再暴露，工作区本身还在；远端
     /// 成员除了这份配置没有别的东西，所以是真的删掉。
-    pub async fn remove_ccnm_member(&self, selector: &str) -> AppResult<HubMembershipChange> {
+    pub async fn remove_ccnm_member(
+        &self,
+        listeners: &ListenerManager,
+        selector: &str,
+    ) -> AppResult<HubMembershipChange> {
         let selector = selector.trim();
         let members = self.ccnm_members()?;
         let found = members
@@ -381,13 +392,14 @@ impl App {
         Ok(HubMembershipChange {
             changed: vec![dto],
             unchanged: Vec::new(),
-            status: self.hub_status().await?,
+            status: self.hub_status(listeners).await?,
         })
     }
 
     /// 把工作区移出 hub。下一次调用起就访问不到，它经 hub 起的命令在那时被结束。
     pub async fn remove_hub_members(
         &self,
+        listeners: &ListenerManager,
         targets: &[WorkspaceTarget],
     ) -> AppResult<HubMembershipChange> {
         let members = self.settings()?.hub.members;
@@ -442,7 +454,7 @@ impl App {
         Ok(HubMembershipChange {
             changed,
             unchanged,
-            status: self.hub_status().await?,
+            status: self.hub_status(listeners).await?,
         })
     }
 
@@ -453,19 +465,19 @@ impl App {
             settings.hub.restore_on_launch = true;
             Ok(())
         })?;
-        self.hub_status().await
+        self.hub_status(listeners).await
     }
 
-    pub async fn stop_hub(&self) -> AppResult<HubStatusDto> {
+    pub async fn stop_hub(&self, listeners: &ListenerManager) -> AppResult<HubStatusDto> {
         {
             let _one_at_a_time = LIFECYCLE.lock().await;
-            hub::runtime::stop().await;
+            listeners.host().stop_hub().await;
         }
         self.update_settings(|settings| {
             settings.hub.restore_on_launch = false;
             Ok(())
         })?;
-        self.hub_status().await
+        self.hub_status(listeners).await
     }
 
     /// 取 hub 的一项凭据；还没生成过就当场生成。
@@ -498,7 +510,7 @@ impl App {
             )));
         }
         self.with_data(|store| store.set_app_secret(HUB_SCOPE, key, value))?;
-        if hub::runtime::state().await != HubState::Stopped {
+        if listeners.host().hub_state().await != HubState::Stopped {
             self.restart_after_change(listeners).await?;
         }
         Ok(())
@@ -524,8 +536,11 @@ impl App {
     }
 
     /// 服务的逐项检查：本地 /mcp、公网 /mcp，OAuth 时再看两份元数据。
-    pub async fn hub_health(&self) -> AppResult<Vec<crate::health::HealthItem>> {
-        let status = self.hub_status().await?;
+    pub async fn hub_health(
+        &self,
+        listeners: &ListenerManager,
+    ) -> AppResult<Vec<crate::health::HealthItem>> {
+        let status = self.hub_status(listeners).await?;
         let public_base = status
             .public_endpoint
             .strip_suffix("/mcp")
@@ -547,7 +562,7 @@ impl App {
     ) -> AppResult<String> {
         validate_hub_key(key)?;
         let value = self.with_data(|store| store.regenerate_app_secret(HUB_SCOPE, key))?;
-        if hub::runtime::state().await != HubState::Stopped {
+        if listeners.host().hub_state().await != HubState::Stopped {
             self.restart_after_change(listeners).await?;
         }
         Ok(value)
@@ -570,7 +585,7 @@ impl App {
                         .into(),
                 ));
             }
-            listeners.binder().ensure_gateway().await?;
+            listeners.host().ensure_gateway().await?;
         }
         let openai = config.tunnel_type == "openai";
         let secrets = self.with_data(|store| {
@@ -589,7 +604,7 @@ impl App {
         })?;
         let tunnel_key = secrets.openai_tunnel_key.clone().unwrap_or_default();
 
-        hub::runtime::stop().await;
+        listeners.host().stop_hub().await;
         ensure_port_available(config.local_port, "MCP 服务").await?;
         // 别的隧道要先起：拿到的公网地址要写进监听器的 OAuth 元数据。OpenAI 隧道没有地址，
         // 而且一起来就要探本机服务，所以等监听器应答了再起。
@@ -602,7 +617,10 @@ impl App {
         } else {
             self.start_hub_tunnel(&config, "").await
         };
-        hub::runtime::start(&config, outcome, secrets, listeners).await?;
+        listeners
+            .host()
+            .start_hub(&config, outcome, secrets)
+            .await?;
         // 和工作区服务一样，报 running 之前确认它真的开始应答，理由见 wait_until_answering。
         if !wait_until_answering(config.local_port, ServiceKind::Mcp, READY_PROBE_BUDGET).await {
             append_profile_log(
@@ -618,7 +636,7 @@ impl App {
         }
         if openai {
             let outcome = self.start_hub_tunnel(&config, &tunnel_key).await;
-            hub::runtime::attach_tunnel(outcome).await;
+            listeners.host().attach_hub_tunnel(outcome).await;
         }
         Ok(())
     }

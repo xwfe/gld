@@ -3,39 +3,29 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::{ListenerBinder, RuntimeSupervisor};
+use super::{ListenerHost, RuntimeSupervisor};
 use crate::error::AppResult;
-use crate::generation::ServiceGeneration;
 
 /// 同一个宿主的监听表、工作区重启锁和启动恢复标记必须作为一份资源传递。
 pub struct ListenerManager {
     runtime: Mutex<RuntimeSupervisor>,
-    binder: Arc<dyn ListenerBinder>,
-    generation: Option<Arc<dyn ServiceGeneration>>,
+    host: Arc<dyn ListenerHost>,
     restart_gate: tokio::sync::Mutex<()>,
     startup_restore_attempted: AtomicBool,
 }
 
 impl ListenerManager {
-    pub fn new(
-        binder: Arc<dyn ListenerBinder>,
-        generation: Option<Arc<dyn ServiceGeneration>>,
-    ) -> Self {
+    pub fn new(host: Arc<dyn ListenerHost>) -> Self {
         Self {
-            runtime: Mutex::new(RuntimeSupervisor::new(binder.clone())),
-            binder,
-            generation,
+            runtime: Mutex::new(RuntimeSupervisor::new(host.clone())),
+            host,
             restart_gate: tokio::sync::Mutex::new(()),
             startup_restore_attempted: AtomicBool::new(false),
         }
     }
 
-    pub(crate) fn binder(&self) -> &dyn ListenerBinder {
-        &*self.binder
-    }
-
-    pub(crate) fn generation(&self) -> Option<Arc<dyn ServiceGeneration>> {
-        self.generation.clone()
+    pub(crate) fn host(&self) -> &dyn ListenerHost {
+        &*self.host
     }
 
     fn runtime(&self) -> MutexGuard<'_, RuntimeSupervisor> {
@@ -64,16 +54,17 @@ impl ListenerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hub::{Hub, HubSecrets};
-    use crate::nodes::registry::Nodes;
+    use crate::hub::runtime::{HubState, TunnelOutcome, TunnelSnapshot};
+    use crate::hub::HubSecrets;
     use crate::runtime::{BoundListener, ServiceKind};
     use crate::settings::HubConfig;
     use crate::usage::ServiceUsage;
     use crate::workspace::WorkspaceProfile;
+    use futures_util::future::BoxFuture;
 
-    struct UnusedBinder;
+    struct UnusedHost;
 
-    impl ListenerBinder for UnusedBinder {
+    impl ListenerHost for UnusedHost {
         fn ensure_gateway(&self) -> futures_util::future::BoxFuture<'_, AppResult<()>> {
             unreachable!("test does not start a gateway")
         }
@@ -87,20 +78,33 @@ mod tests {
         ) -> AppResult<Result<BoundListener, String>> {
             unreachable!("test does not start services")
         }
-        fn bind_hub(
-            &self,
-            _: &HubConfig,
-            _: Arc<Hub>,
-            _: Arc<Nodes>,
-            _: String,
+        fn start_hub<'a>(
+            &'a self,
+            _: &'a HubConfig,
+            _: TunnelOutcome,
             _: HubSecrets,
-        ) -> Result<BoundListener, String> {
+        ) -> BoxFuture<'a, AppResult<()>> {
             unreachable!("test does not start services")
+        }
+        fn stop_hub(&self) -> BoxFuture<'_, ()> {
+            unreachable!()
+        }
+        fn attach_hub_tunnel(&self, _: TunnelOutcome) -> BoxFuture<'_, ()> {
+            unreachable!()
+        }
+        fn hub_state(&self) -> BoxFuture<'_, HubState> {
+            unreachable!()
+        }
+        fn hub_public_base(&self) -> BoxFuture<'_, Option<(String, String)>> {
+            unreachable!()
+        }
+        fn hub_tunnel_snapshot(&self) -> BoxFuture<'_, Option<TunnelSnapshot>> {
+            unreachable!()
         }
     }
 
     fn test_manager() -> ListenerManager {
-        ListenerManager::new(Arc::new(UnusedBinder), None)
+        ListenerManager::new(Arc::new(UnusedHost))
     }
 
     #[test]

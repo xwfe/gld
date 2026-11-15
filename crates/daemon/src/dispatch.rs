@@ -152,14 +152,16 @@ pub async fn dispatch(
         R::GatewayHealth => ok(&global_gateway::health().await),
 
         // ---- 聚合入口 ----
-        R::HubStatus => ok(&app.hub_status().await?),
+        R::HubStatus => ok(&app.hub_status(listeners).await?),
         R::SetHubConfig { config } => ok(&app.set_hub_config(listeners, config).await?),
-        R::HubAddMembers { targets } => ok(&app.add_hub_members(&targets).await?),
-        R::HubRemoveMembers { targets } => ok(&app.remove_hub_members(&targets).await?),
-        R::HubAddRemote { spec } => ok(&app.add_ccnm_member(spec).await?),
-        R::HubRemoveRemote { selector } => ok(&app.remove_ccnm_member(&selector).await?),
+        R::HubAddMembers { targets } => ok(&app.add_hub_members(listeners, &targets).await?),
+        R::HubRemoveMembers { targets } => ok(&app.remove_hub_members(listeners, &targets).await?),
+        R::HubAddRemote { spec } => ok(&app.add_ccnm_member(listeners, spec).await?),
+        R::HubRemoveRemote { selector } => {
+            ok(&app.remove_ccnm_member(listeners, &selector).await?)
+        }
         R::HubStart => ok(&app.start_hub(listeners).await?),
-        R::HubStop => ok(&app.stop_hub().await?),
+        R::HubStop => ok(&app.stop_hub(listeners).await?),
         R::HubSecret { key } => ok(&app.hub_secret(&key)?),
         R::RegenerateHubSecret { key } => ok(&app.regenerate_hub_secret(listeners, &key).await?),
         R::SetHubSecret { key, value } => {
@@ -167,9 +169,9 @@ pub async fn dispatch(
             ok(&true)
         }
         R::HubJoinAll => ok(&app.join_all_workspaces()?),
-        R::HubHealth => ok(&app.hub_health().await?),
+        R::HubHealth => ok(&app.hub_health(listeners).await?),
         R::HubEnsureStarted => ok(&app.ensure_hub_started(listeners).await?),
-        R::HubUsage => ok(&gld_core::hub::runtime::usage().await),
+        R::HubUsage => ok(&gld_host::hub_runtime::usage().await),
         R::HubLogs { max_bytes } => ok(&app.hub_logs(max_bytes)?),
 
         // ---- 密钥 ----
@@ -419,7 +421,7 @@ pub async fn dispatch(
             ok(&app.list_tools(&profile.id)?)
         }
         R::ServedTools => {
-            let Some((build, tools)) = gld_core::hub::runtime::served_tools().await else {
+            let Some((build, tools)) = gld_host::hub_runtime::served_tools().await else {
                 return Err(RpcError::from(gld_core::AppError::Message(
                     "服务没在跑，没有正在给客户端的工具表；`gld start` 之后再查".into(),
                 )));
@@ -558,7 +560,7 @@ async fn remove_node(machine: String) -> Result<Value, RpcError> {
 
 /// 登记已经落盘之后才调，所以失败时要说清楚变更本身已经生效。
 async fn close_stale_connection(machine_id: String, done: &str) -> Result<(), RpcError> {
-    if let Some(nodes) = gld_core::hub::runtime::nodes().await {
+    if let Some(nodes) = gld_host::hub_runtime::nodes().await {
         tokio::task::spawn_blocking(move || nodes.close_stale(&machine_id))
             .await
             .map_err(|_| RpcError::internal(format!("{done}，但旧连接收回任务失败")))?

@@ -10,7 +10,7 @@ pub use gld_protocol::generation::{
 };
 
 use crate::auth::{AuthContext, Grant, Principal};
-use crate::nodes::registry::NativeMember;
+use crate::nodes::NativeMember;
 
 /// 单条消息上限。工具回包本身有界（图片预览、命令输出都有上限），这里只防对端发疯。
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;

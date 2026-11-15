@@ -5,8 +5,8 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 
 use super::ServiceKind;
-use crate::hub::{Hub, HubSecrets};
-use crate::nodes::registry::Nodes;
+use crate::hub::runtime::{HubState, TunnelOutcome, TunnelSnapshot};
+use crate::hub::HubSecrets;
 use crate::settings::HubConfig;
 use crate::usage::ServiceUsage;
 use crate::workspace::WorkspaceProfile;
@@ -15,7 +15,7 @@ use crate::AppResult;
 pub type ShutdownSender = tokio::sync::oneshot::Sender<()>;
 pub type BoundListener = (ShutdownSender, crate::async_rt::JoinHandle<()>);
 
-pub trait ListenerBinder: Send + Sync {
+pub trait ListenerHost: Send + Sync {
     /// 启动选择经全局入口暴露的监听器前，先确保入口在跑。
     fn ensure_gateway(&self) -> BoxFuture<'_, AppResult<()>>;
 
@@ -28,12 +28,15 @@ pub trait ListenerBinder: Send + Sync {
         usage: Arc<ServiceUsage>,
     ) -> AppResult<Result<BoundListener, String>>;
 
-    fn bind_hub(
-        &self,
-        config: &HubConfig,
-        hub: Arc<Hub>,
-        nodes: Arc<Nodes>,
-        public_base: String,
+    fn start_hub<'a>(
+        &'a self,
+        config: &'a HubConfig,
+        outcome: TunnelOutcome,
         secrets: HubSecrets,
-    ) -> Result<BoundListener, String>;
+    ) -> BoxFuture<'a, AppResult<()>>;
+    fn stop_hub(&self) -> BoxFuture<'_, ()>;
+    fn attach_hub_tunnel(&self, outcome: TunnelOutcome) -> BoxFuture<'_, ()>;
+    fn hub_state(&self) -> BoxFuture<'_, HubState>;
+    fn hub_public_base(&self) -> BoxFuture<'_, Option<(String, String)>>;
+    fn hub_tunnel_snapshot(&self) -> BoxFuture<'_, Option<TunnelSnapshot>>;
 }

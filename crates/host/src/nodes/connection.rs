@@ -12,9 +12,9 @@ use futures_util::{Sink, Stream};
 use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 
-use super::hub_key::MessageSigner;
-use super::transport::SocketTransport;
-use crate::bridge::peer::{Peer, PeerError};
+use gld_core::bridge::peer::{Peer, PeerError};
+use gld_core::nodes::hub_key::MessageSigner;
+use gld_core::nodes::transport::SocketTransport;
 
 /// 关连接时给在途调用多久自己收完。一次调用最多要等 60 秒，不能全等：`gld daemon stop` 只等 20 秒，
 /// 多台机器一起忙时更久。切断后调用方拿到“结果不明”，和断线一样，不会重放。
@@ -136,11 +136,11 @@ impl Connection {
     pub fn new(socket: WebSocket, signer: MessageSigner) -> Arc<Self> {
         let cancel = Arc::new(Notify::new());
         Arc::new(Self {
-            peer: Mutex::new(Peer::new(
-                SocketTransport::bounded(AxumSocket(socket))
-                    .signed(signer)
-                    .cancellable(cancel.clone()),
-            )),
+            peer: Mutex::new(Peer::new(SocketTransport::from_bounded_host_socket(
+                AxumSocket(socket),
+                signer,
+                cancel.clone(),
+            ))),
             in_flight: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),

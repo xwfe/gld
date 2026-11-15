@@ -7,7 +7,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-use super::hub_key::{Binding, MessageSigner, NONCE_HEADER, PROOF_HEADER};
+use gld_core::auth::bearer_token;
+use gld_core::nodes::config;
+use gld_core::nodes::hub_key::{Binding, MessageSigner, NONCE_HEADER, PROOF_HEADER};
+use gld_core::nodes::pairing::{self, PairError, PairRequest};
+use gld_core::nodes::transport::MAX_MESSAGE_BYTES;
+
 use super::registry::Nodes;
 
 /// 邀请只用于这条独立的登记入口。正文有界，解析失败不回显秘密字段。
@@ -19,7 +24,7 @@ pub async fn pair(request: axum::extract::Request) -> Response {
         .headers()
         .get(AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
-        .and_then(crate::auth::bearer_token)
+        .and_then(bearer_token)
         .map(str::to_owned)
     else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -34,12 +39,11 @@ pub async fn pair(request: axum::extract::Request) -> Response {
         Ok(Err(_)) => return StatusCode::BAD_REQUEST.into_response(),
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
-    let request = match serde_json::from_slice::<super::pairing::PairRequest>(&body) {
+    let request = match serde_json::from_slice::<PairRequest>(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let result =
-        tokio::task::spawn_blocking(move || super::pairing::pair(&invitation, request)).await;
+    let result = tokio::task::spawn_blocking(move || pairing::pair(&invitation, request)).await;
     match result {
         Ok(Ok(registered)) => (
             [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -47,7 +51,6 @@ pub async fn pair(request: axum::extract::Request) -> Response {
         )
             .into_response(),
         Ok(Err(error)) => {
-            use super::pairing::PairError;
             let status = match error {
                 PairError::InvalidRequest => StatusCode::BAD_REQUEST,
                 PairError::InvalidInvitation => StatusCode::UNAUTHORIZED,
@@ -72,7 +75,7 @@ pub async fn upgrade(
     let Some(credential) = headers
         .get(AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
-        .and_then(crate::auth::bearer_token)
+        .and_then(bearer_token)
         .map(str::to_owned)
     else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -83,19 +86,18 @@ pub async fn upgrade(
         _ => None,
     };
     let admitted = tokio::task::spawn_blocking(move || {
-        let authenticated =
-            super::config::authenticate(&machine_id, &credential).map_err(|error| {
-                if error == super::config::AUTH_FAILED {
-                    "INVALID_NODE_CREDENTIALS"
-                } else {
-                    "NODE_REGISTRY_UNAVAILABLE"
-                }
-            })?;
+        let authenticated = config::authenticate(&machine_id, &credential).map_err(|error| {
+            if error == config::AUTH_FAILED {
+                "INVALID_NODE_CREDENTIALS"
+            } else {
+                "NODE_REGISTRY_UNAVAILABLE"
+            }
+        })?;
         // 先认凭据再看 nonce：没凭据的请求一律 401，不透露节点协议细节。
         let binding = nonce
             .and_then(|nonce| Binding::new(&authenticated.hub_id, &machine_id, &nonce).ok())
             .ok_or("NODE_NONCE_REQUIRED")?;
-        let key = super::config::signing_key().map_err(|_| "NODE_HUB_KEY_UNAVAILABLE")?;
+        let key = config::signing_key().map_err(|_| "NODE_HUB_KEY_UNAVAILABLE")?;
         let hub_id = authenticated.hub_id.clone();
         let reservation = nodes.reserve(authenticated)?;
         let proof = key.handshake_proof(&binding);
@@ -123,8 +125,8 @@ pub async fn upgrade(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let mut response = ws
-        .max_message_size(super::transport::MAX_MESSAGE_BYTES)
-        .max_frame_size(super::transport::MAX_MESSAGE_BYTES)
+        .max_message_size(MAX_MESSAGE_BYTES)
+        .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| reservation.accept(socket, signer));
     response.headers_mut().insert(
         "x-gld-hub-id",

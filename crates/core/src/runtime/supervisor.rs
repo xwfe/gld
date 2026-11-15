@@ -12,7 +12,7 @@ use crate::tunnel::{cleanup_orphan_for_runtime, TunnelServiceKind};
 use crate::usage::{ServiceUsage, ServiceUsageStats};
 use crate::workspace::{RuntimeStatusDto, WorkspaceProfile};
 
-use super::{ListenerBinder, ShutdownSender};
+use super::{ListenerHost, ShutdownSender};
 
 pub use gld_protocol::service::ServiceKind;
 
@@ -35,15 +35,15 @@ struct RuntimeEntry {
 }
 
 pub struct RuntimeSupervisor {
-    binder: Arc<dyn ListenerBinder>,
+    host: Arc<dyn ListenerHost>,
     entries: HashMap<(String, ServiceKind), RuntimeEntry>,
     usage: HashMap<(String, ServiceKind), Arc<ServiceUsage>>,
 }
 
 impl RuntimeSupervisor {
-    pub(super) fn new(binder: Arc<dyn ListenerBinder>) -> Self {
+    pub(super) fn new(host: Arc<dyn ListenerHost>) -> Self {
         Self {
-            binder,
+            host,
             entries: HashMap::new(),
             usage: HashMap::new(),
         }
@@ -290,7 +290,7 @@ impl RuntimeSupervisor {
             }
         }
 
-        let spawn_result = self.binder.bind_workspace(profile, kind, port, usage)?;
+        let spawn_result = self.host.bind_workspace(profile, kind, port, usage)?;
 
         match spawn_result {
             Ok((shutdown, handle)) => {

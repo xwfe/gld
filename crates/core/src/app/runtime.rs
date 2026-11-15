@@ -221,7 +221,7 @@ impl App {
             }
         }
         // 不动 restore_on_launch：这是守护进程退出，不是用户要停 hub，下次启动还得恢复。
-        crate::hub::runtime::stop().await;
+        listeners.host().stop_hub().await;
     }
 
     async fn start_inner(
@@ -251,7 +251,7 @@ impl App {
             };
         }
         if uses_global_gateway(&profile, kind) {
-            listeners.binder().ensure_gateway().await?;
+            listeners.host().ensure_gateway().await?;
         }
         let profile = self.profile_by_id(id)?;
         listeners.with_runtime(|runtime| match kind {

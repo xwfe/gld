@@ -398,7 +398,7 @@ fn the_hub_call_budget_fits_the_longest_tool_wait_and_a_slow_reply() {
     .map(|(tool, arg)| bounded(&json!({ *arg: u64::MAX }), tool, arg))
     .max()
     .unwrap();
-    let call = crate::nodes::registry::CALL;
+    let call = crate::nodes::transport::HUB_CALL_TIMEOUT;
     assert!(call >= Duration::from_millis(longest_wait) + MESSAGE_WRITE_TIMEOUT);
     assert!(call <= IDLE_TIMEOUT);
 }

@@ -41,7 +41,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | 文件执行边界 | `crates/runtime/src/**` | 显式保护目录与别名、有界文件读取、补丁版本前置条件、提交/回滚、Notebook；core 保留共享锁和调用方版本链集成测试 |
 | 命令与会话边界 | runtime 的 exec/session/runs/workspace_runtime；core 的 run_records/task_acceptance；CLI 的 generation_boundary/scoped_grants/agent_delegation | 启动与写锁、主体隔离、输出/终态/记录证据、撤销、交接状态；Agent 阻塞条件在应用层组合 |
 | Agent 边界 | agent 的 profile/store/run；core 的 agents；CLI 的 agent_delegation/generation_boundary | 档案、存储和进程机制随实现；审批、主体隔离、撤销、互斥、环境注入和换代组合在实际调用侧验证 |
-| 宿主节点所有权 | core 的 hub/tests/node_bridge；CLI 的 native_nodes/ownership | 桥接错误与离线成员保留、关闭顺序、换代保持同一 WSS、Hub 重启后原进程重连、直连/网关共用登记表 |
+| 宿主节点所有权 | core 的 hub/tests/node_bridge；host 的 native_node_lifecycle；CLI 的 native_nodes/ownership | 桥接错误与离线成员保留、关闭顺序、换代保持同一 WSS、Hub 重启后原进程重连、直连/网关共用登记表 |
 | 监听管理所有权 | core 的 runtime/manager；CLI 的 service_lifecycle/start_and_upgrade | 一次恢复、独立锁范围、同实例启停/状态、配置更新与重启 |
 | 应用清理与执行代装配 | core 的 app_cleanup；daemon 的 typed agent reply；CLI 的 daemon_lifecycle/generation_boundary/agent_delegation/scoped_grants/planning_output | 先落盘后清理、真实 35 秒复清、错误保真、直连与执行代分支、退出终态 |
 | 宿主 HTTP / OAuth | `crates/host/src/auth/`、`mcp.rs`、`actions/`；CLI 的 oauth_connector_flow / scoped_grants / actions_and_gateway | 错误与元数据、动态注册/PKCE/刷新、持久化损坏拒绝、鉴权和工具选路 |

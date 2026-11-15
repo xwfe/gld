@@ -5,7 +5,7 @@ mod manager;
 mod port;
 mod supervisor;
 
-pub use binding::{BoundListener, ListenerBinder, ShutdownSender};
+pub use binding::{BoundListener, ListenerHost, ShutdownSender};
 pub use manager::ListenerManager;
 pub use port::{await_listener_shutdown, is_own_process, port_busy_message, wait_for_port_free};
 pub use supervisor::{RuntimeSupervisor, ServiceKind};

@@ -1,11 +1,6 @@
-//! 宿主路由结果与 Hub 生命周期编排所需的操作。
-
-use std::sync::Arc;
+//! 已认证请求跨执行代后由宿主使用的路由结果。
 
 use serde_json::Value;
-
-use crate::hub::NodeBridge;
-use crate::settings::HubConfig;
 
 /// 转发失败的三种情况，调用方靠它决定告诉客户端什么。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,11 +39,4 @@ pub struct McpReply {
     pub response: Value,
     pub member: Option<String>,
     pub audit: Value,
-}
-
-/// Hub 的启停与已发布工具表跨执行代操作；HTTP 路由由宿主直接执行。
-pub trait ServiceGeneration: Send + Sync {
-    fn hub_started(&self, config: &HubConfig, nodes: Arc<dyn NodeBridge>);
-    fn hub_stopping(&self);
-    fn served_tools(&self) -> Result<Value, CallError>;
 }

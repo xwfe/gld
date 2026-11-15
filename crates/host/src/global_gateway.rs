@@ -509,10 +509,10 @@ async fn hub_node_connect(
     if !matches!(enabled, Ok(true)) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(nodes) = gld_core::hub::runtime::nodes().await else {
+    let Some(nodes) = crate::hub_runtime::nodes().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    gld_core::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
+    crate::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
 }
 
 async fn proxy_hub_path(

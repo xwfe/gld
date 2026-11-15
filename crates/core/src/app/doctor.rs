@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use super::App;
 use crate::error::AppResult;
 use crate::hub::{
-    self,
     runtime::{HubState, TunnelSnapshot},
     HUB_SCOPE,
 };
@@ -145,7 +144,7 @@ impl App {
         ));
         checks.push(tunnel_check(
             &settings.hub,
-            hub::runtime::tunnel_snapshot().await.as_ref(),
+            listeners.host().hub_tunnel_snapshot().await.as_ref(),
         ));
         checks.extend(config_checks(&profiles, &settings, &secret_present));
         checks.extend(self.port_checks(listeners, &profiles, &settings).await?);
@@ -158,7 +157,7 @@ impl App {
         profiles: &[WorkspaceProfile],
         settings: &AppSettings,
     ) -> AppResult<Vec<DoctorCheck>> {
-        let running = !matches!(hub::runtime::state().await, HubState::Stopped);
+        let running = !matches!(listeners.host().hub_state().await, HubState::Stopped);
         let mut checks = vec![service_port_check(
             settings.hub.local_port,
             running,

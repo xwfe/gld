@@ -9,49 +9,20 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::auth::{AuthContext, Principal};
-use crate::bridge::peer::PeerError;
-use crate::bridge::session::Offered;
-use crate::tools::workspace::{tool_err, WorkspaceError};
+use gld_core::auth::{AuthContext, Principal};
+use gld_core::bridge::peer::PeerError;
+use gld_core::bridge::session::Offered;
+use gld_core::hub::NodeBridge;
+use gld_core::nodes::config::{self, runs_commands, AuthenticatedMachine, NodeProject};
+use gld_core::nodes::hub_key::MessageSigner;
+use gld_core::nodes::identity::forwarded_meta;
+use gld_core::nodes::transport::HUB_CALL_TIMEOUT;
+use gld_core::nodes::NativeMember;
+use gld_core::tools::workspace::{tool_err, wrap_tool_result, WorkspaceError};
 
-use super::config::{self, runs_commands, AuthenticatedMachine, NodeProject};
 use super::connection::{Connection, ConnectionError};
-use super::hub_key::MessageSigner;
-use super::identity::forwarded_meta;
 
 const HANDSHAKE: Duration = Duration::from_secs(10);
-/// 工具自己最多等 30 秒（`exec_command` 的 yield 上限），回包在路上再给 30 秒。超时等于断线：
-/// 连接被关、节点重连、调用方拿到“结果不明”，所以必须比工具等待长，慢网下宁可多等。
-/// 这是上限，调用一回包就返回。不能超过节点的 `IDLE_TIMEOUT`：调用期间 Hub 不发 Ping，
-/// 节点那么久收不到任何帧就会自己断开。
-pub(super) const CALL: Duration = Duration::from_secs(60);
-
-#[derive(Clone)]
-pub struct NativeMember {
-    pub id: String,
-    pub name: String,
-    pub machine_id: String,
-    pub remote_workspace_id: String,
-    pub online: bool,
-    pub revoked: bool,
-    pub tool_profile: String,
-}
-
-impl NativeMember {
-    fn read_only(&self) -> bool {
-        !matches!(self.tool_profile.as_str(), "file-write" | "commands")
-    }
-
-    pub fn listed(&self) -> Value {
-        json!({
-            "id": self.id, "name": self.name, "kind": "node",
-            "machine_id": self.machine_id, "online": self.online, "revoked": self.revoked,
-            "tool_profile": self.tool_profile,
-            "read_only": self.read_only(),
-            "commands": self.tool_profile == "commands",
-        })
-    }
-}
 
 struct Entry {
     generation: String,
@@ -250,7 +221,9 @@ impl Nodes {
                 )
             }
         };
-        match connection.with_peer(|peer| peer.call_tool_with_meta(name, args, meta, CALL)) {
+        match connection
+            .with_peer(|peer| peer.call_tool_with_meta(name, args, meta, HUB_CALL_TIMEOUT))
+        {
             Ok(result) => tag_result(result, member),
             Err(ConnectionError::Busy) => failure(
                 "MACHINE_BUSY",
@@ -304,7 +277,7 @@ impl Nodes {
     }
 }
 
-impl crate::hub::NodeBridge for Nodes {
+impl NodeBridge for Nodes {
     fn members(&self) -> Result<Vec<NativeMember>, String> {
         Nodes::members(self)
     }
@@ -315,7 +288,7 @@ impl crate::hub::NodeBridge for Nodes {
 }
 
 impl Reservation {
-    pub async fn accept(self, socket: axum::extract::ws::WebSocket, signer: MessageSigner) {
+    pub(super) async fn accept(self, socket: axum::extract::ws::WebSocket, signer: MessageSigner) {
         let connection = Connection::new(socket, signer);
         let Some(nodes) = self.nodes.upgrade() else {
             let _ = tokio::task::spawn_blocking(move || connection.close()).await;
@@ -454,7 +427,7 @@ fn parse_projects(result: &Value) -> Result<Vec<NodeProject>, String> {
     Ok(projects)
 }
 
-pub fn workspace_handle(machine_id: &str, workspace_id: &str) -> String {
+fn workspace_handle(machine_id: &str, workspace_id: &str) -> String {
     let encoded = serde_json::to_vec(&(machine_id, workspace_id)).expect("string pair");
     let digest = format!("{:x}", Sha256::digest(encoded));
     format!("n_{}", &digest[..32])
@@ -496,7 +469,7 @@ fn tag_result(mut result: Value, member: &NativeMember) -> Value {
 }
 
 fn failure(code: &'static str, message: &str, retryable: bool) -> Value {
-    crate::tools::workspace::wrap_tool_result(tool_err(WorkspaceError::Tool {
+    wrap_tool_result(tool_err(WorkspaceError::Tool {
         code,
         message: message.into(),
         category: "runtime",

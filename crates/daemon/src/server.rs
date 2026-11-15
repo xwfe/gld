@@ -107,7 +107,7 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
                     .running_services(&listeners)
                     .map(|s| s.len())
                     .unwrap_or(0)
-                    + usize::from(gld_core::hub::runtime::started_hint()),
+                    + usize::from(gld_host::hub_runtime::started_hint()),
             })
         },
         request_shutdown: {

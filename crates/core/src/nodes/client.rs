@@ -135,7 +135,7 @@ fn node_request(
         .websocket_url()?
         .into_client_request()
         .map_err(|_| "invalid node WebSocket endpoint".to_string())?;
-    let mut credential: axum::http::HeaderValue =
+    let mut credential: tokio_tungstenite::tungstenite::http::HeaderValue =
         format!("Bearer {}", config.credential)
             .parse()
             .map_err(|_| "invalid node credential header".to_string())?;

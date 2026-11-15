@@ -10,7 +10,7 @@
 | `crates/runtime` / `gld-runtime` | 工作区路径、文件/补丁、命令、会话、输出、写锁与运行记录；配置和存储位置由调用侧显式传入 |
 | `crates/agent` / `gld-agent` | Agent 档案、任务存储与委派进程生命周期；消费 runtime 的私有文件、环境过滤与脱敏接口 |
 | `crates/core` / `gld-core` | 工具授权、任务/Planning、Agent 审批/审核与应用编排，以及尚未分离的宿主，消费五个底层 crate |
-| `crates/host` / `gld-host` | 执行代 Router/Link、MCP/Actions HTTP 监听、OAuth 会话、全局网关；复用 core 的执行与凭据存储接口 |
+| `crates/host` / `gld-host` | 执行代 Router/Link、MCP/Actions HTTP、OAuth、网关、Hub 监听与节点连接；复用 core 的执行与凭据存储接口 |
 | `crates/daemon` / `gld-daemon` | 本机 IPC、请求分发、守护进程主循环与生命周期，消费共享协议 |
 | `crates/cli` / `gld` | 唯一二进制：clap 解析、后端选择、终端渲染 |
 
@@ -21,7 +21,7 @@
 Agent 和宿主的归属与迁移顺序见 [RFC-0014](rfc/0014-trust-boundary-crates.md)，状态只看 [task_plan.md](../task_plan.md)。
 
 core 不负责 clap 命令行解析，
-但仍包含原生节点接入、应用编排、隧道和本机 MCP 子进程管理。Agent 进程归 agent，工作区命令执行归 runtime；
+但仍包含应用编排、节点客户端、隧道工具和本机 MCP 子进程管理。Agent 进程归 agent，工作区命令执行归 runtime；
 daemon 负责守护进程自身的 IPC 与生命周期，cli 负责参数解析、请求组装和终端展示。不能把“core 不依赖 daemon”
 写成“core 没有网络或进程代码”。纯规则按已建立的边界下沉，应用编排留在 core；契约测试继续约束入口一致性。
 
@@ -145,7 +145,7 @@ core 的 `agents` 保留项目 ID、数据目录和 owner 锁的组合，负责�
 | `tools/` | 统一工具编排与 runtime 文件/补丁/命令适配、策略预检、Git、History、Planning、Skill，以及项目命令发现（`tools/project_commands/`：只读解析 Cargo、package.json 和 CI 工作流；`installs.rs` 判断哪些命令是在装东西、要不要 `confirm`，`policy` 调它）。运行记录、会话和服务端口机制的旧模块只保留兼容入口。`tools::call_tool`（带主体的是 `call_tool_as`）执行工具，`tools::build_tool_context` 构建上下文。MCP 与 CLI 复用内核，但还需验证各自身份、配置、schema 和结果传递 |
 | `mcp/` | MCP 应用分发：工作区的本地请求和执行代共用同一个 JSON-RPC 入口，不负责 HTTP 与 OAuth |
 | `machine_mcp/` | 本机装好的 MCP server 经服务转给 AI（RFC-0006）。读配置、握手调用、子进程通道、连接池、结果整理在共享库 `toexec-mcp`（ccnm 同用）；这里是 gld 自己的：怎么起进程和怎么杀、HTTP 通道、`list_mcp_tools` 等三个工具。自成一块，hub 只在列工具、分发、关服务三处调它 |
-| `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`hub/runtime.rs` 管守护进程里的起停，连同服务自己的隧道 |
+| `hub/` | **就是那个唯一的 MCP 服务**（命令行里叫"服务"，内部名字没改）：一条连接按每次调用的 `workspace` 参数分到各个项目，每个项目一份独立的 `ToolContext`；隔离规则写在 `hub/mod.rs` 开头。`gld-host::hub_runtime` 管宿主起停，连同服务自己的隧道和原生节点表 |
 | `auth/` | 持久 grant/撤销和 OAuth 客户端注册表；纯主体和范围来自 `gld-policy`。动态注册的客户端落盘在 `data/oauth-clients/`，令牌的 `aud` 绑工作区而不是公网地址——两者都是为了"重启和换地址不用重新授权" |
 | `bridge/`、`nodes/` | CCNM 会话、原生节点的身份/项目权限与连接生命周期；共同使用 `gld-transport` 的 Peer 和能力表，保留各自的租约、单连接和断线语义 |
 | `runtime/` | ListenerManager 持有监听表、工作区重启锁与一次恢复标记；RuntimeSupervisor 执行监听器启停、端口检测与释放等待 |
@@ -188,8 +188,8 @@ App 保留数据文件锁、重读磁盘和工具上下文失效规则。Listene
 
 `DaemonContext` 持有启动时创建的同一个 `Arc<Router>`。工具、批准/停止委派和升级从这里选执行代，
 直连请求没有这个上下文，只调用 App 的本地入口；任何路由错误都不转成本地执行。
-daemon 把同一 Router 交给 `gld_host::listener_manager`。HTTP 监听在宿主直接选路；Hub 启停只通过
-`ServiceGeneration` 配置各代、清理与读取已发布工具表。Hub 保存自己挂接的执行代，不查全局 Router。
+daemon 把同一 Router 交给 `gld_host::listener_manager`。HTTP 监听在宿主直接选路，宿主 Hub 直接使用 Router
+配置各代、清理与读取已发布工具表；不查全局 Router，也不再需要跨 crate 的 ServiceGeneration。
 
 App 的 Rust 本地入口明确命名为 `call_tool_local`、`approve_agent_task_local`、`stop_agent_task_local`、
 `remove_grant_local`、`set_planning_mode_local`。宿主转发工具时在阻塞线程里重新读当前目录，不使用较早的 selector 快照；
@@ -209,7 +209,7 @@ Rust 的具体路由器入口现为 `gld_host::generation::Router`。旧的 `cor
 
 ### HTTP 监听和凭据读取
 
-`gld-host` 同时提供 MCP（单工作区和 Hub）与 Actions HTTP 入口。core 的 `ListenerBinder` 是两个实际绑定入口；
+`gld-host` 同时提供 MCP（单工作区和 Hub）与 Actions HTTP 入口。core 的 `ListenerHost` 只暴露现有 Hub 与网关控制和工作区监听绑定；
 Supervisor 继续决定服务状态和启停顺序，宿主读取该监听器的 `SecretStore` 凭据、创建 OAuth 会话、同步绑定和返回停止信号。
 装配凭据的读取失败与监听器绑定失败仍按两层错误处理，不合并为一种运行状态。daemon 和 CLI 直连都显式构造实际 adapter；
 只有 daemon 的 adapter 有执行代。旧 `core::mcp/actions::spawn_listener` 和 OAuth HTTP Rust 入口移到宿主侧，协议和 URL 不变。
@@ -237,7 +237,7 @@ MCP 的 HTTP 入口在完成认证后，调用 `Hub::execution_route(auth, body)
 
 每次启动 Hub，由宿主的 `HubRuntime` 创建一张 `Arc<Nodes>`，将同一张表交给 Router、HTTP 监听器和
 Hub 的 `NodeBridge`。直连 WebSocket 从监听器自己的 state 取得它；全局网关和 daemon 管理操作仍通过
-`hub::runtime::nodes()` 取得当前运行实例，两个入口不会各建一张表。
+`gld_host::hub_runtime::nodes()` 取得当前运行实例，两个入口不会各建一张表。
 
 应用 Hub 只调用现有 `NodeBridge::{members,call}`，不创建或关闭实际节点连接。宿主用 Nodes 的实现，
 执行代用 HostBridge 私有管道；节点自身的 Hub 不转发到其他节点，也不再额外创建空表。
@@ -250,7 +250,7 @@ NodeBridge 不新增关闭方法，丢弃 Arc 也不能替代显式关闭。执�
 
 Rust 调用者需使用 `Hub::new(config, bridge)`；`Hub::nodes()` 已移除，宿主从自己持有的 Nodes 取连接表。
 `spawn_hub_listener` 新增 Nodes 参数，必须传入与该 Hub 桥接相同的表。HTTP、节点/执行代协议、配置、
-错误回包及客户端重连规则不变；连接实现仍在现有模块，整个宿主 crate 的迁移另按 F3/F4 推进。
+错误回包及客户端重连规则不变；服务端登记、配对 HTTP 适配和 socket 接入归 `gld_host::nodes`；节点本地执行、配对持久化、共享传输和成员模型留 core。
 
 ## daemon：协议与进程
 

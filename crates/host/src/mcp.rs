@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::nodes::{endpoint, registry::Nodes};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{
@@ -20,7 +21,6 @@ use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER, SERVER_NAM
 use gld_core::local_network;
 use gld_core::logs::append_profile_log;
 use gld_core::mcp::handle_request;
-use gld_core::nodes::{endpoint, registry::Nodes};
 use gld_core::runtime::ShutdownSender;
 use gld_core::secret::SecretStore;
 use gld_core::settings::AppSettings;
