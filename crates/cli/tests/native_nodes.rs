@@ -13,6 +13,8 @@ mod command_tests;
 mod file_write_tests;
 #[path = "native_nodes/onboarding.rs"]
 mod onboarding_tests;
+#[path = "native_nodes/ownership.rs"]
+mod ownership_tests;
 #[path = "native_nodes/pairing.rs"]
 mod pairing_tests;
 #[path = "native_nodes/proxy.rs"]

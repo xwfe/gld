@@ -41,6 +41,7 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | 文件执行边界 | `crates/runtime/src/**` | 显式保护目录与别名、有界文件读取、补丁版本前置条件、提交/回滚、Notebook；core 保留共享锁和调用方版本链集成测试 |
 | 命令与会话边界 | runtime 的 exec/session/runs/workspace_runtime；core 的 run_records/task_acceptance；CLI 的 generation_boundary/scoped_grants/agent_delegation | 启动与写锁、主体隔离、输出/终态/记录证据、撤销、交接状态；Agent 阻塞条件在应用层组合 |
 | Agent 边界 | agent 的 profile/store/run；core 的 agents；CLI 的 agent_delegation/generation_boundary | 档案、存储和进程机制随实现；审批、主体隔离、撤销、互斥、环境注入和换代组合在实际调用侧验证 |
+| 宿主节点所有权 | core 的 hub/tests/node_bridge；CLI 的 native_nodes/ownership | 桥接错误与离线成员保留、关闭顺序、换代保持同一 WSS、Hub 重启后原进程重连、直连/网关共用登记表 |
 | 工具契约 | `crates/core/tests/call_tool_contract.rs` | 每个 profile 暴露的工具集与返回结构 |
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |

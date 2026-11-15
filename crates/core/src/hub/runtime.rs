@@ -12,6 +12,7 @@ use super::{Hub, HubSecrets};
 use crate::async_rt::JoinHandle;
 use crate::error::{AppError, AppResult};
 use crate::mcp::ShutdownSender;
+use crate::nodes::registry::Nodes;
 use crate::runtime::await_listener_shutdown;
 use crate::settings::HubConfig;
 use crate::tunnel::standalone::StandaloneTunnel;
@@ -21,6 +22,7 @@ struct HubRuntime {
     shutdown: Option<ShutdownSender>,
     handle: JoinHandle<()>,
     hub: Arc<Hub>,
+    nodes: Arc<Nodes>,
     /// 监听器启动后的单轮维护；停服务时取消后续项并收回任务，不留下脱管清理线程。
     startup_sweep: Option<crate::managed_workspaces::startup::StartupSweep>,
     /// 服务自己的隧道进程，跟着监听器一起停。
@@ -75,17 +77,19 @@ pub async fn start(
     if let Some(previous) = guard.take() {
         stop_runtime(previous).await;
     }
-    let hub = Arc::new(Hub::new(config));
+    let nodes = Arc::new(Nodes::new());
+    let hub = Arc::new(Hub::new(config, nodes.clone()));
     // 有执行代时工具在那边跑：监听器开始收请求之前，那边的 Hub 要先建好。
     let router = crate::generation::router();
     if let Some(router) = router.clone() {
-        router.set_nodes(Some(hub.nodes()));
+        router.set_nodes(Some(nodes.clone()));
         let config = config.clone();
         let _ = tokio::task::spawn_blocking(move || router.hub_configure(&config)).await;
     }
     let spawned = crate::mcp::spawn_hub_listener(
         config.local_port,
         hub.clone(),
+        nodes.clone(),
         &config.auth_type,
         outcome.public_base.clone(),
         secrets,
@@ -107,6 +111,7 @@ pub async fn start(
         shutdown: Some(shutdown),
         handle,
         hub,
+        nodes,
         // 有执行代时启动检查在那边跑：它碰的命令和工作区都归那边。
         startup_sweep: if router.is_some() {
             None
@@ -170,7 +175,7 @@ pub async fn nodes() -> Option<Arc<crate::nodes::registry::Nodes>> {
     let active = runtime
         .as_ref()
         .filter(|runtime| !runtime.handle.is_finished())?;
-    Some(active.hub.nodes())
+    Some(active.nodes.clone())
 }
 
 /// 跑着的服务实际用的公网基地址和隧道报错；没在跑是 `None`。
@@ -259,5 +264,6 @@ async fn stop_runtime(mut runtime: HubRuntime) {
     // 成员里经 hub 起的命令，hub 停了就没人能再读它们的输出或杀掉它们。
     // 结束进程要阻塞等待，不能占着异步 worker。
     let hub = runtime.hub;
-    let _ = tokio::task::spawn_blocking(move || hub.shutdown()).await;
+    let nodes = runtime.nodes;
+    let _ = tokio::task::spawn_blocking(move || hub.shutdown_with(|| nodes.close_all())).await;
 }

@@ -65,7 +65,7 @@ use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
 use crate::machine_mcp::{self, installed::Installed, relay::Relay};
 use crate::nodes::config::NodeAccess;
-use crate::nodes::registry::{NativeMember, Nodes};
+use crate::nodes::registry::NativeMember;
 use crate::planning::PlanningService;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{
@@ -233,7 +233,7 @@ pub struct Routed {
 /// 本机 MCP server 转发在路由表里的名字，见 [`Hub::execution_route`]。
 const MACHINE_MCP_ROUTE: &str = "machine-mcp";
 
-/// 执行代摸不到节点连接（归宿主，RFC-0008 §3.4），要用就经这个接口问。
+/// Hub 只查询和调用节点；宿主注入实际登记表，执行代注入私有管道桥，不转移连接关闭权。
 pub trait NodeBridge: Send + Sync {
     fn members(&self) -> Result<Vec<NativeMember>, String>;
     fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value;
@@ -262,8 +262,7 @@ pub struct Hub {
     contexts: Mutex<HashMap<String, CachedContext>>,
     /// 远端成员的 bridge 连接。本地成员一条都用不到。
     connections: Connections,
-    nodes: Arc<Nodes>,
-    /// 在执行代里跑时才有：节点调用经它交给宿主，[`Self::nodes`] 那张表此时是空的。
+    /// 宿主注入实际节点表，执行代注入管道桥；节点自身不再转发到其他节点。
     node_bridge: Option<Arc<dyn NodeBridge>>,
     /// 转发本机装好的 MCP server（`gld mcp on` 开了才有东西）。
     relay: Relay,
@@ -277,8 +276,9 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn new(config: &HubConfig) -> Self {
+    pub fn new(config: &HubConfig, node_bridge: Arc<dyn NodeBridge>) -> Self {
         Self::with_members(config, Members::DataFile, Connections::new())
+            .with_node_bridge(node_bridge)
     }
 
     #[cfg(test)]
@@ -311,7 +311,6 @@ impl Hub {
             usage: Arc::new(ServiceUsage::default()),
             contexts: Mutex::new(HashMap::new()),
             connections,
-            nodes: Arc::new(Nodes::new()),
             node_bridge: None,
             relay: Relay::new(),
             #[cfg(test)]
@@ -331,7 +330,7 @@ impl Hub {
     fn node_members(&self) -> Result<Vec<NativeMember>, String> {
         match &self.node_bridge {
             Some(bridge) => bridge.members(),
-            None => self.nodes.members(),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -344,7 +343,7 @@ impl Hub {
     ) -> Value {
         match &self.node_bridge {
             Some(bridge) => bridge.call(auth, member, tool, args),
-            None => self.nodes.call(auth, member, tool, args),
+            None => node_bridge_failure("服务没在跑"),
         }
     }
 
@@ -504,8 +503,14 @@ impl Hub {
     /// 只停 [`HUB_SCOPE`] 这个入口的：会话表按目录 + 主体分，同一个目录上
     /// 还有命令行和工作区自己监听器起的命令，操作员停的是 hub，不该连累它们。
     ///
+    /// 注入的节点桥由宿主管理，本方法不关闭它。
     /// 会阻塞等进程退出，必须在 `spawn_blocking` 里调。
     pub fn shutdown(&self) {
+        self.shutdown_with(|| {});
+    }
+
+    // 宿主在 CCNM 与本机 MCP 之间关闭自己的节点连接，保持原先的关闭顺序。
+    fn shutdown_with(&self, close_nodes: impl FnOnce()) {
         let contexts: Vec<CachedContext> = self
             .contexts
             .lock()
@@ -522,7 +527,7 @@ impl Hub {
         // 远端 bridge 必须走正常关闭：直接留着进程不管，远端 Runtime 的写锁
         // 会留下 held 标记要人工恢复。
         self.connections.close_all();
-        self.nodes.close_all();
+        close_nodes();
         self.relay.close_all();
     }
 
@@ -1824,6 +1829,7 @@ mod tests {
     use super::*;
     use crate::planning::PlanningMode;
 
+    mod node_bridge;
     mod routing;
 
     struct Fixture {

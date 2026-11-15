@@ -5225,3 +5225,67 @@ env.GLD_HOME.force 两个标量配置后，隔离目录生效，严格 Clippy �
 删除检查发现的文件尾空行时，apply_patch 对 End of File 指令返回 PATCH_FAILED / unsupported_directive，
 没有落盘；改用工具支持的 Update File 补丁后成功删除。该格式差异已记录，未扩展为本轮源码修复。
 本轮未出现新的 gld 内部错误，也没有把此前间歇恢复宣布为根因修复。
+
+
+## 123. D17-F2：原生节点连接由宿主创建、共享和关闭（2026-11-15）
+
+从干净的 `main@6b1c113` 开始，比本地 `origin/main` 超前 7 个提交。先按源码追踪 Nodes 创建、共享、
+关闭和换代，再改资源归属。保留 §122 的 D18 规划与实施顺序，本轮没有实施新授权行为。
+
+### 123.1 实际链路与改动
+
+迁移前每个 Hub 都创建 Nodes；宿主把其中一张表交给 Router 和直连入口，网关/daemon 再从活动 Hub 取它。
+执行代虽然只走 HostBridge，也会创建并关闭一张空表。资源实际归宿主进程，但应用对象承担了创建和关闭。
+
+现在每次 HubRuntime 启动只创建一张 Nodes，同一个 Arc 交给 Router、HTTP Endpoint 和 Hub 的 NodeBridge。
+Nodes 对已有 NodeBridge 的实现仅委托原 members/call，不复制状态、不改认证或结果。child 继续注入 HostBridge，
+Hub 与节点本机分发不再创建 Nodes；移除 Hub::nodes()，公开 Rust 构造与监听参数变化已写入架构文档。
+Hub::new 要求显式传桥，避免保留旧一参数入口却悄悄不再列出离线节点。
+
+- 直连 `/nodes/v1/connect` 使用监听 state 持有的 Nodes，不改查全局运行态锁；网关与 daemon 继续取当前活动运行实例。
+- 停止顺序保持：取消维护 → 停监听并等待 → 收回维护 → 停隧道 → 各执行代 HubShutdown → Router 摘表 →
+  宿主结束 Hub scope 命令 → CCNM → Nodes → 本机 MCP。私有 FnOnce 清理点只为保持 Nodes 的原位置，不扩展 NodeBridge。
+- 认证配置/端口绑定失败仍停隧道、关闭执行代 Hub 并摘表，运行实例不发布，不新加应用 shutdown。
+- Reservation 的 Weak/代次校验、close_all 先标停后关连接、在途调用处理和客户端退避/不重放全部沿用原实现。
+- 换代只重建 child Hub，不关闭宿主表；CCNM/本机 MCP 的 open_connection 交接阻塞未改。
+  监听器异常退出不自动清连接、网关单独停止不关闭 Nodes 等既有边界，也未顺手改变。
+
+### 123.2 新增验证与独立审查
+
+新增两个 core 单测：共享桥保留离线结果、身份/参数和清单错误，关闭一个应用 Hub 不终止另一调用者的桥；
+另一个用既有内存 CCNM/MCP fixture，验证节点清理时上下文已排空、CCNM 已关，而 MCP 仍复用原连接，随后才关闭。
+没有为测试给生产 NodeBridge 增加关闭方法，也没有新增通用执行器或插件接口。
+
+新增 CLI `native_node_connection_is_host_owned_across_switch_and_hub_restart`，在隔离数据目录下真起 daemon、
+本地 TLS/WSS 与节点进程，连续两次通过：
+
+- prepare/switch 后等待旧 child PID 确实退出，宿主 PID 不变、节点读取成功、TLS 总接入数仍为 1。
+- Hub stop 后原活跃连接归零，同一节点进程继续重试；Hub start 后原项目句柄读到新内容，连接峰值保持 1。
+- 相同节点身份再从全局网关进入得到 HTTP 409，原直连仍可读，证明两入口共用登记表。
+
+独立只读审查对照原文确认 Arc 共享、失败分支、停止顺序、锁和执行代入口，没有发现生产回归。
+此次本地 TLS 测试不是跨机或跨版本验收；独立审查本身也不代替运行结果。
+
+### 123.3 验证与交付范围
+
+本机 macOS，所有测试使用隔离 GLD_HOME；没有安装/升级全局依赖。
+
+| 命令 / 范围 | 实际结果 |
+| --- | --- |
+| 迁移前 nodes 单测 | 118 passed / 0 failed |
+| core 新桥接/关闭顺序、nodes、hub::native、native_node_lifecycle | 2 + 118 + 7 + 1 passed / 0 failed |
+| 新 CLI ownership 集成连续两轮 | 每轮 1 passed / 0 failed，分别 4.27 秒、4.34 秒 |
+| CLI generation_boundary / native_nodes | 28 + 49 passed / 0 failed |
+| `cargo test --workspace --all-targets --locked` | **70 个目标，1437 passed / 0 failed / 0 ignored**，退出 0 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 退出 0 |
+| `cargo fmt --all -- --check` | 退出 0 |
+
+新增测试初次编译因 unwrap_err 要求成功类型实现 Debug 而失败，改为直接断言错误值，没有为了测试扩大生产类型。
+Cargo manifest/lock、CI、私有协议、nodes 的 client/connection/reconnect/endpoint 和 Router 状态机代码均保持。
+未验证 Windows/Linux 实机、真实跨机器、跨版本二进制或生产公网；本次不把本地 TLS 与同版本换代当成这些验收。
+
+收尾 `server_info` 实测仍是 `0.10.1 / 1717aaf41685`，连接工具 35 项、指纹 `6022dd56440b0ea9`。
+本轮没有推送、部署、换装或重启运行中的服务，没有创建/修改真实项目、节点、grant 或个人配置。
+构建和测试走本地 shell；gld 只用于运行版本查询，未出现新的 gld 工具错误，也未宣布历史间歇问题已修复。
+
+状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。

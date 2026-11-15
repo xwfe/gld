@@ -304,6 +304,16 @@ impl Nodes {
     }
 }
 
+impl crate::hub::NodeBridge for Nodes {
+    fn members(&self) -> Result<Vec<NativeMember>, String> {
+        Nodes::members(self)
+    }
+
+    fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value {
+        Nodes::call(self, auth, member, tool, args)
+    }
+}
+
 impl Reservation {
     pub async fn accept(self, socket: axum::extract::ws::WebSocket, signer: MessageSigner) {
         let connection = Connection::new(socket, signer);

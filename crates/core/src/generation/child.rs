@@ -432,7 +432,7 @@ impl Generation {
     fn configure_hub(&self, config: &HubConfig, sweep: bool) {
         self.shutdown_hub();
         let bridge: Arc<dyn NodeBridge> = self.bridge.clone();
-        let hub = Arc::new(Hub::new(config).with_node_bridge(bridge));
+        let hub = Arc::new(Hub::new(config, bridge));
         let sweep = sweep.then(|| StartupSweep::launch(config)).flatten();
         *self
             .hub

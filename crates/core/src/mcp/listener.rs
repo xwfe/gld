@@ -31,6 +31,7 @@ use crate::hub::{Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER};
 use crate::local_network;
 use crate::logs::append_profile_log;
 use crate::mcp::server::{handle_request, SharedState};
+use crate::nodes::registry::Nodes;
 use crate::secret::SecretStore;
 use crate::settings::AppSettings;
 use crate::tools::{build_tool_context, Caller};
@@ -48,7 +49,7 @@ enum Endpoint {
     /// 一个工作区自己的 MCP 服务。
     Workspace(SharedState),
     /// 聚合入口：每次调用按 `workspace` 参数分到成员，见 [`crate::hub`]。
-    Hub(Arc<Hub>),
+    Hub { hub: Arc<Hub>, nodes: Arc<Nodes> },
 }
 
 /// 一条请求处理完的结果。
@@ -64,14 +65,14 @@ impl Endpoint {
     fn server_name(&self) -> String {
         match self {
             Self::Workspace(context) => context.server_name().to_string(),
-            Self::Hub(_) => crate::hub::SERVER_NAME.to_string(),
+            Self::Hub { .. } => crate::hub::SERVER_NAME.to_string(),
         }
     }
 
     fn usage(&self) -> Arc<ServiceUsage> {
         match self {
             Self::Workspace(context) => context.usage(),
-            Self::Hub(hub) => hub.usage(),
+            Self::Hub { hub, .. } => hub.usage(),
         }
     }
 
@@ -94,7 +95,7 @@ impl Endpoint {
                     member: None,
                 }
             }
-            Self::Hub(hub) => {
+            Self::Hub { hub, .. } => {
                 let (response, routed) = hub.handle_request(auth, body);
                 Handled {
                     response,
@@ -120,7 +121,7 @@ impl Endpoint {
             Self::Workspace(context) => {
                 router.workspace_mcp(scope, context.workspace.root(), auth, body)
             }
-            Self::Hub(hub) => router.hub_mcp(hub.execution_route(auth, body), auth, body),
+            Self::Hub { hub, .. } => router.hub_mcp(hub.execution_route(auth, body), auth, body),
         };
         match routed {
             Ok(reply) => Handled {
@@ -303,12 +304,14 @@ pub fn spawn_listener(
 }
 
 /// 起聚合入口的监听器。路由、认证、日志和工作区监听器是同一套，只是答请求的换成 [`Hub`]。
+/// `nodes` 必须是宿主注入该 Hub 的同一张节点表，停止时也由宿主显式关闭。
 ///
 /// 令牌受众是 [`hub_audience`]，客户端注册表是独立的 [`HUB_SCOPE`]：工作区发出去的令牌
 /// 进不了 hub，hub 的令牌也进不了任何工作区——拿到一个项目的授权不等于拿到全部。
 pub fn spawn_hub_listener(
     port: u16,
     hub: Arc<Hub>,
+    nodes: Arc<Nodes>,
     auth_type: &str,
     public_base_url: String,
     secrets: HubSecrets,
@@ -342,7 +345,7 @@ pub fn spawn_hub_listener(
     });
     let bearer_token = auth.bearer_enabled().then_some(secrets.bearer_token);
     listen(ListenerState {
-        endpoint: Endpoint::Hub(hub),
+        endpoint: Endpoint::Hub { hub, nodes },
         auth,
         scope: HUB_SCOPE.into(),
         authorize_label: "gld 服务：填服务口令可访问全部项目；填 gld grant 发的口令只开它那几个"
@@ -470,17 +473,17 @@ async fn node_connect(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Endpoint::Hub(hub) = state.endpoint else {
+    let Endpoint::Hub { nodes, .. } = state.endpoint else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    crate::nodes::endpoint::upgrade(hub.nodes(), machine_id, headers, ws).await
+    crate::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
 }
 
 async fn node_pair(
     State(state): State<ListenerState>,
     request: axum::extract::Request,
 ) -> Response {
-    if !matches!(state.endpoint, Endpoint::Hub(_)) {
+    if !matches!(state.endpoint, Endpoint::Hub { .. }) {
         return StatusCode::NOT_FOUND.into_response();
     }
     crate::nodes::endpoint::pair(request).await

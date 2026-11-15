@@ -53,10 +53,6 @@ impl Hub {
         )
     }
 
-    pub fn nodes(&self) -> Arc<Nodes> {
-        self.nodes.clone()
-    }
-
     /// 节点复用真实的只读工具表，再单独允许文件补丁和跑命令；策略分类表还含会执行命令的检查。
     /// 这里只按工具名判断整台节点开不开，具体项目在 `call_local` 里再判一次。
     pub(super) fn node_tool_allowed(&self, name: &str) -> bool {

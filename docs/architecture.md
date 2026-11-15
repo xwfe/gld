@@ -185,6 +185,25 @@ MCP 的 HTTP 入口在完成认证后，调用 `Hub::execution_route(auth, body)
 这只是请求归属的依赖分离；节点连接、认证存储、App 装配和 Router 的其余宿主依赖见
 [RFC-0014 的宿主依赖分析](rfc/0014-trust-boundary-crates.md)，实施进度只看 task_plan。
 
+### 原生节点连接的所有者
+
+每次启动 Hub，由宿主的 `HubRuntime` 创建一张 `Arc<Nodes>`，将同一张表交给 Router、HTTP 监听器和
+Hub 的 `NodeBridge`。直连 WebSocket 从监听器自己的 state 取得它；全局网关和 daemon 管理操作仍通过
+`hub::runtime::nodes()` 取得当前运行实例，两个入口不会各建一张表。
+
+应用 Hub 只调用现有 `NodeBridge::{members,call}`，不创建或关闭实际节点连接。宿主用 Nodes 的实现，
+执行代用 HostBridge 私有管道；节点自身的 Hub 不转发到其他节点，也不再额外创建空表。
+离线成员和读取清单失败的结果仍由原 Nodes 实现提供，不改成空结果或静默忽略。
+
+停服务仍先停监听、收回维护任务和隧道，再关闭执行代 Hub 并摘掉 Router 的节点表。
+宿主随后按原顺序结束工作区命令、关闭 CCNM、显式 `Nodes::close_all()`，最后关闭本机 MCP relay。
+私有 `shutdown_with` 只为保留这个顺序提供一次节点清理位置；`Hub::shutdown()` 不关闭注入的桥，
+NodeBridge 不新增关闭方法，丢弃 Arc 也不能替代显式关闭。执行代替换不关闭宿主的节点连接。
+
+Rust 调用者需使用 `Hub::new(config, bridge)`；`Hub::nodes()` 已移除，宿主从自己持有的 Nodes 取连接表。
+`spawn_hub_listener` 新增 Nodes 参数，必须传入与该 Hub 桥接相同的表。HTTP、节点/执行代协议、配置、
+错误回包及客户端重连规则不变；连接实现仍在现有模块，整个宿主 crate 的迁移另按 F3/F4 推进。
+
 ## daemon：协议与进程
 
 | 模块 | 职责 |

@@ -31,13 +31,13 @@
 |---|---|---|
 | daemon 单实例与 IPC | `crates/daemon/src/lifecycle.rs`：`daemon.lock` 的跨进程排他锁；`server.rs`：进程内 App 与 IPC accept loop | 同一 `GLD_HOME` 不能直接并排启动两个普通 daemon；绕开锁不是交接协议 |
 | restart | `crates/cli/src/commands/daemon.rs`：`Restart` 先看盘上运行记录，有命令在跑就不重启（`--force` 跳过），之后 `stop` 再 `start` | 不是滚动切换；原入口存在停服窗口 |
-| Hub 的端口与 tunnel | `crates/core/src/hub/runtime.rs`：`HubRuntime` 持有监听任务、shutdown sender、Hub、work_session 启动检查、tunnel；`start` 先停止旧 runtime；`stop_runtime` 关闭监听、停止 tunnel、调用 Hub shutdown | 对外连接及隧道不独立于 daemon 存活；重启不能保持原连接 |
+| Hub 的端口与 tunnel | `crates/core/src/hub/runtime.rs`：`HubRuntime` 持有监听任务、shutdown sender、Hub、Nodes、work_session 启动检查、tunnel；`start` 先停止旧 runtime；`stop_runtime` 关闭监听、停止 tunnel、调用 Hub shutdown | 对外连接及隧道不独立于 daemon 存活；重启不能保持原连接 |
 | 进程退出与命令 | `crates/core/src/app/runtime.rs`：`shutdown_all` 在停止服务前、后都调用 `terminate_all_sessions_everywhere`，中间还 `agents::interrupt_all` 停委派的 Agent | 正常退出也会终止运行中命令和 Agent；不只是 `--force` 才有影响 |
 | graceful shutdown | `crates/core/src/runtime/port.rs`：监听任务等待约 3 秒，超时后 `abort` | 只是有截止时间的退出等待，不能证明长请求完整结束 |
-| Hub 内部连接 | `crates/core/src/hub/mod.rs`：`Hub::shutdown` 终止 Hub scope 会话，并关闭 ccnm 远端连接、原生节点连接及 machine relay | 等待 HTTP 监听退出不足以保持其他 Hub 会话 |
+| Hub 内部连接 | `crates/core/src/hub/runtime.rs` 组合关闭：Hub scope 会话 → ccnm 远端连接 → 宿主持有的 Nodes → machine relay；应用 Hub 不关闭注入的节点桥 | 等待 HTTP 监听退出不足以保持其他 Hub 会话 |
 | MCP 工具请求 | `crates/core/src/mcp/listener.rs`：请求通过 `spawn_blocking` 调用 endpoint；Actions 监听器（`actions/listener.rs`）、`gld tool call`（`dispatch.rs` → `App::call_tool`）是另外两条进同一批工具的入口；没有升级用的在途请求登记及 admission gate | 不能从服务数量或完成后的 usage 统计推断“可安全切换”；响应断开也不证明工具未产生副作用 |
 | OAuth 身份 | `crates/core/src/auth/oauth_flow.rs` 与 `client_registry.rs`：签名 secret、client registry 等可持久化；授权码 pending map 是 OAuthRuntime 内存状态 | 复用密钥有利于保留已签发 token，但进行中的授权流程仍可能丢失 |
-| 原生节点 | `crates/core/src/nodes/registry.rs`：`Nodes` 持有每台机器唯一的一条 WSS；连接从 Hub 监听器的 `/nodes/v1/connect/{machine_id}`（或全局入口）进来，`Hub` 经 `nodes.call` 转发 | 连接挂在公网入口上，不能跟着执行代走；换代断连接等于每台机器都要重连 |
+| 原生节点 | `crates/core/src/nodes/registry.rs`：`Nodes` 持有每台机器唯一的一条 WSS；连接从 Hub 监听器的 `/nodes/v1/connect/{machine_id}`（或全局入口）进来，`Hub` 经 NodeBridge 转发到宿主的同一张表 | 连接挂在公网入口上，不能跟着执行代走；换代断连接等于每台机器都要重连 |
 | 委派的 Agent | `crates/agent/src/run.rs`：`LIVE` 表和子进程都在起它的进程里，`agent_manage start` 和 `gld agent approve/stop` 都能起或停；任务记录和 owner 锁在盘上 | 属于工作区执行状态；停和放行必须到起它的进程里做，看记录不用 |
 | 通用任务空间 | `crates/core/src/hub/work_sessions.rs` 与 `managed_workspaces/`：登记在数据目录自己的存储里，不走 `DataStore`；启动检查由 `HubRuntime` 拉起，碰 `workspace_runtime` | 跟执行状态走，不跟监听器走 |
 | exec 会话 | `crates/core/src/tools/session.rs`：ExecSession 持有进程 Child、ChildStdin、输出 reader task、内存状态；run record 另行落盘 | 持久化日志不等于接管进程和 stdin；重启后读取历史不能算命令连续运行与交互能力保留 |
