@@ -5788,3 +5788,4 @@ subagent，也未调整委派开关。未操作在用授权、推送、部署或
 
 **未完成：**OAuth access/refresh 的 grant+client_id 绑定及修订验证、URL Origin、
 隧道显式绑定、全量真实客户端正向接入和统一 CLI 仍按 B3.3/C/D/E 推进。
+
