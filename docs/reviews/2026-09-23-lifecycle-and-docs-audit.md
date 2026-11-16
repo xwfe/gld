@@ -5756,3 +5756,35 @@ agent_manage 探测结果：本项目 `delegation=off`，所有列出的 agent �
 每个请求读取最新授权，不在 host 另开 AccessStore 或缓存已认证身份。随后接 OAuth access/refresh
 签发和修订验证、URL Origin、隧道来源绑定，再完成单工作区项目上限与 RFC-0015 正向测试。
 当前小步只验证来源冲突与拒绝边界，不代表新的客户端可连接。
+
+## 139. 2026-11-16：D18-B3.2 共享授权读取端与 API token HTTP 正向接通
+
+**源码改动：**daemon 与 CLI 本机装配复用同一个 `Arc<App>`；Hub 与单工作区监听器从该 App 获取
+`AccessReader`，不在宿主新建独立授权存储或长效 AuthContext 缓存。创建／轮换／撤销发布新快照后，
+已启动监听器的下一次请求直接使用当前授权。普通设置及 Actions 入口不提前开启授权文件。
+HTTP 标准 Bearer 先做 B3.1 的用途与冲突分类，仅 API token 进入当前快照验证；未知、到期、旧秘密或已撤销
+返回 401 和 Bearer 挑战，响应不携带原秘密并使用 no-store/no-referrer。单项目入口另检查稳定项目 ID
+与 `confine-reads`，越界返回 403；Hub 使用自身已有的动态成员策略。
+OAuth、URL、未绑定隧道与原生节点工具入口依旧不开放；没有恢复旧 master/noauth 旁路。
+
+**验证证据：**隔离 `GLD_HOME` 下 `cargo test -p gld-host --lib --locked`：
+**57 passed / 0 failed**，包括同一读取端轮换和撤销即时失效、HTTP tools/list 正向处理。
+`cargo test --workspace --all-targets --locked --quiet` 全仓运行退出 0，
+从完整 stdout 统计 **74 组、1489 passed / 0 failed / 0 ignored**，包含新 token 集成目标；
+`crates/cli/tests/token_grants.rs` 也独立运行验证，
+单独执行 `cargo test -p gld --test token_grants --locked -- --nocapture`：
+**1 passed / 0 failed**。它在隔离数据目录用真实 daemon/HTTP/Hub 依次验证初始化、发现、工具调用、
+只读写入拒绝、创建后的动态 All 成员、错误用途、旧认证与 URL 待接通拒绝。
+初次严格 Clippy 因 Hub 监听器增加第八个显式参数触发 too_many_arguments，
+沿用同文件既有监听器的对应标注后，
+`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出 0；
+`cargo fmt --all -- --check` 退出 0。
+
+**工具异常：**文档同步时 `gld.apply_patch` 返回 `PATCH_FAILED` / `files_changed=false`，
+同时 `git_status`、`read_file` 与 `git_diff` 发现部分同范围文件已被其他并行写入修改。
+未证实失败的补丁本身造成写入；按最新实际内容检查并只补缺失部分，未盲目重试或覆盖。
+本项目 `agent_manage` 报告 `delegation=off`、所有候选 `installed=false`，本轮未虚构或强行启动
+subagent，也未调整委派开关。未操作在用授权、推送、部署或重启在线服务。
+
+**未完成：**OAuth access/refresh 的 grant+client_id 绑定及修订验证、URL Origin、
+隧道显式绑定、全量真实客户端正向接入和统一 CLI 仍按 B3.3/C/D/E 推进。

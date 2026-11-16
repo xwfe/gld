@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
+use gld_core::app::App;
 use gld_core::async_rt::JoinHandle;
 use gld_core::hub::runtime::{HubState, TunnelOutcome, TunnelSnapshot};
 use gld_core::hub::HubSecrets;
@@ -23,12 +24,13 @@ pub(crate) type ShutdownSender = tokio::sync::oneshot::Sender<()>;
 pub(crate) type BoundListener = (ShutdownSender, JoinHandle<()>);
 
 /// 本机直连与 daemon 复用相同的 HTTP 适配；后一条路径的容器里只有一个 Router。
-pub fn listener_manager(router: Option<Arc<Router>>) -> ListenerManager {
-    let runtime = Box::new(RuntimeSupervisor::new(router.clone()));
-    ListenerManager::new(Arc::new(HttpListeners { router }), runtime)
+pub fn listener_manager(app: Arc<App>, router: Option<Arc<Router>>) -> ListenerManager {
+    let runtime = Box::new(RuntimeSupervisor::new(app.clone(), router.clone()));
+    ListenerManager::new(Arc::new(HttpListeners { app, router }), runtime)
 }
 
 struct HttpListeners {
+    app: Arc<App>,
     router: Option<Arc<Router>>,
 }
 
@@ -43,12 +45,10 @@ impl ListenerHost for HttpListeners {
         outcome: TunnelOutcome,
         secrets: HubSecrets,
     ) -> BoxFuture<'a, AppResult<()>> {
-        Box::pin(hub_runtime::start(
-            config,
-            outcome,
-            secrets,
-            self.router.clone(),
-        ))
+        Box::pin(async move {
+            let reader = self.app.listener_access_reader()?;
+            hub_runtime::start(config, outcome, secrets, self.router.clone(), reader).await
+        })
     }
 
     fn stop_hub(&self) -> BoxFuture<'_, ()> {
@@ -74,6 +74,7 @@ pub(crate) fn bind_workspace(
     port: u16,
     usage: Arc<ServiceUsage>,
     router: Option<Arc<Router>>,
+    app: &App,
 ) -> AppResult<Result<BoundListener, String>> {
     Ok(match kind {
         ServiceKind::Mcp => {
@@ -110,6 +111,7 @@ pub(crate) fn bind_workspace(
                 profile.runtime.clone(),
                 usage.clone(),
                 router,
+                app.listener_access_reader()?,
             )
         }
         ServiceKind::Actions => {

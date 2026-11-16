@@ -41,6 +41,12 @@ impl App {
         Ok(store.reader())
     }
 
+    /// MCP 监听器共享当前写者的读取端。缺少新存储时仍可启动并拒绝请求，
+    /// 让可信本机入口完成首次创建；旧授权重建提示留给管理用例。
+    pub fn listener_access_reader(&self) -> AppResult<AccessReader> {
+        Ok(self.access_store()?.reader())
+    }
+
     pub(super) fn require_current_authorization(&self, store: &AccessStore) -> AppResult<()> {
         if store.snapshot()?.is_initialized() {
             return Ok(());
@@ -538,6 +544,10 @@ mod access_tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(
             &app.access_reader().unwrap().snapshot().unwrap(),
+            &first.snapshot().unwrap(),
+        ));
+        assert!(Arc::ptr_eq(
+            &app.listener_access_reader().unwrap().snapshot().unwrap(),
             &first.snapshot().unwrap(),
         ));
     }

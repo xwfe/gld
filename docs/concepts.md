@@ -4,8 +4,8 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 这篇只讲"它是什么、什么时候该用、用错了会怎样"，具体怎么配大多在各自的文档里（浏览器那节例外，配置步骤就写在这里）。
 
 > **新授权的客户端接入仍在分步实现。**统一身份、授权存储和内核权限边界已落地；
-> HTTP MCP（含 Hub、单工作区、URL、隧道入口）和原生节点转发暂返回 `AUTH_NOT_READY`。
-> 三类凭据的材料签发与轮换内核已具备，HTTP 适配与统一 CLI 尚未接通，不能据此配置真实客户端。
+> HTTP MCP 的有效 API token 已在宿主接通；MCP OAuth、URL、未绑定隧道与原生节点转发仍拒绝。
+> 三类凭据的材料签发与轮换内核已具备，统一 CLI 与其他入口尚未接通，不能据此配置真实客户端。
 > Actions 的独立认证仍支持。后续接入顺序见 [RFC-0015](rfc/0015-unified-client-access.md)，本页不代表已上线。
 
 各节都能单独看，按需跳：
@@ -811,13 +811,16 @@ Grant 表示“允许谁访问哪些项目、做哪些操作”，凭据表示�
 | 接入方式 | 用途 | 当前阶段 |
 | --- | --- | --- |
 | OAuth | 支持浏览器授权的标准 MCP 客户端；同一 grant 的不同 client_id 独立隔离 | core 已创建/轮换确认口令；access/refresh 签发、验证与修订检查待 B3；Actions 独立 OAuth 仍支持 |
-| API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | core 已创建/轮换材料并逐次验证当前授权；HTTP 接线待 B3，CLI 待 D |
+| API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | HTTP Bearer 已接通当前授权验证，范围外项目、失效 token 和未约束读取的单项目拒绝；CLI 待 D |
 | URL | 只能填写 Server URI 的客户端，如图示 SuperAssistant；短期 capability URL | core 已创建/轮换限期材料并校验 Origin；完整地址交付和 HTTP 入口待 B3/D |
 
 统一 CLI 规划使用同一组 add / ls / rotate / rm，不再要求用户区分 grant 与 grant browser。
 **当前 CLI 的旧创建入口仍返回 `AUTH_NOT_READY`**；新内核用例不写旧 grants。
 旧 `grant browser`、服务口令和 `--reveal` 不能作为这一阶段的接入办法；
 OAuth 与 token 的 HTTP 共存、失败不降级及客户端交付仍需后续实现和验收。
+HTTP token 目前由宿主对每次请求重新核验，不缓存已认证身份；未知、撤销、轮换后的秘密返回 401，
+并提供 Bearer 认证挑战。单项目入口会额外限制当前授权范围和 `confine-reads`，范围不符返回 403。
+其他三种认证来源不因为 token 接通而回退到 token 验证；完整客户端交付仍需 D/E。
 
 三种创建凭据共用严格期限解析：`s`、`m`、`h`、`d` 表示秒、分、时、天，数值必须是正整数。
 token 默认 30 天，显式 `none` 表示不限期；URL 默认 8 小时、最多 24 小时；OAuth 确认口令拒绝 TTL 参数。

@@ -12,6 +12,7 @@ use crate::generation::Router;
 use crate::listeners::ShutdownSender;
 use crate::nodes::registry::Nodes;
 use gld_core::async_rt::JoinHandle;
+use gld_core::auth::AccessReader;
 use gld_core::error::{AppError, AppResult};
 use gld_core::hub::runtime::{HubState, StartupSweep, TunnelOutcome, TunnelSnapshot};
 use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE};
@@ -56,6 +57,7 @@ pub async fn start(
     outcome: TunnelOutcome,
     secrets: HubSecrets,
     router: Option<Arc<Router>>,
+    access: AccessReader,
 ) -> AppResult<()> {
     let mut guard = RUNTIME.lock().await;
     if let Some(previous) = guard.take() {
@@ -77,6 +79,7 @@ pub async fn start(
         outcome.public_base.clone(),
         secrets,
         router.clone(),
+        access,
     );
     let (shutdown, handle) = match spawned {
         Ok(listener) => listener,

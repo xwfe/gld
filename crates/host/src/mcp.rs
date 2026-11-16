@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::listeners::ShutdownSender;
 use crate::nodes::{endpoint, registry::Nodes};
@@ -8,6 +9,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::{
     header::{
         ACCEPT, ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, REFERRER_POLICY, USER_AGENT,
+        WWW_AUTHENTICATE,
     },
     HeaderMap, HeaderName, Method, StatusCode,
 };
@@ -16,6 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gld_core::async_rt::{self, JoinHandle};
+use gld_core::auth::AccessReader;
 use gld_core::generation::CallError;
 use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE, SERVER_NAME};
 use gld_core::local_network;
@@ -32,9 +35,9 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::auth::source::{self, CredentialSource};
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, external_base_url, hub_audience,
-    protected_resource_metadata, register_client, token_exchange, workspace_audience, AuthContext,
-    AuthorizeForm, AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime,
-    TokenForm,
+    protected_resource_metadata, protected_resource_metadata_url, register_client, token_exchange,
+    workspace_audience, AuthContext, AuthorizeForm, AuthorizeParams, ClientRegistrationRequest,
+    ClientRegistry, OAuthRuntime, TokenForm,
 };
 use crate::generation::Router as GenerationRouter;
 
@@ -216,6 +219,10 @@ async fn oauth_register_post(
 #[derive(Clone)]
 struct ListenerState {
     endpoint: Endpoint,
+    /// 与 App 的授权写者共享快照；不在宿主另开一份存储或保存认证结果。
+    access: AccessReader,
+    /// 仅单工作区端点使用；配置未约束读取时禁止网络 grant 越界读取。
+    workspace_confined: bool,
     generation: Option<Arc<GenerationRouter>>,
     /// 日志目录和 OAuth 客户端注册表的作用域：工作区 id，或 [`HUB_SCOPE`]。
     scope: String,
@@ -241,8 +248,10 @@ pub fn spawn_listener(
     runtime: RuntimeConfig,
     usage: Arc<ServiceUsage>,
     generation: Option<Arc<GenerationRouter>>,
+    access: AccessReader,
 ) -> Result<(ShutdownSender, JoinHandle<()>), String> {
     let workspace_display = workspace_path.display().to_string();
+    let workspace_confined = runtime.confine_reads;
     let global = AppSettings::load_or_default();
     // 和命令行 `gld tool call` 共用同一个构建入口，两边看到的工具集与策略必然一致。
     let mcp = Arc::new(build_tool_context(
@@ -263,6 +272,8 @@ pub fn spawn_listener(
     )));
     listen(ListenerState {
         endpoint: Endpoint::Workspace(mcp),
+        access,
+        workspace_confined,
         generation,
         scope: workspace_id,
         authorize_label: workspace_display,
@@ -278,6 +289,7 @@ pub fn spawn_listener(
 ///
 /// 令牌受众是 [`hub_audience`]，客户端注册表是独立的 [`HUB_SCOPE`]：工作区发出去的令牌
 /// 进不了 hub，hub 的令牌也进不了任何工作区——拿到一个项目的授权不等于拿到全部。
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_hub_listener(
     port: u16,
     hub: Arc<Hub>,
@@ -286,6 +298,7 @@ pub fn spawn_hub_listener(
     public_base_url: String,
     secrets: HubSecrets,
     generation: Option<Arc<GenerationRouter>>,
+    access: AccessReader,
 ) -> Result<(ShutdownSender, JoinHandle<()>), String> {
     let oauth = Some(Arc::new(OAuthRuntime::new_mcp_pending(
         hub_audience(),
@@ -296,6 +309,8 @@ pub fn spawn_hub_listener(
     )));
     listen(ListenerState {
         endpoint: Endpoint::Hub { hub, nodes },
+        access,
+        workspace_confined: true,
         generation,
         scope: HUB_SCOPE.into(),
         authorize_label: "gld 客户端授权".into(),
@@ -793,7 +808,7 @@ fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
 
 /// No network MCP identity is constructed before the new credential store is connected.
 fn require_mcp_auth(
-    _state: &ListenerState,
+    state: &ListenerState,
     headers: &HeaderMap,
 ) -> Result<AuthContext, Box<Response>> {
     match source::standard(headers) {
@@ -801,14 +816,66 @@ fn require_mcp_auth(
             return Err(Box::new(mcp_source_conflict()));
         }
         Ok(CredentialSource::Token { id, secret }) => {
-            let _ = (id, secret);
+            let current = state
+                .access
+                .snapshot()
+                .map_err(|_| Box::new(mcp_auth_not_ready()))?;
+            // 未初始化的新授权文件不能让旧 service token 或旧 grants 恢复权限。
+            if !current.is_initialized() {
+                return Err(Box::new(mcp_auth_not_ready()));
+            }
+            drop(current);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| Box::new(mcp_auth_not_ready()))?
+                .as_secs();
+            let auth = state
+                .access
+                .authenticate_token(&state.scope, id, secret, now)
+                .map_err(|_| Box::new(mcp_unauthorized(state, headers)))?;
+            if matches!(&state.endpoint, Endpoint::Workspace(_))
+                && (!auth.allows_project(&state.scope) || !state.workspace_confined)
+            {
+                return Err(Box::new(mcp_forbidden()));
+            }
+            return Ok(auth);
         }
         Ok(CredentialSource::OAuthBearer(value) | CredentialSource::Tunnel(value)) => {
             let _ = value;
         }
+        Err("invalid_credential") => {
+            return Err(Box::new(mcp_unauthorized(state, headers)));
+        }
         _ => {}
     }
     Err(Box::new(mcp_auth_not_ready()))
+}
+
+fn mcp_unauthorized(state: &ListenerState, headers: &HeaderMap) -> Response {
+    let resource = protected_resource_metadata_url(&resolve_oauth_base(state, headers));
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        [
+            (CACHE_CONTROL, "no-store"),
+            (REFERRER_POLICY, "no-referrer"),
+        ],
+        Json(json!({"error": "AUTHENTICATION_FAILED", "message": "Invalid API token"})),
+    )
+        .into_response();
+    let challenge = format!("Bearer resource_metadata=\"{resource}\"");
+    if let Ok(value) = challenge.parse() {
+        response.headers_mut().insert(WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
+fn mcp_forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(CACHE_CONTROL, "no-store"), (REFERRER_POLICY, "no-referrer")],
+        Json(json!({"error": "PROJECT_ACCESS_DENIED", "message": "Grant cannot access this workspace"})),
+    )
+        .into_response()
 }
 
 fn mcp_source_conflict() -> Response {
@@ -953,6 +1020,9 @@ mod tests {
     use axum::extract::State;
     use axum::http::header::CACHE_CONTROL;
     use axum::response::IntoResponse;
+    use gld_core::auth::{
+        AccessReader, AccessStore, CredentialKind, GrantCreation, GrantPermissions, ProjectScope,
+    };
     use gld_core::tools::{PolicySettings, ToolContext, Workspace};
     use gld_core::workspace::AuthConfig;
 
@@ -960,6 +1030,14 @@ mod tests {
     use crate::auth::test_home::run_isolated;
 
     fn state_named(root: &Path, workspace_name: &str) -> ListenerState {
+        state_with_access(
+            root,
+            workspace_name,
+            AccessStore::open_in(root).unwrap().reader(),
+        )
+    }
+
+    fn state_with_access(root: &Path, workspace_name: &str, access: AccessReader) -> ListenerState {
         let workspace = Workspace::new(root.to_path_buf(), Vec::new()).expect("workspace");
         let context = ToolContext::from_workspace_with_harness_root(
             workspace,
@@ -975,6 +1053,8 @@ mod tests {
         .with_workspace_name(workspace_name);
         ListenerState {
             endpoint: Endpoint::Workspace(Arc::new(context)),
+            access,
+            workspace_confined: true,
             generation: None,
             scope: "w1".into(),
             authorize_label: "/tmp/x".into(),
@@ -983,6 +1063,159 @@ mod tests {
             oauth: None,
             oauth_client_secret: None,
         }
+    }
+
+    #[test]
+    fn token_auth_rechecks_grant_scope_secret_and_revocation_without_restarting_listener() {
+        run_isolated(
+            module_path!(),
+            "token_auth_rechecks_grant_scope_secret_and_revocation_without_restarting_listener",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let store = AccessStore::open_in(root.path()).unwrap();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let issued = store
+                    .create_grant(
+                        GrantCreation {
+                            name: "Client".into(),
+                            scope: ProjectScope::Selected(vec!["w1".into()]),
+                            permissions: GrantPermissions::default(),
+                            kind: CredentialKind::Token,
+                            ttl: None,
+                            allowed_origins: vec![],
+                        },
+                        now,
+                    )
+                    .unwrap();
+                let mut state = state_with_access(root.path(), "api", store.reader());
+                let secret = issued.secret.into_string();
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {secret}").parse().unwrap(),
+                );
+                let first = super::require_mcp_auth(&state, &headers).unwrap();
+                assert!(first.allows_project("w1"));
+                assert!(!first.may_write_project());
+
+                let mut changed = issued.record.clone();
+                changed.grant.permissions.write = true;
+                store.update(changed.clone()).unwrap();
+                let updated = super::require_mcp_auth(&state, &headers).unwrap();
+                assert_eq!(first.id(), updated.id());
+                assert!(updated.may_write_project());
+
+                changed.grant.scope = ProjectScope::Selected(vec!["another-project".into()]);
+                store.update(changed.clone()).unwrap();
+                assert_eq!(
+                    super::require_mcp_auth(&state, &headers)
+                        .unwrap_err()
+                        .status(),
+                    axum::http::StatusCode::FORBIDDEN
+                );
+                changed.grant.scope = ProjectScope::Selected(vec!["w1".into()]);
+                store.update(changed).unwrap();
+                state.workspace_confined = false;
+                assert_eq!(
+                    super::require_mcp_auth(&state, &headers)
+                        .unwrap_err()
+                        .status(),
+                    axum::http::StatusCode::FORBIDDEN
+                );
+                state.workspace_confined = true;
+
+                let rotated = store.rotate_grant("Client", None, now).unwrap();
+                let failure = super::require_mcp_auth(&state, &headers).unwrap_err();
+                assert_eq!(failure.status(), axum::http::StatusCode::UNAUTHORIZED);
+                assert_eq!(failure.headers()[CACHE_CONTROL], "no-store");
+                assert!(failure
+                    .headers()
+                    .contains_key(axum::http::header::WWW_AUTHENTICATE));
+                headers.insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {}", rotated.secret.into_string())
+                        .parse()
+                        .unwrap(),
+                );
+                let after = super::require_mcp_auth(&state, &headers).unwrap();
+                assert_eq!(first.id(), after.id());
+                store.revoke(&issued.record.grant.id).unwrap();
+                assert_eq!(
+                    super::require_mcp_auth(&state, &headers)
+                        .unwrap_err()
+                        .status(),
+                    axum::http::StatusCode::UNAUTHORIZED
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn token_post_reaches_mcp_tools_and_revocation_blocks_the_next_request() {
+        run_isolated(
+            module_path!(),
+            "token_post_reaches_mcp_tools_and_revocation_blocks_the_next_request",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let store = AccessStore::open_in(root.path()).unwrap();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let issued = store
+                    .create_grant(
+                        GrantCreation {
+                            name: "HTTP client".into(),
+                            scope: ProjectScope::Selected(vec!["w1".into()]),
+                            permissions: GrantPermissions::default(),
+                            kind: CredentialKind::Token,
+                            ttl: None,
+                            allowed_origins: vec![],
+                        },
+                        now,
+                    )
+                    .unwrap();
+                let state = state_with_access(root.path(), "api", store.reader());
+                let mut headers = axum::http::HeaderMap::new();
+                let secret = issued.secret.into_string();
+                headers.insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {secret}").parse().unwrap(),
+                );
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+                });
+                let call = |state: ListenerState, headers: axum::http::HeaderMap| {
+                    gld_core::async_rt::block_on(super::mcp_post(
+                        State(state),
+                        headers,
+                        axum::Json(body.clone()),
+                    ))
+                };
+                let response = call(state.clone(), headers.clone());
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                let bytes =
+                    gld_core::async_rt::block_on(axum::body::to_bytes(response.into_body(), 65536))
+                        .unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(result["id"], 1);
+                let tools = result["result"]["tools"].as_array().unwrap();
+                assert!(tools.iter().any(|tool| tool["name"] == "read_file"));
+                assert!(!tools.iter().any(|tool| tool["name"] == "exec_command"));
+
+                store.revoke(&issued.record.grant.id).unwrap();
+                let response = call(state, headers);
+                assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+                assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+                let bytes =
+                    gld_core::async_rt::block_on(axum::body::to_bytes(response.into_body(), 4096))
+                        .unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains(&secret));
+            },
+        );
     }
 
     /// 请求头是对方随便填的：写进日志前得压成一个字段，不能带空格凒出假字段，也不能无限长。

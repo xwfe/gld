@@ -126,9 +126,10 @@ impl Backend {
                 let app = match app {
                     Some(app) => app.clone(),
                     None => {
+                        let local_app = Arc::new(App::load()?);
                         let loaded = LocalApplication {
-                            app: Arc::new(App::load()?),
-                            listeners: Arc::new(gld_daemon::local_listeners()),
+                            listeners: Arc::new(gld_daemon::local_listeners(local_app.clone())),
+                            app: local_app,
                         };
                         *app = Some(loaded.clone());
                         loaded

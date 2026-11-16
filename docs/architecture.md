@@ -1,8 +1,8 @@
 # 架构
 
 > **新授权的客户端接入仍在分步实现。**统一授权类型、稳定调用方身份、独立授权存储与新执行代契约已接入内核；
-> HTTP MCP（包括单工作区、Hub、URL 和隧道入口）及原生节点转发暂以 `AUTH_NOT_READY` 拒绝。
-> Actions 的独立认证仍支持。三类材料签发与轮换内核已具备，HTTP 验证待 B3，远端权限与租约待 C，统一 CLI 待 D；
+> 已签发的专用 API token 可以通过 Hub/单工作区 MCP 逐请求验证；MCP OAuth、URL、隧道和原生节点转发仍待 B3/C。
+> Actions 的独立认证仍支持。三类材料签发与轮换内核已具备，统一 CLI 待 D；
 > 这不是客户端接入完成或已上线的声明。范围与后续验收见 [RFC-0015](rfc/0015-unified-client-access.md)。
 
 ## 按信任边界组织 crate
@@ -242,6 +242,11 @@ policy 不读取此文件。
 `AccessReader::authenticate_token` 每次按公开凭据 ID 读取当前快照，检查 Token 用途、Active 状态、
 期限与秘密摘要，再生成本次 AuthContext。CallerId 只用于归属，旧快照不能作为后续请求的认证缓存。
 HTTP 的来源提取、格式分派和三类入口接线仍由 host 完成；此 core 接口不开放网络，也不接受 OAuth、URL 或隧道证明。
+daemon 和本地 CLI 将同一个 `Arc<App>` 装配给 HTTP 监听管理；只有启动 MCP 监听器才从它取得
+`AccessReader`，并显式传给 Hub 或单工作区监听器。普通设置／Actions 操作不打开新授权存储。
+宿主不自行打开第二个 `AccessStore`；读取端的共享快照随创建、轮换和撤销原子更新。
+标准 Bearer 先按用途严格分类，API token 每次从该读取端取得当前 Grant 与稳定身份；
+单工作区在工具处理前再检查该工作区 ID 和读限制。OAuth、URL、隧道等仍为独立待接入的入口。
 
 新文件严格拒绝未知字段、旧结构、重复 ID、非法有效期、降修订和撤销记录重新激活；读坏文件不会回退成空授权或覆盖原件。
 旧 `profiles.json` 的 grants 字段只作为脱敏 Debug 的 opaque JSON 原值保留，普通配置保存保留其内容，
@@ -298,9 +303,10 @@ Rust 的具体路由器入口现为 `gld_host::generation::Router`。旧的 `cor
 `WorkspaceListeners` 支持应用在原锁内读快照、推进状态。装配凭据的读取失败与监听器绑定失败仍分别处理。
 daemon 和 CLI 直连显式构造实际 adapter；只有 daemon 的 adapter 有执行代。
 
-D18-A 的标准 MCP / AuthMCP 和新 URL 入口统一返回 HTTP 503、`AUTH_NOT_READY`、`Cache-Control: no-store`；
-旧服务口令、bearer、旧 OAuth token、loopback、隧道或缺省 grant 都不能绕过它。MCP 的 noauth 配置也拒绝。
-这保留监听和路由结构，但不会把未完成的网络验证伪装成已验证 MCP 主体。
+尚未建立新授权时，MCP 仍返回 503 / `AUTH_NOT_READY`；格式正确且有效的专用 API token
+每次从共享读取端校验摘要、期限、撤销、轮换与当前范围，再交由现有工具路由处理。
+错误 token 返回 401 并附 OAuth 资源发现挑战，单工作区越权或未约束读取返回 403。
+旧服务口令、旧 OAuth token、loopback、隧道或缺省 grant 都不能绕过它；MCP noauth 配置拒绝。
 
 Actions 继续走自己的 OAuth / API key / 显式匿名配置，使用独立单工作区 AuthContext；
 OAuth 动态注册、PKCE 和刷新仍由宿主与 core 的 `ClientRegistry` 协作，内存授权码只随当前 HTTP 会话存活。
@@ -314,7 +320,7 @@ OAuth 动态注册、PKCE 和刷新仍由宿主与 core 的 `ClientRegistry` 协
 
 内核的 MCP 路由契约是：验证身份后调用 `Hub::execution_route(auth, body)`，
 将明确的 `ExecutionRoute` 传入 `Router::hub_mcp`；Router 只按归属选择执行代，不接收整份 Hub。
-D18-A 的 HTTP 验证入口尚未放行这条路径，不能据此声称网络 MCP 已接通。
+专用 API token 已沿这条路径完成真实 daemon/HTTP/Hub 的读工具往返，其他来源仍待完成。
 执行代通过严格 WireAuth 重建上下文，并调用 `Hub::handle_routed` 复核，避免配置变化时同一目录被两代执行。
 
 同目录的归属键由 `generation::root_key` 生成：路径可解析时规范化，无法解析时保留原路径。

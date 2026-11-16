@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use gld_core::app::App;
 use gld_core::async_rt::{self, JoinHandle};
 use gld_core::logs::append_profile_log;
 use gld_core::platform::platform;
@@ -36,14 +37,16 @@ struct RuntimeEntry {
 }
 
 pub(crate) struct RuntimeSupervisor {
+    app: Arc<App>,
     router: Option<Arc<Router>>,
     entries: HashMap<(String, ServiceKind), RuntimeEntry>,
     usage: HashMap<(String, ServiceKind), Arc<ServiceUsage>>,
 }
 
 impl RuntimeSupervisor {
-    pub(crate) fn new(router: Option<Arc<Router>>) -> Self {
+    pub(crate) fn new(app: Arc<App>, router: Option<Arc<Router>>) -> Self {
         Self {
+            app,
             router,
             entries: HashMap::new(),
             usage: HashMap::new(),
@@ -275,7 +278,8 @@ impl WorkspaceListeners for RuntimeSupervisor {
             }
         }
 
-        let spawn_result = bind_workspace(profile, kind, port, usage, self.router.clone())?;
+        let spawn_result =
+            bind_workspace(profile, kind, port, usage, self.router.clone(), &self.app)?;
 
         match spawn_result {
             Ok((shutdown, handle)) => {

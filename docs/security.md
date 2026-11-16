@@ -4,7 +4,7 @@ gld 的文件策略和授权决定哪些工具可被调用，**不是操作系�
 子进程能访问什么最终由运行 gld 的系统账号决定。
 
 > **新授权的客户端接入仍在分步实现。** 新授权模型、独立存储、身份隔离和三类材料创建/轮换已有内核用例，
-> MCP、URL 凭据与原生节点工具转发尚未接通新认证，明确拒绝；不能把这版源码作为完整接入版本部署。
+> 有效的新 API token 已可通过宿主 HTTP MCP 完成认证；MCP OAuth、URL、未绑定隧道与原生节点工具尚未接通；不能把这版源码作为完整接入版本部署。
 > 当前运行中的旧版本未因源码提交而改变。统一接入契约见 [RFC-0015](rfc/0015-unified-client-access.md)，阶段状态见 [task_plan](../task_plan.md)。
 
 ## 一分钟自查
@@ -15,12 +15,13 @@ gld grant ls               # 新授权的元数据；空列表不开放任何网
 gld doctor                 # 配置与运行状态检查
 ```
 
-监听端口可达、GET 发现文档成功和完成授权是不同的状态。当前源码的 MCP POST 返回
-`503 / AUTH_NOT_READY`，不执行工具；Actions 继续使用独立的项目身份与认证流程。
+监听端口可达、GET 发现文档成功和完成授权是不同的状态。当前源码仅接受已经由可信应用创建的新 token：
+Bearer 验证失败返回 401；旧 OAuth／隧道入口继续返回 `503 / AUTH_NOT_READY`，不执行工具。
+Actions 继续使用独立的项目身份与认证流程。
 
 ## 新授权模型的权限边界
 
-以下是新模型的能力约束；三类创建凭据共用内核发行和轮换，HTTP 验证与 OAuth access/refresh 接线仍需 B3。
+以下是新模型的能力约束；API token HTTP 逐请求验证已接通，OAuth access/refresh、URL Origin 和隧道绑定仍需 B3。
 
 | 能力 | 必须同时满足 |
 | --- | --- |
@@ -380,7 +381,8 @@ gld 不限制目标主机、不限制远端执行什么，也挡不住端口转�
 AllProjects 默认覆盖当前与以后登记的项目，write 和服务能力仍须单独授予。
 回环地址、隧道密钥、缺少 grant 或旧服务口令都不建立本机操作员身份；MCP 的 noauth 配置拒绝。
 
-三种凭据的 HTTP 验证尚未接通，网络 MCP 返回 `AUTH_NOT_READY`。
+专用 API token 已接入 HTTP 并逐请求验证当前授权；错误 token 返回 401，单项目越权返回 403。
+MCP OAuth、URL、未绑定隧道仍明确拒绝，不能从旧服务口令回退为本机操作员。
 不要通过更换旧 bearer_token、启用匿名配置或复制旧 grant 来尝试恢复访问。
 接入方式和后续命令见 [统一授权](concepts.md#统一授权gld-grant) 与 [RFC-0015](rfc/0015-unified-client-access.md)。
 
@@ -443,7 +445,7 @@ tar -czf gld-state-backup.tgz -C ~/.config gld
   `mcp.confine-reads` 只管文件类工具，管不住子进程。
 - **`.git` 保护只挡文件工具和明显的命令模式。**绕过方式存在：脚本存成文件再跑、`os.system('cp …')`、`subprocess.run([…])`、`'.'+'git'` 这样拼路径，都看不见。
 - **`only:git` 不等于只能跑 git。**配置那条挡的是常见的键，`git rebase --exec`、`git fetch --upload-pack=…`、`git bisect run` 这些参数没拦，它们一样能跑程序。真要隔离用系统账号或容器。
-- **全局网关只转发。** `/hub` 必须通过 MCP 授权入口；A 阶段会得到 `AUTH_NOT_READY`。
+- **全局网关只转发。** `/hub` 必须通过 MCP 授权入口；有效的新 API token 可通过当前验证，其他方式仍待接通。
   `/w/<id>/actions` 由那个项目的 Actions 认证，网关不会将它提升为服务身份。
 - **公网地址是靠请求头推断的**（服务没配公网入口时）。这是给"你自己架
   nginx / cloudflared 反代"用的。全局入口那条路已经不再透传公网来的
