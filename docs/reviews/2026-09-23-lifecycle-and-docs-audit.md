@@ -4827,6 +4827,12 @@ grep worker_failed ~/.config/gld/logs/hub/mcp-requests.log
 
 **改动：** 改成跑的时候读 cargo 给的 `CARGO_MANIFEST_DIR` 环境变量。新增 `crates/core/tests/build_script_checkout.rs`：在一个不存在的目录名下用 rustc 编 `build.rs`，再让它为本检出跑，要报出本检出的 HEAD。改前红、改后绿；上面的 worktree 步骤改后也通过。这条检查只在 unix 上跑。
 
-**证据：** 全仓 `cargo test --workspace --all-targets --locked`：**1416 passed / 0 failed**（Linux 本机，64 个测试目标，比 §118 多两条新测试）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。
+### 三、PR 审查里补的一处
+
+Devin Review 在 PR #8 上指出：`settle` 手里的记录可能是任务收尾前读的 `running`，等它查表时任务已经从表里拿掉，它会判成 `unknown` 写回去，把跑完的 recap、退出码、改动清单盖掉。这个先后在本轮之前就有。改成查不到在跑时重读一次盘上的记录，不是 `running` 就用盘上的；靠的是上面「写完记录才从表里拿掉」这个顺序。回归测试 `a_stale_running_copy_does_not_overwrite_the_finished_record` 改前红（返回 `Unknown`）、改后绿。
+
+PR 第一次 CI 的 Windows 作业失败：测试钩子只有 unix 的测试在用，Windows 上报 dead_code。钩子改成只在 unix 的测试里编。
+
+**证据：** 全仓 `cargo test --workspace --all-targets --locked`：**1417 passed / 0 failed**（Linux 本机，64 个测试目标，比 §118 多三条新测试）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。
 
 **边界：** 未换本机二进制、未重启守护进程；PR 待审，未合并。
