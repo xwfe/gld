@@ -1072,42 +1072,59 @@ done"#,
 }
 
 /// 切换前后一直有请求：同一个端口、同一个 token，没有一条因为切换报错。延迟预算没有验。
+///
+/// 请求一条接一条不停发，所以“切换前有一条答完、切换后又有两条答完”就说明切换落在了请求中间，
+/// 而且至少有一条是完全在切换之后发出的。只数总条数说明不了这一点：条数随机器快慢变，慢的
+/// runner 上不切换也发不够（审查 §118）。
 #[test]
 fn requests_keep_succeeding_across_prepare_and_switch() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+
     let fixture = fixture();
     fixture.env.write("hello.txt", "steady\n");
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU32::new(0));
     let client = {
-        let (port, token, stop) = (fixture.port, fixture.token.clone(), stop.clone());
+        let (port, token) = (fixture.port, fixture.token.clone());
+        let (stop, done) = (stop.clone(), done.clone());
         std::thread::spawn(move || {
             let body = call_body(
                 "read_file",
                 json!({ "workspace": "api", "path": "hello.txt" }),
             );
-            let mut count = 0u32;
-            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            while !stop.load(Ordering::SeqCst) {
                 let reply = post_json(port, "/mcp", &body, Some(&token));
                 assert_eq!(reply.status, 200, "{}", reply.body);
                 assert!(reply.body.contains("steady"), "{}", reply.body);
-                count += 1;
+                done.fetch_add(1, Ordering::SeqCst);
             }
-            count
         })
     };
-    for _ in 0..2 {
+    // 请求线程报错退出时不再空等到超时，直接把它的断言信息带出来。
+    let wait_for_more = |what: &str, more: u32| {
+        let target = done.load(Ordering::SeqCst) + more;
+        wait_for(what, || {
+            assert!(!client.is_finished(), "请求线程中途退出了，等不到：{what}");
+            done.load(Ordering::SeqCst) >= target
+        });
+    };
+    for round in 1..=2 {
         std::thread::sleep(Duration::from_millis(200));
+        wait_for_more(&format!("第 {round} 次切换前有请求答完"), 1);
         fixture
             .env
             .ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
         fixture.env.ok(&["daemon", "upgrade", "switch"]);
+        wait_for_more(&format!("第 {round} 次切换后还有请求答完"), 2);
     }
     // 请求一直不停也要搬得走：这时几乎任何一刻看，这个项目都有在途调用。
     wait_for("旧代都退出", || {
         generation_pids(&fixture.status()).len() == 1
     });
-    stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    let count = client.join().expect("请求线程没有报错");
-    assert!(count > 10, "这段时间只发出去 {count} 条，没覆盖到切换");
+    wait_for_more("旧代退出后还有请求答完", 2);
+    stop.store(true, Ordering::SeqCst);
+    client.join().expect("请求线程没有报错");
 }
 
 /// 切换时正在跑的带副作用调用只执行一次，回包对得上；新版本失败也不会让它再跑一遍。
