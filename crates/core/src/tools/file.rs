@@ -1586,16 +1586,27 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     if pat == "**/*" || pat == "*" {
         return true;
     }
-    if let Some(suffix) = pat.strip_prefix("**/") {
-        return simple_glob(suffix, &p) || p.split('/').any(|part| simple_glob(suffix, part));
+    // `**` 交给 glob crate 自己解析。以前这里手工剥掉前导 `**/` 再拿剩下的
+    // 部分去比，带子目录的模式（`**/tests/*.rs`）永远比不中任何嵌套文件，
+    // list_files / search_text 整片返回空（审查 §85、§89）。
+    let Ok(pat) = glob::Pattern::new(&pat) else {
+        return false;
+    };
+    // 目录名命中也算：`**/deps` 这种「以目录名结尾」的排除要能盖住目录下
+    // 所有文件，而遍历只拿文件的相对路径来比，目录本身从不进匹配。依次比
+    // `web`、`web/deps`、`web/deps/y/b.js` 这些前缀（PR #3 复核，和旧行为
+    // 「任一路径段相同即命中」对齐；include / exclude 共用这一个函数）。
+    let mut prefix = String::new();
+    for segment in p.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+        if pat.matches(&prefix) {
+            return true;
+        }
     }
-    simple_glob(&pat, &p)
-}
-
-fn simple_glob(pattern: &str, text: &str) -> bool {
-    glob::Pattern::new(pattern)
-        .map(|p| p.matches(text))
-        .unwrap_or(false)
+    false
 }
 
 fn format_mtime(st: Option<SystemTime>) -> Option<String> {
@@ -1887,5 +1898,44 @@ mod tests {
             matches[1]["after"][0].as_str().expect("after").len(),
             256 + "...".len()
         );
+    }
+
+    /// `**/` 后面带子目录的模式要按工作区根的任意深度匹配（审查 §85、§89）。
+    /// 以前手工剥掉前导 `**/` 后只比整条路径和单个路径段，`**/tests/*.rs`
+    /// 对 `crates/core/tests/x.rs` 永远是 false。
+    #[test]
+    fn glob_match_recurses_through_directories() {
+        assert!(glob_match("**/tests/*.rs", "crates/core/tests/x.rs"));
+        assert!(glob_match("**/tests/*.rs", "tests/x.rs"));
+        assert!(!glob_match("**/tests/*.rs", "crates/core/src/x.rs"));
+        assert!(glob_match("**/exec.rs", "crates/core/exec.rs"));
+        assert!(glob_match("**/exec.rs", "exec.rs"));
+        assert!(glob_match("crates/**/exec.rs", "crates/core/exec.rs"));
+        assert!(glob_match("assets/**", "assets/raw.bin"));
+        // 反斜杠先归一成 `/`，Windows 上的相对路径同样命中。
+        assert!(glob_match("**\\tests\\*.rs", "crates\\core\\tests\\x.rs"));
+    }
+
+    /// 「以目录名结尾」的模式命中目录下所有文件（PR #3 复核）：遍历只拿文件的
+    /// 工作区相对路径来比，靠逐级路径前缀比出目录名命中，include / exclude 同一套。
+    #[test]
+    fn glob_match_directory_name_covers_files_below() {
+        assert!(glob_match("**/foo", "a/foo/b.txt"));
+        assert!(glob_match("**/foo", "a/b/foo"));
+        assert!(glob_match("**/foo", "foo"));
+        assert!(!glob_match("**/foo", "a/food/b.txt"));
+        assert!(!glob_match("**/foo", "a/bar.txt"));
+        // 没有 glob 的裸文件名仍然只比整条工作区相对路径（schema 里写明的基准）。
+        assert!(!glob_match("exec.rs", "crates/core/exec.rs"));
+        assert!(glob_match("exec.rs", "exec.rs"));
+    }
+
+    /// `*` 会跨 `/`：glob crate 默认 require_literal_separator=false，
+    /// 这是原有行为，钉住不改（PR #3 复核）。
+    #[test]
+    fn glob_match_star_crosses_path_separators() {
+        assert!(glob_match("tests/*.rs", "tests/a/b.rs"));
+        assert!(glob_match("*.rs", "crates/core/x.rs"));
+        assert!(!glob_match("*.rs", "crates/core/x.txt"));
     }
 }
