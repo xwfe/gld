@@ -308,13 +308,19 @@ gld upgrade --tool-profile read-only       # 整个服务：项目的工具集�
 代价：模型不能改代码、不能跑测试。适合"只让它看、不让它动"的场景。
 `read_file` 仍在表里，但它的范围由 `confine-reads` 管（默认只读项目目录内）。
 
-### 3. 收窄命令白名单——注意要加 `only:`
+### 3. 增删和收窄命令白名单——`+=` / `-=` 与 `only:`
+
+平时往白名单加一个命令用 `+=`，去掉一个用 `-=`（Actions 侧用 `actions.allowed-commands+=...` / `-=...`），都不会覆盖你之前已经配好的项：
 
 ```bash
-gld set <项目> allowed-commands=only:cargo,git
+gld set <项目> allowed-commands+=rg        # 在现有白名单上追加 rg（已存在则自动去重）
+gld set <项目> allowed-commands-=rg        # 从当前配置里移除 rg（不存在也无害）
+gld set <项目> allowed-commands=only:cargo,git  # 整值替换并收窄为"只允许这些"
 ```
 
-**不带 `only:` 的写法是"追加"，减不掉任何东西。**
+在 `only:` 模式下用 `+=` / `-=` 会保留 `only:` 前缀，不会意外退回默认全集；如果真要切换进/出 `only:` 模式，用 `=` 整值替换。
+
+**不带 `only:` 的 `=` 写法是"追加到默认白名单"，减不掉默认项。**
 
 ```text
 mcp.allowed-commands=cargo,git         默认白名单 + cargo + git（python 照样能跑）
@@ -340,28 +346,32 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 写 `only:` 的人是想收紧，把它理解成"没配"等于把一个收权的配置放到最大。
 （0.4.x 及更早确实会退回默认全集，那是个 bug——手上还是那几个版本的话，`only:` 写空等于没收紧。）
 
-**`rg`、`gh` 这类不在默认白名单里的命令，加进去就能用**，写法就是上面的追加形式
-（`allowed-commands=rg`）。加之前先想想有没有现成工具：搜索用 `search_text`
+**`rg`、`gh` 这类不在默认白名单里的命令，用 `+=` 加进去就能用**（`gld set <项目> allowed-commands+=rg`）。
+加之前先想想有没有现成工具：搜索用 `search_text`
 （带上下文、分页、类型过滤），列文件用 `list_files`——它们不需要放开任何命令。
 
-### `gh` 加进白名单 = 只读诊断，不是整个 gh
+### `gh` 三层分级：只读直接放行、日常写走 `confirm=true`、高危硬拦
 
-把 `gh` 加进白名单之后，能跑的只有查询类子命令：
+`gh` 默认不在白名单里。用 `gld set <项目> allowed-commands+=gh` 加进去之后，按子命令分三层（名单均为**允许制**，未收录或 `gh` 以后新增的子命令默认拒，错误码 `POLICY_REJECTED`、原因 `github_command_not_allowed`）：
 
 ```text
-放行  gh run list / run view（含 --log）、workflow list|view、pr list|view|diff|checks|status、
-      issue list|view|status、release list|view、repo view、cache list、label list、
-      auth status、gh version、gh status
-拒绝  其余全部，包括 run rerun|cancel、pr create|merge、release create、secret set、
-      workflow run、auth token|login、repo clone，以及 gh api（一个 -X POST 就是任意写接口）
+只读（直接放行）      gh run list|view|watch（含 --log）、workflow list|view、pr list|view|diff|checks|status、
+                    issue list|view|status、release list|view、repo list|view、cache list、label list、
+                    auth status、gh version、gh status
+日常写（走 confirm）  gh repo create|clone|fork|edit|sync|rename、
+                    pr create|edit|comment|review|ready|close|reopen|checkout|merge|update-branch、
+                    issue create|edit|comment|close|reopen|develop|pin|unpin|lock|unlock、
+                    run rerun|cancel、workflow run|enable|disable、
+                    release create|edit|upload、label create|edit|clone、gist create|edit|clone
+高危（guarded 硬拦）  其余全部，包括 auth token|login|logout|refresh|setup-git、secret、variable、
+                    ssh-key、gpg-key、repo delete|archive|deploy-key、各类 delete、
+                    extension、alias、config、gh api（一个 -X POST 就是任意写接口），
+                    以及 repo clone/fork 带 -- 或 git 选项透传、pr merge --admin、repo edit --visibility
 ```
 
-名单是**允许制**：没列进去的一律拒，gh 以后新增的子命令默认也不放行，错误码
-`POLICY_REJECTED`、原因 `github_command_not_read_only`。这么做是因为
-`gh run view` 和 `gh run rerun` 只差一个词，按"首个单词是 gh"根本分不出来。
-
-真要做写操作（合并 PR、重跑 workflow、发 release），请自己在终端里做——
-那是需要你本人判断的一步，不该由模型代劳。
+- **日常写默认要你点头**：只配了 `gh` 时，跑 `gh repo create`、`gh pr create`、`gh run rerun` 等会返回 `needs_approval`（`resolved_by: "confirm"`），模型问过你后带 `confirm=true` 重发即放行。
+- **不想每次确认日常写**：显式再加一条能力项 `gld set <项目> allowed-commands+=gh:write`（也会同时放行只读 `gh`），日常写操作不再要求 `confirm=true`；取消用 `allowed-commands-=gh:write`。注意：配了 `gh:write` 之后，AI 不问你就能执行这些写操作，包括合并 PR（含 `--delete-branch` 删分支）、`repo sync --force`、`release upload --clobber`。
+- **凭据、不可逆高危与高危选项仍硬拦**：即使传 `confirm=true` 或配了 `gh:write`，`gh auth token`、`gh secret set`、`gh repo delete`、`gh api`、`gh repo clone`/`fork` 通过 `--`（或 `-c`/`--config`/`-u`/`--upload-pack`）透传 git 参数、`gh pr merge --admin`（含 `--admin=true`）、`gh repo edit --visibility` 在 `guarded` 模式下照样硬拒，请自己在终端做（只有 `command-policy=all` 才会放开）。`gh repo clone` 指定项目外目标目录时也会被工作区路径保护拦下。
 
 ### `ssh` / `scp` 默认不放行
 

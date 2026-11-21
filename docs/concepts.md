@@ -1490,7 +1490,7 @@ AI 跑下表里的命令时，gld 先拦下，报 `DANGEROUS_OPERATION_REQUIRES_
 `dotnet build` 也会下载声明过的依赖，但拦了每次构建都要问，问多了只会闭眼点同意。只认子命令，所以
 `grep install README.md`、`git commit -m "pip install"` 不会被拦。
 
-表里不少程序默认不在命令白名单里（`pip`、`uv`、`gem`……），要先 `gld set <项目> allowed-commands=pip` 加进去才跑得了，
+表里不少程序默认不在命令白名单里（`pip`、`uv`、`gem`……），要先 `gld set <项目> allowed-commands+=pip` 追加进去才跑得了，
 加进去之后装东西照样要你点头。默认就在白名单里的 `python`、`cargo`、`go`、`npx` 不用加：`python -m pip install`、
 `cargo install` 直接就会被拦下来问你。
 
@@ -1498,15 +1498,15 @@ AI 跑下表里的命令时，gld 先拦下，报 `DANGEROUS_OPERATION_REQUIRES_
 
 | `resolved_by` | 怎么办 | 例子 |
 | --- | --- | --- |
-| `confirm` | 问过用户，带 `confirm=true` 重发 | `git reset --hard`、`pnpm install` |
+| `confirm` | 问过用户，带 `confirm=true` 重发 | `git reset --hard`、`pnpm install`、配了 `gh` 时的 `gh repo create` / `gh pr create` / `gh run rerun`（配 `allowed-commands+=gh:write` 可免确认） |
 | `config_change` | `confirm=true` 解不开。让用户在本机跑回包 `config_command` 给的命令，再重新预检 | 不在白名单的程序；老配置留下的 `permission-mode=safe` 挡住的联网命令 |
-| `other` | 这条拒绝 gld 给不出配置解法，按 `suggestion` 换做法 | shell 语法、`gh pr merge`、`ssh`（走已登记的远端成员） |
+| `other` | 这条拒绝 gld 给不出配置解法，按 `suggestion` 换做法 | shell 语法、`gh auth token` / `gh secret set` / `gh repo delete` / `gh api`、`gh repo clone`/`fork` 带 `--` 透传、`gh pr merge --admin`、`gh repo edit --visibility`、`ssh`（走已登记的远端成员） |
 
 `needs_user_authorization` 只表示"得用户出面"，白名单拒绝也是 `true`，而带 `confirm=true` 复查照样是 `deny`（审查 §108 踩过）。字段没改语义，老调用方不受影响。
 
 `rm -rf` 这种可能两道都要：`rm` 默认不在白名单，所以回 `decision: needs_approval` 的同时 `resolved_by: config_change`。先改配置，再预检一次才轮到 `confirm`。
 
-`config_command` 自己拼好了已配的内容，别手写短的：`gld set` 是整值替换，项目配过 `rg` 时写 `allowed-commands=pip` 会把 `rg` 冲掉；配过 `only:cargo` 时不带前缀会退回默认全集，白名单反而放宽。
+`config_command` 对白名单字段给的是 `+=`（如 `allowed-commands+=pip`），直接在现有配置后去重追加，不会冲掉以前配过的 `rg` 等项，也不会破坏已有的 `only:` 前缀；想移除某一项用 `-=`（如 `allowed-commands-=rg`）。只有 `=` 才是整值替换，手动用 `=` 改 `only:` 项目时别忘了保留前缀。
 
 **为什么要拦，而不是在回包里提醒：**2026-10-07 实测过两次，只提醒拦不住。一次 AI 照提醒没跑 `pnpm install`，可 `pnpm run test`
 自己把依赖装上了；另一次它把"按 CI 全跑一遍"当成你同意了，没问就跑了 `pnpm install`。`confirm=true` 仍是 AI 自己填的，

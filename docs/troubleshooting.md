@@ -169,7 +169,8 @@ gld tool call exec_command cmd='cargo test'
 | `WORK_SESSION_REGISTRY_INVALID`，`gld prune` 拒绝清理 | 托管登记损坏、版本不符或根路径不匹配，服务无法确认归属 | 保留现场，由本机操作者检查备份及 `managed-workspaces`；不删除工作目录或伪造空登记来强行清理 |
 | Plan 模式下写文件被拒 | 设计如此：Plan 模式只读 | `gld planning mode direct` 或 `goal` |
 | Goal 模式下写操作被拒 | 没有聚焦的 Goal | `gld planning goal create …` 或 `goal update <id> --focus true` |
-| 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld set <项目> allowed-commands=<名字>` 追加（默认那批仍在）；想反过来**只**允许某几个要写 `only:cargo,git`，光写 `cargo,git` 减不掉任何东西 |
+| 命令被拒 `Command is not allowlisted: <名字>` | 不在白名单 | `gld set <项目> allowed-commands+=<名字>` 追加（不会覆盖已有配置，移除用 `-=`）；想反过来**只**允许某几个用 `=only:cargo,git`，光写 `=cargo,git` 减不掉默认项 |
+| `gh repo create` / `gh pr create` 等日常写操作被拦 | 配了 `gh` 后日常写默认走二次确认，高危（`auth token`、`secret`、`repo delete`、`gh api`）硬拦 | 确认后让 AI 带 `confirm=true` 重发；想对日常写免确认可再加 `gld set <项目> allowed-commands+=gh:write`；高危操作请在自己终端执行，见 [security.md](security.md) |
 | 分不清一条命令是「没装」还是「不许跑」 | 拒绝信息只说了不许跑 | 让 AI 先调 `check_command cmd='<命令>'`：它不跑命令，只回答能不能跑（`decision`）、是哪条规则拒的（`rule`）、程序在不在机器上（`program.found`）和有什么已获准的替代工具（`alternatives`） |
 | AI 不知道项目怎么跑测试，或者用错了包管理器（pnpm 项目跑了 `npm install`，多出一份 `package-lock.json`） | 提示词没给命令，它在猜 | 让 AI 先调 `list_project_commands`：列出清单里写好的命令和该用的包管理器，几个锁文件同时在的写进 `ambiguities`；CI 里的 `run:` 步骤单列在 `ci_steps`，`uses:`、矩阵、`if:` 和开发文档里的要求它不解析，列在 `other_sources` 里要 AI 去读。见 [concepts.md](concepts.md#项目怎么构建怎么测list_project_commands) |
 | 改完白名单不确定生效没有 | 配置改了，跑着的服务不一定重载了 | 改前改后各调一次 `check_command`，比对 `policy.runtime_fingerprint`：数变了才是真生效 |

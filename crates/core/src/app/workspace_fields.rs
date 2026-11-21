@@ -131,8 +131,8 @@ const FIELDS: &[Field] = &[
     ),
     field!(
         "mcp.allowed-commands",
-        "逗号分隔",
-        "在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md",
+        "逗号分隔（支持 += 追加、-= 移除）",
+        "在默认白名单之外追加的命令（如 rg、gh、gh:write）；写成 only:cargo,git 则表示只允许这些。可用 allowed-commands+=gh 追加、-=rg 移除而不覆盖已有项。见 docs/security.md",
         |p, v| {
             p.runtime.allowed_commands = v.trim().into();
             Ok(())
@@ -249,8 +249,8 @@ const FIELDS: &[Field] = &[
     ),
     field!(
         "actions.allowed-commands",
-        "逗号分隔",
-        "Actions 侧同上（追加；only: 前缀表示只允许这些）",
+        "逗号分隔（支持 += 追加、-= 移除）",
+        "Actions 侧同上（追加；only: 前缀表示只允许这些；可用 += / -= 增删而不覆盖）",
         |p, v| {
             p.actions.allowed_commands = v.trim().into();
             Ok(())
@@ -412,23 +412,112 @@ fn canonical_key(raw: &str) -> Option<&'static Field> {
     FIELDS.iter().find(|field| field.key == implied)
 }
 
-/// 对一个工作区配置应用 `key=value`；未知 key 返回带全部可选项的错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldOp {
+    Replace,
+    Append,
+    Remove,
+}
+
+const ONLY_PREFIX: &str = "only:";
+
+/// 对一个工作区配置应用 `key=value`（白名单字段另支持 `key+=value` / `key-=value`）；
+/// 未知 key 返回带全部可选项的错误。
 pub fn apply_workspace_field(
     profile: &mut WorkspaceProfile,
     key: &str,
     value: &str,
     ctx: &FieldContext,
 ) -> AppResult<()> {
-    let Some(field) = canonical_key(key) else {
-        if let Some((retired, instead)) = retired_key(key) {
+    let trimmed = key.trim();
+    let (raw_key, op) = if let Some(base) = trimmed.strip_suffix('+') {
+        (base.trim(), FieldOp::Append)
+    } else if let Some(base) = trimmed.strip_suffix('-') {
+        (base.trim(), FieldOp::Remove)
+    } else {
+        (trimmed, FieldOp::Replace)
+    };
+    let Some(field) = canonical_key(raw_key) else {
+        if let Some((retired, instead)) = retired_key(raw_key) {
             return Err(AppError::Message(format!(
                 "{} 是项目自己那个 MCP 服务的字段；现在只有一个服务，项目上不再有它。\n{instead}",
                 retired.strip_prefix(IMPLIED_PREFIX).unwrap_or(retired)
             )));
         }
-        return Err(unknown_field(key.trim()));
+        return Err(unknown_field(raw_key));
     };
-    (field.apply)(profile, value, ctx)
+    match op {
+        FieldOp::Replace => (field.apply)(profile, value, ctx),
+        FieldOp::Append | FieldOp::Remove => match field.key {
+            "mcp.allowed-commands" => {
+                profile.runtime.allowed_commands =
+                    mutate_allowed_commands(&profile.runtime.allowed_commands, value, op)?;
+                Ok(())
+            }
+            "actions.allowed-commands" => {
+                profile.actions.allowed_commands =
+                    mutate_allowed_commands(&profile.actions.allowed_commands, value, op)?;
+                Ok(())
+            }
+            _ => Err(AppError::Message(format!(
+                "{raw_key} 不支持 += / -=，请用 = 赋值"
+            ))),
+        },
+    }
+}
+
+fn mutate_allowed_commands(current: &str, delta: &str, op: FieldOp) -> AppResult<String> {
+    let delta_trimmed = delta.trim();
+    if delta_trimmed
+        .get(..ONLY_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(ONLY_PREFIX))
+    {
+        return Err(AppError::Message(
+            "+= / -= 不能带 only: 前缀；要切换成仅允许模式请用 allowed-commands=only:...".into(),
+        ));
+    }
+    let items: Vec<&str> = delta_trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if items.is_empty() {
+        return Err(AppError::Message("+= / -= 右侧至少要写一个命令名".into()));
+    }
+    let trimmed = current.trim();
+    let (only, body) = match trimmed.strip_prefix(ONLY_PREFIX) {
+        Some(rest) => (true, rest),
+        None => (false, trimmed),
+    };
+    let mut existing: Vec<String> = Vec::new();
+    for part in body
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if !existing.iter().any(|item| item == part) {
+            existing.push(part.to_string());
+        }
+    }
+    match op {
+        FieldOp::Append => {
+            for item in items {
+                if !existing.iter().any(|entry| entry == item) {
+                    existing.push(item.to_string());
+                }
+            }
+        }
+        FieldOp::Remove => {
+            existing.retain(|entry| !items.iter().any(|item| item == entry));
+        }
+        FieldOp::Replace => unreachable!(),
+    }
+    let joined = existing.join(",");
+    Ok(if only {
+        format!("{ONLY_PREFIX}{joined}")
+    } else {
+        joined
+    })
 }
 
 fn retired_key(raw: &str) -> Option<(&'static str, &'static str)> {
@@ -736,6 +825,51 @@ mod tests {
         assert!(error.to_string().contains("未知字段"));
         assert!(set(&mut profile, "actions.port", "0").is_err());
         assert!(set(&mut profile, "mcp.tool-profile", "magic").is_err());
+    }
+
+    #[test]
+    fn allowed_commands_supports_append_and_remove_preserving_only_mode() {
+        let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
+
+        // 新建项目默认带 DEFAULT_ALLOWED_COMMANDS：+= 在其后追加，不覆盖原有项。
+        let before = profile.runtime.allowed_commands.clone();
+        set(&mut profile, "allowed-commands+", "rg").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, format!("{before},rg"));
+
+        // 从空列表起：+= 去重追加，-= 移除。
+        set(&mut profile, "allowed-commands", "").unwrap();
+        set(&mut profile, "allowed-commands+", "rg").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "rg");
+        set(&mut profile, "allowed-commands+", "gh, rg, jq").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "rg,gh,jq");
+        set(&mut profile, "allowed-commands-", "gh,missing").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "rg,jq");
+        set(&mut profile, "allowed-commands-", "rg,jq").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "");
+
+        // only: 模式：+= 和 -= 必须保留 only: 前缀，删空也不能退回默认全集。
+        set(&mut profile, "allowed-commands", "only:cargo").unwrap();
+        set(&mut profile, "allowed-commands+", "gh").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "only:cargo,gh");
+        set(&mut profile, "allowed-commands-", "gh").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "only:cargo");
+        set(&mut profile, "allowed-commands-", "cargo").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "only:");
+        set(&mut profile, "allowed-commands+", "git").unwrap();
+        assert_eq!(profile.runtime.allowed_commands, "only:git");
+
+        // Actions 侧同样支持。
+        set(&mut profile, "actions.allowed-commands", "").unwrap();
+        set(&mut profile, "actions.allowed-commands+", "rg").unwrap();
+        set(&mut profile, "actions.allowed-commands+", "gh").unwrap();
+        assert_eq!(profile.actions.allowed_commands, "rg,gh");
+        set(&mut profile, "actions.allowed-commands-", "rg").unwrap();
+        assert_eq!(profile.actions.allowed_commands, "gh");
+
+        // 非法用法拒绝。
+        assert!(set(&mut profile, "allowed-commands+", "only:cargo").is_err());
+        assert!(set(&mut profile, "allowed-commands+", " , ").is_err());
+        assert!(set(&mut profile, "tool-profile+", "read-only").is_err());
     }
 
     /// 退役的工具集不收，报错说清楚为什么、换成什么，别让人以为是拼错了。

@@ -151,8 +151,8 @@ macOS 上**登录会话类型也是继承的**，`setsid` 不改它：从 SSH �
 ```bash
 # 1. 守护进程要在图形会话里：交给 launchd 拉起，步骤见下一节“开机自启”
 
-# 2. 放行命令。这是整值替换，项目配过别的要一起写上。它能看到整个屏幕，只给信得过的项目开
-gld set <项目> allowed-commands=screencapture
+# 2. 追加放行命令（不会覆盖项目已配的其他命令）。它能看到整个屏幕，只给信得过的项目开
+gld set <项目> allowed-commands+=screencapture
 
 # 3. 办授权。它让守护进程试截 1 个像素，打开系统设置，等到真能截才返回
 gld desktop authorize

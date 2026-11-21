@@ -4836,3 +4836,34 @@ PR 第一次 CI 的 Windows 作业失败：测试钩子只有 unix 的测试在�
 **证据：** 全仓 `cargo test --workspace --all-targets --locked`：**1417 passed / 0 failed**（Linux 本机，64 个测试目标，比 §118 多三条新测试）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。
 
 **边界：** 未换本机二进制、未重启守护进程；PR 待审，未合并。
+
+## 120. `gh` 三层分级命令策略（含 `gh:write`）与 `allowed-commands` 增删语法（2026-11-22）
+
+**起因：** 用户反馈在 `allowed-commands` 中加入 `gh` 后，日常写操作（如 `gh repo create`）仍被硬拒，即便口头同意放权、AI 重传 `confirm=true` 也无法通过；同时 `gld set <项目> allowed-commands=...` 只能整值覆盖，无法按项追加或移除。
+
+**决策变更记录：**
+
+- **确认来源：** 用户于 2026-11-21 在会话 `e11a2c718bde488cbe28962b33e178f6` 中明确选定「方案 A（`gh` 三层分级，日常写走 `confirm=true`，支持 `gh:write` 免确认）+ `gld set` 支持 `+=` / `-=`」，并要求同步更新相关文档。
+- **取代的旧决定：**
+  - `docs/reviews/2026-09-19-gld-tooling-review-and-plan.md` 的 **A05**（「GitHub 只读规则不允许 rerun/cancel、PR/release/secret 写操作或任意写 API；未授权 SSH 不建立连接」）中关于把 `gh` 常规写操作（`rerun`/`cancel`、日常 PR/Issue/Release 写等）一律硬拒的部分；凭据与不可逆高危操作（`auth token`、`secret`、`variable`、`ssh-key`、`gpg-key`、`repo delete`、`release delete`、`gh api` 等）仍维持硬拒，未授权 SSH 规则不变。
+  - `docs/reviews/2026-09-19-gld-tooling-review-and-plan.md` 的 **U3 第二批**（「`gh` 加进白名单 = 只读诊断」「其余一律拒（`github_command_not_read_only`）」）。
+  - 原 `docs/security.md` 中「写操作请自己在终端做」的表述。
+- **三层分级内容（`guarded` 模式下）：**
+  1. **只读诊断（白名单含 `gh` 即直接放行）：** `run list|view|watch`、`workflow list|view`、`pr list|view|diff|checks|status`、`issue list|view|status`、`release list|view`、`repo list|view`、`cache list`、`label list`、`auth status`、`version`、`status`。
+  2. **日常写操作（白名单含 `gh` 时返回 `ConfirmationRequired`，用户确认后重传 `confirm=true` 放行；白名单配 `gh:write` 时免确认直接放行）：** `repo create|clone|fork|edit|sync|rename`、`pr create|edit|comment|review|ready|close|reopen|checkout|merge|update-branch`、`issue create|edit|comment|close|reopen|develop|pin|unpin|lock|unlock`、`run rerun|cancel`、`workflow run|enable|disable`、`release create|edit|upload`、`label create|edit|clone`、`gist create|edit|clone`。`docs/security.md` 已明示：配了 `gh:write` 后，AI 不经询问即可执行合并 PR（含 `--delete-branch` 删分支）、`repo sync --force`、`release upload --clobber` 等操作。
+  3. **高危与凭据操作（无论 `confirm=true` 还是 `gh:write` 一律硬拒，仅 `command-policy=all` 放行）：** `auth token`、`secret`、`variable`、`ssh-key`、`gpg-key`、`repo delete|archive|unarchive|deploy-key`、`release delete|delete-asset`、`gh api`、未登记子命令，以及 `gh repo clone` / `gh repo fork` 带 `--` 透传或 `--config`/`-c`/`--upload-pack`/`-u`、`gh pr merge --admin`、`gh repo edit --visibility`（含 `--flag=value` 及选项位于子命令前后的写法）；`clone`/`fork` 目标路径落在项目目录外时按 `workspace_path_protected` 拦截。
+- **兼容性影响：** 拒绝原因码由 `github_command_not_read_only` 更名为 `github_command_not_allowed`；按旧原因码字符串精确匹配的调用方会受影响，需同步更新为新码。
+
+**同步改动与审查修复：**
+
+- **`gld set` 增量修改：** `allowed-commands` 与 `actions.allowed-commands` 支持 `+=` 和 `-=`（自动去重并保留 `only:` 前缀语义，`=` 保持整值替换），策略拒绝提示中的建议命令同步改用 `+=`。
+- **并发写回修复（Devin Review）：** `set_workspace_fields` 原先先 `profile_by_id` 释放锁、在锁外应用 `+=`/`-=` 再 `update_workspace` 整份写回，并发调用会丢更新；改为在单次 `with_data` 临界区（持内存锁与文件锁并重读磁盘）内原子完成读、改、校验和落盘。
+- **PR #9 审查意见落实：** 收紧 `gh repo clone`/`fork` 透传与 git 选项、`gh pr merge --admin`、`gh repo edit --visibility` 及项目外 clone 路径；将 `gh run watch` 归入只读层；所有新增拦截项均按「改前跑失败、改后通过」补齐 `confirm=true` 与 `gh:write` 双场景回归测试。
+
+**证据：**
+
+- 定向测试：`cargo test -p gld-core --test call_tool_contract --locked`（83 passed / 0 failed）、`cargo test -p gld-core --lib policy --locked`（16 passed / 0 failed）、`cargo test -p gld-core --lib concurrent_allowed_commands_delta_updates --locked`（1 passed / 0 failed）。
+- 补修 `gh` 克隆参数外部路径检查（只扫参数并拦截裸 `..`、`~`/`~user`、`$VAR`/命令替换以及含空格的同前缀绝对路径如 `'<workspace> copy/repo'`，同时确认 `gh repo clone o/r sub/dir` 放行）：先红（`gh repo clone o/r ~` 放行失败）后绿，上述定向测试、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均在隔离 `GLD_HOME` 下通过。
+- 全仓验证（Linux 本机，隔离 `GLD_HOME`，Node v24.22.2 在 `PATH` 中）：`cargo test --workspace --all-targets --locked` **1420 passed / 0 failed / 0 ignored**（64 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均通过。
+
+**边界：** 未换本机二进制、未重启守护进程；PR #9 待审，未合并。

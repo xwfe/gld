@@ -185,7 +185,7 @@ pub enum Command {
     /// 改项目配置：gld set api tool-profile=read-only（字段见 gld fields）
     ///
     ///   gld set tool-profile=read-only              当前目录对应的项目
-    ///   gld set api allowed-commands=rg,gh          按名称指定项目
+    ///   gld set api allowed-commands+=gh            追加白名单命令（-= 移除，= 整值替换）
     ///
     /// 下一次调用就生效，不用重启。服务本身的端口、认证、公网入口用 gld upgrade / gld share。
     #[command(verbatim_doc_comment)]

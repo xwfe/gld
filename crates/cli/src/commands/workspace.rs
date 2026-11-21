@@ -318,7 +318,9 @@ pub async fn set(ctx: &mut Ctx, args: SetArgs) -> CliResult {
         ));
     }
     let allows_capture = pairs.iter().any(|(key, value)| {
-        key.trim_start_matches("mcp.") == "allowed-commands" && allows_screen_capture(value)
+        !key.trim().ends_with('-')
+            && risk_key(key) == "allowed-commands"
+            && allows_screen_capture(value)
     });
     set_fields(ctx, target, pairs).await?;
     if allows_capture && cfg!(target_os = "macos") {
@@ -355,7 +357,12 @@ async fn set_fields(
 /// 风险提示认字段的规范写法：`gld set` 的字段名大小写不敏感、`_` 当 `-`，
 /// `mcp.` 前缀可省略；提示只看存下来的值，写法不该决定说不说风险。
 fn risk_key(raw: &str) -> String {
-    let key = raw.trim().to_ascii_lowercase().replace('_', "-");
+    let trimmed = raw.trim();
+    let bare = trimmed
+        .strip_suffix('+')
+        .or_else(|| trimmed.strip_suffix('-'))
+        .unwrap_or(trimmed);
+    let key = bare.to_ascii_lowercase().replace('_', "-");
     key.strip_prefix("mcp.").unwrap_or(&key).to_string()
 }
 
