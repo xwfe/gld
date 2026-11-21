@@ -564,13 +564,9 @@ pub fn validate_command_for_workspace(
     let gh_class = if stem == "gh" && !allow_all {
         let class = classify_github_cli(&parts)?;
         if github_clones_into_filesystem(&parts)
-            && parts[1..].iter().any(|arg| {
-                arg == ".."
-                    || crate::tools::command_paths::command_contains_external_path(
-                        arg,
-                        workspace.map(Workspace::root),
-                    )
-            })
+            && parts[1..]
+                .iter()
+                .any(|arg| github_clone_arg_is_external(arg, workspace.map(Workspace::root)))
         {
             return Err(PolicyError::new(
                 PolicyReason::WorkspacePathProtected,
@@ -857,6 +853,17 @@ fn github_clones_into_filesystem(parts: &[String]) -> bool {
         github_subcommand_words(parts).as_slice(),
         ["repo", "clone" | "fork", ..] | ["gist", "clone", ..]
     )
+}
+
+fn github_clone_arg_is_external(arg: &str, root: Option<&std::path::Path>) -> bool {
+    if arg == ".." || arg.starts_with('~') || arg.contains('$') || arg.contains('`') {
+        return true;
+    }
+    if std::path::Path::new(arg).is_absolute() {
+        return !root
+            .is_some_and(|root| crate::tools::command_paths::absolute_path_inside(arg, root));
+    }
+    crate::tools::command_paths::command_contains_external_path(arg, root)
 }
 
 fn flag_matches(arg: &str, name: &str) -> bool {
@@ -1422,6 +1429,12 @@ mod tests {
             "/usr/bin/gh repo clone o/r /tmp/x",
             "gh repo clone o/r ..",
             "gh repo clone o/r ../outside",
+            "gh repo clone o/r ~",
+            "gh repo clone o/r ~other/x",
+            "gh repo clone o/r $HOME/x",
+            "gh repo clone o/r \"${HOME}\"",
+            "gh repo clone o/r \"`echo /tmp`\"",
+            "gh repo clone o/r \"$(echo /tmp)\"",
         ] {
             let err = validate_command(&json!({"cmd": external}), &policy)
                 .expect_err("克隆到 Workspace 外部必须被拒绝");

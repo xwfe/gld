@@ -1290,11 +1290,19 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
         );
     }
 
-    // 5. clone 目标落在项目外时被工作区路径保护拦下（confirm=true 和 gh:write 都不能绕过）。
+    // 5. clone 目标落在项目外（含波浪线、环境变量、双引号内命令替换与带空格的同前缀绝对路径）时被工作区路径保护拦下（confirm=true 和 gh:write 都不能绕过）。
+    let sibling_with_space = format!("gh repo clone o/r '{} copy/repo'", fx.root.display());
     for external_clone in [
         "gh repo clone o/r /tmp/x",
         "gh repo clone o/r ../outside",
         "gh repo clone o/r ..",
+        "gh repo clone o/r ~",
+        "gh repo clone o/r ~other/x",
+        "gh repo clone o/r $HOME/x",
+        "gh repo clone o/r \"${HOME}\"",
+        "gh repo clone o/r \"`echo /tmp`\"",
+        "gh repo clone o/r \"$(echo /tmp)\"",
+        sibling_with_space.as_str(),
     ] {
         let checked = invoke(
             &ctx,
@@ -1310,7 +1318,7 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
         let checked_write = invoke(
             &write_ctx,
             "check_command",
-            json!({ "cmd": external_clone, "confirm": true }),
+            json!({ "cmd": external_clone }),
         );
         assert_eq!(
             checked_write["decision"], "deny",
@@ -1320,7 +1328,70 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
             checked_write["rule"], "workspace_path_protected",
             "gh:write {external_clone}: {checked_write}"
         );
+
+        let checked_write_confirmed = invoke(
+            &write_ctx,
+            "check_command",
+            json!({ "cmd": external_clone, "confirm": true }),
+        );
+        assert_eq!(
+            checked_write_confirmed["decision"], "deny",
+            "gh:write + confirm {external_clone}: {checked_write_confirmed}"
+        );
+        assert_eq!(
+            checked_write_confirmed["rule"], "workspace_path_protected",
+            "gh:write + confirm {external_clone}: {checked_write_confirmed}"
+        );
     }
+
+    // 未加引号的命令替换在更早的 shell 语法检查层即被拒绝。
+    for shell_expansion_clone in [
+        "gh repo clone o/r `echo /tmp`",
+        "gh repo clone o/r $(echo /tmp)",
+    ] {
+        for (label, target_ctx, args) in [
+            (
+                "confirm=true",
+                &ctx,
+                json!({ "cmd": shell_expansion_clone, "confirm": true }),
+            ),
+            (
+                "gh:write",
+                &write_ctx,
+                json!({ "cmd": shell_expansion_clone }),
+            ),
+        ] {
+            let checked = invoke(target_ctx, "check_command", args);
+            assert_eq!(
+                checked["decision"], "deny",
+                "{label} {shell_expansion_clone}: {checked}"
+            );
+            assert_eq!(
+                checked["rule"], "shell_syntax_rejected",
+                "{label} {shell_expansion_clone}: {checked}"
+            );
+        }
+    }
+
+    // 相对子目录（含多级）克隆仍在 Workspace 内，应正常放行。
+    let subdir_confirmed = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": "gh repo clone o/r sub/dir", "confirm": true }),
+    );
+    assert_eq!(
+        subdir_confirmed["decision"], "allow",
+        "gh repo clone o/r sub/dir (confirm=true): {subdir_confirmed}"
+    );
+    let subdir_write = invoke(
+        &write_ctx,
+        "check_command",
+        json!({ "cmd": "gh repo clone o/r sub/dir" }),
+    );
+    assert_eq!(
+        subdir_write["decision"], "allow",
+        "gh repo clone o/r sub/dir (gh:write): {subdir_write}"
+    );
 }
 
 /// 没把 gh 加进白名单时，它就是一条普通的未获准命令——不会因为有只读规则

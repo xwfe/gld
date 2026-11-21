@@ -4862,7 +4862,8 @@ PR 第一次 CI 的 Windows 作业失败：测试钩子只有 unix 的测试在�
 
 **证据：**
 
-- 定向测试：`cargo test -p gld-core --test call_tool_contract --locked`（83 passed / 0 failed）、`cargo test -p gld-core --lib policy --locked`（15 passed / 0 failed）、`cargo test -p gld-core --lib concurrent_allowed_commands_delta_updates --locked`（1 passed / 0 failed）。
-- 全仓验证（Linux 本机，隔离 `GLD_HOME`，Node v24.22.2 在 `PATH` 中）：`cargo test --workspace --all-targets --locked` **1419 passed / 0 failed / 0 ignored**（64 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均通过。
+- 定向测试：`cargo test -p gld-core --test call_tool_contract --locked`（83 passed / 0 failed）、`cargo test -p gld-core --lib policy --locked`（16 passed / 0 failed）、`cargo test -p gld-core --lib concurrent_allowed_commands_delta_updates --locked`（1 passed / 0 failed）。
+- 补修 `gh` 克隆参数外部路径检查（只扫参数并拦截裸 `..`、`~`/`~user`、`$VAR`/命令替换以及含空格的同前缀绝对路径如 `'<workspace> copy/repo'`，同时确认 `gh repo clone o/r sub/dir` 放行）：先红（`gh repo clone o/r ~` 放行失败）后绿，上述定向测试、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均在隔离 `GLD_HOME` 下通过。
+- 全仓验证（Linux 本机，隔离 `GLD_HOME`，Node v24.22.2 在 `PATH` 中）：`cargo test --workspace --all-targets --locked` **1420 passed / 0 failed / 0 ignored**（64 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均通过。
 
 **边界：** 未换本机二进制、未重启守护进程；PR #9 待审，未合并。
