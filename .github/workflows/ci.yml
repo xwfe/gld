@@ -35,10 +35,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # 集成测试会真的拉起守护进程并写数据文件，必须指向临时目录，
       # 否则会污染 runner 上的 ~/.gld，多个 job 之间还会互相干扰。
-      - name: cargo test
+      - name: probe
         run: |
           export GLD_HOME="$(mktemp -d)"
-          cargo test --workspace --all-targets --locked
+          cargo test -p gld --test generation_boundary --locked --no-run
+          summarize() { grep -aE "DBG|test result|FAILED|panicked|只发出去" | awk '/DBG req/{n++; if($3>m)m=$3; s+=$3; h[int($3/10)]++; next}{printf "%s | ", $0} END{printf "reqs %d max %d avg %.1f hist10ms:", n, m, s/n; for(k in h) printf " %d0:%d", k, h[k]; print ""}'; }
+          echo "== alone"
+          for i in $(seq 15); do cargo test -p gld --test generation_boundary --locked requests_keep -- --nocapture 2>&1 | summarize; done
+          echo "== whole file in parallel"
+          for i in $(seq 15); do cargo test -p gld --test generation_boundary --locked -- --nocapture 2>&1 | summarize; done
 
   docs:
     name: 命令参考是否最新
