@@ -4742,3 +4742,23 @@ grep worker_failed ~/.config/gld/logs/hub/mcp-requests.log
 - 全仓 `cargo test --workspace --all-targets --locked`：**1410 passed / 0 failed**（Linux 本机，63 个测试目标；§114 的 1409 是 macOS，平台测试集不同）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
 
 **边界：** 未换本机二进制、未重启守护进程、未推送 main，PR #3 待审（含复核修复）。子任务挂起等其它摩擦项沿用原证据，不在本轮范围。
+
+## 117. GPT Actions 补 `actions.command-policy`（2026-11-21）
+
+**起因：** `task_plan.md` 的「一键放行全部命令」一行写明 MCP 侧 `command-policy=all` 已上，尾部还留着「GPT Actions 那条线路没有这个开关」。本轮先核对它是不是已写下的决定：没有找到把 Actions 侧缺开关当作决策的记录，RFC-0007 里「GPT Actions 不动」说的是 scoped grants，不是命令关卡；所以按排队项处理。
+
+**事实：**
+
+- `ActionsConfig` 新增 `command_policy`，serde 默认 `guarded`，旧配置读出来仍是 guarded；`gld set` 新增 `actions.command-policy=guarded|all`，和 MCP 侧的 `command-policy` 分开，互不改写。
+- `PolicySettings::from_actions_config` 只把 `"all"` 映成放行，其余一律按 guarded 处理；Actions 的 `exec_command` 仍走同一套 dispatch，放行时回包沿用既有 `policy_bypassed` 字段，没有新增绕过关卡的路径。
+- `gld set <项目> actions.command-policy=all` 会打印和 MCP 侧同等级的风险提示，并写明改回 `actions.command-policy=guarded`；`docs/concepts.md`、`docs/security.md`、生成的 `docs/cli.md` 同一提交补上 Actions 侧用法。
+
+**证据：**
+
+- 新增单元/字段测试：`actions_command_policy_is_separate_from_the_mcp_one`、`an_old_config_without_confine_reads_defaults_to_confined`、`allowing_all_commands_lifts_the_restrictions_but_keeps_the_rails` 的 Actions 断言。
+- 新增集成回归 `actions_command_policy_all_runs_commands_the_default_policy_would_deny`：默认 Actions `exec_command` 跑 `sh` 返回 422 `command_not_allowlisted`；设 `actions.command-policy=all` 并重启 Actions 服务后同一命令返回 200，`structured_content.policy_bypassed.rule` 为 `command_not_allowlisted`。
+- 全仓 `cargo test --workspace --all-targets --locked`：**1413 passed / 0 failed / 0 ignored**（Linux 本机，63 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
+
+**遇到的问题：** 第一次全量测试在 `command_write_paths.rs` 的 `copying_an_outside_file_into_the_workspace_is_allowed` 失败，原因是这台机器的 shell PATH 里没有 `node`；用 `~/.nvm/versions/node/v24.22.2/bin` 补进 PATH 后同一条全量测试通过。与本次改动无关，未改测试。
+
+**边界：** 未换本机二进制、未重启守护进程、未推送 main；PR 待审。
