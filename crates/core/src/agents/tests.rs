@@ -304,6 +304,21 @@ fn a_nonzero_exit_or_missing_result_fails_but_still_lists_changes() {
     );
 }
 
+/// 记录一写着跑完，项目就已经放开了：照着记录马上再起一个不会被挡。
+///
+/// 收尾时故意在“写记录”和“放开项目”之间停 200 毫秒。两步不在同一把锁里的话，这里每次都红。
+#[test]
+fn a_task_recorded_as_finished_no_longer_holds_its_project() {
+    let f = Fixture::new();
+    f.agent("fake", "cat >/dev/null\necho ok", STDOUT, "");
+    run::tests_hook::pause_when_finishing_in(&f.root());
+    let first = f.start("fake", Approval::Auto).expect("起");
+    assert_eq!(f.finished(&first).state, State::AwaitingReview);
+    assert_eq!(running_in(&f.root()), None, "记录写着跑完了，项目还占着");
+    let second = f.start("fake", Approval::Auto).expect("跑完就能再起");
+    assert_eq!(f.finished(&second).state, State::AwaitingReview);
+}
+
 #[test]
 fn ask_waits_for_local_approval_and_deny_or_stop_ends_it() {
     let f = Fixture::new();
