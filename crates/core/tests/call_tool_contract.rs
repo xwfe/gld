@@ -1291,7 +1291,11 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
     }
 
     // 5. clone 目标落在项目外时被工作区路径保护拦下（confirm=true 和 gh:write 都不能绕过）。
-    for external_clone in ["gh repo clone o/r /tmp/x", "gh repo clone o/r ../outside"] {
+    for external_clone in [
+        "gh repo clone o/r /tmp/x",
+        "gh repo clone o/r ../outside",
+        "gh repo clone o/r ..",
+    ] {
         let checked = invoke(
             &ctx,
             "check_command",

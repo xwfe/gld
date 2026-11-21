@@ -564,10 +564,13 @@ pub fn validate_command_for_workspace(
     let gh_class = if stem == "gh" && !allow_all {
         let class = classify_github_cli(&parts)?;
         if github_clones_into_filesystem(&parts)
-            && crate::tools::command_paths::command_contains_external_path(
-                command,
-                workspace.map(Workspace::root),
-            )
+            && parts[1..].iter().any(|arg| {
+                arg == ".."
+                    || crate::tools::command_paths::command_contains_external_path(
+                        arg,
+                        workspace.map(Workspace::root),
+                    )
+            })
         {
             return Err(PolicyError::new(
                 PolicyReason::WorkspacePathProtected,
@@ -1397,5 +1400,36 @@ mod tests {
             ..ActionsConfig::default()
         };
         assert!(PolicySettings::from_actions_config(&actions_all).allows_all_commands());
+    }
+
+    #[test]
+    fn gh_clone_external_path_check_ignores_executable_path_and_blocks_parent_dir() {
+        let runtime = crate::workspace::RuntimeConfig {
+            allowed_commands: "gh:write".into(),
+            ..crate::workspace::RuntimeConfig::default()
+        };
+        let policy = PolicySettings::from_runtime(&runtime);
+
+        assert!(
+            validate_command(
+                &json!({"cmd": "/usr/bin/gh repo clone o/r subdir"}),
+                &policy
+            )
+            .is_ok(),
+            "policy 层的外部路径检查只应看克隆参数，不应把可执行文件路径本身判成外部克隆目标"
+        );
+        for external in [
+            "/usr/bin/gh repo clone o/r /tmp/x",
+            "gh repo clone o/r ..",
+            "gh repo clone o/r ../outside",
+        ] {
+            let err = validate_command(&json!({"cmd": external}), &policy)
+                .expect_err("克隆到 Workspace 外部必须被拒绝");
+            assert_eq!(
+                err.reason,
+                PolicyReason::WorkspacePathProtected,
+                "{external}"
+            );
+        }
     }
 }
