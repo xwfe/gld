@@ -191,8 +191,8 @@ install -m 755 target/release/gld "$GLD.new" && mv "$GLD.new" "$GLD"
 # 4. 重启守护进程。版本号没变也要做，见下面；有命令在跑时它不重启，见下面
 gld daemon restart
 #    配了 launchd 开机自启的换成下面这句，守护进程继续归 launchd 管（见守护进程 · 开机自启）。
-#    这句不查在跑的命令，先 pgrep -lP <gld daemon status 里的 pid> 自己看一眼：
-#    gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon
+#    --if-idle 和 restart 查的是同一样东西：有命令在跑就不停、列出来，后面的 kickstart 也不会执行：
+#    gld daemon stop --if-idle && launchctl kickstart gui/$(id -u)/dev.gld.daemon
 ```
 
 **让 AI 截屏的机器，重启后再跑一次 `gld desktop authorize`：**换二进制会让录屏授权失效，设置里的开关还亮着，见[让 AI 能截屏](daemon.md#让-ai-能截屏macos)。

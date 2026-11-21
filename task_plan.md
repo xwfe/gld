@@ -20,7 +20,7 @@
 
 - 本机部署配置：2026-11-03 23:29 换上 `1717aaf`（§113）。D15、D10-W0/W1、D16-M0/M1 和工作区交接代码均已随版本部署；默认关闭的功能不因此自动启用。
   **守护进程归 launchd 管**（`~/Library/LaunchAgents/dev.gld.daemon.plist`，带 `HTTPS_PROXY`、`HTTP_PROXY`）。§113 已验证图形会话和录屏授权；项目尚未放行 `screencapture`，不能据此把完整桌面能力标为完成。
-  升级用 `gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，换完跑 `gld desktop authorize`。全局可执行路径是交互 shell 的 PATH（61 个目录）。
+  升级用 `gld daemon stop --if-idle && launchctl kickstart gui/$(id -u)/dev.gld.daemon`（`--if-idle` 已合并进 main，PR #10；换上带它的二进制那一次起可用，新命令行对着旧守护进程也能查），换完跑 `gld desktop authorize`。全局可执行路径是交互 shell 的 PATH（61 个目录）。
   §113 实测守护进程不带 `CLAUDE*` 变量；已点名注入 `~/.codex/AGENTS.md`。测试 grant 的撤销记录见 §69，本轮没有重读或修改凭据配置。
   临时项目 `delegation-test`（`~/xdw/gld-delegation-test`，`agent-delegation=ask`，测试时临时开过 `command-policy=all`、`agent-approval=self`，
   §62 测完已改回 guarded / all；工作区里故意留着前几轮委派没提交的改动）还挂在服务上，不要了就 `gld rm delegation-test`。
@@ -112,7 +112,7 @@ ccnm 的 remote_* 接法继续兼容，浏览器继续复用 Playwright。OpenAI
 | 经 gld 开发时的摩擦（§28、§72、§85、§89、§114） | 本轮 `workspace_context` 首次返回 `-32603: Internal error`，重试成功，其余核对继续；原因未定位；消除了 Harness 初始化 panic 这一条 -32603 来源（PR #2），§114 那次是否就是它要等日志核对 | 忽略文件引起的基线误报已有 `e32023c` 修复记录（§72–§73）；旧 glob 过滤已修复（PR #3：`glob_match` 改用 glob crate 原生 `**` 语义，目录名经路径前缀命中盖住目录下文件，§85/§89 场景和目录排除都有先红后绿的回归测试，见 §116）；子任务挂起等问题沿用原证据，不因一次恢复就标为修复，也不把本轮一次错误说成全部工具不可用 |
 | 一键放行全部命令 | 10-23 22:34 已换上（审查 §60、§61） | `6a840e2`：`gld set <项目> command-policy=all` 放开白名单和 `confirm=true` 这些限制类关卡，删 `.git` 等照拦；本机 `gld set` / `gld ls` 提示风险，AI 那边初始化说明、`list_workspaces`、`workspace_context` 告知、绕过关卡的命令回包带 `policy_bypassed`。ChatGPT 没被提示就从 `list_workspaces` 看到并转告了风险，两条绕过关卡的命令它都认出来（§62）。GPT Actions 侧已补 `actions.command-policy`，已合并进 main（PR #4，审查 §117）；本机还没换装，装着的二进制里还没有这个字段 |
 | `gh` 三层分级与白名单增删 | 已合并进 main（PR #9，审查 §120），本机未换装 | 按用户 2026-11-21 确认的方案 A：`gh` 分只读直接放行、日常写 `confirm=true`（配 `gh:write` 免确认）、高危/凭据与 `--` 透传/`--admin`/`--visibility` 硬拒（原因码改名 `github_command_not_allowed`）；`gld set` 的 `allowed-commands` 与 `actions.allowed-commands` 支持 `+=` / `-=` 并在锁内原子更新 |
-| 重启前等空闲 | 本机已换上、实测通过（2026-10-22，审查 §40、§41） | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。`gld daemon stop`、launchd 那条路径、`gld restart`（服务重启）没加检查，真有需要再说 |
+| 重启前等空闲 | `restart` 的检查本机已换上、实测通过（2026-10-22，审查 §40、§41）；`gld daemon stop --if-idle` 已合并进 main（PR #10，审查 §121），本机未换装 | `825b74a`：守护进程起的命令还在跑时 `gld daemon restart` 不重启、按项目列出来，`--force` 照旧；读盘上的运行记录，换装前用新命令行对着旧守护进程实测拦住了。另外两台换装时用的就是新检查。launchd / systemd 那条路径用 `gld daemon stop --if-idle && launchctl kickstart …`，查的是同一段（命令和委派的 Agent 都看），集成测试已过；真实 launchd 下还没跑过，下次本机换装时实测。不带 `--if-idle` 的 `gld daemon stop`、`gld restart`（服务重启）没加检查，真有需要再说 |
 
 所有部署、grant 创建/撤销、CI 推送、本机升级和发布仍须取得对应授权。
 

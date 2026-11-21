@@ -2631,9 +2631,10 @@ Usage: gld daemon stop [OPTIONS]
 Options:
       --force           超时后强制结束进程树
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --if-idle         有在跑的命令时不停，列出来（launchd / systemd 管着守护进程、换完二进制要停它时用）
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
-      --wait <SECS>     等待退出的秒数 [default: 20]
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --wait <SECS>     等待退出的秒数 [default: 20]
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）

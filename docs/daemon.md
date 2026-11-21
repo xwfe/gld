@@ -24,7 +24,7 @@ socket        /Users/you/.config/gld/daemon.sock
 | 命令 | 做什么 |
 | --- | --- |
 | `gld daemon start` | 后台启动；已在跑就什么都不做 |
-| `gld daemon stop [--force] [--wait 20]` | 先停所有服务和隧道，再退出；20 秒没退可加 `--force` 杀进程树 |
+| `gld daemon stop [--force] [--if-idle] [--wait 20]` | 先停所有服务和隧道，再退出；20 秒没退可加 `--force` 杀进程树。加 `--if-idle` 时，守护进程起的命令或委派的 Agent 还在跑就不停、把它们列出来，退出码 1（`--json` 时是 `{"stopped": false, "running_commands": [...]}`）；不加就直接停，命令跟着停 |
 | `gld daemon restart [--force]` | stop + start，升级 `gld` 二进制后用；有它起的命令在跑时不重启、列出来，`--force` 照旧停掉（[升级](install.md#升级)） |
 | `gld daemon run [--no-restore]` | 前台运行，Ctrl-C 优雅退出；给 launchd / systemd 或排障用 |
 | `gld daemon logs [-n 50] [-f]` | 它自己的日志（每个请求一行，含耗时） |
@@ -234,8 +234,8 @@ gld tool call exec_command -w <项目> cmd='cargo --version'   # 你常用的工
 - **`KeepAlive` 只在崩溃时拉回来**（`SuccessfulExit=false`）：`kill -9` 之后几秒内被拉回；`gld daemon stop`
   是正常退出（退出码 0），不会被拉回，照旧是"停了就是停了"。以前这里的模板写的是 `KeepAlive=true`，
   那样 `gld daemon stop` 之后 launchd 马上又起一个，停不下来。
-- **升级**：换完二进制用 `gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，守护进程
-  继续归 launchd 管。直接 `gld daemon restart` 也能用（launchd 那个正常退出，命令行另起一个），只是到下次
+- **升级**：换完二进制用 `gld daemon stop --if-idle && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，守护进程
+  继续归 launchd 管；有命令在跑时 `--if-idle` 不停、列出来，等它们跑完再来一遍。直接 `gld daemon restart` 也能用（launchd 那个正常退出，命令行另起一个），只是到下次
   开机之前它不归 launchd 管，崩了不会被拉回。
 - **第 1 步是一份快照**：以后装了新工具、放在新目录里，重跑第 1 步。它对手动 `gld daemon start` 也有用：
   守护进程的 PATH 取决于是谁、在什么环境里拉起它的，配成全局可执行路径之后就和这个无关了（2026-09-24
@@ -302,8 +302,9 @@ gld status                       # MCP 服务应该已经自己回来了
 ```
 
 配了 launchd [开机自启](#开机自启)的，把 `gld daemon restart` 换成
-`gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，守护进程继续归 launchd 管。
-这条不会像 `restart` 那样先查有没有命令在跑，换之前自己看一眼（[安装 · 升级](install.md#升级)第 4 步）。
+`gld daemon stop --if-idle && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，守护进程继续归 launchd 管。
+`--if-idle` 和 `restart` 查的是同一样东西：有命令在跑就不停、把它们列出来，后面的 `kickstart` 也不会执行
+（[安装 · 升级](install.md#升级)第 4 步）。systemd 管着的写法一样：`gld daemon stop --if-idle && systemctl --user start gld`。
 
 **MCP 服务会自己回来**：守护进程启动时把上次 `gld start` 过、没 `gld stop` 的服务连同
 隧道一起拉起（上面"启动时发生什么"第 5 条）。用的是 Cloudflare 临时地址的话，地址会换，

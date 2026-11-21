@@ -632,6 +632,9 @@ pub enum DaemonCmd {
         /// 超时后强制结束进程树
         #[arg(long)]
         force: bool,
+        /// 有在跑的命令时不停，列出来（launchd / systemd 管着守护进程、换完二进制要停它时用）
+        #[arg(long, conflicts_with = "force")]
+        if_idle: bool,
         /// 等待退出的秒数
         #[arg(long, default_value_t = 20, value_name = "SECS")]
         wait: u64,

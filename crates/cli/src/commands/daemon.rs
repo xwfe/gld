@@ -19,12 +19,19 @@ pub async fn run(command: &DaemonCmd, out: Output) -> CliResult {
     let paths = DaemonPaths::resolve()?;
     match command {
         DaemonCmd::Start => start(&paths, out).await,
-        DaemonCmd::Stop { force, wait } => {
+        DaemonCmd::Stop {
+            force,
+            if_idle,
+            wait,
+        } => {
+            if *if_idle {
+                refuse_while_commands_run(&paths, out, Pending::Stop).await?;
+            }
             stop(&paths, out, *force, Duration::from_secs(*wait)).await
         }
         DaemonCmd::Restart { force } => {
             if !force {
-                refuse_while_commands_run(&paths, out).await?;
+                refuse_while_commands_run(&paths, out, Pending::Restart).await?;
             }
             stop(&paths, out, *force, Duration::from_secs(20)).await?;
             start(&paths, out).await
@@ -268,12 +275,25 @@ async fn warn_if_screen_capture_broke(paths: &DaemonPaths, out: Output) {
     }
 }
 
+/// 被在跑的命令拦下的是哪个动作，只影响提示的措辞和 `--json` 里的键。
+#[derive(Clone, Copy)]
+enum Pending {
+    Restart,
+    /// `gld daemon stop --if-idle`：launchd / systemd 管着守护进程时，升级是先停、再让它们拉起，
+    /// 走不到 `restart` 的检查。
+    Stop,
+}
+
 /// 守护进程起的命令还在跑就不重启：重启会把它们（包括开着的 dev server）一起停掉。
 ///
 /// 以前这一步靠人记着先查，忘了就把正跑着的测试、服务停了。看的是盘上的运行记录，不问
 /// 守护进程：换完二进制、重启之前，守护进程还是旧版，新命令行跟它的协议不一定对得上。
 /// 守护进程不在、不响应时不拦：前者没东西可停，后者本来就要靠重启救。
-async fn refuse_while_commands_run(paths: &DaemonPaths, out: Output) -> CliResult {
+async fn refuse_while_commands_run(
+    paths: &DaemonPaths,
+    out: Output,
+    pending: Pending,
+) -> CliResult {
     let DaemonProbe::Running(info) = lifecycle::probe(paths).await else {
         return Ok(());
     };
@@ -336,16 +356,27 @@ async fn refuse_while_commands_run(paths: &DaemonPaths, out: Output) -> CliResul
         });
         rows.push((task.workspace_name.clone(), what, secs, task.pid, json));
     }
-    let advice = "等命令跑完再重启；确定要停掉就加 --force：gld daemon restart --force";
+    let (verb, key, advice) = match pending {
+        Pending::Restart => (
+            "重启",
+            "restarted",
+            "等命令跑完再重启；确定要停掉就加 --force：gld daemon restart --force",
+        ),
+        Pending::Stop => (
+            "停守护进程",
+            "stopped",
+            "等命令跑完再停；确定要连命令一起停掉就去掉 --if-idle：gld daemon stop",
+        ),
+    };
     let json_rows: Vec<_> = rows.iter().map(|row| row.4.clone()).collect();
-    if out.json_or(&json!({ "restarted": false, "running_commands": json_rows })) {
+    if out.json_or(&json!({ key: false, "running_commands": json_rows })) {
         return Err(CliError::new(format!(
-            "有 {} 条命令在跑，没重启。{advice}",
+            "有 {} 条命令在跑，没{verb}。{advice}",
             rows.len()
         )));
     }
     let mut message = format!(
-        "有 {} 条命令在跑，重启会连命令一起停掉，这次没重启：",
+        "有 {} 条命令在跑，{verb}会连命令一起停掉，这次没{verb}：",
         rows.len()
     );
     for (name, what, secs, pid, _) in &rows {
