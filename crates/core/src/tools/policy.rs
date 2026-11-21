@@ -195,8 +195,8 @@ pub enum PolicyReason {
     CommandNotAllowlisted,
     /// `ssh` / `scp` 这类直连远端的命令。
     RemoteShellNotAllowed,
-    /// `gh` 的这个子命令不在只读诊断名单里。
-    GithubCommandNotReadOnly,
+    /// `gh` 的这个子命令在 guarded 模式下不允许（凭据读取、不可逆删除、任意 `gh api` 或未收录子命令）。
+    GithubCommandNotAllowed,
     EnvironmentNotAllowed,
     TimeoutTooLong,
     PatchMissing,
@@ -232,7 +232,7 @@ impl PolicyReason {
             Self::InvalidSyntax => "invalid_command_syntax",
             Self::CommandNotAllowlisted => "command_not_allowlisted",
             Self::RemoteShellNotAllowed => "remote_shell_not_allowed",
-            Self::GithubCommandNotReadOnly => "github_command_not_read_only",
+            Self::GithubCommandNotAllowed => "github_command_not_allowed",
             Self::EnvironmentNotAllowed => "environment_not_allowed",
             Self::TimeoutTooLong => "timeout_too_long",
             Self::PatchMissing => "patch_missing",
@@ -269,8 +269,8 @@ impl PolicyReason {
             Self::RemoteShellNotAllowed => {
                 "远端机器上的事走已登记的 hub / ccnm 远端成员；确实要从这台机器直连，得由用户把它加进白名单，那等于放开任意远端 shell，gld 不限制目标"
             }
-            Self::GithubCommandNotReadOnly => {
-                "gh 只放行只读诊断（run list/view、workflow view、pr view/diff/checks、issue view、release view、repo view、auth status）。rerun、合并、release、secret、gh api 这类会改 GitHub 的操作请用户自己在终端做"
+            Self::GithubCommandNotAllowed => {
+                "guarded 模式下 gh 放行只读诊断，日常写操作（如 repo create、pr create、issue create、run rerun/cancel、release create）需用户确认后带 confirm=true（或配 allowed-commands+=gh:write 免确认）；凭据、删除和 gh api 等高危操作请用户自己在终端做"
             }
             Self::EnvironmentNotAllowed => "环境变量只能由服务端配置，不能随调用传入",
             Self::TimeoutTooLong => "timeout_ms 普通命令最多 10 分钟；dev server 这类要一直开着的，带上 service_port 最多 1 小时",
@@ -536,10 +536,10 @@ pub fn validate_command_for_workspace(
             .workspace_script_extensions
             .iter()
             .any(|extension| base_name.to_ascii_lowercase().ends_with(extension));
-    if !allow_all
-        && !(policy.allowed_commands.contains(stem)
-            || (policy.workspace_local_entries && workspace_entry_candidate))
-    {
+    let allowlisted = policy.allowed_commands.contains(stem)
+        || (stem == "gh" && policy.allowed_commands.contains(GH_WRITE_CAPABILITY))
+        || (policy.workspace_local_entries && workspace_entry_candidate);
+    if !allow_all && !allowlisted {
         // 远端 shell 单独说一句。笼统的"不在白名单"会让模型去试 scp、试
         // `python -c paramiko`，而正确答案是根本不从这里出去：远端机器上的事
         // 走已登记的 hub / ccnm 成员（方案 B 的 SSH 一行）。
@@ -555,13 +555,17 @@ pub fn validate_command_for_workspace(
         ));
     }
 
-    // `gh` 进了白名单只等于开了**只读诊断**。写操作不跟着一起开：一个字段名
-    // 就能把 `gh run view` 变成 `gh run rerun`，而"首个单词是 gh"看不出区别
-    // （方案 B 的 GitHub 两行、审查 A05）。名单是允许制——没列进去的子命令
-    // 一律拒，gh 以后加了什么新命令也默认不放行。
-    if stem == "gh" && !allow_all {
-        check_github_cli(&parts)?;
-    }
+    // `gh` 按三层分级（均为允许制，未收录的子命令一律硬拒）：
+    // 1. 只读诊断：配了 `gh`（或 `gh:write`）直接放行；
+    // 2. 日常写操作（repo/pr/issue/release create、run rerun/cancel 等）：
+    //    默认走 `confirm=true`（见下方确认关卡），配了 `gh:write` 则免确认；
+    // 3. 凭据与不可逆高危（auth token、secret、ssh-key、repo delete、gh api 等）：
+    //    guarded 下即使用户传 `confirm=true` 或配了 `gh:write` 也仍硬拒。
+    let gh_class = if stem == "gh" && !allow_all {
+        Some(classify_github_cli(&parts)?)
+    } else {
+        None
+    };
 
     if arguments.get("env").is_some() {
         return Err(PolicyError::new(
@@ -589,10 +593,20 @@ pub fn validate_command_for_workspace(
         }
     }
 
-    // 装依赖、装工具要联网下载、跑包自己的安装脚本。回包里写"先问用户"拦不住：ChatGPT 把"按 CI 全跑一遍"
-    // 当成了同意，没问就跑了 pnpm install（审查 §17）。所以和 rm -rf 一样，用户点头后带 confirm=true。
-    // 哪些算装，见 project_commands/installs.rs。放在最后：被别的规则拒的命令，问了用户也跑不了，先报那个。
+    // 装依赖、装工具与日常 `gh` 写操作默认都要用户点头后带 confirm=true。
+    // 放在最后：被别的规则拒的命令，问了用户也跑不了，先报那个。
     if !allow_all && !confirmed(arguments) {
+        if gh_class == Some(GithubCommandClass::ConfirmableWrite)
+            && !policy.allowed_commands.contains(GH_WRITE_CAPABILITY)
+        {
+            let sub = github_subcommand_label(&parts);
+            return Err(PolicyError::new(
+                PolicyReason::ConfirmationRequired,
+                format!(
+                    "gh {sub} will modify GitHub state. Ask the user, then retry with confirm=true (or add gh:write to allowed-commands)"
+                ),
+            ));
+        }
         let workdir = arguments
             .get("workdir")
             .or_else(|| arguments.get("cwd"))
@@ -634,8 +648,8 @@ fn program_stem(program: &str) -> &str {
 
 /// 这条策略拒绝靠什么解开：`confirm`、`config_change`（第二个值是确切命令）或 `other`。
 ///
-/// 不按规则名猜，而是真的改完再判一次：`rm -rf` 带了 confirm 还会撞白名单，`gh pr merge` 加进
-/// 白名单还会撞只读名单。只看规则名，就又会让人点了头、改了配置还是被拒（审查 §108）。
+/// 不按规则名猜，而是真的改完再判一次：`rm -rf` 带了 confirm 还会撞白名单，`gh repo delete` 加进
+/// 白名单还会撞高危拦截。只看规则名，就又会让人点了头、改了配置还是被拒（审查 §108）。
 /// 只判策略，程序装没装看同一份回包的 `program.found`。
 pub fn denial_resolution(
     first: PolicyReason,
@@ -715,11 +729,21 @@ fn is_remote_shell(stem: &str) -> bool {
     )
 }
 
+/// 允许日常 `gh` 写操作免 `confirm=true` 的白名单能力项。
+///
+/// 仍受高危黑箱保护：凭据读取（`auth token`、`secret`）、不可逆删除（`repo delete`）、
+/// 任意写接口（`gh api`）以及未收录子命令在 guarded 下依旧硬拒。
+pub const GH_WRITE_CAPABILITY: &str = "gh:write";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubCommandClass {
+    ReadOnly,
+    ConfirmableWrite,
+}
+
 /// `gh` 的只读诊断子命令。
 ///
-/// 只收**读**：列表、详情、日志、状态。判断依据是"这条命令会不会改 GitHub 上
-/// 的东西或本机凭据"，不是"它常不常用"。名单外一律拒，包括 `gh api`——它
-/// 一个 `-X POST` 就是任意写接口，从子命令名上分不出来。
+/// 只收**读**：列表、详情、日志、状态。
 const GH_READ_ONLY: &[(&str, &str)] = &[
     ("run", "list"),
     ("run", "view"),
@@ -735,6 +759,7 @@ const GH_READ_ONLY: &[(&str, &str)] = &[
     ("issue", "status"),
     ("release", "list"),
     ("release", "view"),
+    ("repo", "list"),
     ("repo", "view"),
     ("cache", "list"),
     ("label", "list"),
@@ -744,26 +769,87 @@ const GH_READ_ONLY: &[(&str, &str)] = &[
 /// 不带子命令也只读的那几个。
 const GH_READ_ONLY_TOPLEVEL: &[&str] = &["version", "status"];
 
-fn check_github_cli(parts: &[String]) -> Result<(), PolicyError> {
+/// `gh` 的日常写操作子命令：配了 `gh` 时走 `confirm=true`，配了 `gh:write` 时免确认。
+///
+/// 明确排除凭据相关（`auth token|login|logout|refresh`、`secret`、`variable`、`ssh-key`、
+/// `gpg-key`）、不可逆删除（`repo delete|archive`、`issue/release/run/label/gist delete`）、
+/// 任意写接口（`gh api`）以及改变 CLI 行为的 `extension`/`alias`/`config`。
+const GH_CONFIRMABLE_WRITE: &[(&str, &str)] = &[
+    ("repo", "create"),
+    ("repo", "clone"),
+    ("repo", "fork"),
+    ("repo", "edit"),
+    ("repo", "sync"),
+    ("repo", "rename"),
+    ("pr", "create"),
+    ("pr", "edit"),
+    ("pr", "comment"),
+    ("pr", "review"),
+    ("pr", "ready"),
+    ("pr", "close"),
+    ("pr", "reopen"),
+    ("pr", "checkout"),
+    ("pr", "merge"),
+    ("pr", "update-branch"),
+    ("issue", "create"),
+    ("issue", "edit"),
+    ("issue", "comment"),
+    ("issue", "close"),
+    ("issue", "reopen"),
+    ("issue", "develop"),
+    ("issue", "pin"),
+    ("issue", "unpin"),
+    ("issue", "lock"),
+    ("issue", "unlock"),
+    ("run", "rerun"),
+    ("run", "cancel"),
+    ("run", "watch"),
+    ("workflow", "run"),
+    ("workflow", "enable"),
+    ("workflow", "disable"),
+    ("release", "create"),
+    ("release", "edit"),
+    ("release", "upload"),
+    ("label", "create"),
+    ("label", "edit"),
+    ("label", "clone"),
+    ("gist", "create"),
+    ("gist", "edit"),
+    ("gist", "clone"),
+];
+
+fn github_subcommand_words(parts: &[String]) -> Vec<&str> {
     // flag 跳过就行：gh 要求子命令在最前，`gh run list --limit 5` 里第一个
     // 非 flag 的两个词就是 run 和 list。认不出来就拒——猜错的代价是放行一次
-    // 写操作。
-    let words: Vec<&str> = parts[1..]
+    // 高危操作。
+    parts[1..]
         .iter()
         .map(String::as_str)
         .filter(|word| !word.starts_with('-'))
-        .collect();
+        .collect()
+}
+
+fn github_subcommand_label(parts: &[String]) -> String {
+    match github_subcommand_words(parts).as_slice() {
+        [] => String::new(),
+        [single] => (*single).to_string(),
+        [group, action, ..] => format!("{group} {action}"),
+    }
+}
+
+fn classify_github_cli(parts: &[String]) -> Result<GithubCommandClass, PolicyError> {
+    let words = github_subcommand_words(parts);
     let denied = |detail: &str| {
         Err(PolicyError::new(
-            PolicyReason::GithubCommandNotReadOnly,
-            format!("gh {detail}：只放行只读诊断子命令"),
+            PolicyReason::GithubCommandNotAllowed,
+            format!("gh {detail}：guarded 模式下不允许该子命令"),
         ))
     };
     match words.as_slice() {
         [] => denied("需要一个子命令"),
         [single] => {
             if GH_READ_ONLY_TOPLEVEL.contains(single) {
-                Ok(())
+                Ok(GithubCommandClass::ReadOnly)
             } else {
                 denied(single)
             }
@@ -772,7 +858,14 @@ fn check_github_cli(parts: &[String]) -> Result<(), PolicyError> {
             if GH_READ_ONLY.iter().any(|(allowed_group, allowed_action)| {
                 allowed_group == group && allowed_action == action
             }) {
-                Ok(())
+                Ok(GithubCommandClass::ReadOnly)
+            } else if GH_CONFIRMABLE_WRITE
+                .iter()
+                .any(|(allowed_group, allowed_action)| {
+                    allowed_group == group && allowed_action == action
+                })
+            {
+                Ok(GithubCommandClass::ConfirmableWrite)
             } else {
                 denied(&format!("{group} {action}"))
             }

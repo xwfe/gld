@@ -350,24 +350,27 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 加之前先想想有没有现成工具：搜索用 `search_text`
 （带上下文、分页、类型过滤），列文件用 `list_files`——它们不需要放开任何命令。
 
-### `gh` 加进白名单 = 只读诊断，不是整个 gh
+### `gh` 三层分级：只读直接放行、日常写走 `confirm=true`、高危硬拦
 
-把 `gh` 加进白名单之后，能跑的只有查询类子命令：
+`gh` 默认不在白名单里。用 `gld set <项目> allowed-commands+=gh` 加进去之后，按子命令分三层（名单均为**允许制**，未收录或 `gh` 以后新增的子命令默认拒，错误码 `POLICY_REJECTED`、原因 `github_command_not_allowed`）：
 
 ```text
-放行  gh run list / run view（含 --log）、workflow list|view、pr list|view|diff|checks|status、
-      issue list|view|status、release list|view、repo view、cache list、label list、
-      auth status、gh version、gh status
-拒绝  其余全部，包括 run rerun|cancel、pr create|merge、release create、secret set、
-      workflow run、auth token|login、repo clone，以及 gh api（一个 -X POST 就是任意写接口）
+只读（直接放行）      gh run list|view（含 --log）、workflow list|view、pr list|view|diff|checks|status、
+                    issue list|view|status、release list|view、repo list|view、cache list、label list、
+                    auth status、gh version、gh status
+日常写（走 confirm）  gh repo create|clone|fork|edit|sync|rename、
+                    pr create|edit|comment|review|ready|close|reopen|checkout|merge|update-branch、
+                    issue create|edit|comment|close|reopen|develop|pin|unpin|lock|unlock、
+                    run rerun|cancel|watch、workflow run|enable|disable、
+                    release create|edit|upload、label create|edit|clone、gist create|edit|clone
+高危（guarded 硬拦）  其余全部，包括 auth token|login|logout|refresh|setup-git、secret、variable、
+                    ssh-key、gpg-key、repo delete|archive|deploy-key、各类 delete、
+                    extension、alias、config，以及 gh api（一个 -X POST 就是任意写接口）
 ```
 
-名单是**允许制**：没列进去的一律拒，gh 以后新增的子命令默认也不放行，错误码
-`POLICY_REJECTED`、原因 `github_command_not_read_only`。这么做是因为
-`gh run view` 和 `gh run rerun` 只差一个词，按"首个单词是 gh"根本分不出来。
-
-真要做写操作（合并 PR、重跑 workflow、发 release），请自己在终端里做——
-那是需要你本人判断的一步，不该由模型代劳。
+- **日常写默认要你点头**：只配了 `gh` 时，跑 `gh repo create`、`gh pr create`、`gh run rerun` 等会返回 `needs_approval`（`resolved_by: "confirm"`），模型问过你后带 `confirm=true` 重发即放行。
+- **不想每次确认日常写**：显式再加一条能力项 `gld set <项目> allowed-commands+=gh:write`（也会同时放行只读 `gh`），日常写操作不再要求 `confirm=true`。取消用 `allowed-commands-=gh:write`。
+- **凭据和不可逆高危仍硬拦**：即使传 `confirm=true` 或配了 `gh:write`，`gh auth token`、`gh secret set`、`gh repo delete`、`gh api` 等在 `guarded` 模式下照样拒，请自己在终端做（只有 `command-policy=all` 才会放开）。
 
 ### `ssh` / `scp` 默认不放行
 

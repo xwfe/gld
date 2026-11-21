@@ -1498,9 +1498,9 @@ AI 跑下表里的命令时，gld 先拦下，报 `DANGEROUS_OPERATION_REQUIRES_
 
 | `resolved_by` | 怎么办 | 例子 |
 | --- | --- | --- |
-| `confirm` | 问过用户，带 `confirm=true` 重发 | `git reset --hard`、`pnpm install` |
+| `confirm` | 问过用户，带 `confirm=true` 重发 | `git reset --hard`、`pnpm install`、配了 `gh` 时的 `gh repo create` / `gh pr create` / `gh run rerun`（配 `allowed-commands+=gh:write` 可免确认） |
 | `config_change` | `confirm=true` 解不开。让用户在本机跑回包 `config_command` 给的命令，再重新预检 | 不在白名单的程序；老配置留下的 `permission-mode=safe` 挡住的联网命令 |
-| `other` | 这条拒绝 gld 给不出配置解法，按 `suggestion` 换做法 | shell 语法、`gh pr merge`、`ssh`（走已登记的远端成员） |
+| `other` | 这条拒绝 gld 给不出配置解法，按 `suggestion` 换做法 | shell 语法、`gh auth token` / `gh secret set` / `gh repo delete` / `gh api`、`ssh`（走已登记的远端成员） |
 
 `needs_user_authorization` 只表示"得用户出面"，白名单拒绝也是 `true`，而带 `confirm=true` 复查照样是 `deny`（审查 §108 踩过）。字段没改语义，老调用方不受影响。
 

@@ -1137,37 +1137,129 @@ fn the_builtin_ls_resolves_relative_paths_against_workdir() {
 /// sh 脚本，所以只在 unix 上跑。
 #[cfg(unix)]
 #[test]
-fn enabling_gh_opens_read_only_diagnostics_only() {
+fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
     let fx = repo_maintenance_fixture();
     let ctx = common::ctx_with_allowed_commands_and_path(&fx.root, "gh", &fx.root.join("tools"));
 
+    // 1. 只读诊断：配了 gh 直接放行。
     for allowed in [
         "gh run list",
         "gh run view 42 --log",
         "gh workflow view ci.yml",
         "gh pr checks",
+        "gh repo list",
+        "gh repo view",
+        "gh auth status",
         "gh version",
+        "gh status",
     ] {
         let checked = invoke(&ctx, "check_command", json!({ "cmd": allowed }));
         assert_eq!(checked["decision"], "allow", "{allowed}: {checked}");
     }
 
-    for denied in [
+    // 2. 日常写操作：不带 confirm 返回 needs_approval（resolved_by=confirm），带 confirm=true 放行。
+    for confirmable in [
+        "gh repo create my-repo --private",
+        "gh pr create --title test",
+        "gh issue create --title bug",
         "gh run rerun 42",
         "gh run cancel 42",
-        "gh pr merge 7",
         "gh release create v1",
-        "gh secret set TOKEN",
+        "gh pr merge 7",
         "gh workflow run deploy.yml",
-        "gh auth token",
-        "gh api /repos/o/r/actions/runs",
         "gh repo clone o/r",
+    ] {
+        let checked = invoke(&ctx, "check_command", json!({ "cmd": confirmable }));
+        assert_eq!(
+            checked["decision"], "needs_approval",
+            "{confirmable}: {checked}"
+        );
+        assert_eq!(
+            checked["rule"], "confirmation_required",
+            "{confirmable}: {checked}"
+        );
+        assert_eq!(
+            checked["resolved_by"], "confirm",
+            "{confirmable}: {checked}"
+        );
+
+        let confirmed = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": confirmable, "confirm": true }),
+        );
+        assert_eq!(
+            confirmed["decision"], "allow",
+            "{confirmable} with confirm=true: {confirmed}"
+        );
+    }
+
+    // 3. 凭据与不可逆高危：即使带 confirm=true 也硬拒。
+    for denied in [
+        "gh auth token",
+        "gh auth login",
+        "gh secret set TOKEN",
+        "gh repo delete o/r",
+        "gh ssh-key add key.pub",
+        "gh api /repos/o/r/actions/runs",
+        "gh api -X POST /repos/o/r/issues",
     ] {
         let checked = invoke(&ctx, "check_command", json!({ "cmd": denied }));
         assert_eq!(checked["decision"], "deny", "{denied}: {checked}");
         assert_eq!(
-            checked["rule"], "github_command_not_read_only",
+            checked["rule"], "github_command_not_allowed",
             "{denied}: {checked}"
+        );
+        assert_eq!(checked["resolved_by"], "other", "{denied}: {checked}");
+
+        let confirmed = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": denied, "confirm": true }),
+        );
+        assert_eq!(
+            confirmed["decision"], "deny",
+            "{denied} with confirm=true: {confirmed}"
+        );
+        assert_eq!(
+            confirmed["rule"], "github_command_not_allowed",
+            "{denied} with confirm=true: {confirmed}"
+        );
+    }
+
+    // 4. 显式配 gh:write：日常写免 confirm，同时仍可跑只读；高危仍硬拒。
+    let write_ctx =
+        common::ctx_with_allowed_commands_and_path(&fx.root, "gh:write", &fx.root.join("tools"));
+    for direct in [
+        "gh run list",
+        "gh repo create my-repo --private",
+        "gh pr create --title test",
+        "gh run rerun 42",
+    ] {
+        let checked = invoke(&write_ctx, "check_command", json!({ "cmd": direct }));
+        assert_eq!(
+            checked["decision"], "allow",
+            "gh:write should allow {direct}: {checked}"
+        );
+    }
+    for still_denied in [
+        "gh auth token",
+        "gh secret set TOKEN",
+        "gh repo delete o/r",
+        "gh api /repos/o/r",
+    ] {
+        let checked = invoke(
+            &write_ctx,
+            "check_command",
+            json!({ "cmd": still_denied, "confirm": true }),
+        );
+        assert_eq!(
+            checked["decision"], "deny",
+            "gh:write must still block {still_denied}: {checked}"
+        );
+        assert_eq!(
+            checked["rule"], "github_command_not_allowed",
+            "{still_denied}: {checked}"
         );
     }
 }
@@ -1287,11 +1379,14 @@ fn resolved_by_is_what_lifts_the_denial_not_what_the_rule_name_suggests() {
     assert_eq!(rm["resolved_by"], "config_change", "{rm}");
     assert_eq!(rm["config_command"], "gld set <项目> allowed-commands+=rm");
 
-    // 加进白名单也只开只读诊断，merge 还是过不去。
-    let merge = resolve(json!({ "cmd": "gh pr merge 1" }));
-    assert_eq!(merge["rule"], "command_not_allowlisted", "{merge}");
-    assert_eq!(merge["resolved_by"], "other", "{merge}");
-    assert!(merge.get("config_command").is_none(), "{merge}");
+    // 加进白名单也只开只读 + 日常写确认，不可逆高危（repo delete）还是过不去，不能误导去加 gh。
+    let delete_repo = resolve(json!({ "cmd": "gh repo delete o/r" }));
+    assert_eq!(
+        delete_repo["rule"], "command_not_allowlisted",
+        "{delete_repo}"
+    );
+    assert_eq!(delete_repo["resolved_by"], "other", "{delete_repo}");
+    assert!(delete_repo.get("config_command").is_none(), "{delete_repo}");
 
     // 程序名是调用方给的，不能把 $(...) 拼进给用户复制的命令。
     let hostile = resolve(json!({ "argv": ["evil$(touch pwned)", "x"] }));
