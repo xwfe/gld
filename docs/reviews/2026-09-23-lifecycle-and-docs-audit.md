@@ -4789,3 +4789,50 @@ grep worker_failed ~/.config/gld/logs/hub/mcp-requests.log
 - macOS 的数据来自一次性探针（PR #5）。它把 CI 的测试步骤换成了只循环这一条，本来不该合并，却被合进了 main，随后由 PR #6 原样撤回，撤回后的树和 PR #4 合并后一致。之后在 CI 上量数据只推分支或保持草稿，用完删分支。
 
 **边界：** 未换本机二进制、未重启守护进程；PR 待审，未合并。
+
+## 119. 委派测试偶发 `AGENT_TASK_RUNNING`：跑完后项目多占了一小段；构建脚本写死了编译时的目录（2026-11-22）
+
+**起因：** §118 留了两件没查的事。一是 PR #2 的 CI 里 Ubuntu 作业有两条 Agent 测试报 `AGENT_TASK_RUNNING`，重跑通过。二是删掉共用 `target` 的 worktree 后版本号不带提交号，没查 `crates/core/build.rs`。
+
+**更正 §118 的一处：** 那两条失败不在 run 44898507184 里，在同一个 PR 更早的 run 44895454481 第一次（job 136820013298，提交 `bea9dd40`）。44898507184 第一次只有 macOS 作业失败。
+
+### 一、`AGENT_TASK_RUNNING`
+
+**事实：**
+
+- 失败日志：`gld-core` 单测 882 过、2 失败。
+  - `agents::tests::ask_waits_for_local_approval_and_deny_or_stop_ends_it`，panic 在 `crates/core/src/agents/tests.rs:324`，是 `f.start("fake", Approval::Ask).expect("存下")`。
+  - `agents::tests::approval_can_change_the_agent_model_and_effort`，panic 在 `tests.rs:661`，同样是 `start(...).expect("存下")`。
+  - 两条的回包都是 `AgentError { code: "AGENT_TASK_RUNNING", message: "这个项目已经有委派在跑（任务 <id>），同一个项目同时只许一个；等它跑完或者先停掉" }`。
+- 两条测试各用自己的临时数据目录和临时 git 项目，测试之间不共享项目。进程内那张「哪个项目在跑」的表是全局的，但按项目目录比对，别的测试的项目不会撞上。
+- 两处失败前都有同一个动作：上一个委派刚用 `wait_until_finished` 等到记录不再是 `running`，紧接着在同一个项目再起一个。
+- 产品代码 `crates/core/src/agents/run.rs` 的监视线程收尾时，先 `store::write` 把结局写进记录，再 `release` 把项目从表里拿掉，是分开的两步。两步之间，记录写着跑完了，项目还占着。
+
+**复现：**
+
+- 原样循环跑 `agents::tests::`（隔离 `GLD_HOME`）：空闲 30 轮、压 64 个忙循环 15 轮，共 45 轮没有一次失败。窗口太短，没有原样复现。
+- 在旧代码两步之间插 100 毫秒：27 条里 8 条失败，CI 上那两条都在内，报错和行号（324、661）与 CI 日志一致。
+
+**结论：** 是产品缺陷，不是测试共享状态。任何调用方读到委派「跑完了」后马上在同一个项目再委派，都可能被挡回去；对这个项目的 `apply_patch` / `exec_command` 也一样会多挡这一小段。没有并发起出两个任务，任务状态也没有残留，只是放开晚了一步。
+
+**改动：** 写记录和放开项目放进同一把锁（`run.rs` 的 `finish`），三处收尾都走它。先放开再写不行：记录还是 `running` 而表里没有它，读的人会把它判成 `unknown`。回归测试 `a_task_recorded_as_finished_no_longer_holds_its_project` 用测试钩子把两步之间拉长到 200 毫秒，只对这条测试自己的项目生效：改回不持锁红，持锁绿。原有断言没有放宽，没有加重试。工具回包和规则没变，`docs/concepts.md` 没动。
+
+**没证实的：** CI 日志里报出的任务号是不是刚跑完的那一个。日志不打印前一个任务的 id，只能从测试结构和插延迟后的同款失败推出。
+
+### 二、`crates/core/build.rs`
+
+**事实：** `rerun-if-changed` 没有漏，构建脚本当时重跑了。问题是脚本里三处用 `env!("CARGO_MANIFEST_DIR")`，这是脚本自己被编译时的目录。两个检出共用 `target` 时，cargo 拿 worktree 编出来的脚本直接为主检出跑，里面写死的是 worktree 的路径。worktree 删了，往上找不到 `.git`，不报提交号；worktree 没删，报的是 worktree 的提交号。
+
+**复现：** `git worktree add` 一份，`CARGO_TARGET_DIR` 指到同一个目录，先在 worktree 里跑版本测试（过），删掉 worktree 再在主检出跑：`version_names_the_build_commit_when_it_is_known` 失败，`left: None`；编出来的构建脚本里能搜到 worktree 的路径。
+
+**改动：** 改成跑的时候读 cargo 给的 `CARGO_MANIFEST_DIR` 环境变量。新增 `crates/core/tests/build_script_checkout.rs`：在一个不存在的目录名下用 rustc 编 `build.rs`，再让它为本检出跑，要报出本检出的 HEAD。改前红、改后绿；上面的 worktree 步骤改后也通过。这条检查只在 unix 上跑。
+
+### 三、PR 审查里补的一处
+
+Devin Review 在 PR #8 上指出：`settle` 手里的记录可能是任务收尾前读的 `running`，等它查表时任务已经从表里拿掉，它会判成 `unknown` 写回去，把跑完的 recap、退出码、改动清单盖掉。这个先后在本轮之前就有。改成查不到在跑时重读一次盘上的记录，不是 `running` 就用盘上的；靠的是上面「写完记录才从表里拿掉」这个顺序。回归测试 `a_stale_running_copy_does_not_overwrite_the_finished_record` 改前红（返回 `Unknown`）、改后绿。
+
+PR 第一次 CI 的 Windows 作业失败：测试钩子只有 unix 的测试在用，Windows 上报 dead_code。钩子改成只在 unix 的测试里编。
+
+**证据：** 全仓 `cargo test --workspace --all-targets --locked`：**1417 passed / 0 failed**（Linux 本机，64 个测试目标，比 §118 多三条新测试）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。
+
+**边界：** 未换本机二进制、未重启守护进程；PR 待审，未合并。
