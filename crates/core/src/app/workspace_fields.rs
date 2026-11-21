@@ -257,6 +257,15 @@ const FIELDS: &[Field] = &[
         }
     ),
     field!(
+        "actions.command-policy",
+        "guarded | all",
+        "Actions 侧的命令关卡：guarded（默认）照白名单、装东西和危险命令要它先问你；all 一律放行，风险和 MCP 侧相同，见 docs/security.md",
+        |p, v| {
+            p.actions.command_policy = parse_choice(v, &["guarded", "all"])?;
+            Ok(())
+        }
+    ),
+    field!(
         "actions.tunnel",
         "frp | cf | none",
         "Actions 公网隧道类型（cf 即 cloudflare）",
@@ -716,9 +725,11 @@ mod tests {
         let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
         set(&mut profile, "mcp.tool-profile", "Read-Only").unwrap();
         set(&mut profile, "actions.auth", "api_key").unwrap();
+        set(&mut profile, "actions.command-policy", "all").unwrap();
         set(&mut profile, "mcp.history-context", "3, 1,3").unwrap();
         assert_eq!(profile.runtime.tool_profile, "read-only");
         assert_eq!(profile.actions.auth_type, "api_key");
+        assert_eq!(profile.actions.command_policy, "all");
         assert_eq!(profile.runtime.history_context_sessions, vec![1, 3]);
 
         let error = set(&mut profile, "nope", "1").unwrap_err();
@@ -780,6 +791,19 @@ mod tests {
         assert_eq!(profile.runtime.local_port, before, "被拒了就不能写进去");
         // Actions 那一半照旧能改。
         set(&mut profile, "actions.tunnel", "cf").unwrap();
+    }
+
+    #[test]
+    fn actions_command_policy_is_separate_from_the_mcp_one() {
+        let mut profile = WorkspaceProfile::new("/tmp/x".into(), None);
+        set(&mut profile, "command-policy", "all").unwrap();
+        assert_eq!(profile.runtime.command_policy, "all");
+        assert_eq!(profile.actions.command_policy, "guarded");
+
+        set(&mut profile, "actions.command-policy", "all").unwrap();
+        assert_eq!(profile.actions.command_policy, "all");
+        assert!(set(&mut profile, "actions.command-policy", "everything").is_err());
+        assert_eq!(profile.actions.command_policy, "all");
     }
 
     /// `name` 没有前缀，不能被补成 `mcp.name`（那个字段不存在，会变成"未知字段"）。

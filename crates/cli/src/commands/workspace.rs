@@ -369,6 +369,15 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
             ctx.out.yellow("⚠")
         ));
     }
+    if keys.iter().any(|key| key == "actions.command-policy")
+        && update.profile.actions.command_policy == "all"
+    {
+        ctx.out.line(format!(
+            "{} 这个项目的 GPT Actions 现在允许 AI 跑任何命令：不看白名单，装依赖、rm -rf 这类也不再先问你。命令用你的账号跑，\
+             能读写你账号碰得到的一切，不只是项目目录。\n  改回来：gld set {name} actions.command-policy=guarded",
+            ctx.out.yellow("⚠")
+        ));
+    }
     // 委派的两个开关一起说：谁来放行（agent-delegation）、放行后 Agent 能做多少（agent-approval）。
     let delegation_changed = keys
         .iter()

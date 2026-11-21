@@ -1536,7 +1536,8 @@ gld set api command-policy=guarded   # 改回默认
 - 某条命令要是按默认关卡会被拦，回包里多一个 `policy_bypassed`（哪条规则、为什么），要它把跑了什么告诉你。
 
 本机这边：打开时 `gld set` 打出风险和怎么改回来；`gld ls` 在项目后面标「命令全放行」，`gld ls <项目>` 的"跑命令"一行写着 `all`。
-只管 MCP 这条线路，项目的 GPT Actions 不受影响。风险见 [security.md](security.md#一键放行全部命令等于把账号交给-ai)。
+
+GPT Actions 是另一条线路，默认仍走 guarded；要放开它用 `gld set api actions.command-policy=all`，风险相同，改回来写 `actions.command-policy=guarded`。它的 `exec_command` 回包同样带 `policy_bypassed`。风险见 [security.md](security.md#一键放行全部命令等于把账号交给-ai)。
 
 ---
 

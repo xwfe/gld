@@ -147,8 +147,11 @@ impl PolicySettings {
             confine_reads: actions.confine_reads,
             allowlist_mode: allowlist_mode(&actions.allowed_commands),
             config_source: ACTIONS_CONFIG_SOURCE,
-            // GPT Actions 是另一条线路，没有这个开关。
-            command_policy: "guarded",
+            command_policy: if actions.command_policy == "all" {
+                "all"
+            } else {
+                "guarded"
+            },
         }
     }
 
@@ -1264,9 +1267,14 @@ mod tests {
             );
         }
 
-        // GPT Actions 那条线路没有这个开关。
+        // GPT Actions 有自己的开关，默认仍然 guarded。
         assert!(
             !PolicySettings::from_actions_config(&ActionsConfig::default()).allows_all_commands()
         );
+        let actions_all = ActionsConfig {
+            command_policy: "all".into(),
+            ..ActionsConfig::default()
+        };
+        assert!(PolicySettings::from_actions_config(&actions_all).allows_all_commands());
     }
 }
