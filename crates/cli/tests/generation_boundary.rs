@@ -1086,9 +1086,7 @@ fn requests_keep_succeeding_across_prepare_and_switch() {
             );
             let mut count = 0u32;
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                let t0 = Instant::now();
                 let reply = post_json(port, "/mcp", &body, Some(&token));
-                eprintln!("DBG req {} ms", t0.elapsed().as_millis());
                 assert_eq!(reply.status, 200, "{}", reply.body);
                 assert!(reply.body.contains("steady"), "{}", reply.body);
                 count += 1;
@@ -1096,15 +1094,12 @@ fn requests_keep_succeeding_across_prepare_and_switch() {
             count
         })
     };
-    let t = Instant::now();
     for _ in 0..2 {
         std::thread::sleep(Duration::from_millis(200));
         fixture
             .env
             .ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
-        eprintln!("DBG prepared at {}", t.elapsed().as_millis());
         fixture.env.ok(&["daemon", "upgrade", "switch"]);
-        eprintln!("DBG switched at {}", t.elapsed().as_millis());
     }
     // 请求一直不停也要搬得走：这时几乎任何一刻看，这个项目都有在途调用。
     wait_for("旧代都退出", || {
@@ -1112,7 +1107,6 @@ fn requests_keep_succeeding_across_prepare_and_switch() {
     });
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let count = client.join().expect("请求线程没有报错");
-    eprintln!("DBG count {count} window {}", t.elapsed().as_millis());
     assert!(count > 10, "这段时间只发出去 {count} 条，没覆盖到切换");
 }
 
