@@ -632,6 +632,41 @@ fn recursive_globs_match_nested_directories() {
     assert_eq!(files[0]["path"], "crates/core/src/bridge/peer.rs");
 }
 
+/// 「目录名结尾」的 glob（`**/deps` 这种写法）要能排掉目录下所有文件
+/// （PR #3 复核）：glob 只比文件的工作区相对路径，目录本身不进匹配，模式
+/// 不带文件名通配时必须靠路径前缀命中，否则这种排除一个文件都排不掉。
+/// 用 `deps` 而不是 `node_modules`：node_modules、target 这类名字在遍历时
+/// 就整棵跳过，根本到不了 glob 这一步，排除它们的 glob 等于没写。
+#[test]
+fn directory_globs_exclude_everything_below() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    fs::create_dir_all(root.join("web/deps/y")).expect("deps dir");
+    fs::create_dir_all(root.join("web/src")).expect("src dir");
+    fs::write(root.join("web/deps/y/b.js"), "fn needle() {}\n").expect("deps file");
+    fs::write(root.join("web/src/a.js"), "fn needle() {}\n").expect("src file");
+    let ctx = ctx_for(root);
+
+    let listed = invoke(
+        &ctx,
+        "list_files",
+        json!({ "patterns": ["**/*.js"], "exclude_patterns": ["**/deps"] }),
+    );
+    let listed_payload = assert_ok(&listed);
+    let files = listed_payload["files"].as_array().expect("files array");
+    let paths: Vec<&str> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+    assert_eq!(paths, ["web/src/a.js"], "{listed}");
+
+    // search_text：同一套 glob_match。
+    let search = invoke(
+        &ctx,
+        "search_text",
+        json!({ "query": "needle", "exclude_globs": ["**/deps"] }),
+    );
+    let payload = assert_ok(&search);
+    assert_eq!(payload["total_matches"], 1, "{search}");
+}
+
 #[test]
 fn search_text_skips_binary_and_oversized_files() {
     let fx = tiny_js_fixture();

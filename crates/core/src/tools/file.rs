@@ -1589,13 +1589,24 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     // `**` 交给 glob crate 自己解析。以前这里手工剥掉前导 `**/` 再拿剩下的
     // 部分去比，带子目录的模式（`**/tests/*.rs`）永远比不中任何嵌套文件，
     // list_files / search_text 整片返回空（审查 §85、§89）。
-    simple_glob(&pat, &p)
-}
-
-fn simple_glob(pattern: &str, text: &str) -> bool {
-    glob::Pattern::new(pattern)
-        .map(|p| p.matches(text))
-        .unwrap_or(false)
+    let Ok(pat) = glob::Pattern::new(&pat) else {
+        return false;
+    };
+    // 目录名命中也算：`**/deps` 这种「以目录名结尾」的排除要能盖住目录下
+    // 所有文件，而遍历只拿文件的相对路径来比，目录本身从不进匹配。依次比
+    // `web`、`web/deps`、`web/deps/y/b.js` 这些前缀（PR #3 复核，和旧行为
+    // 「任一路径段相同即命中」对齐；include / exclude 共用这一个函数）。
+    let mut prefix = String::new();
+    for segment in p.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+        if pat.matches(&prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 fn format_mtime(st: Option<SystemTime>) -> Option<String> {
@@ -1905,14 +1916,26 @@ mod tests {
         assert!(glob_match("**\\tests\\*.rs", "crates\\core\\tests\\x.rs"));
     }
 
-    /// `**/foo` 只匹配结尾是 foo 的路径。以前的"任一路径段等于 foo 就算"
-    /// 会把 `a/foo/b.txt` 也算进来。
+    /// 「以目录名结尾」的模式命中目录下所有文件（PR #3 复核）：遍历只拿文件的
+    /// 工作区相对路径来比，靠逐级路径前缀比出目录名命中，include / exclude 同一套。
     #[test]
-    fn glob_match_does_not_match_intermediate_directories() {
-        assert!(!glob_match("**/foo", "a/foo/b.txt"));
+    fn glob_match_directory_name_covers_files_below() {
+        assert!(glob_match("**/foo", "a/foo/b.txt"));
         assert!(glob_match("**/foo", "a/b/foo"));
+        assert!(glob_match("**/foo", "foo"));
+        assert!(!glob_match("**/foo", "a/food/b.txt"));
+        assert!(!glob_match("**/foo", "a/bar.txt"));
         // 没有 glob 的裸文件名仍然只比整条工作区相对路径（schema 里写明的基准）。
         assert!(!glob_match("exec.rs", "crates/core/exec.rs"));
         assert!(glob_match("exec.rs", "exec.rs"));
+    }
+
+    /// `*` 会跨 `/`：glob crate 默认 require_literal_separator=false，
+    /// 这是原有行为，钉住不改（PR #3 复核）。
+    #[test]
+    fn glob_match_star_crosses_path_separators() {
+        assert!(glob_match("tests/*.rs", "tests/a/b.rs"));
+        assert!(glob_match("*.rs", "crates/core/x.rs"));
+        assert!(!glob_match("*.rs", "crates/core/x.txt"));
     }
 }
