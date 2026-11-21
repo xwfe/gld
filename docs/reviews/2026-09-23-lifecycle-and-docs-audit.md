@@ -4701,3 +4701,27 @@ D15-P2 只保留用户指定 Prompt 正文读取的缺口；另一台 Mac/Linux 
 本轮未重跑真实 Windows/远端节点、整机重启、公网三平台或跨执行代场景；没有改生产服务、连接凭据、默认开关，也没有推送或发布。
 
 **文档落盘后复验：**`docs_commands_exist`、`docs_links_resolve`、`docs_have_no_home_paths`、`messages_name_real_commands` 四个测试目标合计 **7 passed / 0 failed**；`git diff --check` 通过。
+
+## 115. workspace_context -32603：消除 Harness 初始化 panic 这一条来源（2026-11-21）
+
+**起因：** §114 记录本轮首次 `workspace_context` 返回 `-32603: Internal error`，重试成功，原因未定位。本节只追加事实与证据，不改 §114 结论。
+
+**核对到的代码事实：**
+
+- MCP 路径上 `-32603` 只由 `mcp/listener.rs` 的 `generation_failure`（`reason=worker_failed`）和 `nodes/client.rs` 的节点转发产生；`"Internal error"` 字样不在仓库里，是客户端对 -32603 的渲染。
+- `ToolContext::from_workspace` / `from_workspace_with_harness_root` 原来用 `.expect(...)` 初始化 Harness；`Harness::new` 只在两处失败：`workspace_root.canonicalize()`（项目目录不存在或解析不了，`WORKSPACE_UNAVAILABLE`）和 `HarnessStore::new` 里的 `create_dir_all(GLD_HOME/harness)`（`STORE_UNAVAILABLE`）。任一失败都会 panic，worker 线程崩溃，这次工具调用变成 -32603（`reason=worker_failed`）。
+- `create_dir_all` 本身能承受并发创建，「并发下的 IO 错误」没有依据；真实触发更可能是项目目录 canonicalize 失败，或数据目录建不了（权限、盘满、只读）。
+- 上下文按 `workspace+指纹` 缓存，`context_for` 里 build 失败不入缓存，所以重试会重建。这与 §114「首次失败、重试成功」的现象**可能对应，是推测，未证实**。
+
+**修复与回归：** PR #2 把两个构造函数改成返回 `Result<Self, String>`，Harness 初始化失败走普通工具错误回包，不再打崩 worker；新增 `a_harness_dir_that_cannot_be_created_is_an_error_not_a_panic`。三个检查本地全绿，CI 9 项全绿，Devin Review 无问题。
+
+**还不能说死 §114 那次：** 2026-11-05 那次的生产日志没拿到。能定论的命令在用户机器上：
+
+```
+grep worker_failed ~/.config/gld/logs/hub/mcp-requests.log
+# 以及各项目的 logs/<项目>/mcp-requests.log
+```
+
+看那条的 `error=`：是 `worker_panicked` 就坐实是这次 panic，是别的值就不是。另一条 -32603 可能来源是 `generation_unavailable`（10 秒 admit 超时，已测定为预期行为，见 `generation_boundary.rs`），本次不动。
+
+**范围：** 未合并、未碰本机部署、未重启守护进程。
