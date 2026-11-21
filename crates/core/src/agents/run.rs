@@ -94,13 +94,13 @@ fn finish(task_dir: &Path, task: &AgentTask) {
     if let Err(error) = store::write(task_dir, task) {
         eprintln!("委派记录写不进 {}：{error}", task_dir.display());
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     tests_hook::pause_before_release(Path::new(&task.workspace_root));
     live.remove(&task.task_id);
 }
 
-/// 只给测试用：把“写完记录”和“放开项目”之间拉长，让先后顺序的问题每次都露出来。
-#[cfg(test)]
+/// 只给测试用（委派的测试只在 unix 上跑）：把“写完记录”和“放开项目”之间拉长，让先后顺序的问题每次都露出来。
+#[cfg(all(test, unix))]
 pub(super) mod tests_hook {
     use super::*;
 
