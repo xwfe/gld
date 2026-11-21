@@ -355,22 +355,23 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 `gh` 默认不在白名单里。用 `gld set <项目> allowed-commands+=gh` 加进去之后，按子命令分三层（名单均为**允许制**，未收录或 `gh` 以后新增的子命令默认拒，错误码 `POLICY_REJECTED`、原因 `github_command_not_allowed`）：
 
 ```text
-只读（直接放行）      gh run list|view（含 --log）、workflow list|view、pr list|view|diff|checks|status、
+只读（直接放行）      gh run list|view|watch（含 --log）、workflow list|view、pr list|view|diff|checks|status、
                     issue list|view|status、release list|view、repo list|view、cache list、label list、
                     auth status、gh version、gh status
 日常写（走 confirm）  gh repo create|clone|fork|edit|sync|rename、
                     pr create|edit|comment|review|ready|close|reopen|checkout|merge|update-branch、
                     issue create|edit|comment|close|reopen|develop|pin|unpin|lock|unlock、
-                    run rerun|cancel|watch、workflow run|enable|disable、
+                    run rerun|cancel、workflow run|enable|disable、
                     release create|edit|upload、label create|edit|clone、gist create|edit|clone
 高危（guarded 硬拦）  其余全部，包括 auth token|login|logout|refresh|setup-git、secret、variable、
                     ssh-key、gpg-key、repo delete|archive|deploy-key、各类 delete、
-                    extension、alias、config，以及 gh api（一个 -X POST 就是任意写接口）
+                    extension、alias、config、gh api（一个 -X POST 就是任意写接口），
+                    以及 repo clone/fork 带 -- 或 git 选项透传、pr merge --admin、repo edit --visibility
 ```
 
 - **日常写默认要你点头**：只配了 `gh` 时，跑 `gh repo create`、`gh pr create`、`gh run rerun` 等会返回 `needs_approval`（`resolved_by: "confirm"`），模型问过你后带 `confirm=true` 重发即放行。
-- **不想每次确认日常写**：显式再加一条能力项 `gld set <项目> allowed-commands+=gh:write`（也会同时放行只读 `gh`），日常写操作不再要求 `confirm=true`。取消用 `allowed-commands-=gh:write`。
-- **凭据和不可逆高危仍硬拦**：即使传 `confirm=true` 或配了 `gh:write`，`gh auth token`、`gh secret set`、`gh repo delete`、`gh api` 等在 `guarded` 模式下照样拒，请自己在终端做（只有 `command-policy=all` 才会放开）。
+- **不想每次确认日常写**：显式再加一条能力项 `gld set <项目> allowed-commands+=gh:write`（也会同时放行只读 `gh`），日常写操作不再要求 `confirm=true`；取消用 `allowed-commands-=gh:write`。注意：配了 `gh:write` 之后，AI 不问你就能执行这些写操作，包括合并 PR（含 `--delete-branch` 删分支）、`repo sync --force`、`release upload --clobber`。
+- **凭据、不可逆高危与高危选项仍硬拦**：即使传 `confirm=true` 或配了 `gh:write`，`gh auth token`、`gh secret set`、`gh repo delete`、`gh api`、`gh repo clone`/`fork` 通过 `--`（或 `-c`/`--config`/`-u`/`--upload-pack`）透传 git 参数、`gh pr merge --admin`（含 `--admin=true`）、`gh repo edit --visibility` 在 `guarded` 模式下照样硬拒，请自己在终端做（只有 `command-policy=all` 才会放开）。`gh repo clone` 指定项目外目标目录时也会被工作区路径保护拦下。
 
 ### `ssh` / `scp` 默认不放行
 

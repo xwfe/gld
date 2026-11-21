@@ -1145,6 +1145,7 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
     for allowed in [
         "gh run list",
         "gh run view 42 --log",
+        "gh run watch 42",
         "gh workflow view ci.yml",
         "gh pr checks",
         "gh repo list",
@@ -1168,6 +1169,9 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
         "gh pr merge 7",
         "gh workflow run deploy.yml",
         "gh repo clone o/r",
+        "gh repo clone o/r subdir",
+        "gh repo fork o/r --clone",
+        "gh repo edit o/r --description hi",
     ] {
         let checked = invoke(&ctx, "check_command", json!({ "cmd": confirmable }));
         assert_eq!(
@@ -1194,8 +1198,8 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
         );
     }
 
-    // 3. 凭据与不可逆高危：即使带 confirm=true 也硬拒。
-    for denied in [
+    // 3. 凭据、不可逆高危、clone/fork 透传 git 参数、高危 flag：即使带 confirm=true 也硬拒。
+    let hard_denied = [
         "gh auth token",
         "gh auth login",
         "gh secret set TOKEN",
@@ -1203,7 +1207,24 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
         "gh ssh-key add key.pub",
         "gh api /repos/o/r/actions/runs",
         "gh api -X POST /repos/o/r/issues",
-    ] {
+        "gh repo clone o/r -- --config core.sshCommand=sh",
+        "gh repo clone o/r -- -c core.sshCommand=sh",
+        "gh repo clone o/r -- -u /tmp/evil",
+        "gh repo clone o/r -- --upload-pack /tmp/evil",
+        "gh repo clone o/r -- --depth 1",
+        "gh repo fork o/r --clone -- --upload-pack /tmp/evil",
+        "gh repo fork o/r --clone -- -c core.sshCommand=sh",
+        "gh pr merge 7 --admin",
+        "gh pr merge --admin 7",
+        "gh pr merge --admin=true 7",
+        "gh --admin pr merge 7",
+        "gh pr --admin merge 7",
+        "gh repo edit o/r --visibility public",
+        "gh repo edit --visibility=public o/r",
+        "gh --visibility public repo edit o/r",
+        "gh repo --visibility=public edit o/r",
+    ];
+    for denied in hard_denied {
         let checked = invoke(&ctx, "check_command", json!({ "cmd": denied }));
         assert_eq!(checked["decision"], "deny", "{denied}: {checked}");
         assert_eq!(
@@ -1227,14 +1248,16 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
         );
     }
 
-    // 4. 显式配 gh:write：日常写免 confirm，同时仍可跑只读；高危仍硬拒。
+    // 4. 显式配 gh:write：日常写免 confirm，同时仍可跑只读；高危（含透传与高危 flag）仍硬拒。
     let write_ctx =
         common::ctx_with_allowed_commands_and_path(&fx.root, "gh:write", &fx.root.join("tools"));
     for direct in [
         "gh run list",
+        "gh run watch 42",
         "gh repo create my-repo --private",
         "gh pr create --title test",
         "gh run rerun 42",
+        "gh repo clone o/r subdir",
     ] {
         let checked = invoke(&write_ctx, "check_command", json!({ "cmd": direct }));
         assert_eq!(
@@ -1242,17 +1265,8 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
             "gh:write should allow {direct}: {checked}"
         );
     }
-    for still_denied in [
-        "gh auth token",
-        "gh secret set TOKEN",
-        "gh repo delete o/r",
-        "gh api /repos/o/r",
-    ] {
-        let checked = invoke(
-            &write_ctx,
-            "check_command",
-            json!({ "cmd": still_denied, "confirm": true }),
-        );
+    for still_denied in hard_denied {
+        let checked = invoke(&write_ctx, "check_command", json!({ "cmd": still_denied }));
         assert_eq!(
             checked["decision"], "deny",
             "gh:write must still block {still_denied}: {checked}"
@@ -1260,6 +1274,47 @@ fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
         assert_eq!(
             checked["rule"], "github_command_not_allowed",
             "{still_denied}: {checked}"
+        );
+        let checked_confirmed = invoke(
+            &write_ctx,
+            "check_command",
+            json!({ "cmd": still_denied, "confirm": true }),
+        );
+        assert_eq!(
+            checked_confirmed["decision"], "deny",
+            "gh:write + confirm=true must still block {still_denied}: {checked_confirmed}"
+        );
+        assert_eq!(
+            checked_confirmed["rule"], "github_command_not_allowed",
+            "{still_denied}: {checked_confirmed}"
+        );
+    }
+
+    // 5. clone 目标落在项目外时被工作区路径保护拦下（confirm=true 和 gh:write 都不能绕过）。
+    for external_clone in ["gh repo clone o/r /tmp/x", "gh repo clone o/r ../outside"] {
+        let checked = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": external_clone, "confirm": true }),
+        );
+        assert_eq!(checked["decision"], "deny", "{external_clone}: {checked}");
+        assert_eq!(
+            checked["rule"], "workspace_path_protected",
+            "{external_clone}: {checked}"
+        );
+
+        let checked_write = invoke(
+            &write_ctx,
+            "check_command",
+            json!({ "cmd": external_clone, "confirm": true }),
+        );
+        assert_eq!(
+            checked_write["decision"], "deny",
+            "gh:write {external_clone}: {checked_write}"
+        );
+        assert_eq!(
+            checked_write["rule"], "workspace_path_protected",
+            "gh:write {external_clone}: {checked_write}"
         );
     }
 }

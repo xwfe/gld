@@ -562,7 +562,19 @@ pub fn validate_command_for_workspace(
     // 3. 凭据与不可逆高危（auth token、secret、ssh-key、repo delete、gh api 等）：
     //    guarded 下即使用户传 `confirm=true` 或配了 `gh:write` 也仍硬拒。
     let gh_class = if stem == "gh" && !allow_all {
-        Some(classify_github_cli(&parts)?)
+        let class = classify_github_cli(&parts)?;
+        if github_clones_into_filesystem(&parts)
+            && crate::tools::command_paths::command_contains_external_path(
+                command,
+                workspace.map(Workspace::root),
+            )
+        {
+            return Err(PolicyError::new(
+                PolicyReason::WorkspacePathProtected,
+                "workspace scope 禁止把仓库克隆到 Workspace 外部路径",
+            ));
+        }
+        Some(class)
     } else {
         None
     };
@@ -747,6 +759,7 @@ enum GithubCommandClass {
 const GH_READ_ONLY: &[(&str, &str)] = &[
     ("run", "list"),
     ("run", "view"),
+    ("run", "watch"),
     ("workflow", "list"),
     ("workflow", "view"),
     ("pr", "list"),
@@ -803,7 +816,6 @@ const GH_CONFIRMABLE_WRITE: &[(&str, &str)] = &[
     ("issue", "unlock"),
     ("run", "rerun"),
     ("run", "cancel"),
-    ("run", "watch"),
     ("workflow", "run"),
     ("workflow", "enable"),
     ("workflow", "disable"),
@@ -837,6 +849,61 @@ fn github_subcommand_label(parts: &[String]) -> String {
     }
 }
 
+fn github_clones_into_filesystem(parts: &[String]) -> bool {
+    matches!(
+        github_subcommand_words(parts).as_slice(),
+        ["repo", "clone" | "fork", ..] | ["gist", "clone", ..]
+    )
+}
+
+fn flag_matches(arg: &str, name: &str) -> bool {
+    arg == name || arg.starts_with(&format!("{name}="))
+}
+
+fn check_github_dangerous_flags(
+    group: &str,
+    action: &str,
+    parts: &[String],
+) -> Result<(), PolicyError> {
+    let args = &parts[1..];
+    match (group, action) {
+        ("repo", "clone") | ("repo", "fork") => {
+            if args.iter().any(|arg| {
+                arg == "--"
+                    || flag_matches(arg, "--config")
+                    || flag_matches(arg, "-c")
+                    || flag_matches(arg, "--upload-pack")
+                    || flag_matches(arg, "-u")
+            }) {
+                return Err(PolicyError::new(
+                    PolicyReason::GithubCommandNotAllowed,
+                    format!(
+                        "gh {group} {action}：guarded 模式下不允许通过 -- 或 git 选项透传参数（可能执行任意程序）"
+                    ),
+                ));
+            }
+        }
+        ("pr", "merge") => {
+            if args.iter().any(|arg| flag_matches(arg, "--admin")) {
+                return Err(PolicyError::new(
+                    PolicyReason::GithubCommandNotAllowed,
+                    "gh pr merge --admin：guarded 模式下不允许绕过分支保护合并",
+                ));
+            }
+        }
+        ("repo", "edit") => {
+            if args.iter().any(|arg| flag_matches(arg, "--visibility")) {
+                return Err(PolicyError::new(
+                    PolicyReason::GithubCommandNotAllowed,
+                    "gh repo edit --visibility：guarded 模式下不允许修改仓库可见性",
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn classify_github_cli(parts: &[String]) -> Result<GithubCommandClass, PolicyError> {
     let words = github_subcommand_words(parts);
     let denied = |detail: &str| {
@@ -865,6 +932,7 @@ fn classify_github_cli(parts: &[String]) -> Result<GithubCommandClass, PolicyErr
                     allowed_group == group && allowed_action == action
                 })
             {
+                check_github_dangerous_flags(group, action, parts)?;
                 Ok(GithubCommandClass::ConfirmableWrite)
             } else {
                 denied(&format!("{group} {action}"))
