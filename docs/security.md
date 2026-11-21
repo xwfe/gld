@@ -273,7 +273,7 @@ SECRET_KEY、COOKIE、AUTH 结尾的变量（不分大小写；`PWD`、`OLDPWD` 
 ### 一键放行全部命令，等于把账号交给 AI
 
 `gld set <项目> command-policy=all`（[怎么用](concepts.md#一键放行全部命令command-policyall)）把这个项目的命令白名单、
-装东西和危险命令的确认都关掉。AI 能以你的账号跑任何程序：装全局工具、改 `~/.zshrc`、`ssh` 到别的机器、`gh` 推代码、
+装东西和危险命令的确认都关掉。GPT Actions 那条线路用 `actions.command-policy=all`，风险相同。AI 能以你的账号跑任何程序：装全局工具、改 `~/.zshrc`、`ssh` 到别的机器、`gh` 推代码、
 删工作区外的文件。上面说的提示注入，在这个项目里就能直接变成命令。
 
 - **凭据给了谁，谁就有这些能力。**接到公网的服务（ChatGPT、DeepSeek 网页、浏览器 grant 地址）尤其要想清楚。

@@ -129,6 +129,59 @@ fn actions_service_serves_an_importable_openapi_and_enforces_the_api_key() {
     env.ok(&["stop"]);
 }
 
+/// GPT Actions 有自己的 `actions.command-policy`：默认仍拦白名单外命令，
+/// 设成 all 后同一条命令能跑，并在回包里注明绕过了哪道关。
+#[cfg(unix)]
+#[test]
+fn actions_command_policy_all_runs_commands_the_default_policy_would_deny() {
+    let env = Env::new();
+    let port = free_port();
+    env.ok(&["add", ".", "--name", "act-all"]);
+    env.ok(&["set", "act-all", &format!("actions.port={port}")]);
+    env.ok(&["start", "-s", "actions"]);
+    let key = env.json(&[
+        "--json",
+        "secret",
+        "ls",
+        "actions_api_key",
+        "--reveal",
+        "-w",
+        "act-all",
+    ])["value"]
+        .as_str()
+        .expect("actions_api_key")
+        .to_string();
+    let command = r#"{"argv":["sh","-c","echo actions-all"],"yield_time_ms":30000}"#;
+
+    let denied = post_json(port, "/actions/exec_command", command, Some(&key));
+    assert_eq!(denied.status, 422, "默认关卡该拦 sh：{}", denied.body);
+    assert!(
+        denied.body.contains("command_not_allowlisted"),
+        "{}",
+        denied.body
+    );
+
+    // 字段名大小写不敏感、`_` 当 `-`：别名也要照样放行并打风险提示。
+    let warned = env.ok(&["set", "act-all", "ACTIONS.COMMAND_POLICY=all"]);
+    assert!(
+        warned.contains("GPT Actions") && warned.contains("actions.command-policy=guarded"),
+        "打开时要说风险和怎么改回来：{warned}"
+    );
+    env.ok(&["restart", "-s", "actions"]);
+
+    let ran = post_json(port, "/actions/exec_command", command, Some(&key));
+    assert_eq!(ran.status, 200, "放开后该能跑：{}", ran.body);
+    let result = ran.json();
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(
+        result["structured_content"]["policy_bypassed"]["rule"], "command_not_allowlisted",
+        "{result}"
+    );
+    assert!(result.to_string().contains("actions-all"), "{result}");
+
+    env.ok(&["stop", "-s", "actions"]);
+}
+
 /// 全局入口：按 `/w/<项目 id>/actions` 和 `/hub` 分流，没接入的不该被转发。
 #[test]
 fn global_gateway_routes_only_what_opted_in() {

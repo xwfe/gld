@@ -2763,6 +2763,7 @@ actions.oauth-client-id   文本                                   Actions OAuth
 actions.shared-secrets    true | false                           Actions 使用共享密钥池
 actions.confine-reads     true | false                           Actions 侧同上（默认 true）
 actions.allowed-commands  逗号分隔                               Actions 侧同上（追加；only: 前缀表示只允许这些）
+actions.command-policy    guarded | all                          Actions 侧的命令关卡：guarded（默认）照白名单、装东西和危险命令要它先问你；all 一律放行，风险和 MCP 侧相同，见 docs/security.md
 actions.tunnel            frp | cf | none                        Actions 公网隧道类型（cf 即 cloudflare）
 actions.frp-profile       FRP 配置的名称或 id，或空              Actions 使用的 FRP 服务器配置
 actions.frp-subdomain     子域名（小写字母 / 数字 / 连字符）     Actions FRP 子域名
