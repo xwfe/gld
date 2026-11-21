@@ -867,37 +867,33 @@ fn check_github_dangerous_flags(
 ) -> Result<(), PolicyError> {
     let args = &parts[1..];
     match (group, action) {
-        ("repo", "clone") | ("repo", "fork") => {
+        ("repo", "clone") | ("repo", "fork")
             if args.iter().any(|arg| {
                 arg == "--"
                     || flag_matches(arg, "--config")
                     || flag_matches(arg, "-c")
                     || flag_matches(arg, "--upload-pack")
                     || flag_matches(arg, "-u")
-            }) {
-                return Err(PolicyError::new(
-                    PolicyReason::GithubCommandNotAllowed,
-                    format!(
-                        "gh {group} {action}：guarded 模式下不允许通过 -- 或 git 选项透传参数（可能执行任意程序）"
-                    ),
-                ));
-            }
+            }) =>
+        {
+            return Err(PolicyError::new(
+                PolicyReason::GithubCommandNotAllowed,
+                format!(
+                    "gh {group} {action}：guarded 模式下不允许通过 -- 或 git 选项透传参数（可能执行任意程序）"
+                ),
+            ));
         }
-        ("pr", "merge") => {
-            if args.iter().any(|arg| flag_matches(arg, "--admin")) {
-                return Err(PolicyError::new(
-                    PolicyReason::GithubCommandNotAllowed,
-                    "gh pr merge --admin：guarded 模式下不允许绕过分支保护合并",
-                ));
-            }
+        ("pr", "merge") if args.iter().any(|arg| flag_matches(arg, "--admin")) => {
+            return Err(PolicyError::new(
+                PolicyReason::GithubCommandNotAllowed,
+                "gh pr merge --admin：guarded 模式下不允许绕过分支保护合并",
+            ));
         }
-        ("repo", "edit") => {
-            if args.iter().any(|arg| flag_matches(arg, "--visibility")) {
-                return Err(PolicyError::new(
-                    PolicyReason::GithubCommandNotAllowed,
-                    "gh repo edit --visibility：guarded 模式下不允许修改仓库可见性",
-                ));
-            }
+        ("repo", "edit") if args.iter().any(|arg| flag_matches(arg, "--visibility")) => {
+            return Err(PolicyError::new(
+                PolicyReason::GithubCommandNotAllowed,
+                "gh repo edit --visibility：guarded 模式下不允许修改仓库可见性",
+            ));
         }
         _ => {}
     }
