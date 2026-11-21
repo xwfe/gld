@@ -135,3 +135,22 @@ fn allowing_all_commands_warns_marks_and_reports_what_it_bypassed() {
     );
     env.ok(&["daemon", "stop"]);
 }
+
+/// 风险提示里印的回退命令要能直接粘进 shell：项目名带空格时得加引号。
+#[test]
+fn risk_warnings_quote_project_names_with_spaces() {
+    let env = Env::new();
+    env.ok(&["add", ".", "--name", "my app"]);
+
+    let mcp = env.ok(&["set", "my app", "command-policy=all"]);
+    assert!(
+        mcp.contains("gld set 'my app' command-policy=guarded"),
+        "{mcp}"
+    );
+
+    let actions = env.ok(&["set", "my app", "actions.command-policy=all"]);
+    assert!(
+        actions.contains("gld set 'my app' actions.command-policy=guarded"),
+        "{actions}"
+    );
+}
