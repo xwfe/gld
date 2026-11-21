@@ -1220,7 +1220,7 @@ fn a_denial_only_config_lifts_says_so_and_confirm_really_does_not_lift_it() {
     assert_eq!(checked["needs_user_authorization"], json!(true));
     assert_eq!(
         checked["config_command"],
-        format!("gld set <项目> actions.allowed-commands=only:{TEST_PYTHON}"),
+        format!("gld set <项目> actions.allowed-commands+={TEST_PYTHON}"),
         "{checked}"
     );
     let confirmed = invoke(
@@ -1269,7 +1269,7 @@ fn a_denial_only_config_lifts_says_so_and_confirm_really_does_not_lift_it() {
         json!({ "cmd": "curl https://example.com" }),
     );
     assert_eq!(
-        checked["config_command"], "gld set api permission-mode=trusted allowed-commands=curl",
+        checked["config_command"], "gld set api permission-mode=trusted allowed-commands+=curl",
         "{checked}"
     );
 }
@@ -1285,7 +1285,7 @@ fn resolved_by_is_what_lifts_the_denial_not_what_the_rule_name_suggests() {
     let rm = resolve(json!({ "cmd": "rm -rf build" }));
     assert_eq!(rm["decision"], "needs_approval", "{rm}");
     assert_eq!(rm["resolved_by"], "config_change", "{rm}");
-    assert_eq!(rm["config_command"], "gld set <项目> allowed-commands=rm");
+    assert_eq!(rm["config_command"], "gld set <项目> allowed-commands+=rm");
 
     // 加进白名单也只开只读诊断，merge 还是过不去。
     let merge = resolve(json!({ "cmd": "gh pr merge 1" }));

@@ -672,16 +672,13 @@ pub fn denial_resolution(
                 let Some(stem) = program.map(program_stem).filter(|stem| shell_safe(stem)) else {
                     return ("other", None);
                 };
-                let Some(value) = allowed_commands_with(policy, stem) else {
-                    return ("other", None);
-                };
                 trial.allowed_commands.insert(stem.to_string());
                 let key = if actions {
                     "actions.allowed-commands"
                 } else {
                     "allowed-commands"
                 };
-                assignments.push(format!("{key}={value}"));
+                assignments.push(format!("{key}+={stem}"));
             }
             _ => return ("other", None),
         }
@@ -699,39 +696,6 @@ pub fn denial_resolution(
         }
     }
     ("other", None)
-}
-
-/// 把 `added` 加进白名单后，`allowed-commands` 该写成什么。
-///
-/// `gld set` 是整值替换，不是追加：项目配过 `rg`，只写新名字 `rg` 就没了；配过 `only:cargo`，
-/// 不带前缀还会变回默认全集，把想收紧的权限放大。所以已配的要一起写上。
-fn allowed_commands_with(policy: &PolicySettings, added: &str) -> Option<String> {
-    let only = policy.allowlist_mode == "only";
-    let implied = if only {
-        BASIC_READ_ONLY_COMMANDS
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    } else {
-        default_allowed_command_set()
-    };
-    let mut names: Vec<&str> = policy
-        .allowed_commands
-        .difference(&implied)
-        .map(String::as_str)
-        .chain([added])
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    if !names.iter().all(|name| shell_safe(name)) {
-        return None;
-    }
-    let names = names.join(",");
-    Some(if only {
-        format!("{ONLY_PREFIX}{names}")
-    } else {
-        names
-    })
 }
 
 /// 能原样拼进给用户复制的命令。程序名是 AI 传进来的，不查就可能把 `$(...)` 递到用户终端里。

@@ -308,13 +308,19 @@ gld upgrade --tool-profile read-only       # 整个服务：项目的工具集�
 代价：模型不能改代码、不能跑测试。适合"只让它看、不让它动"的场景。
 `read_file` 仍在表里，但它的范围由 `confine-reads` 管（默认只读项目目录内）。
 
-### 3. 收窄命令白名单——注意要加 `only:`
+### 3. 增删和收窄命令白名单——`+=` / `-=` 与 `only:`
+
+平时往白名单加一个命令用 `+=`，去掉一个用 `-=`（Actions 侧用 `actions.allowed-commands+=...` / `-=...`），都不会覆盖你之前已经配好的项：
 
 ```bash
-gld set <项目> allowed-commands=only:cargo,git
+gld set <项目> allowed-commands+=rg        # 在现有白名单上追加 rg（已存在则自动去重）
+gld set <项目> allowed-commands-=rg        # 从当前配置里移除 rg（不存在也无害）
+gld set <项目> allowed-commands=only:cargo,git  # 整值替换并收窄为"只允许这些"
 ```
 
-**不带 `only:` 的写法是"追加"，减不掉任何东西。**
+在 `only:` 模式下用 `+=` / `-=` 会保留 `only:` 前缀，不会意外退回默认全集；如果真要切换进/出 `only:` 模式，用 `=` 整值替换。
+
+**不带 `only:` 的 `=` 写法是"追加到默认白名单"，减不掉默认项。**
 
 ```text
 mcp.allowed-commands=cargo,git         默认白名单 + cargo + git（python 照样能跑）
@@ -340,8 +346,8 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 写 `only:` 的人是想收紧，把它理解成"没配"等于把一个收权的配置放到最大。
 （0.4.x 及更早确实会退回默认全集，那是个 bug——手上还是那几个版本的话，`only:` 写空等于没收紧。）
 
-**`rg`、`gh` 这类不在默认白名单里的命令，加进去就能用**，写法就是上面的追加形式
-（`allowed-commands=rg`）。加之前先想想有没有现成工具：搜索用 `search_text`
+**`rg`、`gh` 这类不在默认白名单里的命令，用 `+=` 加进去就能用**（`gld set <项目> allowed-commands+=rg`）。
+加之前先想想有没有现成工具：搜索用 `search_text`
 （带上下文、分页、类型过滤），列文件用 `list_files`——它们不需要放开任何命令。
 
 ### `gh` 加进白名单 = 只读诊断，不是整个 gh
