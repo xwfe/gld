@@ -587,6 +587,51 @@ fn search_text_filters_by_glob() {
     assert_eq!(miss_payload["total_matches"].as_u64().unwrap_or(1), 0);
 }
 
+/// `**/` 后面再带子目录的 glob 以前一个都匹配不上（审查 §85、§89）：
+/// `**/tests/*.rs` 在 crates 下搜返回 scanned_files=0、rejected_by_glob=321，
+/// 已知测试文件明明存在；list_files 的 `**/bridge/*.rs` 同样空手而归。
+/// glob 的基准是工作区根，`**/` 要能匹配任意深度的子目录。
+#[test]
+fn recursive_globs_match_nested_directories() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    fs::create_dir_all(root.join("crates/core/tests")).expect("tests dir");
+    fs::create_dir_all(root.join("crates/core/src/bridge")).expect("bridge dir");
+    fs::write(
+        root.join("crates/core/tests/call_tool_contract.rs"),
+        "fn needle() {}\n",
+    )
+    .expect("test file");
+    fs::write(
+        root.join("crates/core/src/bridge/peer.rs"),
+        "fn needle() {}\n",
+    )
+    .expect("bridge file");
+    fs::write(root.join("crates/core/src/main.rs"), "fn needle() {}\n").expect("main file");
+    let ctx = ctx_for(root);
+
+    // §89 的原样场景：在 crates 下用 include_globs=["**/tests/*.rs"]。
+    let search = invoke(
+        &ctx,
+        "search_text",
+        json!({ "query": "needle", "path": "crates", "include_globs": ["**/tests/*.rs"] }),
+    );
+    let payload = assert_ok(&search);
+    assert_eq!(payload["total_matches"], 1, "{search}");
+    assert_eq!(payload["scanned_files"], 1, "{search}");
+
+    // §85 的原样场景：list_files 用 **/bridge/*.rs。
+    let listed = invoke(
+        &ctx,
+        "list_files",
+        json!({ "patterns": ["**/bridge/*.rs"] }),
+    );
+    let listed_payload = assert_ok(&listed);
+    let files = listed_payload["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 1, "{listed}");
+    assert_eq!(files[0]["path"], "crates/core/src/bridge/peer.rs");
+}
+
 #[test]
 fn search_text_skips_binary_and_oversized_files() {
     let fx = tiny_js_fixture();
