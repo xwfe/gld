@@ -4867,3 +4867,30 @@ PR 第一次 CI 的 Windows 作业失败：测试钩子只有 unix 的测试在�
 - 全仓验证（Linux 本机，隔离 `GLD_HOME`，Node v24.22.2 在 `PATH` 中）：`cargo test --workspace --all-targets --locked` **1420 passed / 0 failed / 0 ignored**（64 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均通过。
 
 **边界：** 未换本机二进制、未重启守护进程；PR #9 待审，未合并。
+
+## 121. launchd / systemd 的升级路径也先查在跑的命令：`gld daemon stop --if-idle`（2026-11-22）
+
+**起因：** §40 给 `gld daemon restart` 加了「有命令在跑就不重启」，当时写明 `gld daemon stop` 和 launchd 那条路径没加。§113 之后本机守护进程归 launchd 管，升级用的是 `gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，正好走不到那段检查；`docs/install.md` 和 `docs/daemon.md` 只能写「这句不查，先 `pgrep` 自己看一眼」。
+
+**先查清的事实：** restart 的检查在 `crates/cli/src/commands/daemon.rs` 的 `refuse_while_commands_run`。它查两样：`runs::running_under`（守护进程起的命令）和 `gld_core::agents::running_under`（委派的 Agent，RFC-0009），守护进程和各执行代的 pid 都算。读的是盘上的运行记录，不问守护进程；守护进程不在或不响应时不拦。所以 Agent 不用另开待办。
+
+**改动：**
+
+- `gld daemon stop` 加 `--if-idle`，默认不开。带上时先调 `refuse_while_commands_run`，有命令或 Agent 在跑就不停、按项目列出来，退出码 1，`&&` 后面的 `launchctl kickstart` 不会执行。没有另写一份检查，只给那个函数加了一个参数区分措辞。
+- 和 restart 一样的：检查本身、列表格式、`--json` 里的 `running_commands`、退出码。不一样的只有措辞：提示是「没停守护进程」，`--json` 是 `{"stopped": false, ...}`（restart 是 `"restarted": false`）；照抄 restart 的话 stop 会说「没重启」。
+- 不带 `--if-idle` 的 `stop` 没变，§40「stop 的意思就是停」不推翻。`--if-idle` 和 `--force` 一起给由 clap 报用法错误。
+- 没动守护进程的 `Request` / `Response`，`PROTOCOL_VERSION` 不变。
+- 文档：`docs/install.md` 升级第 4 步、`docs/daemon.md` 命令表和两处 launchd 升级说明换成 `gld daemon stop --if-idle && launchctl kickstart ...`，删掉「先 pgrep」；`docs/cli.md` 由 `scripts/gen-cli-docs.sh` 生成；`task_plan.md` 改「重启前等空闲」行和本机部署配置里的升级命令。
+
+**证据：**
+
+- 新增集成测试 `stop_if_idle_refuses_while_a_command_runs_and_plain_stop_still_stops`（`crates/cli/tests/daemon_lifecycle.rs`）。改前红：`error: unexpected argument '--if-idle' found`。改后绿，断言：有命令在跑时退出码非零、stderr 列出命令、守护进程 pid 不变、命令还在跑；`--json` 给出 `stopped: false` 和同一个 `session_id`；`--if-idle --force` 被拒、守护进程不动；不带选项的 `stop` 照旧停掉命令；空闲时 `--if-idle` 正常停，守护进程不在时回 `NotRunning`。
+- 全仓（Linux，隔离 `GLD_HOME`，Node v24.22.2 在 `PATH` 中）：`cargo test --workspace --all-targets --locked` **1421 passed / 0 failed / 0 ignored**（64 个测试目标，比 §120 多这一条）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。`PATH` 里没有 node 时 `command_write_paths` 的 `copying_an_outside_file_into_the_workspace_is_allowed` 会失败（`Program not found on PATH: node`），和本次改动无关。
+
+**没验证的：**
+
+- 真实 launchd 下的整条命令（`stop --if-idle && launchctl kickstart`）没跑：这轮不换本机二进制、不重启守护进程。集成测试覆盖的是 `--if-idle` 自己的退出码和不动守护进程。
+- `docs/daemon.md` 里 systemd 的写法 `gld daemon stop --if-idle && systemctl --user start gld` 没在真机上跑过。
+- 委派的 Agent 在跑时 `--if-idle` 拦不拦，没有单独的集成测试；它和 restart 走同一个函数，那一段本次没改。
+
+**边界：** 未换本机二进制、未重启守护进程、未动 grant、未发版。`gld restart`（服务重启）仍不查在跑的命令。
