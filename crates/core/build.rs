@@ -36,7 +36,7 @@ fn main() {
 
     let Ok(output) = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(manifest_dir())
         .output()
     else {
         return;
@@ -50,10 +50,22 @@ fn main() {
     }
 }
 
+/// 本 crate 的目录，跑的时候问 cargo 要，不用编译时写死的那个。
+///
+/// 两个检出共用一个 `target`（比如 git worktree 加 `CARGO_TARGET_DIR`）时，cargo 会拿
+/// 另一个检出编出来的构建脚本直接跑。用 `env!` 的话里面写死的是那个检出的路径：它被删了
+/// 就找不到 `.git`，版本号里没有提交号；没删就报成那个检出的提交号（审查 §119）。
+fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 /// 找到 `.git`。普通检出里它是目录，worktree 和 submodule 里它是一个
 /// 写着 `gitdir: <路径>` 的文件。
 fn find_git_dir() -> Option<std::path::PathBuf> {
-    let mut dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = manifest_dir();
+    let mut dir = manifest_dir.as_path();
     loop {
         let candidate = dir.join(".git");
         if candidate.is_dir() {
@@ -124,7 +136,8 @@ fn emit_shared_crate_revisions() {
 
 /// 从本 crate 往上找一个文件（工作区根上的 `Cargo.lock`）。
 fn find_upwards(file: &str) -> Option<PathBuf> {
-    let mut dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = manifest_dir();
+    let mut dir = manifest_dir.as_path();
     loop {
         let candidate = dir.join(file);
         if candidate.is_file() {
