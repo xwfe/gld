@@ -4725,3 +4725,19 @@ grep worker_failed ~/.config/gld/logs/hub/mcp-requests.log
 看那条的 `error=`：是 `worker_panicked` 就坐实是这次 panic，是别的值就不是。另一条 -32603 可能来源是 `generation_unavailable`（10 秒 admit 超时，已测定为预期行为，见 `generation_boundary.rs`），本次不动。
 
 **范围：** 未合并、未碰本机部署、未重启守护进程。
+
+## 116. 修复 `**/` 后带子目录的 glob 误过滤（2026-11-21）
+
+**问题：** §85 记录 `list_files` 用 `**/bridge/*.rs` 返回空（同一路径不带 glob 能列出 5 个文件）；§89 记录 `search_text` 在 crates 下用 `include_globs=["**/tests/*.rs"]` 返回 `scanned_files=0`、`rejected_by_glob=321`，当时只记录、未修根因。
+
+**根因：** `glob_match`（`crates/core/src/tools/file.rs`，`list_files` 的 patterns/exclude_patterns 和 `search_text` 的 include/exclude globs 共用）手工剥掉前导 `**/` 再拿剩余部分比对：`**/tests/*.rs` 剥成 `tests/*.rs` 后只比整路径或单层，永远比不中 `crates/core/tests/x.rs` 这种嵌套路径。
+
+**修法：** 改用已在依赖里的 glob crate（0.3.4）的原生 `**` 语义：`**/` 匹配零或多层目录，glob 基准仍是工作区根（`registry.rs` 的 `GLOB_BASE_DESCRIPTION`）。行为变化：`**/foo` 以前会匹配中间目录 `a/foo/b.txt`，现在只匹配路径末尾是 `foo` 的文件，这才是文档和用户预期的语义。
+
+**证据：**
+
+- 新增集成回归 `recursive_globs_match_nested_directories` 先红后绿：修复前复现 §89 原样症状（`scanned_files=0`、`rejected_by_glob=3`），修复后 `search_text` 命中 1 个文件、`list_files` 列出 `crates/core/src/bridge/peer.rs`。
+- 新增 2 个 `glob_match` 单元测试：嵌套目录匹配、`**/foo` 不再匹配中间目录、Windows 反斜杠。
+- 全仓 `cargo test --workspace --all-targets --locked`：**1408 passed / 0 failed**（Linux 本机，63 个测试目标；§114 的 1409 是 macOS，平台测试集不同）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
+
+**边界：** 未换本机二进制、未重启守护进程、未推送 main，PR 待审。子任务挂起等其它摩擦项沿用原证据，不在本轮范围。
