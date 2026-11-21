@@ -47,7 +47,7 @@
 | D09 | 结局与有界输出落盘，重启后可按已知 id 读取；`list_runs` 只列自己的（0.8.1） | 不恢复进程、不重放；跨重启旧结果不自动成为有效验收证据 |
 | D10 | Rust、Web、gld 自身三轮实测（审查 §10–§12）；`list_project_commands` 与 `ci_steps`、装依赖要 `confirm`（0.8.2，§13–§17）；服务模式与浏览器配法（0.8.3，§19–§21） | 就绪只到端口连得上，不验业务；浏览器的截图和 console 记录不进项目、不绑任务 |
 | D12–D13 | 0.9.0、0.10.0、0.10.1 发布、校验和、来源证明及兼容验证已有记录（§100、§102、§106） | 下载包验收必须匹配版本；Windows 下载包的版本输出不等于完整节点验收；协议回退不是全面支持新协议 |
-| Agent 委派（RFC-0009） | `agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`、`agent-approval=all/self`、Agent 名单与默认模型 / 强度、按文件分页读 diff、`--write` grant 委派都已换上，ChatGPT 真机发起、审核、撤销都测过（审查 §42–§69）；2026-10-24 用户定收尾 | 内置六份档案只有 codex 真跑通；qwen、agy、pi、kimi、claude 卡在各家登录（§65）；OpenCode、Qoder CLI、DeepSeek Harness 只给了 `agents.toml` 写法、没装。真要用哪家再装、再调，全局安装先问 |
+| Agent 委派（RFC-0009） | `agent_manage`、`gld agent`、`agent-delegation=off/ask/auto`、`agent-approval=all/self`、Agent 名单与默认模型 / 强度、按文件分页读 diff、`--write` grant 委派都已换上，ChatGPT 真机发起、审核、撤销都测过（审查 §42–§69）；2026-10-24 用户定收尾 | 内置六份档案只有 codex 真跑通；qwen、agy、pi、kimi、claude 卡在各家登录（§65）；OpenCode、Qoder CLI、DeepSeek Harness 只给了 `agents.toml` 写法、没装。真要用哪家再装、再调，全局安装先问。CI 上两条委派测试偶发 `AGENT_TASK_RUNNING` 已查（§119）：委派跑完时先写记录、后放开项目，中间一小段会挡掉紧接着的下一个委派，是产品缺陷，已修进代码；本机还没换装 |
 
 `gld tool call` 的 CLI 退出码表示工具调用是否成功，这是已确认的契约，**不要再次当缺陷改掉**；
 命令结果看 `command_ok` / `exit_code`。
