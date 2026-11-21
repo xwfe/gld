@@ -55,7 +55,7 @@ pub fn build_tool_context(
         policy,
         runtime.tool_profile.clone(),
         runtime.permission_mode.clone(),
-    )
+    )?
     .with_agent_runtime(
         merge_executable_paths(&runtime.executable_paths, &settings.global_executable_paths),
         merge_ai_instructions(&settings.global_ai_instructions, &runtime.ai_instructions),

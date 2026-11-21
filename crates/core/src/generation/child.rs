@@ -640,7 +640,7 @@ impl ContextKind {
                     .map_err(|error| error.message())?;
                 let policy = tools::PolicySettings::from_actions_config(&profile.actions);
                 let permission_mode = policy.permission_mode.clone();
-                Ok(ToolContext::from_workspace(
+                ToolContext::from_workspace(
                     workspace,
                     AuthConfig {
                         auth_type: profile.actions.auth_type.clone(),
@@ -649,7 +649,7 @@ impl ContextKind {
                     policy,
                     "full".into(),
                     permission_mode,
-                ))
+                )
             }
         }
     }

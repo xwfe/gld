@@ -189,6 +189,7 @@ pub fn ctx_for_dangerous_mode(root: &Path) -> ToolContext {
         "full".into(),
         "dangerous".into(),
     )
+    .expect("tool context")
 }
 
 /// 指定命令白名单配置的上下文。`configured` 就是 `mcp.allowed-commands`
@@ -210,6 +211,7 @@ pub fn ctx_with_allowed_commands(root: &Path, configured: &str) -> ToolContext {
         "full".into(),
         "trusted".into(),
     )
+    .expect("tool context")
 }
 
 /// 白名单之外再把一个目录放到 PATH 前面。
@@ -245,6 +247,7 @@ pub fn ctx_with_policy(root: &Path, policy: PolicySettings) -> ToolContext {
         "full".into(),
         "trusted".into(),
     )
+    .expect("tool context")
 }
 
 /// 关掉"读只许在 Workspace 内"的上下文。
@@ -267,6 +270,7 @@ pub fn ctx_for_unconfined_reads(root: &Path) -> ToolContext {
         "full".into(),
         "trusted".into(),
     )
+    .expect("tool context")
 }
 
 /// 要断言命令已经跑完（`status: exited`、退出码、输出、它写的文件）时，`exec_command`

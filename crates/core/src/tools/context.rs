@@ -83,13 +83,13 @@ impl ToolContext {
             auth_type: "noauth".into(),
             ..AuthConfig::default()
         };
-        Ok(Self::from_workspace(
+        Self::from_workspace(
             workspace,
             auth,
             PolicySettings::default(),
             "full".into(),
             "trusted".into(),
-        ))
+        )
     }
 
     pub fn from_workspace(
@@ -98,8 +98,8 @@ impl ToolContext {
         policy: PolicySettings,
         tool_profile: String,
         permission_mode: String,
-    ) -> Self {
-        let harness_root = Harness::default_root().expect("无法初始化 Harness 数据目录");
+    ) -> Result<Self, String> {
+        let harness_root = Harness::default_root().map_err(|error| error.to_string())?;
         Self::from_workspace_with_harness_root(
             workspace,
             auth,
@@ -117,14 +117,14 @@ impl ToolContext {
         tool_profile: String,
         permission_mode: String,
         harness_root: PathBuf,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let root = workspace.root().to_path_buf();
         let runtime = crate::tools::workspace_runtime::runtime_for(&root);
         // 「读能不能出 Workspace」是策略的一部分，但真正执行判断的是 Workspace
         // 自己（路径解析都在那儿）。在这一个地方转交，免得每个调用点各设一次、
         // 漏掉哪个就等于悄悄放开了限制。
         let workspace = workspace.with_confined_reads(policy.confine_reads);
-        Self {
+        Ok(Self {
             workspace,
             workspace_name: String::new(),
             auth,
@@ -140,17 +140,17 @@ impl ToolContext {
             agent_delegation: "off".into(),
             agent_approval: "all".into(),
             agents_allowed: Vec::new(),
-            harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
+            harness: Harness::new(root.clone(), harness_root).map_err(|error| error.to_string())?,
             runtime,
             default_cwd: Mutex::new(root),
             usage: Arc::new(ServiceUsage::default()),
             context_audit: Mutex::new(ContextAuditState::default()),
-        }
+        })
     }
 
     pub fn for_test(workspace_path: PathBuf, harness_root: PathBuf) -> Result<Self, String> {
         let workspace = Workspace::new(workspace_path).map_err(|e| e.message())?;
-        Ok(Self::from_workspace_with_harness_root(
+        Self::from_workspace_with_harness_root(
             workspace,
             AuthConfig {
                 auth_type: "noauth".into(),
@@ -160,7 +160,7 @@ impl ToolContext {
             "full".into(),
             "trusted".into(),
             harness_root,
-        ))
+        )
     }
 
     pub fn with_agent_runtime(
@@ -420,6 +420,28 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Harness 数据目录建不出来时，建上下文要报错而不是 panic：panic 会把这次
+    /// 工具调用变成 -32603（worker_failed），客户端只看到 "Internal error"，
+    /// 而不是一个能重试的工具错误。
+    #[test]
+    fn a_harness_dir_that_cannot_be_created_is_an_error_not_a_panic() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let blocker = workspace.path().join("blocker");
+        std::fs::write(&blocker, "not a dir").expect("blocker file");
+        let bad_harness_root = blocker.join("harness");
+
+        let result = ToolContext::from_workspace_with_harness_root(
+            Workspace::new(workspace.path().to_path_buf()).expect("workspace"),
+            AuthConfig::default(),
+            PolicySettings::default(),
+            "full".into(),
+            "trusted".into(),
+            bad_harness_root,
+        );
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn workspace_paths_precede_global_paths_and_duplicates_are_removed() {
