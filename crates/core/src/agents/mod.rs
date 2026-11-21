@@ -788,7 +788,16 @@ fn settle(agents_root: &Path, dir: &Path, mut task: AgentTask) -> AgentTask {
         State::Running => {
             let lost = match task.owner.as_deref() {
                 Some(owner) if owner == crate::tools::runs::instance_id() => {
-                    !run::is_live(&task.task_id)
+                    if run::is_live(&task.task_id) {
+                        false
+                    } else {
+                        // 手里这份可能是它收尾之前读的。收尾是写完记录才从表里拿掉（`run::finish`），
+                        // 所以表里没有它的时候，盘上已经是结局了：以盘上的为准，别拿 `unknown` 盖掉。
+                        match store::read(dir) {
+                            Some(latest) if latest.state != State::Running => return latest,
+                            _ => true,
+                        }
+                    }
                 }
                 Some(owner) => !crate::tools::runs::owner_alive(agents_root, owner),
                 None => true,
