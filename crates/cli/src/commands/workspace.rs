@@ -334,11 +334,8 @@ async fn set_fields(
     target: WorkspaceTarget,
     pairs: Vec<(String, String)>,
 ) -> CliResult {
-    // 这次改到的字段名（去掉 `mcp.` 前缀），发请求前取：pairs 要交出去。
-    let keys: Vec<String> = pairs
-        .iter()
-        .map(|(key, _)| key.trim().trim_start_matches("mcp.").to_string())
-        .collect();
+    // 这次改到的字段名（去掉 `mcp.` 前缀，大小写和 `_`/`-` 规整），发请求前取：pairs 要交出去。
+    let keys: Vec<String> = pairs.iter().map(|(key, _)| risk_key(key)).collect();
     let update: WorkspaceUpdate = ctx
         .backend
         .call_typed(Request::SetWorkspaceFields {
@@ -353,6 +350,13 @@ async fn set_fields(
         .line(format!("已更新项目「{}」。", update.profile.name));
     report_risks(ctx, &keys, &update);
     report_restarts(ctx, &update)
+}
+
+/// 风险提示认字段的规范写法：`gld set` 的字段名大小写不敏感、`_` 当 `-`，
+/// `mcp.` 前缀可省略；提示只看存下来的值，写法不该决定说不说风险。
+fn risk_key(raw: &str) -> String {
+    let key = raw.trim().to_ascii_lowercase().replace('_', "-");
+    key.strip_prefix("mcp.").unwrap_or(&key).to_string()
 }
 
 /// 一键放开的两个开关，打开的那一刻把风险说清楚、说怎么改回来（审查 §60）。只看存下来的值，

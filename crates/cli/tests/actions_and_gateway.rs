@@ -161,7 +161,8 @@ fn actions_command_policy_all_runs_commands_the_default_policy_would_deny() {
         denied.body
     );
 
-    let warned = env.ok(&["set", "act-all", "actions.command-policy=all"]);
+    // 字段名大小写不敏感、`_` 当 `-`：别名也要照样放行并打风险提示。
+    let warned = env.ok(&["set", "act-all", "ACTIONS.COMMAND_POLICY=all"]);
     assert!(
         warned.contains("GPT Actions") && warned.contains("actions.command-policy=guarded"),
         "打开时要说风险和怎么改回来：{warned}"
