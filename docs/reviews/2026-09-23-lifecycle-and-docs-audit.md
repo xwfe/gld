@@ -4732,12 +4732,13 @@ grep worker_failed ~/.config/gld/logs/hub/mcp-requests.log
 
 **根因：** `glob_match`（`crates/core/src/tools/file.rs`，`list_files` 的 patterns/exclude_patterns 和 `search_text` 的 include/exclude globs 共用）手工剥掉前导 `**/` 再拿剩余部分比对：`**/tests/*.rs` 剥成 `tests/*.rs` 后只比整路径或单层，永远比不中 `crates/core/tests/x.rs` 这种嵌套路径。
 
-**修法：** 改用已在依赖里的 glob crate（0.3.4）的原生 `**` 语义：`**/` 匹配零或多层目录，glob 基准仍是工作区根（`registry.rs` 的 `GLOB_BASE_DESCRIPTION`）。行为变化：`**/foo` 以前会匹配中间目录 `a/foo/b.txt`，现在只匹配路径末尾是 `foo` 的文件，这才是文档和用户预期的语义。
+**修法：** `glob_match`（`crates/core/src/tools/file.rs`，`list_files` 的 patterns/exclude_patterns 和 `search_text` 的 include/exclude globs 共用）改用已在依赖里的 glob crate（0.3.4）的原生 `**` 语义：`**/` 匹配零或多层目录，glob 基准仍是工作区根（`registry.rs` 的 `GLOB_BASE_DESCRIPTION`）。PR #3 复核又发现只比整条路径会让「以目录名结尾」的模式失效：遍历只拿文件的相对路径来比，目录本身从不进匹配，`**/node_modules` 以前靠「任一路径段相同」排掉整个目录，现在一个文件都排不掉。最终做法：整条路径或任一级上级目录前缀命中即算（`web/deps/y/b.js` 依次比 `web`、`web/deps`、`web/deps/y`、`web/deps/y/b.js`），include / exclude 共用这一个函数，目录名命中时目录下所有文件都算命中。`*` 跨 `/`（glob crate 默认 `require_literal_separator=false`）是原有行为，未改，单测钉住。
 
 **证据：**
 
-- 新增集成回归 `recursive_globs_match_nested_directories` 先红后绿：修复前复现 §89 原样症状（`scanned_files=0`、`rejected_by_glob=3`），修复后 `search_text` 命中 1 个文件、`list_files` 列出 `crates/core/src/bridge/peer.rs`。
-- 新增 2 个 `glob_match` 单元测试：嵌套目录匹配、`**/foo` 不再匹配中间目录、Windows 反斜杠。
-- 全仓 `cargo test --workspace --all-targets --locked`：**1408 passed / 0 failed**（Linux 本机，63 个测试目标；§114 的 1409 是 macOS，平台测试集不同）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
+- 集成回归 `recursive_globs_match_nested_directories` 先红后绿：修复前复现 §89 原样症状（`scanned_files=0`、`rejected_by_glob=3`），修复后 `search_text` 命中 1 个文件、`list_files` 列出 `crates/core/src/bridge/peer.rs`。
+- 复核加的 `directory_globs_exclude_everything_below` 先红后绿：复核修复前 `list_files` 列出 `web/deps/y/b.js`、`search_text` `total_matches=2`，修复后只剩 `web/src/a.js`。`node_modules`、`target` 这类名字的目录在遍历时就整棵跳过，到不了 glob，所以测试用不在默认排除名单里的 `deps`。
+- 单元测试：`glob_match_recurses_through_directories`、`glob_match_directory_name_covers_files_below`、`glob_match_star_crosses_path_separators`。
+- 全仓 `cargo test --workspace --all-targets --locked`：**1410 passed / 0 failed**（Linux 本机，63 个测试目标；§114 的 1409 是 macOS，平台测试集不同）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
 
-**边界：** 未换本机二进制、未重启守护进程、未推送 main，PR 待审。子任务挂起等其它摩擦项沿用原证据，不在本轮范围。
+**边界：** 未换本机二进制、未重启守护进程、未推送 main，PR #3 待审（含复核修复）。子任务挂起等其它摩擦项沿用原证据，不在本轮范围。

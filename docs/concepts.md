@@ -1810,8 +1810,10 @@ search_text path=crates include_globs=["**/tests/*.rs"]
 
 - `**/` 匹配零到多层目录：上面这条能命中 `crates/core/tests/x.rs`，也能命中根下的 `tests/x.rs`。
 - 在 `path=crates` 底下写 `exec.rs` 什么都匹配不到，要写 `**/exec.rs` 或带上前缀的 `crates/**/exec.rs`。
-- `**/foo` 只匹配路径末尾是 `foo` 的文件，不会命中 `a/foo/b.txt` 这种中间目录。
+- `*` 会跨 `/`：`tests/*.rs` 也能命中 `tests/a/b.rs`（glob crate 的默认行为，原有如此）。
+- 模式以目录名结尾时，目录下的文件都算命中：`**/foo` 能命中 `a/foo/b.txt`；include 和 exclude 同一套规则。
 - `exclude_patterns` / `exclude_globs` 同一套规则，命中的从结果里去掉。
+- `node_modules`、`target`、`dist` 这类名字的目录在遍历时就整棵跳过，到不了 glob；给它们写 exclude 没有效果。
 
 ## 一次读几段：`read_file` 的 `ranges`
 
