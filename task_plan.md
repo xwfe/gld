@@ -114,8 +114,9 @@ B 按下面的小步推进，不把内核验证算作客户端接通：
 1. **B1 已完成：**core 每请求验证 token 的当前材料、状态和期限；All/Selected 的本机成员变化、权限收紧及持久归属已经实际调用验证。
 2. **B2 已完成：**三种材料共用用途/期限与原子提交；创建默认 token/All/只读/无服务能力，Selected 共用 Hub 解析稳定 ID 并校验读取限制；秘密仅成功交付，旧授权不导入，缺新存储时明确提示重建（§143–144）。
 3. **B3 进行中：**B3.1 已实现来源冲突分类（§145）；B3.2 从同一 App 向 Hub／单工作区监听器注入共享 AccessReader，有效 API token 逐请求核对摘要、期限和当前 grant，单工作区另查稳定 ID 范围与 confine-reads，读到撤销或轮换立即拒绝。B3.3 让授权页只收 OAuth grant 的确认口令，access/refresh 绑定 GrantId、client_id 和凭据修订号，签发、refresh 与 `/mcp` 每次都经同一 AccessReader 对照当前 grant，轮换或撤销后立即拒绝且不回落到其他凭据（§148）；运行中轮换未经真实 daemon 验证（入口属 D），refresh 同一修订号内可重复使用。匿名动态注册先落 pending，授权码兑换校验通过后才落盘 authorized，pending 最多 10 个、24 小时淘汰。B3.4 接通 `/mcp/connect/<secret>`：先核对秘密、期限和 grant（401），再按创建时的名单逐字符核对 Origin（403），CORS 只回显通过核对的 Origin，预检同样核对（§149）；默认 SuperAssistant Origin 和创建命令属 D，真实扩展验收属 E。下一步做隧道显式绑定；全部入口与 RFC-0015 §7.1 正向客户端仍待验收。D 负责统一 CLI 与一次性输出。
-4. **待办（排在 E 的真实客户端验收之前）：**`gld gateway start` 换地址后，Hub 的 401 发现链接仍是监听器启动时的旧地址；OAuth 已接通，旧地址下线后从新地址来的客户端无法完成授权（PR #12 Devin Review 提出，未复现，§148）。
+4. **已完成（§153）：**Hub 和工作区 MCP 监听器的 OAuth 发现地址改为每次请求按当前配置重算，`gld gateway start` 换地址或停用入口后不用重启服务，401 挑战、well-known、授权页和 token 端点都指向当前地址（PR #12 Devin Review 提出，§148）。
 5. **剩余限制（留给 D 的撤销/清理命令）：**已授权客户端仍最多 50 个且不回收，占满后注册继续 503；需要有效确认口令才能到达，不是匿名注册能触发。
+6. **待办：**Actions 监听器的 OAuth 发现地址和 OpenAPI `servers` 同样在监听器启动时写死公网基址，入口换地址后同样过期；涉及 `crates/host/src/actions/listener.rs`、`crates/host/src/actions/auth.rs`、`crates/host/src/actions/openapi.rs`（§153）。
 
 ### 产品功能与真实场景验收
 
