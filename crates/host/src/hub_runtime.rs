@@ -76,6 +76,7 @@ pub async fn start(
         hub.clone(),
         nodes.clone(),
         &config.auth_type,
+        &config.openai_tunnel_id,
         outcome.public_base.clone(),
         secrets,
         router.clone(),
