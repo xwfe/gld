@@ -6148,3 +6148,48 @@ subagent，也未调整委派开关。未操作在用授权、推送、部署或
 - 首次全量测试时 PATH 上没有 `node`，`command_write_paths` 的一条用例失败（同 §148），加入 Node 后通过；
   同一次还有 `docs_commands_exist` 因文档里提到尚不存在的命令参数失败，已改写文档。
 - 没有更换本机二进制、重启本机守护进程或改动真实 grant。
+
+## 150. 模块化执行节点、系统能力与 shun 集成规划（2026-11-22）
+
+**用户要求：**每个实际执行系统具备轻量节点，按需提供截图、执行命令、打开应用等能力，
+支撑 shun 与合适的 Herdr / ocra 类能力；将模块边界和详细任务写入 Markdown，并保留此前主 Bot 持续推进项目的目标。
+
+**核对基线与落点：**
+- 远端 main 为 `b51b90ac18f255aaf618d9953b94bc84ccd6f81e`；在其独立文档工作树中修改，
+  原有 main 检出与正在运行的服务未切换。shun 源码核对基线为 `03340eaef9d4e0429d5f6dd42921415c53fd0d84`。
+- 新增 [RFC-0016](../rfc/0016-modular-node-capabilities-and-shun.md)：同产品轻量节点、
+  可选同用户 GUI helper、模块启停与故障边界、能力 / 授权分离、桌面目标 / 坐标 / 输入租约、
+  会话 provider、shun 消费契约、完成证据与失联恢复。
+- 30 个子任务都有依赖、改动范围和可观察的验收条件。task_plan.md 新增 D19/D20 状态入口；
+  L0/L1 仍归原任务，M0 → M1 → M2 → M3 → L0 → L1 顺序及 D18 当前优先事项保留。
+  managed worktree 移到 D20-A2；内建真 PTY 仍不进入默认开发。
+- RFC-0013 顶部增加补充入口，说明按需 helper 与原有单产品节点的关系。未改实际工具契约或运行代码。
+
+**研究与独立审查：**
+- Herdr 官方 FAQ / TUI socket / Core schema 分开核对；TUI 与 Core 不能共用会话身份。
+  ocra 仍有歧义，记录 Orca 与 Open-CR-Agent 两种候选，具体 adapter 先确认项目；
+  通用模块设计不依赖这一选择。平台差异依据 Apple、Microsoft、XDG 官方文档，链接收在 RFC。
+- shun 继续拥有 SSH、RoutePlan、tmux 与终端渲染；没有把 Headscale 测试环境说成已实现设备目录。
+  shun 的实现仍按自己的 R54 等任务登记，本轮没有改动 shun 文件或当前 R90 等队列。
+- 独立审查补齐了 C2 / shun 实际实现与联调的前置条件；仅有 GLD API 样例不能算手机功能可用。
+  补齐 TmuxTarget 的 socket / server、window / pane 与工作项运行关联；
+  hostKey 是主机绑定标识，SSH 公钥指纹仍按既有路由逐跳验证。
+- 模块重新启用使用新代次，旧 handle / 租约不得复活；桌面租约只协调 GLD 客户端，
+  不宣称能阻止本地用户或其他程序改变画面。
+
+**验证：**在上述文档工作树、macOS、隔离 GLD_HOME 中执行。
+- `cargo test --workspace --all-targets --locked`：**75 个目标，1523 passed / 0 failed / 0 ignored**。
+  包含文档链接、命令和隐私路径检查；输出完整读取后汇总。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` 通过。
+- `cargo fmt --all -- --check` 与 `git diff --check` 通过。
+- 主 RFC 的 30 个任务 ID 唯一；交付副本与仓库文档内容一致。
+
+**执行过程中的问题与处理：**
+- 一次 `apply_patch` 返回 `PATCH_FAILED / context_out_of_order`：提交的第 4 个 hunk 位于前面 hunk 之前。
+  工具明确报告未落盘；重读对应范围并按文件顺序重排后成功。这是调用补丁顺序错误，未认定为工具缺陷。
+- 首次 Cargo 启动使用的 inline-table 配置被 Cargo 拒绝，尚未执行测试；
+  改用分开的 env.GLD_HOME.value 与 env.GLD_HOME.force 配置后，完成上述隔离验证。
+
+**实际边界：**本次交付是设计和任务文档。未实施桌面、Herdr / ocra adapter、shun 客户端接入、
+managed worktree 或自主调度；没有用本轮 Rust 回归代替未来三平台 GUI 真机验收。
+没有更换本机二进制、重启正在使用的服务、变更真实授权、安装第三方 provider、推送或发布。
