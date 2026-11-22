@@ -5981,3 +5981,38 @@ subagent，也未调整委派开关。未操作在用授权、推送、部署或
 
 **未完成：**OAuth access/refresh 的 grant+client_id 绑定及修订验证、URL Origin、
 隧道显式绑定、全量真实客户端正向接入和统一 CLI 仍按 B3.3/C/D/E 推进。
+
+## 147. 2026-11-22：auth/host 重构与 main 集成
+
+以 merge commit `2797f65` 将 `origin/main` 合入 `origin/local/auth-host-refactor` 派生的集成分支，
+保留重构分支的 25 个提交，不改写原分支或 main。main 的 §§115–§121 原位保留在 §114 后；
+重构分支原 §§115–§139 及其引入的交叉引用统一 +7，成为 §§122–§146。main 的编号已被合并 PR 引用，
+故不改动；任务计划同时保留 D17/D18 当前行并并入 `actions.command-policy`、`gh` 策略和
+`gld daemon stop --if-idle && launchctl kickstart ...` 升级路径。
+
+**冲突处理与主线修复落点：**
+- `crates/cli/tests/generation_boundary.rs` 保留切代前后的完成请求计数与等待；依 D18 既定边界，
+  本地工具调用继续成功，未接通的网络 MCP 仍断言 `AUTH_NOT_READY`，没有改成网络正向授权。
+- `crates/core/src/tools/context.rs` 保留 refactor 的 workspace 构造路径和 Harness 初始化错误返回；
+  错误回归 `a_harness_dir_that_cannot_be_created_is_an_error_not_a_panic` 保留，host 调用方在
+  `crates/host/src/actions/listener.rs` 继续传播错误。
+- `crates/core/src/tools/file.rs` 保留对 runtime 的 facade；#3 的 glob 实现与递归/目录前缀回归进入
+  live `crates/runtime/src/file.rs`，调用契约测试仍在 `crates/core/tests/call_tool_contract.rs`。
+- `docs/reviews/2026-09-23-lifecycle-and-docs-audit.md` 保留 main §115–§121 原文并附加重编号后的分支历史；
+  `task_plan.md` 合并两侧当前状态。以上五处冲突文件均已解决。
+- #4 `actions.command-policy` 与 #9 的 `gh` 分级策略位于
+  `crates/core/src/tools/policy.rs`、`crates/core/src/app/workspace_fields.rs`；白名单 `+=`/`-=`
+  原子更新位于 `crates/core/src/app/workspace.rs`，clone 路径检查在
+  `crates/core/src/tools/command_paths.rs`。CLI/core 回归位于 `crates/cli/tests/command_policy.rs`
+  与 `crates/core/tests/call_tool_contract.rs`。
+- #8 finish 与项目释放继续在 `crates/agent/src/run.rs` 同锁执行；其强制竞态回归移入 agent crate，
+  core 的完整委派回归与 stale-running 回归保留。`crates/core/build.rs` 使用 checkout 的 manifest
+  路径，`crates/core/tests/build_script_checkout.rs` 覆盖该行为。
+- #10 `Pending::Stop`、`--if-idle` 和运行命令拒绝逻辑位于 `crates/cli/src/commands/daemon.rs`，
+  回归位于 `crates/cli/tests/daemon_lifecycle.rs`；生成的 `docs/cli.md` 包含该选项。
+
+**验证：**Linux 隔离 `GLD_HOME` 下 `cargo test --workspace --all-targets --locked`：
+**75 个目标，1502 passed / 0 failed / 0 ignored**；测试进程 PATH 加入已安装的 Node v24.22.2。
+`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check`
+均通过；CLI 文档生成脚本在 `cargo build --locked -p gld` 后成功运行，且文档包含 `--if-idle`。
+没有操作 `~/.config/gld`，没有创建 PR，也未等待或监看远端 CI。
