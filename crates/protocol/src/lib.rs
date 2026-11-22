@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capabilities;
 pub mod config;
 pub mod daemon;
 pub mod generation;
