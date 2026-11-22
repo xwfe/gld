@@ -1,5 +1,5 @@
-//! D18-A keeps OAuth discovery and registration available while MCP authorization is pending.
-//! Positive MCP grant issuance, refresh, project scope and connector restart are D18-B acceptance.
+//! MCP 的授权页和 token 端点已接到统一授权：只有 OAuth 用途 grant 的确认口令能换出 token，
+//! 旧服务口令、旧授权码和旧 refresh 都被拒绝。`/mcp` 上的 access 验证在下一步接通。
 //! Actions remains a separate protocol and exercises the real PKCE/token/tool path below.
 
 mod common;
@@ -123,7 +123,8 @@ fn mcp_discovery_and_durable_registration_survive_a_restart_without_authorizing(
         "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&state=test-state",
         endpoint_path(&metadata,"authorization_endpoint"), urlencode(&client_id), urlencode(REDIRECT)
     ));
-    assert_pending(&page);
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert_eq!(page.header("cache-control"), Some("no-store"));
     assert_pending(&post_json(
         port,
         "/mcp",
@@ -148,25 +149,33 @@ fn old_service_password_code_and_tokens_cannot_reenter_mcp_authorization() {
         "wrong-password",
     ] {
         let response = authorize(port, &authorize_path, &client_id, &challenge, offered);
-        assert_pending(&response);
+        assert_eq!(response.status, 401, "{}", response.body);
+        assert_eq!(response.header("cache-control"), Some("no-store"));
+        assert!(response.header("location").is_none());
         assert!(!response.body.contains(offered));
     }
-    assert_pending(&exchange(
-        port,
-        &token_path,
-        &client_id,
-        "synthetic-old-code",
-        &verifier,
-    ));
-    assert_pending(&post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", "synthetic-old-refresh"),
-            ("client_id", &client_id),
-        ],
-    ));
+    for refused in [
+        exchange(
+            port,
+            &token_path,
+            &client_id,
+            "synthetic-old-code",
+            &verifier,
+        ),
+        post_form(
+            port,
+            &token_path,
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "synthetic-old-refresh"),
+                ("client_id", &client_id),
+            ],
+        ),
+    ] {
+        assert_eq!(refused.status, 400, "{}", refused.body);
+        assert_eq!(refused.json()["error"], "invalid_grant");
+        assert!(refused.json().get("access_token").is_none());
+    }
     let rejected = post_json(port, "/mcp", &json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
             "name":"apply_patch","arguments":{

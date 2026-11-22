@@ -105,81 +105,347 @@ fn refresh_with(oauth: &OAuthRuntime, client_id: &str, refresh_token: String) ->
     )
 }
 
-fn pending_mcp() -> OAuthRuntime {
-    OAuthRuntime::new_mcp_pending(
-        AUDIENCE.into(),
-        "chatgpt-client-test".into(),
-        None,
-        TOKEN_SECRET.into(),
-        Arc::new(ClientRegistry::in_memory()),
-    )
+const DAY: i64 = 60 * 60 * 24;
+
+/// MCP 运行时连着一份真实的授权存储：`store` 是写者，`oauth` 里是它发出的共享读者。
+struct McpFixture {
+    _home: tempfile::TempDir,
+    store: gld_core::auth::AccessStore,
+    oauth: OAuthRuntime,
+    confirmation: String,
+    grant_id: String,
 }
 
-#[test]
-fn unconnected_mcp_authorization_refuses_passwords_and_token_exchange() {
-    let oauth = pending_mcp();
-    let refused = authorize_post(
-        &oauth,
+fn create(
+    store: &gld_core::auth::AccessStore,
+    name: &str,
+    kind: CredentialKind,
+) -> gld_core::auth::IssuedAccess {
+    store
+        .create_grant(
+            gld_core::auth::GrantCreation {
+                name: name.into(),
+                scope: gld_core::auth::ProjectScope::AllProjects,
+                permissions: gld_core::auth::GrantPermissions::default(),
+                kind,
+                ttl: None,
+                allowed_origins: vec![],
+            },
+            unix_now(),
+        )
+        .unwrap()
+}
+
+fn mcp_with_secret(token_secret: &str) -> McpFixture {
+    let home = tempfile::tempdir().unwrap();
+    let store = gld_core::auth::AccessStore::open_in(home.path()).unwrap();
+    let issued = create(&store, "chat-client", CredentialKind::OAuth);
+    let oauth = OAuthRuntime::new_mcp(
+        AUDIENCE.into(),
+        "hub".into(),
+        "chatgpt-client-test".into(),
+        None,
+        token_secret.into(),
+        Arc::new(ClientRegistry::in_memory()),
+        store.reader(),
+    );
+    McpFixture {
+        _home: home,
+        store,
+        oauth,
+        confirmation: issued.secret.into_string(),
+        grant_id: issued.record.grant.id,
+    }
+}
+
+fn mcp() -> McpFixture {
+    mcp_with_secret(TOKEN_SECRET)
+}
+
+fn mcp_claims(token: &str) -> McpTokenClaims {
+    decode_claims(token, TOKEN_SECRET, AUDIENCE).expect("mcp claims")
+}
+
+fn submit(oauth: &OAuthRuntime, client_id: &str, offered: &str) -> Response {
+    authorize_post(
+        oauth,
         AuthorizeForm {
-            client_id: "chatgpt-client-test".into(),
+            client_id: client_id.into(),
             redirect_uri: REDIRECT_URI.into(),
             code_challenge: challenge(),
             code_challenge_method: "S256".into(),
             state: "state".into(),
-            password: PASSWORD.into(),
+            password: offered.into(),
         },
         "https://service.example.com",
-    );
-    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(refused.headers().get("location").is_none());
-    assert_eq!(body_json(refused)["error"], "AUTH_NOT_READY");
-    assert!(oauth.pending.lock().unwrap().is_empty());
-    for grant_type in ["authorization_code", "refresh_token"] {
-        let response = token_exchange(
-            &oauth,
-            &HeaderMap::new(),
-            TokenForm {
-                grant_type: grant_type.into(),
-                code: "old-code".into(),
-                refresh_token: "old-refresh".into(),
-                ..TokenForm::default()
-            },
-            "https://service.example.com",
-        );
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body_json(response)["error"], "AUTH_NOT_READY");
-    }
+    )
+}
+
+fn body_text(response: Response) -> String {
+    let bytes = gld_core::async_rt::block_on(async {
+        axum::body::to_bytes(response.into_body(), OAUTH_MAX_BODY_BYTES * 16)
+            .await
+            .expect("read body")
+    });
+    String::from_utf8(bytes.to_vec()).expect("utf8 body")
+}
+
+fn assert_no_store(response: &Response) {
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
 }
 
 #[test]
-fn mcp_never_reinterprets_actions_tokens_as_a_grant() {
-    let actions = runtime("chatgpt-client-test");
-    let (access, refresh) = authorize_and_exchange(
-        &actions,
+fn mcp_tokens_bind_grant_client_and_revision_with_rfc_lifetimes() {
+    let fixture = mcp();
+    let oauth = &fixture.oauth;
+    let base = "https://service.example.com";
+    let code = authorize_code(oauth, "chatgpt-client-test", base, &fixture.confirmation);
+    let response = exchange_code(oauth, "chatgpt-client-test", base, code);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_no_store(&response);
+    let body = body_json(response);
+    assert_eq!(body["expires_in"], 30 * DAY);
+    let access = body["access_token"].as_str().unwrap();
+    let refresh = body["refresh_token"].as_str().unwrap();
+
+    for (token, kind, ttl) in [(access, "access", 30 * DAY), (refresh, "refresh", 90 * DAY)] {
+        let claims = mcp_claims(token);
+        assert_eq!(claims.version, MCP_CLAIMS_VERSION);
+        assert_eq!(claims.grant_id, fixture.grant_id);
+        assert_eq!(claims.credential_revision, 1);
+        assert_eq!(claims.client_id, "chatgpt-client-test");
+        assert_eq!(claims.token_use, mcp_token_use(kind));
+        assert_eq!(claims.exp - claims.iat, ttl);
+    }
+    let caller = oauth.authenticate_mcp_access(access).expect("access");
+    assert!(caller.allows_project("any-project"));
+    // refresh 不能当 access 用，access 也不能拿去续签。
+    assert!(oauth.authenticate_mcp_access(refresh).is_none());
+    let misuse = refresh_with(oauth, "chatgpt-client-test", access.to_string());
+    assert_eq!(body_json(misuse)["error"], "invalid_grant");
+
+    let renewed = refresh_with(oauth, "chatgpt-client-test", refresh.to_string());
+    assert_eq!(renewed.status(), StatusCode::OK);
+    let renewed = body_json(renewed);
+    let next = oauth
+        .authenticate_mcp_access(renewed["access_token"].as_str().unwrap())
+        .expect("renewed access");
+    assert_eq!(caller.id(), next.id());
+    assert_eq!(
+        mcp_claims(renewed["refresh_token"].as_str().unwrap()).grant_id,
+        fixture.grant_id
+    );
+}
+
+#[test]
+fn authorization_page_rejects_every_wrong_credential_the_same_way_without_echoing_it() {
+    let fixture = mcp();
+    let token = create(&fixture.store, "token", CredentialKind::Token)
+        .secret
+        .into_string();
+    let other = create(&fixture.store, "other", CredentialKind::OAuth);
+    fixture.store.revoke(&other.record.grant.id).unwrap();
+    let revoked = other.secret.into_string();
+    // 公开 ID 存在但秘密错误，以及格式正确但 ID 不存在。
+    let (prefix, secret) = fixture.confirmation.rsplit_once('.').unwrap();
+    let wrong_secret = format!("{prefix}.{}", "A".repeat(secret.len()));
+    let unknown_id = format!("gld_oauth_v1.{}.{secret}", "0".repeat(32));
+    let mut bodies = Vec::new();
+    for offered in [
+        wrong_secret.as_str(),
+        unknown_id.as_str(),
+        token.as_str(),
+        revoked.as_str(),
+        PASSWORD,
+        "",
+    ] {
+        let response = submit(&fixture.oauth, "chatgpt-client-test", offered);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&response);
+        assert!(response.headers().get("location").is_none());
+        let body = body_text(response);
+        assert!(body.contains("Invalid authorization credential"));
+        if !offered.is_empty() {
+            assert!(!body.contains(offered));
+        }
+        bodies.push(body);
+    }
+    assert!(bodies.iter().all(|body| body == &bodies[0]));
+
+    let granted = submit(&fixture.oauth, "chatgpt-client-test", &fixture.confirmation);
+    assert_eq!(granted.status(), StatusCode::SEE_OTHER);
+    assert_no_store(&granted);
+    let location = granted.headers()["location"].to_str().unwrap();
+    assert!(!location.contains(&fixture.confirmation));
+}
+
+#[test]
+fn rotation_and_revocation_reject_old_access_refresh_and_codes_without_restart() {
+    let fixture = mcp();
+    let oauth = &fixture.oauth;
+    let base = "https://service.example.com";
+    let (access, refresh) = {
+        let code = authorize_code(oauth, "chatgpt-client-test", base, &fixture.confirmation);
+        let body = body_json(exchange_code(oauth, "chatgpt-client-test", base, code));
+        (
+            body["access_token"].as_str().unwrap().to_string(),
+            body["refresh_token"].as_str().unwrap().to_string(),
+        )
+    };
+    let before = oauth.authenticate_mcp_access(&access).expect("access");
+    let stale_code = authorize_code(oauth, "chatgpt-client-test", base, &fixture.confirmation);
+
+    let rotated = fixture
+        .store
+        .rotate_grant("chat-client", None, unix_now())
+        .unwrap()
+        .secret
+        .into_string();
+    assert!(oauth.authenticate_mcp_access(&access).is_none());
+    for response in [
+        refresh_with(oauth, "chatgpt-client-test", refresh.clone()),
+        exchange_code(oauth, "chatgpt-client-test", base, stale_code),
+    ] {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(response)["error"], "invalid_grant");
+    }
+    assert_eq!(
+        submit(oauth, "chatgpt-client-test", &fixture.confirmation).status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let code = authorize_code(oauth, "chatgpt-client-test", base, &rotated);
+    let body = body_json(exchange_code(oauth, "chatgpt-client-test", base, code));
+    let access = body["access_token"].as_str().unwrap();
+    assert_eq!(mcp_claims(access).credential_revision, 2);
+    let after = oauth.authenticate_mcp_access(access).expect("new access");
+    assert_eq!(before.id(), after.id());
+
+    fixture.store.revoke(&fixture.grant_id).unwrap();
+    assert!(oauth.authenticate_mcp_access(access).is_none());
+    let refused = refresh_with(
+        oauth,
         "chatgpt-client-test",
-        "https://service.example.com",
+        body["refresh_token"].as_str().unwrap().to_string(),
     );
-    let mcp = pending_mcp();
-    assert!(mcp
-        .identify_access_token(&access, "https://service.example.com")
-        .is_none());
-    assert!(mcp
-        .identify_access_token(&refresh, "https://service.example.com")
-        .is_none());
-    let response = authorize_get(
-        &mcp,
-        AuthorizeParams {
-            response_type: "code".into(),
-            client_id: "chatgpt-client-test".into(),
-            redirect_uri: REDIRECT_URI.into(),
-            code_challenge: challenge(),
-            code_challenge_method: "S256".into(),
-            state: String::new(),
-        },
-        None,
-        "https://service.example.com",
+    assert_eq!(body_json(refused)["error"], "invalid_grant");
+}
+
+#[test]
+fn clients_sharing_a_grant_get_separate_callers_and_cannot_swap_refresh_tokens() {
+    let fixture = mcp();
+    let oauth = &fixture.oauth;
+    let base = "https://service.example.com";
+    let first = register(oauth);
+    let second = register(oauth);
+    let mut callers = Vec::new();
+    let mut refreshes = Vec::new();
+    for client in [&first, &second] {
+        let code = authorize_code(oauth, client, base, &fixture.confirmation);
+        let body = body_json(exchange_code(oauth, client, base, code));
+        let access = body["access_token"].as_str().unwrap();
+        assert_eq!(mcp_claims(access).grant_id, fixture.grant_id);
+        callers.push(oauth.authenticate_mcp_access(access).unwrap());
+        refreshes.push(body["refresh_token"].as_str().unwrap().to_string());
+    }
+    assert_ne!(callers[0].id(), callers[1].id());
+    let swapped = refresh_with(oauth, &second, refreshes[0].clone());
+    assert_eq!(body_json(swapped)["error"], "invalid_client");
+}
+
+#[test]
+fn mcp_and_actions_tokens_and_forged_claims_never_cross_over() {
+    let fixture = mcp();
+    let oauth = &fixture.oauth;
+    let base = "https://service.example.com";
+    // 同一把签名密钥、同一受众的 Actions 运行时：claims 形状不同，两边互不接受。
+    let actions = runtime("chatgpt-client-test");
+    let (actions_access, actions_refresh) =
+        authorize_and_exchange(&actions, "chatgpt-client-test", base);
+    assert!(oauth.authenticate_mcp_access(&actions_access).is_none());
+    let refused = refresh_with(oauth, "chatgpt-client-test", actions_refresh);
+    assert_eq!(body_json(refused)["error"], "invalid_grant");
+    let code = authorize_code(oauth, "chatgpt-client-test", base, &fixture.confirmation);
+    let body = body_json(exchange_code(oauth, "chatgpt-client-test", base, code));
+    let access = body["access_token"].as_str().unwrap();
+    assert!(actions.identify_access_token(access, base).is_none());
+    assert_eq!(
+        submit(&actions, "chatgpt-client-test", &fixture.confirmation).status(),
+        StatusCode::UNAUTHORIZED
     );
+
+    let now = unix_now() as i64;
+    let valid = json!({
+        "version": MCP_CLAIMS_VERSION, "iss": AUDIENCE, "aud": AUDIENCE,
+        "iat": now, "exp": now + 3600, "client_id": "chatgpt-client-test",
+        "grant_id": fixture.grant_id, "credential_revision": 1,
+        "token_use": mcp_token_use("access")
+    });
+    assert!(oauth
+        .authenticate_mcp_access(&sign_claim_value(&valid))
+        .is_some());
+    for (field, value) in [
+        ("version", json!(2)),
+        ("aud", json!("gld:actions:another-workspace")),
+        ("iss", json!("gld:actions:another-workspace")),
+        ("exp", json!(now - 1)),
+        ("client_id", json!("unregistered-client")),
+        ("grant_id", json!("another-grant")),
+        ("credential_revision", json!(2)),
+        ("token_use", json!(mcp_token_use("refresh"))),
+        ("token_use", json!(token_use("access"))),
+    ] {
+        let mut forged = valid.clone();
+        forged[field] = value;
+        assert!(
+            oauth
+                .authenticate_mcp_access(&sign_claim_value(&forged))
+                .is_none(),
+            "{field}"
+        );
+    }
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("grant_id");
+    assert!(oauth
+        .authenticate_mcp_access(&sign_claim_value(&missing))
+        .is_none());
+    let mut extra = valid.clone();
+    extra["scope"] = json!("actions");
+    assert!(oauth
+        .authenticate_mcp_access(&sign_claim_value(&extra))
+        .is_none());
+    // 换一把密钥签出来的同样 claims。
+    let other_key = encode(
+        &Header::new(Algorithm::HS256),
+        &valid,
+        &EncodingKey::from_secret(b"another-secret"),
+    )
+    .unwrap();
+    assert!(oauth.authenticate_mcp_access(&other_key).is_none());
+}
+
+#[test]
+fn endpoint_without_a_signing_key_neither_issues_nor_accepts_tokens() {
+    let fixture = mcp_with_secret("");
+    let response = submit(&fixture.oauth, "chatgpt-client-test", &fixture.confirmation);
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body_json(response)["error"], "temporarily_unavailable");
+    let response = refresh_with(&fixture.oauth, "chatgpt-client-test", "anything".into());
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let now = unix_now() as i64;
+    let forged = encode(
+        &Header::new(Algorithm::HS256),
+        &json!({
+            "version": MCP_CLAIMS_VERSION, "iss": AUDIENCE, "aud": AUDIENCE,
+            "iat": now, "exp": now + 3600, "client_id": "chatgpt-client-test",
+            "grant_id": fixture.grant_id, "credential_revision": 1,
+            "token_use": mcp_token_use("access")
+        }),
+        &EncodingKey::from_secret(b""),
+    )
+    .unwrap();
+    assert!(fixture.oauth.authenticate_mcp_access(&forged).is_none());
 }
 
 fn sign_claim_value(value: &Value) -> String {
@@ -254,7 +520,7 @@ fn actions_claims_have_no_optional_grant_or_legacy_token_use() {
     let (access, refresh) =
         authorize_and_exchange(&oauth, "chatgpt-client-test", "https://service.example.com");
     for (token, kind) in [(&access, "access"), (&refresh, "refresh")] {
-        let claims = decode_token_claims(token, TOKEN_SECRET, AUDIENCE).unwrap();
+        let claims: TokenClaims = decode_claims(token, TOKEN_SECRET, AUDIENCE).unwrap();
         assert_eq!(claims.version, ACTIONS_CLAIMS_VERSION);
         assert_eq!(claims.scope, "actions");
         assert_eq!(claims.token_use, token_use(kind));

@@ -810,7 +810,7 @@ Grant 表示“允许谁访问哪些项目、做哪些操作”，凭据表示�
 
 | 接入方式 | 用途 | 当前阶段 |
 | --- | --- | --- |
-| OAuth | 支持浏览器授权的标准 MCP 客户端；同一 grant 的不同 client_id 独立隔离 | core 已创建/轮换确认口令；access/refresh 签发、验证与修订检查待 B3；Actions 独立 OAuth 仍支持 |
+| OAuth | 支持浏览器授权的标准 MCP 客户端；同一 grant 的不同 client_id 独立隔离 | 授权页只收 OAuth grant 的确认口令（`gld_oauth_v1.` 开头），签发的 access（30 天）/ refresh（90 天）绑定 GrantId、client_id 和凭据修订号，轮换或撤销后 refresh 返回 `invalid_grant`；`/mcp` 上的 access 验证待接；Actions 独立 OAuth 仍支持 |
 | API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | HTTP Bearer 已接通当前授权验证，范围外项目、失效 token 和未约束读取的单项目拒绝；CLI 待 D |
 | URL | 只能填写 Server URI 的客户端，如图示 SuperAssistant；短期 capability URL | core 已创建/轮换限期材料并校验 Origin；完整地址交付和 HTTP 入口待 B3/D |
 

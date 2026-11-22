@@ -272,7 +272,9 @@ fn oauth_discovery_remains_public_but_retired_passwords_and_tokens_are_rejected(
             ("state", "pending-state"),
         ],
     );
-    assert_pending(&denied);
+    // 授权页只收 OAuth grant 的确认口令：旧服务口令是 401 页面，不跳转。
+    assert_eq!(denied.status, 401, "{}", denied.body);
+    assert_eq!(denied.header("cache-control"), Some("no-store"));
     assert!(denied.header("location").is_none(), "旧口令不能发行授权码");
     assert!(!denied.body.contains(&password));
 

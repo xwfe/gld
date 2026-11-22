@@ -263,12 +263,14 @@ pub fn spawn_listener(
         usage,
     )?);
     let configured_public_url = public_base_url.trim().to_string();
-    let oauth = Some(Arc::new(OAuthRuntime::new_mcp_pending(
+    let oauth = Some(Arc::new(OAuthRuntime::new_mcp(
         workspace_audience(&workspace_id),
+        workspace_id.clone(),
         auth.oauth_client_id.clone(),
         oauth_client_secret.clone(),
         oauth_token_secret.unwrap_or_default(),
         Arc::new(ClientRegistry::load(&workspace_id, &workspace_id)),
+        access.clone(),
     )));
     listen(ListenerState {
         endpoint: Endpoint::Workspace(mcp),
@@ -300,12 +302,14 @@ pub fn spawn_hub_listener(
     generation: Option<Arc<GenerationRouter>>,
     access: AccessReader,
 ) -> Result<(ShutdownSender, JoinHandle<()>), String> {
-    let oauth = Some(Arc::new(OAuthRuntime::new_mcp_pending(
+    let oauth = Some(Arc::new(OAuthRuntime::new_mcp(
         hub_audience(),
+        HUB_SCOPE.into(),
         secrets.oauth_client_id,
         None,
         secrets.oauth_token_secret,
         Arc::new(ClientRegistry::load(HUB_SCOPE, HUB_SCOPE)),
+        access.clone(),
     )));
     listen(ListenerState {
         endpoint: Endpoint::Hub { hub, nodes },

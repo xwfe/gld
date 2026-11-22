@@ -392,7 +392,7 @@ fn killing_the_generation_preserves_the_port_and_authorization_refusal() {
     let _ = Command::new("pkill").args(["-f", &sleeper]).status();
 }
 
-/// D18-A 未接通统一凭据存储时，切代、执行代恢复和宿主重启都不得恢复旧 OAuth 授权。
+/// 没有任何新授权时，切代、执行代恢复和宿主重启都不得让旧服务口令、旧授权码或旧 token 恢复 OAuth 授权。
 #[test]
 fn unconnected_oauth_entries_stay_rejected_across_generation_and_host_restarts() {
     let env = Env::new();
@@ -412,10 +412,12 @@ fn unconnected_oauth_entries_stay_rejected_across_generation_and_host_restarts()
             &challenge,
             &password,
         );
-        assert_auth_not_ready(&authorization);
+        // 授权页已接通统一授权：旧服务口令和没注册过的旧 client 换不到授权码，也不回显口令。
+        assert_ne!(authorization.status, 303, "{}", authorization.body);
         assert!(authorization.header("location").is_none());
+        assert!(!authorization.body.contains(&password));
         for grant_type in ["authorization_code", "refresh_token"] {
-            assert_auth_not_ready(&post_form(
+            let reply = post_form(
                 port,
                 &token_path,
                 &[
@@ -424,8 +426,11 @@ fn unconnected_oauth_entries_stay_rejected_across_generation_and_host_restarts()
                     ("refresh_token", "legacy-refresh"),
                     ("client_id", "legacy-client"),
                 ],
-            ));
+            );
+            assert_eq!(reply.status, 400, "{}", reply.body);
+            assert!(reply.json().get("access_token").is_none());
         }
+        // 一条新授权都没有时，/mcp 仍对旧 access 返回 AUTH_NOT_READY。
         assert_auth_not_ready(&post_json(
             port,
             "/mcp",
