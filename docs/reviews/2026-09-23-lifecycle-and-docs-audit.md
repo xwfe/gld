@@ -6074,3 +6074,77 @@ subagent，也未调整委派开关。未操作在用授权、推送、部署或
 - 未修、已列入 `task_plan.md`：匿名动态注册可占满注册表；`gld gateway start` 换地址后 401 发现链接仍是旧地址
   （后者未复现，排在真实客户端验收之前）。
 - 无 grant 时 `/mcp` 的 `AUTH_NOT_READY` 经审查方确认保留，依据 RFC-0015 §6。
+
+## 149. 2026-11-22：D18-B3.4 URL 入口按 grant 核对秘密和 Origin
+
+**范围：**B3.4 接通 `/mcp/connect/<secret>`。没有改隧道绑定、统一 CLI、daemon 协议，也没有碰本机二进制、
+本机守护进程或真实 grant。方案和七个默认决定事先经审查方确认。
+
+**改了什么：**
+- `crates/core/src/auth/access_store/authorize.rs`：新增 `AccessReader::authenticate_url` 和 `UrlRejection`。
+  读当前快照，依次要求凭据是 URL 用途、grant 有效、在期限内、秘密摘要匹配，任何一项不满足都是 `Credential`；
+  全部通过后才看 Origin，不在名单里是 `Origin`。通过后建立 `CredentialKind::Url` / `McpSubject::Url` 的 `AuthContext`。
+- 没有新增存储：Origin 名单就是 `access/v1/grants.json` 里已有的 `CredentialRecord.allowed_origins`，
+  创建时校验并规范化、轮换时原样保留（B2，§143–144）。比较是逐字符相等，不在请求侧做换算。
+- `crates/host/src/auth/source.rs`：`request_origin` 取唯一一个 `Origin` 头的原文；重复、为空或不是有效文本算畸形。
+- `crates/host/src/mcp.rs`：`require_url_auth` 不再一律返回 503。判断顺序固定为：
+  来源冲突 400 → 畸形 Origin 400 → 授权存储不可用或未初始化 503 → 秘密/期限/grant 401 → Origin 403 →
+  单工作区入口的项目范围与 confine-reads 403。401 不带 `WWW-Authenticate`（RFC-0015 §4.2：URL 不对外声称是标准 OAuth）。
+  去掉了这条路由上的通配 CORS 层（原来对任何 Origin 返回 `*`）：只有通过核对的请求才回显它自己的 Origin，
+  并带 `Access-Control-Expose-Headers: mcp-session-id, mcp-protocol-version`；不设 `Allow-Credentials`。
+  新增 OPTIONS 处理：预检同样核对路径秘密和 Origin，通过才返回 `Allow-Methods: POST, OPTIONS` 和
+  `Allow-Headers: content-type, accept, mcp-session-id, mcp-protocol-version, last-event-id`，
+  不通过是不带任何 CORS 头的 204。预检不进入工具分发。
+- daemon `Request` / `Response` 未改，`PROTOCOL_VERSION` 未动；命令行帮助未改。
+
+**审查方确认的决定：**
+- 403 `ORIGIN_NOT_ALLOWED` 只在秘密已通过后返回；错误秘密配名单内的 Origin 仍是 401。
+- 名单为空时只放行不带 Origin 的请求。本步骤不带默认 SuperAssistant Origin，D 创建时注入，实际值待 E 用真实扩展核对。
+- `Origin: null` 一律拒绝（它无法作为合法 Origin 存进名单）。
+- 测试文件名 `crates/cli/tests/browser_grants.rs` 不改，旧 `grant browser` 命令的清理属 D。
+
+**与审查方补充意见不同的一处：**预检许可的请求头里没有 `authorization`。这条路由上只要带 `Authorization`
+就是 `400 / CONFLICTING_CREDENTIAL_SOURCES`（B3.1，§145），许可它只会让浏览器发出一个必然失败的请求。
+`Expose-Headers` 在要求的 `mcp-session-id` 之外多列了 `mcp-protocol-version`。两处都有集成测试断言，待审查方确认。
+
+**日志里的地址秘密：**核对了会落盘或输出的位置，结论是此前没有任何一处记录请求路径，所以没有需要改写成
+`/mcp/connect/<redacted>` 的现成日志行。
+- `mcp-requests.log`（Hub 和成员项目）：`append_profile_log` 的调用点只写方法名、工具名、来源头和状态，
+  新增的 `[auth] rejected … entry=url` 一行只记状态码、Origin、转发来源和 User-Agent。
+- 全局入口 `crates/host/src/global_gateway.rs`：没有访问日志；转发失败的回包用 `error.without_url()`，不含上游地址。
+- 工作区里没有 tracing 依赖、`TraceLayer` 或自定义 panic hook；路径提取成功后不会出现在 panic 消息里。
+- 集成测试在成功、403、401、400、错误入口、405、预检、到期、轮换、撤销之后各遍历一次整个隔离数据目录
+  （不只 `logs/`，也包括授权存储和运行记录），断言没有任何文件含地址秘密，并断言请求日志里没有 `/mcp/connect/`。
+- 没覆盖到的：集成测试直连服务端口，没有经全局入口转发；用户自己的反向代理和隧道的访问日志不在 gld 控制内，
+  `docs/security.md` 已提示。
+
+**单工作区监听器：**URL 路由和 `/mcp` 在同一个路由表里，所以单工作区监听器上也有这个入口。它沿用 token/OAuth
+的做法：秘密和 Origin 通过后，grant 范围不含该项目或项目没开 confine-reads 返回 403（host 单测覆盖）。
+真实 daemon 的集成测试只走了 Hub 入口。
+
+**验证：**Linux、隔离 `GLD_HOME`，PATH 含 Node v24.22.2。
+- `cargo test --workspace --all-targets --locked --no-fail-fast`：**75 个目标，1519 passed / 0 failed / 0 ignored**。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 通过。
+- core 单测（`authorize.rs`）：秘密先于 Origin 判断、精确匹配、空名单；未知 ID、别的用途、签发前、到期时刻；
+  轮换后 CallerId 和名单不变、旧秘密拒绝；撤销；URL 与 token/OAuth 入口互不接受对方的秘密；URL 的 CallerId 与 token 不同。
+- host 单测（共享 reader，监听器不重启）：Origin 头的各种形态；运行中轮换、撤销后下一个请求即 401；
+  单工作区范围与 confine-reads 403；CORS 只回显通过核对的 Origin、失败和无 Origin 的响应不带 CORS 头。
+- 真实 daemon/HTTP（`crates/cli/tests/browser_grants.rs`，凭据由 `AccessStore::create_grant` 在 daemon 启动前建立）：
+  名单内的两个 Origin 和无 Origin 各自 `initialize`、`tools/list`、`read_file` 成功 → 点名范围外的项目读不到 →
+  只读地址 `apply_patch` 被拒、可写地址写入成功但 `agent_manage action=start` 得到 `AGENT_DELEGATION_NOT_ALLOWED` →
+  未列出、`null`、多一个尾斜杠、大小写不同的 Origin，以及借用另一条 grant 名单里的 Origin 都是 403 →
+  错误秘密、API token、OAuth 确认口令放进路径都是 401，且不随 Origin 变化 → 重复 Origin 和附带 Bearer 是 400 →
+  地址秘密当 Bearer 或查询串发到 `/mcp` 是 401，旧 `/mcp/browser/…` 是 404 → GET/DELETE 在秘密有效时 405 →
+  预检只对会被接受的组合返回 CORS 头 → 3 秒期限到期后 401 → 停 daemon 轮换后旧地址 401、新地址沿用原名单 →
+  运行中 `gld grant rm` 后下一个请求 401，无关的 API token 仍可用 → 一条 grant 都没有时仍是 503。
+  `token_grants.rs` 和 `oauth_connector_flow.rs` 里原先断言 URL 入口 503 的两处改为断言用途不能互换。
+
+**未验证与已知限制：**
+- 运行中轮换未经真实 daemon 验证，待 D：运行中的 daemon 没有轮换入口，集成测试是停机轮换，
+  运行中立即失效只有 host 单测证明。
+- 没有创建 URL 地址的命令，真实客户端目前无法取得地址；默认 Origin 属 D。
+- 没有用真实的 MCP SuperAssistant 扩展验收（属 E）：扩展实际发送的 Origin、它是否读取 `mcp-session-id`、
+  预检实际请求哪些头，都没有实测。
+- 首次全量测试时 PATH 上没有 `node`，`command_write_paths` 的一条用例失败（同 §148），加入 Node 后通过；
+  同一次还有 `docs_commands_exist` 因文档里提到尚不存在的命令参数失败，已改写文档。
+- 没有更换本机二进制、重启本机守护进程或改动真实 grant。

@@ -4,7 +4,7 @@ gld 的文件策略和授权决定哪些工具可被调用，**不是操作系�
 子进程能访问什么最终由运行 gld 的系统账号决定。
 
 > **新授权的客户端接入仍在分步实现。** 新授权模型、独立存储、身份隔离和三类材料创建/轮换已有内核用例，
-> 新 API token 和 OAuth access/refresh 已可通过宿主 HTTP MCP 完成认证；URL、未绑定隧道与原生节点工具尚未接通；不能把这版源码作为完整接入版本部署。
+> 新 API token、OAuth access/refresh 和 URL 地址已可通过宿主 HTTP MCP 完成认证；创建 URL 地址的命令、未绑定隧道与原生节点工具尚未接通；不能把这版源码作为完整接入版本部署。
 > 当前运行中的旧版本未因源码提交而改变。统一接入契约见 [RFC-0015](rfc/0015-unified-client-access.md)，阶段状态见 [task_plan](../task_plan.md)。
 
 ## 一分钟自查
@@ -15,14 +15,14 @@ gld grant ls               # 新授权的元数据；空列表不开放任何网
 gld doctor                 # 配置与运行状态检查
 ```
 
-监听端口可达、GET 发现文档成功和完成授权是不同的状态。当前源码接受新 API token，以及用 OAuth grant 的确认口令授权后签发的 access token：
-没带凭据或 Bearer 验证失败返回 401，回包带 OAuth 发现信息；URL 入口、隧道，以及一条授权都没建过的服务
-继续返回 `503 / AUTH_NOT_READY`，不执行工具。
+监听端口可达、GET 发现文档成功和完成授权是不同的状态。当前源码接受新 API token、用 OAuth grant 的确认口令授权后签发的 access token，以及 URL 用途 grant 的地址
+（`/mcp/connect/<secret>`）：没带凭据或 Bearer 验证失败返回 401，回包带 OAuth 发现信息；URL 地址不对也是 401，
+但不带发现信息。隧道，以及一条授权都没建过的服务继续返回 `503 / AUTH_NOT_READY`，不执行工具。
 Actions 继续使用独立的项目身份与认证流程。
 
 ## 新授权模型的权限边界
 
-以下是新模型的能力约束；API token 和 OAuth access/refresh 的 HTTP 逐请求验证已接通，URL Origin 和隧道绑定仍需 B3。
+以下是新模型的能力约束；API token、OAuth access/refresh 和 URL 地址（含 Origin 名单）的 HTTP 逐请求验证已接通，隧道绑定仍需 B3。
 
 | 能力 | 必须同时满足 |
 | --- | --- |
@@ -59,8 +59,18 @@ OAuth client_id 和 Actions workspace_id 都是主体隔离的一部分。共用
 它仍需有效 Grant，并额外限制期限、Origin、委派和服务能力；Origin 不是认证凭据。
 原始秘密仅在创建或轮换成功时交付，Debug 和解析错误不包含它；HTTP 适配必须设置 no-store/no-referrer。
 
-core 已签发和轮换 URL 材料；完整地址交付与 HTTP 新路径仍待接通，旧 `/mcp/browser/…` 不保留别名。
-期限、Origin、轮换和撤销的真实 HTTP 正向验收必须在 B3/E 完成，不能把 CORS 预检成功当作已授权。
+HTTP 入口已接通，每个请求都重新核对：先是地址里的秘密、期限和 grant（不对就是 401，不带 OAuth 发现信息），
+再是 `Origin`。带了 `Origin` 的请求必须和创建时列出的某一项逐字符相同，否则 403；`Origin: null` 永远不通过；
+没带 `Origin` 的请求（命令行客户端）只凭秘密通过。403 只在秘密已经对了之后才会出现，所以不能用它来试探秘密。
+跨源响应只回显通过核对的那个 Origin，从不返回 `*`，也不允许带 cookie；预检同样核对秘密和 Origin，
+通过不代表后面的请求不再核对。轮换、撤销或到期后下一个请求就是 401。完整规则见
+[统一授权](concepts.md#统一授权gld-grant)。
+
+gld 自己不把这个地址写进任何日志：被拒的请求只记状态码、Origin 和来源线索。你自己的反向代理或隧道
+会不会记请求路径，要另外检查。
+
+还没做的：创建地址的命令和商店版 SuperAssistant 的默认 Origin 属于后续步骤，
+也还没有用真实扩展验收；运行中的服务没有轮换入口。旧 `/mcp/browser/…` 不保留别名。
 客户端保存或展示完整地址时仍可能泄露秘密；新接入完成后跨机器使用 HTTPS。
 
 ### OpenAI 隧道需要显式授权绑定
@@ -394,7 +404,8 @@ AllProjects 默认覆盖当前与以后登记的项目，write 和服务能力�
 
 专用 API token 和 OAuth access token 已接入 HTTP 并逐请求验证当前授权；错误凭据返回 401，单项目越权返回 403。
 宿主先按格式确定凭据来源，再只按那一种验证：OAuth token 验证失败不会被当成 API token 重试，反过来也一样。
-URL、未绑定隧道仍明确拒绝，不能从旧服务口令回退为本机操作员。
+URL 地址走自己的路径 `/mcp/connect/<secret>`，同样逐请求验证当前授权，另加 Origin 名单；它不能当 Bearer 用，
+API token 和 OAuth token 也不能放进这个路径。未绑定隧道仍明确拒绝，不能从旧服务口令回退为本机操作员。
 
 OAuth 的授权页只接受 OAuth 用途 grant 的确认口令，且只从 POST 正文读取；授权页、授权码跳转和 token 回包都带
 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`，错误页不回显提交的内容，

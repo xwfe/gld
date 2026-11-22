@@ -869,7 +869,7 @@ Actions 的 OAuth token 和 MCP 的互不通用，即使签名密钥相同。
 - 所有响应都带 `Cache-Control: no-store`、`Referrer-Policy: no-referrer` 和 `Vary: Origin`。
   被拒的请求在 `mcp-requests.log` 里记一行状态码、Origin 和来源线索，不记地址。
 
-URL 用途的 grant 目前只能由内核用例创建，`gld grant add --via url` 和商店版 SuperAssistant 的默认 Origin
+URL 用途的 grant 目前只能由内核用例创建，创建地址的命令和商店版 SuperAssistant 的默认 Origin
 要等 D；在那之前没有给真实客户端用的创建办法。
 
 三种创建凭据共用严格期限解析：`s`、`m`、`h`、`d` 表示秒、分、时、天，数值必须是正整数。
