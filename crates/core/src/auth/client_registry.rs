@@ -2,7 +2,7 @@
 //!
 //! ChatGPT 这类客户端会保存注册时拿到的 `dcr-…` client_id，以后继续使用。
 //! 只有注册表写入成功才确认注册；并发请求不能覆盖已经确认的客户端，容量满时也
-//! 不能淘汰旧 id。已有注册表读不动或损坏时保留原文件，暂时拒绝新注册。
+//! 不能淘汰已授权的 id。已有注册表读不动或损坏时保留原文件，暂时拒绝新注册。
 //!
 //! 服务重启后读取同一份注册表；就算文件丢了，已有签名刷新令牌仍走原来的兼容
 //! 路径（见 `oauth_flow::refresh_token_exchange`），但不能据此找回未知的注册记录。
@@ -35,6 +35,8 @@ pub enum RegistrationError {
     CapacityReached,
     #[error("Client registration is temporarily unavailable.")]
     Unavailable,
+    #[error("Client registration is not present or no longer authorized.")]
+    NotRegistered,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,14 +233,17 @@ impl ClientRegistry {
     }
 
     /// 授权码兑换校验全部通过后调用：先把 pending 落成 authorized，再允许签发 token。
-    /// 已经 authorized 或不在注册表里的静态 client_id 是幂等 no-op；写盘失败不发布状态。
+    /// 缺失或过期 pending 返回 `NotRegistered`；已经 authorized 是幂等 no-op，写盘失败不发布状态。
     pub fn mark_authorized(&self, client_id: &str) -> Result<(), RegistrationError> {
         let mut clients = self.clients.lock().expect("oauth clients lock");
         let now = unix_now();
-        let needs_update = clients.get(client_id).is_some_and(|client| {
-            client.status == ClientRegistrationStatus::Pending && !pending_expired(client, now)
-        });
-        if !needs_update {
+        let Some(client) = clients.get(client_id) else {
+            return Err(RegistrationError::NotRegistered);
+        };
+        if !client_visible(client, now) {
+            return Err(RegistrationError::NotRegistered);
+        }
+        if client.status == ClientRegistrationStatus::Authorized {
             return Ok(());
         }
         if !self.writable {
@@ -725,6 +730,37 @@ mod tests {
     }
 
     #[test]
+    fn mark_authorized_reports_only_visible_registered_clients() {
+        let registry = ClientRegistry::in_memory();
+        let now = unix_now();
+        registry
+            .insert("dcr-pending".into(), pending(now))
+            .expect("pending client");
+        registry
+            .insert("dcr-expired".into(), pending(0))
+            .expect("expired pending client");
+        registry
+            .insert("dcr-authorized".into(), client(0))
+            .expect("authorized client");
+
+        assert_eq!(
+            registry.mark_authorized("dcr-missing"),
+            Err(RegistrationError::NotRegistered)
+        );
+        assert_eq!(
+            registry.mark_authorized("dcr-expired"),
+            Err(RegistrationError::NotRegistered)
+        );
+        assert_eq!(registry.mark_authorized("dcr-pending"), Ok(()));
+        assert_eq!(
+            registry.get("dcr-pending").unwrap().status,
+            ClientRegistrationStatus::Authorized
+        );
+        assert_eq!(registry.mark_authorized("dcr-pending"), Ok(()));
+        assert_eq!(registry.mark_authorized("dcr-authorized"), Ok(()));
+    }
+
+    #[test]
     fn pending_registrations_make_room_but_authorized_capacity_still_rejects() {
         let path = crate::home::test_scratch_dir("oauth-authorized-capacity").join("clients.json");
         let registry = ClientRegistry::load_path(Ok(path.clone()), "authorized-capacity");
@@ -746,9 +782,7 @@ mod tests {
         assert!(registry.contains("dcr-newcomer"));
         assert_eq!(registry.len(), MAX_CLIENTS);
 
-        registry
-            .mark_authorized("dcr-newcomer")
-            .expect("pending becomes authorized");
+        assert_eq!(registry.mark_authorized("dcr-newcomer"), Ok(()));
         assert_eq!(
             registry.get("dcr-newcomer").unwrap().status,
             ClientRegistrationStatus::Authorized

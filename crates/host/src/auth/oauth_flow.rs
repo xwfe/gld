@@ -213,16 +213,19 @@ impl OAuthRuntime {
         matches!(self.authorization, OAuthAuthorization::Actions { .. })
     }
 
+    fn is_static_client(&self, client_id: &str) -> bool {
+        !self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id)
+    }
+
     pub fn client_id_allowed(&self, client_id: &str) -> bool {
         if client_id.is_empty() {
             return false;
         }
-        (!self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id))
-            || self.clients.contains(client_id)
+        self.is_static_client(client_id) || self.clients.contains(client_id)
     }
 
     fn redirect_uri_allowed(&self, client_id: &str, redirect_uri: &str) -> bool {
-        if !self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id) {
+        if self.is_static_client(client_id) {
             return !redirect_uri.trim().is_empty();
         }
         self.clients
@@ -231,7 +234,7 @@ impl OAuthRuntime {
     }
 
     fn client_credentials_allowed(&self, client_id: &str, client_secret: &str) -> bool {
-        if !self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id) {
+        if self.is_static_client(client_id) {
             return self
                 .client_secret
                 .as_deref()
@@ -608,6 +611,37 @@ pub fn token_exchange(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ExchangeClientError {
+    NotRegistered,
+    Unavailable,
+}
+
+impl ExchangeClientError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::NotRegistered => token_error("invalid_client", "Invalid client credentials"),
+            Self::Unavailable => token_error("server_error", "Failed to issue token pair"),
+        }
+    }
+}
+
+fn authorize_exchange_client(
+    oauth: &OAuthRuntime,
+    client_id: &str,
+) -> Result<(), ExchangeClientError> {
+    if oauth.is_static_client(client_id) {
+        return Ok(());
+    }
+    oauth
+        .clients
+        .mark_authorized(client_id)
+        .map_err(|error| match error {
+            RegistrationError::NotRegistered => ExchangeClientError::NotRegistered,
+            _ => ExchangeClientError::Unavailable,
+        })
+}
+
 fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Response {
     if !oauth.client_id_allowed(&form.client_id)
         || !oauth.client_credentials_allowed(&form.client_id, &form.client_secret)
@@ -645,8 +679,8 @@ fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Respons
     }
     match (&oauth.authorization, code_data.binding) {
         (OAuthAuthorization::Actions { .. }, None) => {
-            if oauth.clients.mark_authorized(&form.client_id).is_err() {
-                return token_error("server_error", "Failed to issue token pair");
+            if let Err(error) = authorize_exchange_client(oauth, &form.client_id) {
+                return error.into_response();
             }
             issue_actions_token_pair(oauth, &form.client_id)
         }
@@ -654,8 +688,8 @@ fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Respons
             if !mcp_binding_current(oauth, &form.client_id, &binding) {
                 return token_error("invalid_grant", "Authorization is no longer valid");
             }
-            if oauth.clients.mark_authorized(&form.client_id).is_err() {
-                return token_error("server_error", "Failed to issue token pair");
+            if let Err(error) = authorize_exchange_client(oauth, &form.client_id) {
+                return error.into_response();
             }
             sign_mcp_token_pair(oauth, &form.client_id, &binding)
         }

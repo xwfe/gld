@@ -854,6 +854,47 @@ fn authorization_write_failure_returns_server_error_without_tokens() {
 }
 
 #[test]
+fn exchange_authorization_rejects_clients_that_are_no_longer_registered() {
+    let clients = Arc::new(ClientRegistry::in_memory());
+    let oauth = runtime_with("", clients.clone());
+
+    let missing = authorize_exchange_client(&oauth, "dcr-missing")
+        .unwrap_err()
+        .into_response();
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(missing)["error"], "invalid_client");
+
+    clients
+        .insert(
+            "dcr-expired".into(),
+            RegisteredClient {
+                redirect_uris: vec![REDIRECT_URI.into()],
+                token_endpoint_auth_method: "none".into(),
+                client_secret: None,
+                client_name: "expired-pending".into(),
+                created_at: 0,
+                status: ClientRegistrationStatus::Pending,
+            },
+        )
+        .expect("expired pending fixture");
+    let expired = authorize_exchange_client(&oauth, "dcr-expired")
+        .unwrap_err()
+        .into_response();
+    assert_eq!(expired.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(expired)["error"], "invalid_client");
+}
+
+#[test]
+fn static_client_id_exchange_does_not_require_a_registry_record() {
+    let oauth = runtime("chatgpt-client-test");
+    let base = "https://service.example.com";
+    let (access, refresh) = authorize_and_exchange(&oauth, "chatgpt-client-test", base);
+    assert!(oauth.verify_access_token(&access, base));
+    let renewed = refresh_with(&oauth, "chatgpt-client-test", refresh);
+    assert_eq!(renewed.status(), StatusCode::OK);
+}
+
+#[test]
 fn damaged_registry_returns_service_unavailable_without_overwriting_it() {
     run_isolated(
         module_path!(),
