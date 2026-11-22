@@ -1,6 +1,9 @@
 //! 在触碰授权存储前确定唯一来源；不能因一种方式失败再尝试另一种。
 
-use axum::http::{header::AUTHORIZATION, HeaderMap};
+use axum::http::{
+    header::{AUTHORIZATION, ORIGIN},
+    HeaderMap,
+};
 use gld_core::auth::{bearer_token, parse_credential, CredentialKind};
 use gld_core::hub::OPENAI_TUNNEL_HEADER;
 
@@ -54,6 +57,23 @@ pub(crate) fn url<'a>(
     }
     let id = parse_credential(secret, CredentialKind::Url).map_err(|_| "invalid_credential")?;
     Ok(CredentialSource::Url { id, secret })
+}
+
+/// 取请求的 Origin 原文，不做任何归一化：授权名单按逐字节相同比对。
+/// 没有 Origin 头是合法的（非浏览器客户端）；重复、空值或非 UTF-8 的 Origin 无法
+/// 对应到名单里的唯一一项，直接拒绝，不挑其中一个来用。
+pub(crate) fn request_origin(headers: &HeaderMap) -> Result<Option<&str>, &'static str> {
+    let mut values = headers.get_all(ORIGIN).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err("invalid_origin");
+    }
+    match first.to_str() {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        _ => Err("invalid_origin"),
+    }
 }
 
 #[cfg(test)]
@@ -146,5 +166,27 @@ mod tests {
         }
         headers.append(OPENAI_TUNNEL_HEADER, HeaderValue::from_static("another"));
         assert!(standard(&headers).is_err());
+    }
+
+    #[test]
+    fn origin_header_is_taken_verbatim_or_refused() {
+        use axum::http::header::ORIGIN;
+        use axum::http::HeaderValue;
+
+        let mut headers = HeaderMap::new();
+        assert_eq!(request_origin(&headers), Ok(None));
+        headers.insert(ORIGIN, "https://App.example.test/".parse().unwrap());
+        assert_eq!(
+            request_origin(&headers),
+            Ok(Some("https://App.example.test/"))
+        );
+        headers.insert(ORIGIN, "null".parse().unwrap());
+        assert_eq!(request_origin(&headers), Ok(Some("null")));
+        headers.append(ORIGIN, "https://app.example.test".parse().unwrap());
+        assert_eq!(request_origin(&headers), Err("invalid_origin"));
+        headers.insert(ORIGIN, HeaderValue::from_static(""));
+        assert_eq!(request_origin(&headers), Err("invalid_origin"));
+        headers.insert(ORIGIN, HeaderValue::from_bytes(b"https://\xff").unwrap());
+        assert_eq!(request_origin(&headers), Err("invalid_origin"));
     }
 }

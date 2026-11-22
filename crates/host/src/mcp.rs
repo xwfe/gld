@@ -8,17 +8,18 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{
     header::{
-        ACCEPT, ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, REFERRER_POLICY, USER_AGENT,
-        WWW_AUTHENTICATE,
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+        ACCESS_CONTROL_EXPOSE_HEADERS, ALLOW, AUTHORIZATION, CACHE_CONTROL, ORIGIN,
+        REFERRER_POLICY, USER_AGENT, VARY, WWW_AUTHENTICATE,
     },
-    HeaderMap, HeaderName, Method, StatusCode,
+    HeaderMap, HeaderValue, StatusCode,
 };
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gld_core::async_rt::{self, JoinHandle};
-use gld_core::auth::AccessReader;
+use gld_core::auth::{AccessReader, UrlRejection};
 use gld_core::generation::CallError;
 use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE, SERVER_NAME};
 use gld_core::local_network;
@@ -30,7 +31,7 @@ use gld_core::usage::ServiceUsage;
 use gld_core::workspace::{AuthConfig, RuntimeConfig};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use crate::auth::source::{self, CredentialSource};
 use crate::auth::{
@@ -466,61 +467,185 @@ fn resolve_oauth_base(state: &ListenerState, headers: &HeaderMap) -> String {
 
 /// URL-only 客户端不一定实现 OAuth / 自定义认证头。独立短期 grant 复用现有
 /// Hub 和权限检查，不开无鉴权入口，也不维护另一套 MCP 会话或执行器。
+///
+/// 这条路由不用通配的 CORS 层：只有秘密、期限、grant 和 Origin 都通过的请求，
+/// 响应里才回显它自己的 Origin。预检不带凭据头，但秘密在路径里，同样完整核对。
 fn url_router() -> Router<ListenerState> {
     Router::new()
         .route(
             "/mcp/connect/{token}",
             post(mcp_url_post)
                 .get(mcp_url_no_stream)
-                .delete(mcp_url_no_stream),
-        )
-        .layer(
-            CorsLayer::new()
-                // 不用跨源 cookie。允许预检，实际请求逐次核验 grant 的 Origin。
-                // CORS 不是鉴权；含密钥的 URL 也必须通过有效期和项目范围检查。
-                .allow_origin(Any)
-                .allow_methods([Method::POST, Method::GET, Method::DELETE, Method::OPTIONS])
-                .allow_headers([
-                    CONTENT_TYPE,
-                    ACCEPT,
-                    AUTHORIZATION,
-                    HeaderName::from_static("mcp-session-id"),
-                    HeaderName::from_static("mcp-protocol-version"),
-                    HeaderName::from_static("last-event-id"),
-                ])
-                .expose_headers([
-                    HeaderName::from_static("mcp-session-id"),
-                    HeaderName::from_static("mcp-protocol-version"),
-                ]),
+                .delete(mcp_url_no_stream)
+                .options(mcp_url_preflight),
         )
         .layer(middleware::map_response(url_response))
 }
 
+/// 浏览器扩展要带的请求头。不含 Authorization：这条路由上同时带路径秘密和
+/// Authorization 是来源冲突（400），放进预检许可只会让浏览器发出一个必然失败的请求。
+const URL_CORS_ALLOW_HEADERS: &str =
+    "content-type, accept, mcp-session-id, mcp-protocol-version, last-event-id";
+/// 不列出来的响应头，跨源脚本读不到；客户端要从响应里取会话 ID 和协商后的版本。
+const URL_CORS_EXPOSE_HEADERS: &str = "mcp-session-id, mcp-protocol-version";
+
 async fn url_response(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    // 同一地址对不同 Origin 的响应头不同，中间缓存不能混用。
+    headers.insert(VARY, HeaderValue::from_static("Origin"));
     response
-        .headers_mut()
-        .insert(CACHE_CONTROL, "no-store".parse().expect("static header"));
-    response.headers_mut().insert(
-        REFERRER_POLICY,
-        "no-referrer".parse().expect("static header"),
+}
+
+/// 给已经通过秘密和 Origin 核对的请求回显它的 Origin。不设 Allow-Credentials：
+/// 凭据在路径里，不用 cookie。请求没带 Origin 时什么都不加。
+fn url_cors(mut response: Response, origin: Option<&str>) -> Response {
+    let Some(origin) = origin.and_then(|value| HeaderValue::from_str(value).ok()) else {
+        return response;
+    };
+    let headers = response.headers_mut();
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    headers.insert(
+        ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static(URL_CORS_EXPOSE_HEADERS),
     );
     response
 }
 
+/// URL 入口通过认证的请求：本次权限，加上已经核对过、可以回显的 Origin。
+struct UrlAccess {
+    auth: AuthContext,
+    origin: Option<String>,
+}
+
+/// `/mcp/connect/<secret>` 的认证：只接受 URL 用途的凭据，失败不回退到别的来源。
+///
+/// 顺序是固定的：来源冲突和畸形 Origin（400）→ 授权存储可用（503）→ 秘密、期限和
+/// grant 状态（401）→ Origin（403）→ 单工作区监听器的项目范围（403）。
+/// 401 不带 OAuth 发现信息：这个入口不能让客户端以为它是标准 OAuth 资源。
 fn require_url_auth(
-    _state: &ListenerState,
+    state: &ListenerState,
     headers: &HeaderMap,
     token: &str,
-) -> Result<AuthContext, Box<Response>> {
-    // 先拒绝重复来源；新验证尚未接线，合法格式仍不取得工具访问权。
-    match source::url(headers, token) {
+) -> Result<UrlAccess, Box<Response>> {
+    let credential = match source::url(headers, token) {
         Err("conflicting_credential_sources") => return Err(Box::new(mcp_source_conflict())),
-        Ok(CredentialSource::Url { id, secret }) => {
-            let _ = (id, secret);
-        }
-        _ => {}
+        Ok(CredentialSource::Url { id, secret }) => Some((id, secret)),
+        _ => None,
+    };
+    let origin = source::request_origin(headers).map_err(|_| Box::new(url_invalid_origin()))?;
+    let current = state
+        .access
+        .snapshot()
+        .map_err(|_| Box::new(mcp_auth_not_ready()))?;
+    // 未初始化的新授权文件不能让旧的浏览器地址恢复权限。
+    if !current.is_initialized() {
+        return Err(Box::new(mcp_auth_not_ready()));
     }
-    Err(Box::new(mcp_auth_not_ready()))
+    drop(current);
+    let (id, secret) = credential.ok_or_else(|| Box::new(url_unauthorized()))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Box::new(mcp_auth_not_ready()))?
+        .as_secs();
+    let auth = state
+        .access
+        .authenticate_url(&state.scope, id, secret, origin, now)
+        .map_err(|rejection| {
+            Box::new(match rejection {
+                UrlRejection::Unavailable => mcp_auth_not_ready(),
+                UrlRejection::Credential => url_unauthorized(),
+                UrlRejection::Origin => url_origin_not_allowed(),
+            })
+        })?;
+    if matches!(&state.endpoint, Endpoint::Workspace(_))
+        && (!auth.allows_project(&state.scope) || !state.workspace_confined)
+    {
+        // 秘密和 Origin 都已核对，回显 Origin 让扩展能读到这条说明。
+        return Err(Box::new(url_cors(mcp_forbidden(), origin)));
+    }
+    Ok(UrlAccess {
+        auth,
+        origin: origin.map(str::to_string),
+    })
+}
+
+fn url_unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": "AUTHENTICATION_FAILED",
+            "message": "Missing or invalid credential"
+        })),
+    )
+        .into_response()
+}
+
+fn url_origin_not_allowed() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "ORIGIN_NOT_ALLOWED",
+            "message": "这个地址不允许从当前 Origin 使用；请在创建地址时把它加入 --origin"
+        })),
+    )
+        .into_response()
+}
+
+fn url_invalid_origin() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "INVALID_ORIGIN",
+            "message": "请求的 Origin 头重复、为空或不是有效文本"
+        })),
+    )
+        .into_response()
+}
+
+/// URL 入口的拒绝也记一行，和 `/mcp` 一样用来分清「请求没到」和「到了但被拒」。
+/// 秘密在路径里，所以这里从不记路径或查询串，只记状态、Origin 和来源线索。
+fn log_url_rejected(scope: &str, headers: &HeaderMap, status: StatusCode) {
+    append_profile_log(
+        scope,
+        "mcp-requests.log",
+        &format!(
+            "[auth] rejected status={} entry=url origin={} forwarded_for={} user_agent={} （请求到了 gld 的 URL 入口，但地址、Origin 或请求头不被接受）",
+            status.as_u16(),
+            header_for_log(headers, &[ORIGIN.as_str()]),
+            header_for_log(headers, &["cf-connecting-ip", "x-forwarded-for", "x-real-ip"]),
+            header_for_log(headers, &[USER_AGENT.as_str()]),
+        ),
+    );
+}
+
+/// 预检不执行任何工具，也不生成权限上下文之外的东西：只有随后的实际请求会被接受时，
+/// 才回显 Origin 和允许的方法、请求头。其余情况回一个不带 CORS 头的 204，浏览器会拦下
+/// 实际请求；响应不区分秘密错误和 Origin 不在名单里。
+async fn mcp_url_preflight(
+    State(state): State<ListenerState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let mut response = (StatusCode::NO_CONTENT, [(ALLOW, "POST, OPTIONS")]).into_response();
+    let allowed = match require_url_auth(&state, &headers, &token) {
+        Ok(access) => access.origin,
+        Err(_) => None,
+    };
+    if let Some(origin) = allowed.as_deref() {
+        response = url_cors(response, Some(origin));
+        let headers = response.headers_mut();
+        headers.insert(
+            ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("POST, OPTIONS"),
+        );
+        headers.insert(
+            ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static(URL_CORS_ALLOW_HEADERS),
+        );
+    }
+    response
 }
 
 async fn mcp_url_post(
@@ -529,14 +654,17 @@ async fn mcp_url_post(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let auth = match require_url_auth(&state, &headers, &token) {
-        Ok(auth) => auth,
-        Err(response) => return *response,
+    let UrlAccess { auth, origin } = match require_url_auth(&state, &headers, &token) {
+        Ok(access) => access,
+        Err(response) => {
+            log_url_rejected(&state.scope, &headers, response.status());
+            return *response;
+        }
     };
     if let Err(response) = require_url_protocol(&headers) {
-        return *response;
+        return url_cors(*response, origin.as_deref());
     }
-    dispatch_mcp(state, auth, body).await
+    url_cors(dispatch_mcp(state, auth, body).await, origin.as_deref())
 }
 
 fn require_url_protocol(headers: &HeaderMap) -> Result<(), Box<Response>> {
@@ -568,13 +696,20 @@ async fn mcp_url_no_stream(
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = require_url_auth(&state, &headers, &token) {
-        return *response;
-    }
+    let origin = match require_url_auth(&state, &headers, &token) {
+        Ok(access) => access.origin,
+        Err(response) => {
+            log_url_rejected(&state.scope, &headers, response.status());
+            return *response;
+        }
+    };
     if let Err(response) = require_url_protocol(&headers) {
-        return *response;
+        return url_cors(*response, origin.as_deref());
     }
-    (StatusCode::METHOD_NOT_ALLOWED, [(ALLOW, "POST, OPTIONS")]).into_response()
+    url_cors(
+        (StatusCode::METHOD_NOT_ALLOWED, [(ALLOW, "POST, OPTIONS")]).into_response(),
+        origin.as_deref(),
+    )
 }
 
 async fn mcp_post(
@@ -811,7 +946,8 @@ fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
 }
 
 /// `/mcp` 的认证分派：先确定唯一的凭据来源，再只按那一种验证，失败即拒绝。
-/// API token 和 OAuth access token 已接入统一授权；隧道仍未接入，返回 AUTH_NOT_READY。
+/// API token 和 OAuth access token 已接入统一授权；URL 凭据走自己的路径，见 [`require_url_auth`]；
+/// 隧道仍未接入，返回 AUTH_NOT_READY。
 fn require_mcp_auth(
     state: &ListenerState,
     headers: &HeaderMap,
@@ -917,7 +1053,7 @@ fn mcp_auth_not_ready() -> Response {
         [(CACHE_CONTROL, "no-store")],
         Json(json!({
             "error": "AUTH_NOT_READY",
-            "message": "统一 MCP 授权尚未接入；当前入口拒绝匿名、旧凭据及未绑定 grant 的隧道请求"
+            "message": "这台机器还没有可用的统一授权，或请求来自尚未绑定 grant 的隧道；匿名和旧凭据一律拒绝"
         })),
     )
         .into_response()
@@ -1515,14 +1651,326 @@ mod tests {
                         .status(),
                     axum::http::StatusCode::BAD_REQUEST
                 );
-                let response =
-                    super::require_url_auth(&state, &headers, "old-url-secret").unwrap_err();
+                let response = super::require_url_auth(&state, &headers, "old-url-secret")
+                    .err()
+                    .unwrap();
                 let body =
                     gld_core::async_rt::block_on(axum::body::to_bytes(response.into_body(), 4096))
                         .unwrap();
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["error"], "CONFLICTING_CREDENTIAL_SOURCES");
                 assert!(!String::from_utf8_lossy(&body).contains("old-url-secret"));
+            },
+        );
+    }
+
+    const EXTENSION: &str = "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef";
+
+    fn url_headers(origin: Option<&str>) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(origin) = origin {
+            headers.insert(axum::http::header::ORIGIN, origin.parse().unwrap());
+        }
+        headers
+    }
+
+    fn url_failure(
+        state: &ListenerState,
+        headers: &axum::http::HeaderMap,
+        secret: &str,
+    ) -> (axum::http::StatusCode, String, bool) {
+        let response = *super::require_url_auth(state, headers, secret)
+            .err()
+            .expect("request must be refused");
+        let status = response.status();
+        let cors = response
+            .headers()
+            .contains_key(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN);
+        assert!(!response
+            .headers()
+            .contains_key(axum::http::header::WWW_AUTHENTICATE));
+        let body =
+            gld_core::async_rt::block_on(axum::body::to_bytes(response.into_body(), 4096)).unwrap();
+        let text = String::from_utf8_lossy(&body).into_owned();
+        assert!(!text.contains(secret), "secret echoed in {text}");
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, value["error"].as_str().unwrap().to_string(), cors)
+    }
+
+    #[test]
+    fn url_auth_rechecks_secret_origin_scope_and_revocation_without_restarting_listener() {
+        use axum::http::StatusCode;
+        run_isolated(
+            module_path!(),
+            "url_auth_rechecks_secret_origin_scope_and_revocation_without_restarting_listener",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let store = AccessStore::open_in(root.path()).unwrap();
+                let mut state = state_with_access(root.path(), "api", store.reader());
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let wrong = "gld_url_v1.0123456789abcdef0123456789abcdef.\
+                    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+                // 还没有任何授权：格式合法的地址也只得到 503，不是 401。
+                assert_eq!(
+                    url_failure(&state, &url_headers(Some(EXTENSION)), wrong).0,
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+
+                let issued = store
+                    .create_grant(
+                        GrantCreation {
+                            name: "Sidebar".into(),
+                            scope: ProjectScope::Selected(vec!["w1".into()]),
+                            permissions: GrantPermissions::default(),
+                            kind: CredentialKind::Url,
+                            ttl: None,
+                            allowed_origins: vec![EXTENSION.into()],
+                        },
+                        now,
+                    )
+                    .unwrap();
+                let secret = issued.secret.into_string();
+
+                let first = super::require_url_auth(&state, &url_headers(None), &secret)
+                    .ok()
+                    .unwrap();
+                assert_eq!(first.origin, None);
+                assert!(!first.auth.may_write_project());
+                assert!(!first.auth.may_delegate());
+                let listed =
+                    super::require_url_auth(&state, &url_headers(Some(EXTENSION)), &secret)
+                        .ok()
+                        .unwrap();
+                assert_eq!(listed.origin.as_deref(), Some(EXTENSION));
+                assert_eq!(first.auth.id(), listed.auth.id());
+
+                // 秘密有效但 Origin 不在名单里：403，不回显 Origin。
+                for origin in ["https://untrusted.example.test", "null"] {
+                    assert_eq!(
+                        url_failure(&state, &url_headers(Some(origin)), &secret),
+                        (StatusCode::FORBIDDEN, "ORIGIN_NOT_ALLOWED".into(), false)
+                    );
+                }
+                // 秘密不对：不管 Origin 在不在名单里都是同一个 401。
+                for origin in [
+                    Some(EXTENSION),
+                    Some("https://untrusted.example.test"),
+                    None,
+                ] {
+                    for candidate in [wrong, "not-a-url-credential"] {
+                        assert_eq!(
+                            url_failure(&state, &url_headers(origin), candidate),
+                            (
+                                StatusCode::UNAUTHORIZED,
+                                "AUTHENTICATION_FAILED".into(),
+                                false
+                            )
+                        );
+                    }
+                }
+                // 重复的 Origin 头无法对应到名单里的一项。
+                let mut doubled = url_headers(Some(EXTENSION));
+                doubled.append(axum::http::header::ORIGIN, EXTENSION.parse().unwrap());
+                assert_eq!(
+                    url_failure(&state, &doubled, &secret),
+                    (StatusCode::BAD_REQUEST, "INVALID_ORIGIN".into(), false)
+                );
+                // 路径秘密之外再带别的凭据是来源冲突，不挑一个来用。
+                let mut conflict = url_headers(Some(EXTENSION));
+                conflict.insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {secret}").parse().unwrap(),
+                );
+                assert_eq!(
+                    url_failure(&state, &conflict, &secret).1,
+                    "CONFLICTING_CREDENTIAL_SOURCES"
+                );
+                // URL 秘密不能改走标准入口的 Bearer。
+                assert_eq!(
+                    super::require_mcp_auth(&state, &conflict)
+                        .unwrap_err()
+                        .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+
+                // 权限、范围在下一次请求生效；单工作区监听器沿用项目范围和 confine-reads 的 403。
+                let mut changed = issued.record.clone();
+                changed.grant.permissions.write = true;
+                store.update(changed.clone()).unwrap();
+                let widened =
+                    super::require_url_auth(&state, &url_headers(Some(EXTENSION)), &secret)
+                        .ok()
+                        .unwrap();
+                assert!(widened.auth.may_write_project());
+                assert!(!widened.auth.may_delegate());
+                changed.grant.scope = ProjectScope::Selected(vec!["another-project".into()]);
+                store.update(changed.clone()).unwrap();
+                assert_eq!(
+                    url_failure(&state, &url_headers(Some(EXTENSION)), &secret),
+                    (StatusCode::FORBIDDEN, "PROJECT_ACCESS_DENIED".into(), true)
+                );
+                changed.grant.scope = ProjectScope::Selected(vec!["w1".into()]);
+                store.update(changed).unwrap();
+                state.workspace_confined = false;
+                assert_eq!(
+                    url_failure(&state, &url_headers(None), &secret),
+                    (StatusCode::FORBIDDEN, "PROJECT_ACCESS_DENIED".into(), false)
+                );
+                state.workspace_confined = true;
+
+                // 轮换：旧地址立刻失效，新地址沿用同一份 Origin 名单和同一个调用方。
+                let rotated = store.rotate_grant("Sidebar", None, now).unwrap();
+                let replacement = rotated.secret.into_string();
+                assert_eq!(
+                    url_failure(&state, &url_headers(Some(EXTENSION)), &secret).0,
+                    StatusCode::UNAUTHORIZED
+                );
+                let after =
+                    super::require_url_auth(&state, &url_headers(Some(EXTENSION)), &replacement)
+                        .ok()
+                        .unwrap();
+                assert_eq!(first.auth.id(), after.auth.id());
+                assert_eq!(
+                    url_failure(
+                        &state,
+                        &url_headers(Some("https://untrusted.example.test")),
+                        &replacement
+                    )
+                    .0,
+                    StatusCode::FORBIDDEN
+                );
+
+                // 撤销后不再透露 Origin 是否在名单里。
+                store.revoke(&issued.record.grant.id).unwrap();
+                for origin in [
+                    Some(EXTENSION),
+                    Some("https://untrusted.example.test"),
+                    None,
+                ] {
+                    assert_eq!(
+                        url_failure(&state, &url_headers(origin), &replacement).0,
+                        StatusCode::UNAUTHORIZED
+                    );
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn url_cors_echoes_only_the_verified_origin() {
+        use axum::http::header::{
+            ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
+            ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+            ACCESS_CONTROL_EXPOSE_HEADERS, ORIGIN,
+        };
+        run_isolated(
+            module_path!(),
+            "url_cors_echoes_only_the_verified_origin",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let store = AccessStore::open_in(root.path()).unwrap();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let secret = store
+                    .create_grant(
+                        GrantCreation {
+                            name: "Sidebar".into(),
+                            scope: ProjectScope::AllProjects,
+                            permissions: GrantPermissions::default(),
+                            kind: CredentialKind::Url,
+                            ttl: None,
+                            allowed_origins: vec![EXTENSION.into()],
+                        },
+                        now,
+                    )
+                    .unwrap()
+                    .secret
+                    .into_string();
+                let state = state_with_access(root.path(), "api", store.reader());
+                let preflight = |origin: Option<&str>, secret: &str| {
+                    let mut headers = url_headers(origin);
+                    headers.insert("access-control-request-method", "POST".parse().unwrap());
+                    gld_core::async_rt::block_on(super::mcp_url_preflight(
+                        axum::extract::State(state.clone()),
+                        axum::extract::Path(secret.to_string()),
+                        headers,
+                    ))
+                };
+
+                let allowed = preflight(Some(EXTENSION), &secret);
+                assert_eq!(allowed.status(), axum::http::StatusCode::NO_CONTENT);
+                assert_eq!(allowed.headers()[ACCESS_CONTROL_ALLOW_ORIGIN], EXTENSION);
+                assert_eq!(
+                    allowed.headers()[ACCESS_CONTROL_ALLOW_METHODS],
+                    "POST, OPTIONS"
+                );
+                let request_headers = allowed.headers()[ACCESS_CONTROL_ALLOW_HEADERS]
+                    .to_str()
+                    .unwrap();
+                for name in [
+                    "content-type",
+                    "accept",
+                    "mcp-session-id",
+                    "mcp-protocol-version",
+                    "last-event-id",
+                ] {
+                    assert!(request_headers.split(", ").any(|item| item == name));
+                }
+                assert!(!request_headers.contains("authorization"));
+                assert!(allowed.headers()[ACCESS_CONTROL_EXPOSE_HEADERS]
+                    .to_str()
+                    .unwrap()
+                    .split(", ")
+                    .any(|item| item == "mcp-session-id"));
+                assert!(!allowed
+                    .headers()
+                    .contains_key(ACCESS_CONTROL_ALLOW_CREDENTIALS));
+
+                // 其余预检一律是不带 CORS 头的 204，彼此看不出差别。
+                let wrong = format!("{secret}x");
+                for (origin, candidate) in [
+                    (Some("https://untrusted.example.test"), secret.as_str()),
+                    (Some("null"), secret.as_str()),
+                    (Some(EXTENSION), wrong.as_str()),
+                    (None, secret.as_str()),
+                ] {
+                    let refused = preflight(origin, candidate);
+                    assert_eq!(refused.status(), axum::http::StatusCode::NO_CONTENT);
+                    for name in [
+                        ACCESS_CONTROL_ALLOW_ORIGIN,
+                        ACCESS_CONTROL_ALLOW_METHODS,
+                        ACCESS_CONTROL_ALLOW_HEADERS,
+                        ACCESS_CONTROL_EXPOSE_HEADERS,
+                    ] {
+                        assert!(!refused.headers().contains_key(name), "{origin:?}");
+                    }
+                }
+
+                // 实际请求：通过的回显自己的 Origin，没带 Origin 的不加 CORS 头。
+                let mut headers = url_headers(Some(EXTENSION));
+                headers.insert(ORIGIN, EXTENSION.parse().unwrap());
+                let get = gld_core::async_rt::block_on(super::mcp_url_no_stream(
+                    axum::extract::State(state.clone()),
+                    axum::extract::Path(secret.clone()),
+                    headers,
+                ));
+                assert_eq!(get.status(), axum::http::StatusCode::METHOD_NOT_ALLOWED);
+                assert_eq!(get.headers()[ACCESS_CONTROL_ALLOW_ORIGIN], EXTENSION);
+                assert!(get.headers().contains_key(ACCESS_CONTROL_EXPOSE_HEADERS));
+                assert!(!get.headers().contains_key(ACCESS_CONTROL_ALLOW_CREDENTIALS));
+                let plain = gld_core::async_rt::block_on(super::mcp_url_no_stream(
+                    axum::extract::State(state.clone()),
+                    axum::extract::Path(secret.clone()),
+                    url_headers(None),
+                ));
+                assert_eq!(plain.status(), axum::http::StatusCode::METHOD_NOT_ALLOWED);
+                assert!(!plain.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
             },
         );
     }
