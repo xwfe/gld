@@ -16,6 +16,8 @@ use gld_core::auth::{
 };
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
+/// 同时等待兑换的授权码上限；每个码最多占用几百字节。
+const MAX_PENDING_CODES: usize = 256;
 pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
 pub const OAUTH_REFRESH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 90;
 const ACTIONS_CLAIMS_VERSION: u32 = 2;
@@ -515,7 +517,7 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
             StatusCode::BAD_REQUEST,
         );
     }
-    if form.code_challenge_method != "S256" || form.code_challenge.is_empty() {
+    if form.code_challenge_method != "S256" || !valid_s256_challenge(&form.code_challenge) {
         return retry(StatusCode::OK, "Invalid PKCE parameters");
     }
     let binding = match &oauth.authorization {
@@ -542,6 +544,10 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
     {
         let mut pending = oauth.pending.lock().expect("oauth pending lock");
         pending.retain(|_, v| v.expires_at >= now);
+        // 未兑换的码只活 5 分钟；满了就拒绝新的，不挤掉别人已经拿到的码。
+        if pending.len() >= MAX_PENDING_CODES {
+            return pending_codes_full();
+        }
         pending.insert(
             code.clone(),
             PendingCode {
@@ -831,6 +837,14 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
     constant_time_eq_str(&expected, code_challenge)
 }
 
+/// S256 的 challenge 是 SHA-256 摘要的无填充 base64url，固定 43 个字符（RFC 7636 §4.2）。
+fn valid_s256_challenge(challenge: &str) -> bool {
+    challenge.len() == 43
+        && challenge
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 fn valid_code_verifier(verifier: &str) -> bool {
     (43..=128).contains(&verifier.len())
         && verifier
@@ -867,6 +881,19 @@ fn oauth_unavailable() -> Response {
         axum::Json(json!({
             "error": "temporarily_unavailable",
             "error_description": "OAuth is not enabled for this endpoint."
+        })),
+    )
+        .into_response()
+}
+
+/// 未兑换的授权码已到上限：稍后重试即可，已有的码不受影响。
+fn pending_codes_full() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        NO_STORE_HEADERS,
+        axum::Json(json!({
+            "error": "temporarily_unavailable",
+            "error_description": "Too many authorizations are waiting to be exchanged. Try again in a few minutes."
         })),
     )
         .into_response()

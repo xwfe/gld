@@ -266,7 +266,10 @@ fn oauth_discovery_remains_public_but_retired_passwords_and_tokens_are_rejected(
             ("response_type", "code"),
             ("client_id", &client_id),
             ("redirect_uri", "http://localhost:41817/callback"),
-            ("code_challenge", "pending-code-challenge"),
+            (
+                "code_challenge",
+                "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            ),
             ("code_challenge_method", "S256"),
             ("password", &password),
             ("state", "pending-state"),

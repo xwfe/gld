@@ -923,3 +923,111 @@ fn login_page_posts_back_to_workspace_oauth_path() {
     );
     assert!(html.contains("action='https://mcp.example.com/w/workspace-id/oauth/authorize'"));
 }
+
+fn submit_challenge(oauth: &OAuthRuntime, code_challenge: &str) -> Response {
+    authorize_post(
+        oauth,
+        AuthorizeForm {
+            client_id: "chatgpt-client-test".into(),
+            redirect_uri: REDIRECT_URI.into(),
+            code_challenge: code_challenge.into(),
+            code_challenge_method: "S256".into(),
+            state: String::new(),
+            password: PASSWORD.into(),
+        },
+        "https://service.example.com",
+    )
+}
+
+/// S256 的 challenge 固定 43 个 base64url 字符；其他长度或字符不进入待兑换表。
+#[test]
+fn authorize_rejects_challenges_that_are_not_a_43_character_s256_digest() {
+    let oauth = runtime("chatgpt-client-test");
+    let valid = challenge();
+    for bad in [
+        valid[..42].to_string(),
+        format!("{valid}A"),
+        "A".repeat(4_096),
+        format!("{}=", &valid[..42]),
+        format!("{}+", &valid[..42]),
+    ] {
+        let response = submit_challenge(&oauth, &bad);
+        assert_eq!(response.status(), StatusCode::OK, "{bad}");
+        assert!(response.headers().get("location").is_none(), "{bad}");
+        assert!(body_text(response).contains("Invalid PKCE parameters"));
+    }
+    assert!(oauth.pending.lock().unwrap().is_empty());
+    assert_eq!(
+        submit_challenge(&oauth, &valid).status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
+#[test]
+fn token_exchange_rejects_verifiers_outside_the_rfc_7636_alphabet_and_length() {
+    let oauth = runtime("chatgpt-client-test");
+    let base = "https://service.example.com";
+    for bad in [
+        "a".repeat(42),
+        "a".repeat(129),
+        format!("{}+", &VERIFIER[..42]),
+        format!("{} ", &VERIFIER[..42]),
+    ] {
+        let code = authorize_code(&oauth, "chatgpt-client-test", base, PASSWORD);
+        let response = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "authorization_code".into(),
+                code: code.clone(),
+                redirect_uri: REDIRECT_URI.into(),
+                code_verifier: bad.clone(),
+                client_id: "chatgpt-client-test".into(),
+                ..TokenForm::default()
+            },
+            base,
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
+        assert_eq!(body_json(response)["error"], "invalid_grant");
+        // 格式不对的 verifier 不消耗授权码：合规的 verifier 仍能兑换。
+        assert_eq!(
+            exchange_code(&oauth, "chatgpt-client-test", base, code).status(),
+            StatusCode::OK
+        );
+    }
+}
+
+/// 待兑换的码到上限后拒绝新的且不挤掉已有的；过期的码清掉后可以继续签发。
+#[test]
+fn pending_codes_are_capped_and_expired_ones_make_room_again() {
+    let oauth = runtime("chatgpt-client-test");
+    let base = "https://service.example.com";
+    let first = authorize_code(&oauth, "chatgpt-client-test", base, PASSWORD);
+    for _ in 1..MAX_PENDING_CODES {
+        authorize_code(&oauth, "chatgpt-client-test", base, PASSWORD);
+    }
+    assert_eq!(oauth.pending.lock().unwrap().len(), MAX_PENDING_CODES);
+
+    let full = submit_challenge(&oauth, &challenge());
+    assert_eq!(full.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_no_store(&full);
+    assert!(full.headers().get("location").is_none());
+    assert_eq!(body_json(full)["error"], "temporarily_unavailable");
+    assert_eq!(oauth.pending.lock().unwrap().len(), MAX_PENDING_CODES);
+    assert!(oauth.pending.lock().unwrap().contains_key(&first));
+
+    // 让除第一个以外的码全部过期：下一次授权先清理再签发。
+    for (code, pending) in oauth.pending.lock().unwrap().iter_mut() {
+        if *code != first {
+            pending.expires_at = 0;
+        }
+    }
+    let fresh = authorize_code(&oauth, "chatgpt-client-test", base, PASSWORD);
+    assert_eq!(oauth.pending.lock().unwrap().len(), 2);
+    for code in [first, fresh] {
+        assert_eq!(
+            exchange_code(&oauth, "chatgpt-client-test", base, code).status(),
+            StatusCode::OK
+        );
+    }
+}
