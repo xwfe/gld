@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use gld_core::auth::{
     bearer_token, constant_time_eq_str, parse_credential, AccessReader, AuthContext,
-    ClientRegistry, CredentialKind, OAuthBinding, RegisteredClient, RegistrationError,
+    ClientRegistrationStatus, ClientRegistry, CredentialKind, OAuthBinding, RegisteredClient,
+    RegistrationError,
 };
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
@@ -347,6 +348,7 @@ pub fn register_client(oauth: &OAuthRuntime, request: ClientRegistrationRequest)
             client_secret: client_secret.clone(),
             client_name: request.client_name.trim().to_string(),
             created_at: unix_now(),
+            status: ClientRegistrationStatus::Pending,
         },
     ) {
         return registration_unavailable(error);
@@ -643,10 +645,19 @@ fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Respons
     }
     match (&oauth.authorization, code_data.binding) {
         (OAuthAuthorization::Actions { .. }, None) => {
+            if oauth.clients.mark_authorized(&form.client_id).is_err() {
+                return token_error("server_error", "Failed to issue token pair");
+            }
             issue_actions_token_pair(oauth, &form.client_id)
         }
         (OAuthAuthorization::Mcp { .. }, Some(binding)) => {
-            issue_mcp_token_pair(oauth, &form.client_id, &binding)
+            if !mcp_binding_current(oauth, &form.client_id, &binding) {
+                return token_error("invalid_grant", "Authorization is no longer valid");
+            }
+            if oauth.clients.mark_authorized(&form.client_id).is_err() {
+                return token_error("server_error", "Failed to issue token pair");
+            }
+            sign_mcp_token_pair(oauth, &form.client_id, &binding)
         }
         _ => token_error("invalid_grant", "Authorization code is not valid here"),
     }
@@ -690,18 +701,25 @@ fn refresh_token_exchange(oauth: &OAuthRuntime, mut form: TokenForm) -> Response
     }
 }
 
+fn mcp_binding_current(oauth: &OAuthRuntime, client_id: &str, binding: &OAuthBinding) -> bool {
+    let OAuthAuthorization::Mcp { access, entry } = &oauth.authorization else {
+        return false;
+    };
+    access
+        .authenticate_oauth(entry, binding, client_id, unix_now())
+        .is_ok()
+}
+
 /// 授权码兑换和 refresh 共用：签发前用共享读者确认 grant 仍有效、修订号仍是绑定的那个。
 /// 轮换或撤销之后，旧授权码和旧 refresh 都换不出新 token。
 fn issue_mcp_token_pair(oauth: &OAuthRuntime, client_id: &str, binding: &OAuthBinding) -> Response {
-    let OAuthAuthorization::Mcp { access, entry } = &oauth.authorization else {
-        return token_error("invalid_grant", "Authorization is not valid here");
-    };
-    if access
-        .authenticate_oauth(entry, binding, client_id, unix_now())
-        .is_err()
-    {
+    if !mcp_binding_current(oauth, client_id, binding) {
         return token_error("invalid_grant", "Authorization is no longer valid");
     }
+    sign_mcp_token_pair(oauth, client_id, binding)
+}
+
+fn sign_mcp_token_pair(oauth: &OAuthRuntime, client_id: &str, binding: &OAuthBinding) -> Response {
     let sign = |ttl: i64, kind: &str| {
         let now = unix_now() as i64;
         sign_claims(

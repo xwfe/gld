@@ -830,6 +830,12 @@ OAuth 客户端这样接入（`/mcp` 上和 API token 并存）：
 3. 授权通过后客户端用 PKCE 换到 access（30 天）和 refresh（90 天）。两者都记着 GrantId、client_id 和
    签发时的凭据修订号。
 
+动态注册先落为 pending：同时最多保留 10 个未完成授权的 client，超过时淘汰最旧的 pending；
+pending 从注册时间算 24 小时，过期按不存在处理。授权码兑换校验 client、PKCE 和 grant/确认口令后，
+才把 client 落盘为 authorized 并签发 token；这期间被淘汰或过期的 client 兑换会得到 invalid_client，
+重新注册即可。已授权客户端最多 50 个且不回收，占满后注册继续 503；到达这个状态需要有效确认口令，
+不是匿名刷注册能触发，剩余清理属 D 的撤销/清理命令。
+
 每次 `/mcp` 请求和每次 refresh，宿主都重新核对签名、用途、受众、期限、client 是否仍已注册，
 并对照当前授权：grant 必须有效，修订号必须和 token 里的一致。任何一项不符就是 401（refresh 是 `invalid_grant`），
 不会把这串 Bearer 再当成 API token 或别的凭据去试。出错时会怎样：
