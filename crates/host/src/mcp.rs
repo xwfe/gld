@@ -810,49 +810,63 @@ fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-/// No network MCP identity is constructed before the new credential store is connected.
+/// `/mcp` 的认证分派：先确定唯一的凭据来源，再只按那一种验证，失败即拒绝。
+/// API token 和 OAuth access token 已接入统一授权；隧道仍未接入，返回 AUTH_NOT_READY。
 fn require_mcp_auth(
     state: &ListenerState,
     headers: &HeaderMap,
 ) -> Result<AuthContext, Box<Response>> {
-    match source::standard(headers) {
+    let source = match source::standard(headers) {
         Err("duplicate_credential_source" | "conflicting_credential_sources") => {
             return Err(Box::new(mcp_source_conflict()));
-        }
-        Ok(CredentialSource::Token { id, secret }) => {
-            let current = state
-                .access
-                .snapshot()
-                .map_err(|_| Box::new(mcp_auth_not_ready()))?;
-            // 未初始化的新授权文件不能让旧 service token 或旧 grants 恢复权限。
-            if !current.is_initialized() {
-                return Err(Box::new(mcp_auth_not_ready()));
-            }
-            drop(current);
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| Box::new(mcp_auth_not_ready()))?
-                .as_secs();
-            let auth = state
-                .access
-                .authenticate_token(&state.scope, id, secret, now)
-                .map_err(|_| Box::new(mcp_unauthorized(state, headers)))?;
-            if matches!(&state.endpoint, Endpoint::Workspace(_))
-                && (!auth.allows_project(&state.scope) || !state.workspace_confined)
-            {
-                return Err(Box::new(mcp_forbidden()));
-            }
-            return Ok(auth);
-        }
-        Ok(CredentialSource::OAuthBearer(value) | CredentialSource::Tunnel(value)) => {
-            let _ = value;
         }
         Err("invalid_credential") => {
             return Err(Box::new(mcp_unauthorized(state, headers)));
         }
-        _ => {}
+        // 隧道的显式 grant 绑定还没接线：格式合法也不取得工具访问权。
+        Ok(CredentialSource::Tunnel(key)) => {
+            let _ = key;
+            return Err(Box::new(mcp_auth_not_ready()));
+        }
+        Ok(source) => Some(source),
+        Err(_) => None,
+    };
+    let current = state
+        .access
+        .snapshot()
+        .map_err(|_| Box::new(mcp_auth_not_ready()))?;
+    // 未初始化的新授权文件不能让旧 service token、旧 grants 或旧 OAuth token 恢复权限。
+    if !current.is_initialized() {
+        return Err(Box::new(mcp_auth_not_ready()));
     }
-    Err(Box::new(mcp_auth_not_ready()))
+    drop(current);
+    let auth = match source {
+        Some(CredentialSource::Token { id, secret }) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| Box::new(mcp_auth_not_ready()))?
+                .as_secs();
+            state
+                .access
+                .authenticate_token(&state.scope, id, secret, now)
+                .ok()
+        }
+        // 验签、用途、受众、期限、client 注册和当前 grant/修订号都在 OAuth 运行时里核对；
+        // 不通过就是 401，不把这串 Bearer 再当成别的凭据。
+        Some(CredentialSource::OAuthBearer(token)) => state
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.authenticate_mcp_access(token)),
+        // 没带凭据：401 里的发现信息让 OAuth 客户端知道去哪里授权。
+        _ => None,
+    };
+    let auth = auth.ok_or_else(|| Box::new(mcp_unauthorized(state, headers)))?;
+    if matches!(&state.endpoint, Endpoint::Workspace(_))
+        && (!auth.allows_project(&state.scope) || !state.workspace_confined)
+    {
+        return Err(Box::new(mcp_forbidden()));
+    }
+    Ok(auth)
 }
 
 fn mcp_unauthorized(state: &ListenerState, headers: &HeaderMap) -> Response {
@@ -863,7 +877,7 @@ fn mcp_unauthorized(state: &ListenerState, headers: &HeaderMap) -> Response {
             (CACHE_CONTROL, "no-store"),
             (REFERRER_POLICY, "no-referrer"),
         ],
-        Json(json!({"error": "AUTHENTICATION_FAILED", "message": "Invalid API token"})),
+        Json(json!({"error": "AUTHENTICATION_FAILED", "message": "Missing or invalid credential"})),
     )
         .into_response();
     let challenge = format!("Bearer resource_metadata=\"{resource}\"");
@@ -1068,6 +1082,167 @@ mod tests {
             oauth: None,
             oauth_client_secret: None,
         }
+    }
+
+    /// 用公开的授权页和 token 端点走一遍 PKCE，拿到 (access, refresh)。
+    fn oauth_tokens(oauth: &super::OAuthRuntime, confirmation: &str) -> (String, String) {
+        use super::{authorize_post, token_exchange, AuthorizeForm, TokenForm};
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        let verifier = "dBjftJeZ4CVP-mB92Kpru-AEJvkQlLgi3ThpmQ45N_Xyo";
+        let redirect = "https://chatgpt.com/connector/oauth/test";
+        let granted = authorize_post(
+            oauth,
+            AuthorizeForm {
+                client_id: "static-client".into(),
+                redirect_uri: redirect.into(),
+                code_challenge: URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                code_challenge_method: "S256".into(),
+                state: String::new(),
+                password: confirmation.into(),
+            },
+            "http://127.0.0.1",
+        );
+        let location = granted.headers()["location"].to_str().unwrap().to_string();
+        let code = location.split("code=").nth(1).unwrap();
+        let code = code.split('&').next().unwrap().to_string();
+        let response = token_exchange(
+            oauth,
+            &axum::http::HeaderMap::new(),
+            TokenForm {
+                grant_type: "authorization_code".into(),
+                code,
+                redirect_uri: redirect.into(),
+                code_verifier: verifier.into(),
+                client_id: "static-client".into(),
+                ..TokenForm::default()
+            },
+            "http://127.0.0.1",
+        );
+        let bytes = gld_core::async_rt::block_on(async {
+            axum::body::to_bytes(response.into_body(), 65_536)
+                .await
+                .unwrap()
+        });
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (
+            body["access_token"].as_str().unwrap().to_string(),
+            body["refresh_token"].as_str().unwrap().to_string(),
+        )
+    }
+
+    #[test]
+    fn oauth_bearer_is_checked_against_the_live_grant_and_never_falls_back() {
+        run_isolated(
+            module_path!(),
+            "oauth_bearer_is_checked_against_the_live_grant_and_never_falls_back",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let store = AccessStore::open_in(root.path()).unwrap();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let issued = store
+                    .create_grant(
+                        GrantCreation {
+                            name: "Chat".into(),
+                            scope: ProjectScope::Selected(vec!["w1".into()]),
+                            permissions: GrantPermissions::default(),
+                            kind: CredentialKind::OAuth,
+                            ttl: None,
+                            allowed_origins: vec![],
+                        },
+                        now,
+                    )
+                    .unwrap();
+                let confirmation = issued.secret.into_string();
+                let mut state = state_with_access(root.path(), "api", store.reader());
+                let oauth = Arc::new(super::OAuthRuntime::new_mcp(
+                    "gld:mcp:w1".into(),
+                    "w1".into(),
+                    "static-client".into(),
+                    None,
+                    "signing-secret".into(),
+                    Arc::new(gld_core::auth::ClientRegistry::in_memory()),
+                    store.reader(),
+                ));
+                state.oauth = Some(oauth.clone());
+                let (access, refresh) = oauth_tokens(&oauth, &confirmation);
+                let bearer = |value: &str| {
+                    let mut headers = axum::http::HeaderMap::new();
+                    headers.insert(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {value}").parse().unwrap(),
+                    );
+                    headers
+                };
+                let unauthorized = |state: &ListenerState, headers: &axum::http::HeaderMap| {
+                    let failure = super::require_mcp_auth(state, headers).unwrap_err();
+                    assert_eq!(failure.status(), axum::http::StatusCode::UNAUTHORIZED);
+                    assert_eq!(failure.headers()[CACHE_CONTROL], "no-store");
+                    let challenge = failure.headers()[axum::http::header::WWW_AUTHENTICATE]
+                        .to_str()
+                        .unwrap()
+                        .to_string();
+                    assert!(challenge.contains("resource_metadata="), "{challenge}");
+                };
+
+                let caller = super::require_mcp_auth(&state, &bearer(&access)).unwrap();
+                assert!(caller.allows_project("w1"));
+                assert!(!caller.may_write_project());
+                // refresh、确认口令本身、别的密钥签的 JWT、没带凭据：都是带发现信息的 401。
+                unauthorized(&state, &bearer(&refresh));
+                unauthorized(&state, &bearer(&confirmation));
+                unauthorized(&state, &bearer("old-oauth-jwt"));
+                unauthorized(&state, &axum::http::HeaderMap::new());
+
+                // 隧道还没接入统一授权，仍是 AUTH_NOT_READY，不因 OAuth 接通而放行。
+                let mut tunnel = axum::http::HeaderMap::new();
+                tunnel.insert(gld_core::hub::OPENAI_TUNNEL_HEADER, "key".parse().unwrap());
+                assert_eq!(
+                    super::require_mcp_auth(&state, &tunnel)
+                        .unwrap_err()
+                        .status(),
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                );
+
+                // 单工作区入口沿用 token 的上限：grant 不含本项目，或没开读取限制，都是 403。
+                let mut changed = issued.record.clone();
+                changed.grant.scope = ProjectScope::Selected(vec!["another-project".into()]);
+                store.update(changed.clone()).unwrap();
+                assert_eq!(
+                    super::require_mcp_auth(&state, &bearer(&access))
+                        .unwrap_err()
+                        .status(),
+                    axum::http::StatusCode::FORBIDDEN
+                );
+                changed.grant.scope = ProjectScope::Selected(vec!["w1".into()]);
+                store.update(changed).unwrap();
+                state.workspace_confined = false;
+                assert_eq!(
+                    super::require_mcp_auth(&state, &bearer(&access))
+                        .unwrap_err()
+                        .status(),
+                    axum::http::StatusCode::FORBIDDEN
+                );
+                state.workspace_confined = true;
+
+                let rotated = store.rotate_grant("Chat", None, now).unwrap();
+                unauthorized(&state, &bearer(&access));
+                let (renewed, _) = oauth_tokens(&oauth, &rotated.secret.into_string());
+                let after = super::require_mcp_auth(&state, &bearer(&renewed)).unwrap();
+                assert_eq!(caller.id(), after.id());
+                store.revoke(&issued.record.grant.id).unwrap();
+                unauthorized(&state, &bearer(&renewed));
+
+                // 没有 OAuth 运行时的入口不接受任何 OAuth Bearer。
+                state.oauth = None;
+                unauthorized(&state, &bearer(&renewed));
+            },
+        );
     }
 
     #[test]
