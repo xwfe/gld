@@ -116,6 +116,54 @@ impl CapabilitySelector {
     }
 }
 
+/// 能力查询 = 目标路由 + 可选能力过滤。空 `capability_ids` 表示该目标的全部能力；
+/// 非空列表按字符串进入，先校验再过滤，未知 ID 返回稳定错误而不是静默丢弃。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityQuery {
+    pub selector: CapabilitySelector,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_ids: Vec<String>,
+}
+
+impl CapabilityQuery {
+    pub fn all(selector: CapabilitySelector) -> Self {
+        Self {
+            selector,
+            capability_ids: Vec::new(),
+        }
+    }
+
+    pub fn only(selector: CapabilitySelector, capability_ids: Vec<String>) -> Self {
+        Self {
+            selector,
+            capability_ids,
+        }
+    }
+
+    pub fn route(&self) -> Result<CapabilityRoute, CapabilityContractError> {
+        self.selector.route()
+    }
+
+    pub fn validate(&self) -> Result<(), CapabilityContractError> {
+        self.selector.route()?;
+        for id in &self.capability_ids {
+            if CapabilityId::parse(id).is_none() {
+                return Err(CapabilityContractError::UnknownCapability(id.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn includes(&self, id: CapabilityId) -> bool {
+        self.capability_ids.is_empty()
+            || self
+                .capability_ids
+                .iter()
+                .any(|requested| CapabilityId::parse(requested) == Some(id))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilityRoute {
     Workspace(String),
@@ -418,6 +466,31 @@ mod tests {
             empty.route().unwrap_err(),
             CapabilityContractError::EmptyIdentifier("workspace_id")
         );
+    }
+
+    #[test]
+    fn capability_queries_filter_by_id_and_reject_unknown_ids() {
+        let all = CapabilityQuery::all(CapabilitySelector::workspace("ws"));
+        assert!(all.includes(CapabilityId::FileCommand));
+        assert!(all.includes(CapabilityId::DesktopObserve));
+
+        let only_file = CapabilityQuery::only(
+            CapabilitySelector::workspace("ws"),
+            vec![CapabilityId::FileCommand.as_str().into()],
+        );
+        assert!(only_file.includes(CapabilityId::FileCommand));
+        assert!(!only_file.includes(CapabilityId::DesktopObserve));
+        only_file.validate().unwrap();
+
+        let unknown = CapabilityQuery::only(
+            CapabilitySelector::machine("machine-a"),
+            vec!["capability_from_the_future".into()],
+        );
+        assert_eq!(
+            unknown.validate().unwrap_err(),
+            CapabilityContractError::UnknownCapability("capability_from_the_future".into())
+        );
+        assert_eq!(unknown.validate().unwrap_err().code(), "CAPABILITY_UNKNOWN");
     }
 
     #[test]
