@@ -13,7 +13,54 @@ pub struct OAuthBinding {
     pub credential_revision: u64,
 }
 
+/// URL 入口拒绝请求的两种原因。秘密本身不对时永远是 `Credential`，
+/// 所以拿到 `Origin` 的调用方必然已经持有有效秘密，它不能用来试探秘密。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlRejection {
+    /// 授权文件读不出来，无法判断。
+    Unavailable,
+    /// 公开 ID 不存在、用途不符、秘密错误、不在有效期内或 grant 已撤销，不向调用方区分。
+    Credential,
+    /// 秘密有效，但请求带的 Origin 不在这份 grant 的精确名单里。
+    Origin,
+}
+
 impl AccessReader {
+    /// 验证 `/mcp/connect/<secret>` 路径里拆出的公开 ID 和秘密，每次调用读取最新快照。
+    /// `origin` 是请求头原文：没有 Origin 时只凭秘密通过；有 Origin 时必须和名单里的某一项
+    /// 逐字节相同（名单为空就只放行不带 Origin 的请求）。不接受 token、OAuth 或隧道凭据。
+    pub fn authenticate_url(
+        &self,
+        entry: &str,
+        credential_id: &str,
+        secret: &str,
+        origin: Option<&str>,
+        now_unix_secs: u64,
+    ) -> Result<AuthContext, UrlRejection> {
+        let current = self.snapshot().map_err(|_| UrlRejection::Unavailable)?;
+        let record = current
+            .by_credential_id(credential_id)
+            .ok_or(UrlRejection::Credential)?;
+        if record.credential.kind != CredentialKind::Url
+            || record.grant.status != GrantStatus::Active
+            || !record.credential.is_valid_at(now_unix_secs)
+            || !record.credential.matches_secret(secret)
+        {
+            return Err(UrlRejection::Credential);
+        }
+        // Origin 只在秘密验证通过之后才看：它是附加限制，不是凭据。
+        if !record.credential.allows_origin(origin) {
+            return Err(UrlRejection::Origin);
+        }
+        AuthContext::verified_mcp(
+            entry,
+            record.grant.clone(),
+            CredentialKind::Url,
+            McpSubject::Url,
+        )
+        .map_err(|_| UrlRejection::Credential)
+    }
+
     /// 验证标准 token 入口已经拆出的公开 ID 和秘密，每次调用读取最新快照。
     /// HTTP 来源/格式分派由宿主负责；此方法不接受 OAuth、URL 或隧道证明。
     pub fn authenticate_token(
@@ -412,5 +459,193 @@ mod tests {
         assert!(reader
             .authenticate_oauth("hub", &rotated, "client-a", 100)
             .is_err());
+    }
+
+    fn url_record(id: &str, secret: &str, revision: u64, origins: &[&str]) -> AccessRecord {
+        let mut value = record(id, id, secret);
+        value.credential = CredentialRecord::prepare(
+            format!("credential-{id}"),
+            CredentialKind::Url,
+            secret,
+            revision,
+            100,
+            Some(3600),
+            origins.iter().map(|origin| origin.to_string()).collect(),
+        )
+        .unwrap();
+        value
+    }
+
+    const EXTENSION: &str = "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef";
+
+    #[test]
+    fn url_secret_is_checked_before_origin_and_origin_must_match_exactly() {
+        let home = tempfile::tempdir().unwrap();
+        let store = AccessStore::open_in(home.path()).unwrap();
+        store
+            .insert(url_record(
+                "url",
+                "url-secret",
+                1,
+                &[EXTENSION, "https://app.example.test"],
+            ))
+            .unwrap();
+        store
+            .insert(url_record("bare", "bare-secret", 1, &[]))
+            .unwrap();
+        let reader = store.reader();
+        let check = |id: &str, secret: &str, origin: Option<&str>, now: u64| {
+            reader
+                .authenticate_url("hub", id, secret, origin, now)
+                .map(|auth| auth.id().clone())
+        };
+
+        // 没有 Origin 时只凭秘密；名单里的 Origin 通过，三种写法是同一个调用方。
+        let caller = check("credential-url", "url-secret", None, 100).unwrap();
+        for origin in [EXTENSION, "https://app.example.test"] {
+            assert_eq!(
+                check("credential-url", "url-secret", Some(origin), 100).unwrap(),
+                caller
+            );
+        }
+        // 不做归一化：大小写、尾斜杠、端口、子域、`null` 都不是名单里的那一项。
+        for origin in [
+            "https://other.example.test",
+            "https://app.example.test/",
+            "https://APP.example.test",
+            "https://app.example.test:443",
+            "https://sub.app.example.test",
+            "http://app.example.test",
+            "null",
+            "",
+        ] {
+            assert_eq!(
+                check("credential-url", "url-secret", Some(origin), 100),
+                Err(UrlRejection::Origin),
+                "{origin}"
+            );
+        }
+        // 名单为空：不带 Origin 可以，带任何 Origin 都不行。
+        assert!(check("credential-bare", "bare-secret", None, 100).is_ok());
+        assert_eq!(
+            check("credential-bare", "bare-secret", Some(EXTENSION), 100),
+            Err(UrlRejection::Origin)
+        );
+
+        // 秘密不对时不管 Origin 在不在名单里，都是同一个凭据错误。
+        for (id, secret, origin, now) in [
+            ("credential-url", "wrong-secret", Some(EXTENSION), 100),
+            (
+                "credential-url",
+                "wrong-secret",
+                Some("https://x.test"),
+                100,
+            ),
+            ("credential-url", "wrong-secret", None, 100),
+            ("credential-url", "bare-secret", Some(EXTENSION), 100),
+            ("credential-missing", "url-secret", Some(EXTENSION), 100),
+            ("credential-url", "url-secret", Some(EXTENSION), 99),
+            ("credential-url", "url-secret", Some(EXTENSION), 3700),
+            ("credential-url", "url-secret", Some("https://x.test"), 3700),
+        ] {
+            assert_eq!(
+                check(id, secret, origin, now),
+                Err(UrlRejection::Credential),
+                "{id} {origin:?} {now}"
+            );
+        }
+        assert!(check("credential-url", "url-secret", Some(EXTENSION), 3699).is_ok());
+    }
+
+    #[test]
+    fn url_entry_rejects_other_purposes_and_other_entries_reject_url_secrets() {
+        let home = tempfile::tempdir().unwrap();
+        let store = AccessStore::open_in(home.path()).unwrap();
+        store
+            .insert(url_record("url", "shared-secret", 1, &[EXTENSION]))
+            .unwrap();
+        store
+            .insert(record("token", "Token", "shared-secret"))
+            .unwrap();
+        store
+            .insert(oauth_record("oauth", "shared-secret", 1))
+            .unwrap();
+        let reader = store.reader();
+        for id in ["credential-token", "credential-oauth"] {
+            assert_eq!(
+                reader
+                    .authenticate_url("hub", id, "shared-secret", None, 100)
+                    .unwrap_err(),
+                UrlRejection::Credential
+            );
+        }
+        assert!(reader
+            .authenticate_token("hub", "credential-url", "shared-secret", 100)
+            .is_err());
+        assert!(reader
+            .confirm_oauth("credential-url", "shared-secret", 100)
+            .is_err());
+
+        let url = reader
+            .authenticate_url("hub", "credential-url", "shared-secret", None, 100)
+            .unwrap();
+        let token = reader
+            .authenticate_token("hub", "credential-token", "shared-secret", 100)
+            .unwrap();
+        assert_ne!(url.id(), token.id());
+        assert!(!url.may_delegate());
+    }
+
+    #[test]
+    fn url_rotation_keeps_caller_and_origins_and_revocation_blocks_the_next_request() {
+        let home = tempfile::tempdir().unwrap();
+        let store = AccessStore::open_in(home.path()).unwrap();
+        let mut current = url_record("url", "first-secret", 1, &[EXTENSION]);
+        current.grant.permissions.write = true;
+        store.insert(current.clone()).unwrap();
+        let reader = store.reader();
+        let check = |secret: &str, origin: Option<&str>| {
+            reader.authenticate_url("hub", "credential-url", secret, origin, 200)
+        };
+        let before = check("first-secret", Some(EXTENSION)).unwrap();
+        assert!(before.may_write_project());
+        // 可写的 URL grant 也不能委派 Agent。
+        assert!(!before.may_delegate());
+
+        // 权限收紧在下一次请求生效，身份不变。
+        current.grant.permissions.write = false;
+        current.grant.scope = ProjectScope::Selected(vec!["selected".into()]);
+        store.update(current.clone()).unwrap();
+        let narrowed = check("first-secret", Some(EXTENSION)).unwrap();
+        assert_eq!(before.id(), narrowed.id());
+        assert!(!narrowed.may_write_project());
+        assert!(!narrowed.allows_project("other"));
+
+        let mut rotated = url_record("url", "second-secret", 2, &[EXTENSION]);
+        rotated.grant = current.grant.clone();
+        store.update(rotated).unwrap();
+        assert_eq!(
+            check("first-secret", Some(EXTENSION)).unwrap_err(),
+            UrlRejection::Credential
+        );
+        assert_eq!(
+            before.id(),
+            check("second-secret", Some(EXTENSION)).unwrap().id()
+        );
+        assert_eq!(
+            check("second-secret", Some("https://other.example.test")).unwrap_err(),
+            UrlRejection::Origin
+        );
+
+        store.revoke("url").unwrap();
+        assert_eq!(
+            check("second-secret", Some(EXTENSION)).unwrap_err(),
+            UrlRejection::Credential
+        );
+        // 已撤销的 grant 不再透露 Origin 是否在名单里。
+        assert_eq!(
+            check("second-secret", Some("https://other.example.test")).unwrap_err(),
+            UrlRejection::Credential
+        );
     }
 }

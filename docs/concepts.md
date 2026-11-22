@@ -4,7 +4,7 @@ gld 里有十来个概念，名字看着都认识，但**默认值和边界**跟
 这篇只讲"它是什么、什么时候该用、用错了会怎样"，具体怎么配大多在各自的文档里（浏览器那节例外，配置步骤就写在这里）。
 
 > **新授权的客户端接入仍在分步实现。**统一身份、授权存储和内核权限边界已落地；
-> HTTP MCP 的 API token 和 OAuth access/refresh 已在宿主接通；URL、未绑定隧道与原生节点转发仍拒绝。
+> HTTP MCP 的 API token、OAuth access/refresh 和 URL 入口（`/mcp/connect/<secret>`）已在宿主接通；未绑定隧道与原生节点转发仍拒绝。
 > 三类凭据的材料签发与轮换内核已具备，统一 CLI 与其他入口尚未接通，不能据此配置真实客户端。
 > Actions 的独立认证仍支持。后续接入顺序见 [RFC-0015](rfc/0015-unified-client-access.md)，本页不代表已上线。
 
@@ -812,7 +812,7 @@ Grant 表示“允许谁访问哪些项目、做哪些操作”，凭据表示�
 | --- | --- | --- |
 | OAuth | 支持浏览器授权的标准 MCP 客户端；同一 grant 的不同 client_id 独立隔离 | 授权页、access/refresh 签发和 `/mcp` 逐请求验证已接通，轮换和撤销立即生效；签发确认口令的 CLI 待 D；Actions 独立 OAuth 仍支持 |
 | API token | 能设置 Authorization header 的客户端和程序；统一 CLI 计划默认选择它 | HTTP Bearer 已接通当前授权验证，范围外项目、失效 token 和未约束读取的单项目拒绝；CLI 待 D |
-| URL | 只能填写 Server URI 的客户端，如图示 SuperAssistant；短期 capability URL | core 已创建/轮换限期材料并校验 Origin；完整地址交付和 HTTP 入口待 B3/D |
+| URL | 只能填写 Server URI 的客户端，如图示 SuperAssistant；短期 capability URL | `/mcp/connect/<secret>` 已逐请求核对秘密、期限、grant 和 Origin，轮换和撤销立即生效；创建地址的 CLI 和默认 Origin 待 D |
 
 统一 CLI 规划使用同一组 add / ls / rotate / rm，不再要求用户区分 grant 与 grant browser。
 **当前 CLI 的旧创建入口仍返回 `AUTH_NOT_READY`**；新内核用例不写旧 grants。
@@ -839,9 +839,38 @@ OAuth 客户端这样接入（`/mcp` 上和 API token 并存）：
 - **撤销了 grant**：下一个请求就是 401，refresh 和重新授权都不行；需要新建 grant。
 - **服务重启**：注册表和签名密钥都在磁盘上，已签发的 token 继续有效，不用重新授权。
 - **同一修订号内 refresh 可以重复使用**，直到 90 天到期；怀疑 refresh 泄露时轮换或撤销 grant。
-- 一条授权都没建过时，`/mcp` 对所有来源返回 `503 / AUTH_NOT_READY`；URL 入口和隧道目前也仍是这个回包。
+- 一条授权都没建过时，`/mcp` 和 URL 入口对所有来源返回 `503 / AUTH_NOT_READY`；隧道目前也仍是这个回包。
 
 Actions 的 OAuth token 和 MCP 的互不通用，即使签名密钥相同。
+
+只能填一个地址的客户端用 URL 入口：把创建 URL 用途 grant 时得到的秘密（`gld_url_v1.` 开头）接在
+`/mcp/connect/` 后面，整串地址填进客户端，用 POST 发 MCP 请求。每次请求宿主按这个顺序核对：
+
+1. 地址里的秘密必须是 URL 用途、在有效期内、所属 grant 有效，否则 `401 / AUTHENTICATION_FAILED`。
+   回包不带 OAuth 发现信息，也不说明是哪一项不对。
+2. 请求带了 `Origin` 头时，它必须和创建时列出的某一项**逐字符相同**，否则 `403 / ORIGIN_NOT_ALLOWED`。
+   不做大小写、端口或尾斜杠的换算；`Origin: null` 永远不通过；名单为空时只有不带 Origin 的请求能通过。
+   这一步只在秘密通过后才做，所以秘密不对时无论 Origin 是什么都是 401。
+3. 请求没带 `Origin`（命令行等非浏览器客户端）时只凭秘密通过。Origin 是附加限制，不是凭据。
+4. 之后和 API token 一样受项目范围、写权限约束；单项目入口范围不符或未约束读取返回 403。
+
+出错时会怎样：
+
+- **同时带了别的凭据**（`Authorization` 头或隧道头）：`400 / CONFLICTING_CREDENTIAL_SOURCES`，不挑一个来用。
+  把秘密放进查询串或当作 Bearer 发到 `/mcp` 也不被接受。
+- **Origin 头重复或为空**：`400 / INVALID_ORIGIN`。
+- **浏览器跨源访问**：只有通过上面核对的请求，响应才带 `Access-Control-Allow-Origin: <它自己的 Origin>`
+  和 `Access-Control-Expose-Headers: mcp-session-id, mcp-protocol-version`，从不返回 `*`，也不允许带 cookie。
+  预检（OPTIONS）同样核对地址里的秘密和 Origin，通过才返回允许的方法和请求头
+  （`content-type`、`accept`、`mcp-session-id`、`mcp-protocol-version`、`last-event-id`）；
+  不通过时是一个不带任何 CORS 头的 204，浏览器会拦下后面的请求。预检不执行工具。
+- **GET / DELETE**：秘密有效时是 `405`（`Allow: POST, OPTIONS`），这个入口不开 SSE 流。
+- **到期、轮换或撤销**：下一个请求就是 401。轮换后的新地址沿用原来的 Origin 名单和 CallerId。
+- 所有响应都带 `Cache-Control: no-store`、`Referrer-Policy: no-referrer` 和 `Vary: Origin`。
+  被拒的请求在 `mcp-requests.log` 里记一行状态码、Origin 和来源线索，不记地址。
+
+URL 用途的 grant 目前只能由内核用例创建，创建地址的命令和商店版 SuperAssistant 的默认 Origin
+要等 D；在那之前没有给真实客户端用的创建办法。
 
 三种创建凭据共用严格期限解析：`s`、`m`、`h`、`d` 表示秒、分、时、天，数值必须是正整数。
 token 默认 30 天，显式 `none` 表示不限期；URL 默认 8 小时、最多 24 小时；OAuth 确认口令拒绝 TTL 参数。

@@ -1,8 +1,8 @@
 # 连接 AI 客户端
 
 > **版本边界：**本页既有接入步骤适用于已发布/运行的旧授权版本。
-> 当前源码的专用 API token 和 MCP OAuth 已完成真实 HTTP MCP 工具往返；统一签发 CLI、
-> URL 和隧道授权仍待实施。不要照旧服务口令和 `--reveal` 步骤部署这一阶段源码：
+> 当前源码的专用 API token、MCP OAuth 和 URL 地址（`/mcp/connect/<secret>`）已完成真实 HTTP MCP 工具往返；
+> 统一签发 CLI（包括创建 URL 地址的命令）和隧道授权仍待实施。不要照旧服务口令和 `--reveal` 步骤部署这一阶段源码：
 > 旧认证方式不会自动获得新授权。
 >
 > 当前源码里 OAuth 的变化：授权页要填的是 OAuth 用途 grant 的确认口令（`gld_oauth_v1.` 开头），
@@ -91,6 +91,10 @@ DeepSeek 网页自己没有 MCP 连接器，靠 Chrome 扩展
 同一批项目，不另起服务，也不用装扩展里提示的 `npx @srbhptl39/mcp-superassistant-proxy`；ChatGPT 等已经连好的
 连接器不受影响。
 
+> **当前源码不适用下面的步骤：**`gld grant browser` 和 `/mcp/browser/…` 已停用，新地址是 `/mcp/connect/<secret>`，
+> 服务端已经会核对它和 Origin 名单（规则见[统一授权](concepts.md#统一授权gld-grant)），但创建地址的命令还没接通，
+> 也还没用真实扩展验收。下面是已发布旧版本的做法。
+>
 > 要 0.9.0 或更新的版本才有 `gld grant browser`。换二进制按[安装 · 升级](install.md#升级)走，
 > 命令行和守护进程都要是新的：只换命令行、守护进程还是旧的，会报版本不一致（退出码 4）。
 

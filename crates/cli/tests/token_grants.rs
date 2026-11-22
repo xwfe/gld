@@ -1,5 +1,5 @@
 //! D18-B3.2: 独立签发的 token 经真实 daemon/HTTP/Hub 进入工具调用；
-//! 其他尚未接入的来源仍拒绝，旧全局认证方式不能恢复权限。
+//! 别的用途的凭据不能互换入口，旧全局认证方式不能恢复权限。
 
 mod common;
 
@@ -167,15 +167,18 @@ fn issued_token_reads_through_real_hub_but_cannot_write_or_imitate_oauth() {
         assert!(!response.body.contains(wrong_purpose));
     }
     let url_path = format!("/mcp/connect/{url_secret}");
-    let url_not_ready = post_json(
-        port,
-        &url_path,
-        &json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string(),
-        None,
-    );
-    assert_eq!(url_not_ready.status, 503, "{}", url_not_ready.body);
-    assert_eq!(url_not_ready.json()["error"], "AUTH_NOT_READY");
-    assert!(!url_not_ready.body.contains(&url_secret));
+    let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string();
+    // URL 入口只认 URL 用途的秘密；API token 放进地址不行，地址秘密外再带 Bearer 也不行。
+    let by_url = post_json(port, &url_path, &list, None);
+    assert_eq!(by_url.status, 200, "{}", by_url.body);
+    assert!(!by_url.body.contains(&url_secret));
+    let token_in_path = post_json(port, &format!("/mcp/connect/{secret}"), &list, None);
+    assert_eq!(token_in_path.status, 401, "{}", token_in_path.body);
+    assert!(token_in_path.header("www-authenticate").is_none());
+    assert!(!token_in_path.body.contains(&secret));
+    let both = post_json(port, &url_path, &list, Some(&secret));
+    assert_eq!(both.status, 400, "{}", both.body);
+    assert_eq!(both.json()["error"], "CONFLICTING_CREDENTIAL_SOURCES");
 
     // 没带凭据，或带着旧服务 token / 旧 OAuth token：按 OAuth Bearer 验证失败，直接 401，
     // 回包带发现信息，不回落到别的凭据。
