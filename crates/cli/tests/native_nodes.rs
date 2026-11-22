@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use common::env::{free_port, Env};
 use common::http::post_json;
+#[cfg(unix)]
 use common::service::Service;
 use serde_json::{json, Value};
 use tokio::net::{TcpListener, TcpStream};

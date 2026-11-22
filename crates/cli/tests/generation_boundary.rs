@@ -837,19 +837,36 @@ fn switching_keeps_running_work_with_its_generation_and_sends_new_workspaces_to_
         .unwrap_or_else(|| panic!("{interactive}"))
         .to_string();
 
-    // 长请求：切换时还没返回。
-    let long = {
+    // 长请求在收到文件信号前不退出，避免短 sleep 在慢 runner 上先于状态轮询结束。
+    let mut long = {
         let local = fixture.local();
-        std::thread::spawn(move || {
+        Some(std::thread::spawn(move || {
             local.tool(
-            "exec_command",
-            json!({"workspace":"api","argv":["sh","-c","sleep 2; echo long-marker"],"yield_time_ms":30000}),
-        )
-        })
+                "exec_command",
+                json!({
+                    "workspace": "api",
+                    "argv": [
+                        "sh",
+                        "-c",
+                        "while [ ! -e long-command-release ]; do sleep 0.05; done; echo long-marker"
+                    ],
+                    "yield_time_ms": 30000
+                }),
+            )
+        }))
     };
+    let mut early_result = None;
     wait_for("长请求进到执行代", || {
+        if long.as_ref().is_some_and(|task| task.is_finished()) {
+            early_result = Some(long.take().unwrap().join().expect("长请求线程"));
+            return true;
+        }
         generation(&fixture.status(), "g1")["in_flight"] == 1
     });
+    assert!(
+        early_result.is_none(),
+        "长请求在进入执行代前就返回了：{early_result:?}"
+    );
 
     let exe = env!("CARGO_BIN_EXE_gld");
     env.ok(&["daemon", "upgrade", "prepare", exe]);
@@ -864,7 +881,8 @@ fn switching_keeps_running_work_with_its_generation_and_sends_new_workspaces_to_
         .unwrap()
         .contains(&json!("owned_workspaces")));
 
-    let finished = long.join().expect("长请求线程");
+    env.write("long-command-release", "release\n");
+    let finished = long.take().unwrap().join().expect("长请求线程");
     assert_eq!(finished["exit_code"], 0, "{finished}");
     assert!(
         finished["stdout"]
