@@ -6,7 +6,8 @@
 use gld_policy::AuthContext;
 use gld_protocol::capabilities::{
     check_snapshot, CapabilityAvailability, CapabilityContractError, CapabilityId, CapabilityProbe,
-    CapabilityReason, CapabilityRoute, CapabilitySelector, CapabilitySnapshot, NodeIdentity,
+    CapabilityQuery, CapabilityReason, CapabilityRoute, CapabilitySelector, CapabilitySnapshot,
+    NodeIdentity,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,11 +42,12 @@ impl CapabilityEvaluation {
 pub fn evaluate_capabilities(
     snapshot: &CapabilitySnapshot,
     auth: &AuthContext,
-    selector: &CapabilitySelector,
+    query: &CapabilityQuery,
     now_ms: u64,
     current_generation: u64,
 ) -> Result<CapabilityEvaluation, CapabilityContractError> {
-    let route = selector.route()?;
+    query.validate()?;
+    let route = query.selector.route()?;
     if let CapabilityRoute::Machine(machine) = &route {
         if machine != &snapshot.node.machine_id {
             return Err(CapabilityContractError::TargetMismatch);
@@ -56,12 +58,13 @@ pub fn evaluate_capabilities(
     let capabilities = snapshot
         .capabilities
         .iter()
+        .filter(|probe| query.includes(probe.id))
         .map(|probe| view_for(auth, probe, &route))
         .collect();
     Ok(CapabilityEvaluation {
         node: snapshot.node.clone(),
         module_generation: snapshot.module_generation,
-        selector: selector.clone(),
+        selector: query.selector.clone(),
         capabilities,
     })
 }
@@ -185,6 +188,35 @@ mod tests {
         view.reason.as_ref().unwrap().0.as_str()
     }
 
+    fn query(selector: &CapabilitySelector) -> CapabilityQuery {
+        CapabilityQuery::all(selector.clone())
+    }
+
+    #[test]
+    fn capability_queries_filter_ids_and_fail_closed_on_unknown() {
+        let snapshot = snapshot();
+        let selector = CapabilitySelector::workspace("project");
+        let local = AuthContext::local_operator();
+
+        let all = evaluate_capabilities(&snapshot, &local, &query(&selector), 1_200, 3).unwrap();
+        assert_eq!(all.capabilities.len(), snapshot.capabilities.len());
+
+        let only_clipboard = CapabilityQuery::only(
+            selector.clone(),
+            vec![CapabilityId::Clipboard.as_str().into()],
+        );
+        let filtered = evaluate_capabilities(&snapshot, &local, &only_clipboard, 1_200, 3).unwrap();
+        assert_eq!(filtered.capabilities.len(), 1);
+        assert_eq!(filtered.capabilities[0].id, CapabilityId::Clipboard);
+        assert_eq!(filtered.visible_ids(), vec![CapabilityId::Clipboard]);
+
+        let unknown = CapabilityQuery::only(selector, vec!["capability_from_the_future".into()]);
+        assert_eq!(
+            evaluate_capabilities(&snapshot, &local, &unknown, 1_200, 3).unwrap_err(),
+            CapabilityContractError::UnknownCapability("capability_from_the_future".into())
+        );
+    }
+
     #[test]
     fn same_node_returns_different_visible_sets_for_different_subjects() {
         let snapshot = snapshot();
@@ -192,7 +224,7 @@ mod tests {
         let local = evaluate_capabilities(
             &snapshot,
             &AuthContext::local_operator(),
-            &selector,
+            &query(&selector),
             1_200,
             3,
         )
@@ -213,7 +245,7 @@ mod tests {
             ServiceCapabilities::default(),
         );
         let selected_eval =
-            evaluate_capabilities(&snapshot, &selected, &selector, 1_200, 3).unwrap();
+            evaluate_capabilities(&snapshot, &selected, &query(&selector), 1_200, 3).unwrap();
         assert_eq!(selected_eval.visible_ids(), vec![CapabilityId::FileCommand]);
         let desktop = selected_eval
             .capabilities
@@ -230,7 +262,8 @@ mod tests {
             ProjectScope::Selected(vec!["other".into()]),
             ServiceCapabilities::default(),
         );
-        let other_eval = evaluate_capabilities(&snapshot, &other, &selector, 1_200, 3).unwrap();
+        let other_eval =
+            evaluate_capabilities(&snapshot, &other, &query(&selector), 1_200, 3).unwrap();
         assert!(other_eval.visible_ids().is_empty());
         assert_eq!(
             reason(&other_eval.capabilities[0]),
@@ -239,7 +272,7 @@ mod tests {
 
         let all_projects = grant("all", ProjectScope::AllProjects, service());
         let all_eval =
-            evaluate_capabilities(&snapshot, &all_projects, &selector, 1_200, 3).unwrap();
+            evaluate_capabilities(&snapshot, &all_projects, &query(&selector), 1_200, 3).unwrap();
         assert_eq!(all_eval.visible_ids(), vec![CapabilityId::FileCommand]);
         for id in [
             CapabilityId::DesktopObserve,
@@ -266,7 +299,7 @@ mod tests {
         let local = evaluate_capabilities(
             &snapshot,
             &AuthContext::local_operator(),
-            &selector,
+            &query(&selector),
             1_200,
             3,
         )
@@ -278,7 +311,8 @@ mod tests {
             ProjectScope::AllProjects,
             ServiceCapabilities::default(),
         );
-        let denied = evaluate_capabilities(&snapshot, &network, &selector, 1_200, 3).unwrap();
+        let denied =
+            evaluate_capabilities(&snapshot, &network, &query(&selector), 1_200, 3).unwrap();
         assert!(denied.visible_ids().is_empty());
         assert_eq!(
             reason(&denied.capabilities[0]),
@@ -287,8 +321,14 @@ mod tests {
 
         let wrong = CapabilitySelector::machine("machine-b");
         assert_eq!(
-            evaluate_capabilities(&snapshot, &AuthContext::local_operator(), &wrong, 1_200, 3)
-                .unwrap_err(),
+            evaluate_capabilities(
+                &snapshot,
+                &AuthContext::local_operator(),
+                &query(&wrong),
+                1_200,
+                3
+            )
+            .unwrap_err(),
             CapabilityContractError::TargetMismatch
         );
     }
