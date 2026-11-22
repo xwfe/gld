@@ -188,6 +188,54 @@ impl AccessRecord {
     }
 }
 
+/// 隧道绑定里隧道标识的前缀；目前只有 OpenAI Secure MCP Tunnel 一种受信隧道。
+const OPENAI_TUNNEL_PREFIX: &str = "openai:";
+
+/// 把配置里的 OpenAI 隧道 ID 写成绑定用的隧道标识；格式不对返回 `None`。
+pub fn openai_tunnel_name(tunnel_id: &str) -> Option<String> {
+    crate::tunnel::openai::is_tunnel_id(tunnel_id)
+        .then(|| format!("{OPENAI_TUNNEL_PREFIX}{tunnel_id}"))
+}
+
+/// 一条隧道到一个 token 类型 grant 的显式绑定。只存引用，不存隧道密钥或 token 秘密：
+/// 隧道密钥证明请求来自这条隧道，权限每次请求从所绑 grant 的当前内容读取。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelBinding {
+    /// 调用方身份里的 `binding_id`：同一隧道重绑同一 grant 时保留，改绑别的 grant 时换新。
+    pub id: String,
+    /// `openai:<隧道 ID>`。一条隧道最多一个绑定。
+    pub tunnel: String,
+    pub grant_id: String,
+    /// 绑定时凭据的修订号。grant 轮换后两者不再相等，绑定失效，要重新绑定。
+    pub credential_revision: u64,
+    pub bound_at_unix_secs: u64,
+}
+
+impl TunnelBinding {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if self.id.len() != 32
+            || !self
+                .id
+                .bytes()
+                .all(|ch| ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
+        {
+            return Err("Invalid tunnel binding ID".into());
+        }
+        if !self
+            .tunnel
+            .strip_prefix(OPENAI_TUNNEL_PREFIX)
+            .is_some_and(crate::tunnel::openai::is_tunnel_id)
+        {
+            return Err("Invalid tunnel name".into());
+        }
+        if self.credential_revision == 0 {
+            return Err("Invalid tunnel binding revision".into());
+        }
+        Ok(())
+    }
+}
+
 fn secret_hash(secret: &str) -> String {
     format!("{:x}", Sha256::digest(secret.as_bytes()))
 }

@@ -25,7 +25,73 @@ pub enum UrlRejection {
     Origin,
 }
 
+/// 隧道密钥已经验证通过、但绑定不能用的原因。对外是同一个回包，这里的区分只给日志。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelRejection {
+    /// 授权文件读不出来，无法判断。
+    Unavailable,
+    /// 这条隧道没有绑定。
+    Unbound,
+    /// 所绑 grant 已撤销。
+    Revoked,
+    /// grant 在绑定之后轮换过；旧绑定不自动跟到新修订。
+    StaleRevision,
+    /// 所绑 token 凭据不在有效期内。
+    Expired,
+}
+
+impl TunnelRejection {
+    /// 写进日志的原因；不含任何秘密。
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Unbound => "unbound",
+            Self::Revoked => "revoked",
+            Self::StaleRevision => "stale_revision",
+            Self::Expired => "expired",
+        }
+    }
+}
+
 impl AccessReader {
+    /// 隧道入口：宿主已确认请求带着这条隧道的密钥，这里只解析显式绑定，每次调用读取最新快照。
+    /// 隧道密钥本身不带权限；范围、写权限和服务能力全部来自所绑 grant 的当前内容。
+    /// 没有绑定、grant 已撤销、绑定时的修订号不是当前修订号、凭据不在有效期内都拒绝。
+    pub fn authenticate_tunnel(
+        &self,
+        entry: &str,
+        tunnel: &str,
+        now_unix_secs: u64,
+    ) -> Result<AuthContext, TunnelRejection> {
+        let current = self.snapshot().map_err(|_| TunnelRejection::Unavailable)?;
+        let binding = current.by_tunnel(tunnel).ok_or(TunnelRejection::Unbound)?;
+        let record = current
+            .by_grant_id(&binding.grant_id)
+            .ok_or(TunnelRejection::Unbound)?;
+        // 加载时已保证绑定只指向 token 用途；这里再查一次，不依赖那条不变量。
+        if record.credential.kind != CredentialKind::Token {
+            return Err(TunnelRejection::Unbound);
+        }
+        if record.grant.status != GrantStatus::Active {
+            return Err(TunnelRejection::Revoked);
+        }
+        if record.credential.revision != binding.credential_revision {
+            return Err(TunnelRejection::StaleRevision);
+        }
+        if !record.credential.is_valid_at(now_unix_secs) {
+            return Err(TunnelRejection::Expired);
+        }
+        AuthContext::verified_mcp(
+            entry,
+            record.grant.clone(),
+            CredentialKind::Token,
+            McpSubject::Tunnel {
+                binding_id: binding.id.clone(),
+            },
+        )
+        .map_err(|_| TunnelRejection::Unbound)
+    }
+
     /// 验证 `/mcp/connect/<secret>` 路径里拆出的公开 ID 和秘密，每次调用读取最新快照。
     /// `origin` 是请求头原文：没有 Origin 时只凭秘密通过；有 Origin 时必须和名单里的某一项
     /// 逐字节相同（名单为空就只放行不带 Origin 的请求）。不接受 token、OAuth 或隧道凭据。
@@ -647,5 +713,153 @@ mod tests {
             check("second-secret", Some("https://other.example.test")).unwrap_err(),
             UrlRejection::Credential
         );
+    }
+
+    const TUNNEL: &str = "openai:tunnel_0123456789abcdef0123456789abcdef";
+    const OTHER_TUNNEL: &str = "openai:tunnel_fedcba9876543210fedcba9876543210";
+
+    fn rotated(store: &AccessStore, id: &str, revision: u64) {
+        let mut next = store.snapshot().unwrap().by_grant_id(id).unwrap().clone();
+        next.credential = CredentialRecord::prepare(
+            format!("credential-{id}"),
+            CredentialKind::Token,
+            &format!("secret-{revision}"),
+            revision,
+            100,
+            Some(3600),
+            Vec::new(),
+        )
+        .unwrap();
+        store.update(next).unwrap();
+    }
+
+    #[test]
+    fn a_bound_tunnel_gets_the_grant_as_its_own_caller() {
+        let home = tempfile::tempdir().unwrap();
+        let store = AccessStore::open_in(home.path()).unwrap();
+        let mut bound = record("one", "Client", "token-secret");
+        bound.grant.permissions.write = true;
+        store.insert(bound.clone()).unwrap();
+        let reader = store.reader();
+        // 有 grant、没有绑定：隧道不取得任何权限。
+        assert_eq!(
+            reader.authenticate_tunnel("hub", TUNNEL, 200).unwrap_err(),
+            TunnelRejection::Unbound
+        );
+        let binding = store.bind_tunnel(TUNNEL, "one", 150).unwrap();
+        let tunnel = reader.authenticate_tunnel("hub", TUNNEL, 200).unwrap();
+        let token = reader
+            .authenticate_token("hub", "credential-one", "token-secret", 200)
+            .unwrap();
+        // 同一个 grant，隧道和直接用 token 是两个调用方；权限相同。
+        assert_ne!(tunnel.id(), token.id());
+        assert!(tunnel.may_write_project());
+        assert!(tunnel.allows_project("any-project"));
+        // 委派跟随 grant 的写权限；服务能力 grant 没给就没有，也不是本机操作员。
+        assert!(tunnel.may_delegate());
+        assert!(!tunnel.may_read_user_prompts());
+        assert!(!tunnel.may_use_machine_mcp());
+        assert!(!tunnel.may_manage_workspaces());
+        assert!(!tunnel.is_local_operator());
+        assert!(matches!(
+            tunnel.identity(),
+            gld_policy::CallerIdentity::McpClient {
+                grant_id,
+                subject: McpSubject::Tunnel { binding_id },
+                ..
+            } if grant_id == "one" && binding_id == &binding.id
+        ));
+        // 别的隧道标识不沾这个绑定。
+        assert_eq!(
+            reader
+                .authenticate_tunnel("hub", OTHER_TUNNEL, 200)
+                .unwrap_err(),
+            TunnelRejection::Unbound
+        );
+
+        // 权限和范围收紧在下一次请求生效，调用方身份不变，绑定不用动。
+        bound.grant.permissions.write = false;
+        bound.grant.scope = ProjectScope::Selected(vec!["selected".into()]);
+        store.update(bound.clone()).unwrap();
+        let narrowed = reader.authenticate_tunnel("hub", TUNNEL, 200).unwrap();
+        assert_eq!(narrowed.id(), tunnel.id());
+        assert!(!narrowed.may_write_project());
+        assert!(!narrowed.may_delegate());
+        assert!(narrowed.allows_project("selected"));
+        assert!(!narrowed.allows_project("other"));
+
+        // 服务能力跟随 grant：grant 给了才有，隧道自己不带。
+        bound.grant.scope = ProjectScope::AllProjects;
+        bound.grant.permissions.write = true;
+        bound.grant.permissions.service.user_prompts = true;
+        store.update(bound).unwrap();
+        let capable = reader.authenticate_tunnel("hub", TUNNEL, 200).unwrap();
+        assert!(capable.may_read_user_prompts());
+        assert!(!capable.may_use_machine_mcp());
+        assert_eq!(capable.id(), tunnel.id());
+    }
+
+    #[test]
+    fn tunnel_binding_stops_at_rotation_expiry_unbind_and_revocation() {
+        let home = tempfile::tempdir().unwrap();
+        let store = AccessStore::open_in(home.path()).unwrap();
+        store
+            .insert(record("one", "Client", "token-secret"))
+            .unwrap();
+        let reader = store.reader();
+        let check = |now| reader.authenticate_tunnel("hub", TUNNEL, now);
+        store.bind_tunnel(TUNNEL, "one", 150).unwrap();
+        let before = check(200).unwrap();
+
+        // 凭据签发前和到期后都不行；到期前最后一秒可以。
+        assert_eq!(check(99).unwrap_err(), TunnelRejection::Expired);
+        assert!(check(3699).is_ok());
+        assert_eq!(check(3700).unwrap_err(), TunnelRejection::Expired);
+
+        // 轮换后旧绑定不自动跟到新修订；重新绑定后恢复，还是同一个调用方。
+        rotated(&store, "one", 2);
+        assert_eq!(check(200).unwrap_err(), TunnelRejection::StaleRevision);
+        assert!(reader
+            .authenticate_token("hub", "credential-one", "secret-2", 200)
+            .is_ok());
+        store.bind_tunnel(TUNNEL, "one", 250).unwrap();
+        assert_eq!(check(200).unwrap().id(), before.id());
+
+        assert!(store.unbind_tunnel(TUNNEL).unwrap());
+        assert_eq!(check(200).unwrap_err(), TunnelRejection::Unbound);
+        // 解绑再绑是新的绑定，调用方身份随之更换。
+        store.bind_tunnel(TUNNEL, "one", 300).unwrap();
+        assert_ne!(check(200).unwrap().id(), before.id());
+
+        store.revoke("one").unwrap();
+        assert_eq!(check(200).unwrap_err(), TunnelRejection::Revoked);
+    }
+
+    #[test]
+    fn a_revoked_binding_survives_reload_and_is_still_refused() {
+        let home = tempfile::tempdir().unwrap();
+        {
+            let store = AccessStore::open_in(home.path()).unwrap();
+            store
+                .insert(record("one", "Client", "token-secret"))
+                .unwrap();
+            store.bind_tunnel(TUNNEL, "one", 150).unwrap();
+            store.revoke("one").unwrap();
+        }
+        let store = AccessStore::open_in(home.path()).unwrap();
+        let reader = store.reader();
+        assert_eq!(
+            reader.authenticate_tunnel("hub", TUNNEL, 200).unwrap_err(),
+            TunnelRejection::Revoked
+        );
+        for rejection in [
+            TunnelRejection::Unavailable,
+            TunnelRejection::Unbound,
+            TunnelRejection::Revoked,
+            TunnelRejection::StaleRevision,
+            TunnelRejection::Expired,
+        ] {
+            assert!(!rejection.reason().is_empty());
+        }
     }
 }

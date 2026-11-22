@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::*;
 
-fn record(id: &str, name: &str, secret: &str) -> AccessRecord {
+pub(super) fn record(id: &str, name: &str, secret: &str) -> AccessRecord {
     AccessRecord {
         grant: Grant {
             id: id.into(),
@@ -38,11 +38,12 @@ fn saved(records: Vec<AccessRecord>) -> Value {
     serde_json::to_value(AccessFile {
         schema_version: SCHEMA_VERSION,
         records,
+        tunnel_bindings: Vec::new(),
     })
     .unwrap()
 }
 
-fn write_private(path: &Path, bytes: &[u8]) {
+pub(super) fn write_private(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = create_private_file(path).unwrap();
     file.write_all(bytes).unwrap();
