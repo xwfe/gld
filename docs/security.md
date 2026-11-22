@@ -4,7 +4,7 @@ gld 的文件策略和授权决定哪些工具可被调用，**不是操作系�
 子进程能访问什么最终由运行 gld 的系统账号决定。
 
 > **新授权的客户端接入仍在分步实现。** 新授权模型、独立存储、身份隔离和三类材料创建/轮换已有内核用例，
-> 有效的新 API token 已可通过宿主 HTTP MCP 完成认证；MCP OAuth、URL、未绑定隧道与原生节点工具尚未接通；不能把这版源码作为完整接入版本部署。
+> 新 API token 和 OAuth access/refresh 已可通过宿主 HTTP MCP 完成认证；URL、未绑定隧道与原生节点工具尚未接通；不能把这版源码作为完整接入版本部署。
 > 当前运行中的旧版本未因源码提交而改变。统一接入契约见 [RFC-0015](rfc/0015-unified-client-access.md)，阶段状态见 [task_plan](../task_plan.md)。
 
 ## 一分钟自查
@@ -15,13 +15,14 @@ gld grant ls               # 新授权的元数据；空列表不开放任何网
 gld doctor                 # 配置与运行状态检查
 ```
 
-监听端口可达、GET 发现文档成功和完成授权是不同的状态。当前源码仅接受已经由可信应用创建的新 token：
-Bearer 验证失败返回 401；旧 OAuth／隧道入口继续返回 `503 / AUTH_NOT_READY`，不执行工具。
+监听端口可达、GET 发现文档成功和完成授权是不同的状态。当前源码接受新 API token，以及用 OAuth grant 的确认口令授权后签发的 access token：
+没带凭据或 Bearer 验证失败返回 401，回包带 OAuth 发现信息；URL 入口、隧道，以及一条授权都没建过的服务
+继续返回 `503 / AUTH_NOT_READY`，不执行工具。
 Actions 继续使用独立的项目身份与认证流程。
 
 ## 新授权模型的权限边界
 
-以下是新模型的能力约束；API token HTTP 逐请求验证已接通，OAuth access/refresh、URL Origin 和隧道绑定仍需 B3。
+以下是新模型的能力约束；API token 和 OAuth access/refresh 的 HTTP 逐请求验证已接通，URL Origin 和隧道绑定仍需 B3。
 
 | 能力 | 必须同时满足 |
 | --- | --- |
@@ -391,16 +392,25 @@ gld 不限制目标主机、不限制远端执行什么，也挡不住端口转�
 AllProjects 默认覆盖当前与以后登记的项目，write 和服务能力仍须单独授予。
 回环地址、隧道密钥、缺少 grant 或旧服务口令都不建立本机操作员身份；MCP 的 noauth 配置拒绝。
 
-专用 API token 已接入 HTTP 并逐请求验证当前授权；错误 token 返回 401，单项目越权返回 403。
-MCP OAuth、URL、未绑定隧道仍明确拒绝，不能从旧服务口令回退为本机操作员。
+专用 API token 和 OAuth access token 已接入 HTTP 并逐请求验证当前授权；错误凭据返回 401，单项目越权返回 403。
+宿主先按格式确定凭据来源，再只按那一种验证：OAuth token 验证失败不会被当成 API token 重试，反过来也一样。
+URL、未绑定隧道仍明确拒绝，不能从旧服务口令回退为本机操作员。
+
+OAuth 的授权页只接受 OAuth 用途 grant 的确认口令，且只从 POST 正文读取；授权页、授权码跳转和 token 回包都带
+`Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`，错误页不回显提交的内容，
+也不区分「没有这条凭据」和「秘密不对」。服务口令（`oauth_password`）不再能授权 MCP。
+access 和 refresh 里签着 GrantId、client_id 和签发时的凭据修订号，每次使用都对照当前授权。
 不要通过更换旧 bearer_token、启用匿名配置或复制旧 grant 来尝试恢复访问。
 接入方式和后续命令见 [统一授权](concepts.md#统一授权gld-grant) 与 [RFC-0015](rfc/0015-unified-client-access.md)。
 
 ### 5. 按 grant 轮换与撤销
 
 新模型按 GrantId 管理生命周期：轮换替换验证材料并递增修订号，保留主体与会话归属；
-撤销先持久化，再回收该 grant 的资源。OAuth 材料轮换已递增修订；B3 必须让旧修订的 access/refresh 同步拒绝，
-不能把只换确认口令当作完整 OAuth 失效验收。应用层创建/轮换已具备，统一 CLI 待 D；当前 `grant ls` 只显示元数据，
+撤销先持久化，再回收该 grant 的资源。OAuth grant 轮换后，旧修订号的 access、refresh 和旧确认口令一起被拒绝；
+撤销后该 grant 的 OAuth 请求下一次就是 401。两者都不依赖重启，也没有认证缓存需要等它过期。
+refresh 没有一次性使用的限制：同一修订号内，一个 refresh 在 90 天到期前可以重复换取新 token，
+所以怀疑 access 或 refresh 泄露时，应轮换或撤销 grant，而不是等它过期。
+应用层创建/轮换已具备，统一 CLI 待 D（运行中的服务目前没有轮换命令）；当前 `grant ls` 只显示元数据，
 `grant rm` 撤销新存储中的授权；停用的旧创建/reveal 路径不会生成或找回秘密。
 
 Actions 使用独立凭据，仍按项目管理，例如：
@@ -424,7 +434,8 @@ gld secret regen actions_api_key -w api
 
 `data/oauth-clients/hub.json` 保存动态注册的 client_id 与回调地址；confidential 客户端的
 client_secret 也在对应注册表中，文件同样为 600。保留这些注册记录可以复用 client_id，
-不等于继续接受旧 access 或 refresh。新 OAuth 的实际接入仍由 B 阶段完成。
+不等于继续接受旧 access 或 refresh：token 是否有效只看签名和当前 grant。
+签名密钥（`oauth_token_secret`）同样落盘，重启不会重新生成；更换它会让全部已签发的 OAuth token 作废。
 
 注册表读取或解析失败时保留原文件，拒绝新注册，不把损坏表当空表覆盖；写盘失败也不返回成功注册。
 现有 Actions OAuth 验证要求客户端仍在对应注册表中。满 50 个注册后拒绝新增，不挤掉旧记录。

@@ -1,9 +1,14 @@
 # 连接 AI 客户端
 
 > **版本边界：**本页既有接入步骤适用于已发布/运行的旧授权版本。
-> 当前源码的专用 API token 已完成真实 HTTP MCP 工具往返；统一签发 CLI、MCP OAuth、
+> 当前源码的专用 API token 和 MCP OAuth 已完成真实 HTTP MCP 工具往返；统一签发 CLI、
 > URL 和隧道授权仍待实施。不要照旧服务口令和 `--reveal` 步骤部署这一阶段源码：
 > 旧认证方式不会自动获得新授权。
+>
+> 当前源码里 OAuth 的变化：授权页要填的是 OAuth 用途 grant 的确认口令（`gld_oauth_v1.` 开头），
+> 不再是服务的 `oauth_password`；填哪条 grant 的口令，客户端就绑到哪条 grant。
+> grant 轮换后用新口令重新授权一次（连接器不用删），撤销后该客户端立即 401。
+> 签发确认口令的命令还没接通，细节见 [统一授权](concepts.md#统一授权gld-grant)。
 > 新接口契约见 [RFC-0015](rfc/0015-unified-client-access.md)，实际完成状态见 [task_plan](../task_plan.md)。
 
 gld 只有**一个 MCP 服务**，你的项目都挂在它下面。客户端里只配这一条连接，AI 每次调用
