@@ -423,8 +423,6 @@ fn rejected_rotation_never_changes_credentials_or_revocation() {
     const SERVICE: &str = "synthetic-service-credential-0000000000000001";
     const APP: &str = "synthetic-app-credential-0000000000000000001";
     const WORKSPACE: &str = "synthetic-workspace-credential-000000000001";
-    const GRANT_BEARER: &str = "synthetic-grant-bearer-0000000000000000001";
-    const GRANT_OAUTH: &str = "synthetic-grant-oauth-00000000000000000001";
     data.shared_secrets
         .insert("bearer_token".into(), SERVICE.into());
     data.app_secrets
@@ -435,31 +433,9 @@ fn rejected_rotation_never_changes_credentials_or_revocation() {
         .entry(PROJECT.into())
         .or_default()
         .insert("bearer_token".into(), WORKSPACE.into());
-    data.grants.push(crate::auth::GrantRecord {
-        grant: crate::auth::Grant {
-            id: "synthetic-grant".into(),
-            name: "limited reader".into(),
-            workspaces: vec![PROJECT.into()],
-            read_only: true,
-            browser: false,
-        },
-        oauth_password: GRANT_OAUTH.into(),
-        bearer_token: GRANT_BEARER.into(),
-        created_at: String::new(),
-        browser: None,
-    });
     revoke_in(&mut data, MACHINE).unwrap();
     let before = serde_json::to_value(&data).unwrap();
-    for token in [
-        "short",
-        TOKEN,
-        OTHER_TOKEN,
-        SERVICE,
-        APP,
-        WORKSPACE,
-        GRANT_BEARER,
-        GRANT_OAUTH,
-    ] {
+    for token in ["short", TOKEN, OTHER_TOKEN, SERVICE, APP, WORKSPACE] {
         let error = rotate_in(&mut data, MACHINE, token).unwrap_err();
         assert!(!error.contains(token));
         assert_eq!(serde_json::to_value(&data).unwrap(), before);
@@ -468,6 +444,19 @@ fn rejected_rotation_never_changes_credentials_or_revocation() {
         assert!(rotate_in(&mut data, id, "synthetic-unused-credential-00000000000001").is_err());
         assert_eq!(serde_json::to_value(&data).unwrap(), before);
     }
+}
+
+#[test]
+fn obsolete_grants_are_preserved_without_defining_node_credentials() {
+    let legacy = json!([{
+        "bearer_token": TOKEN,
+        "oauth_password": "old-authorization-password",
+        "unknown": {"keep": true}
+    }]);
+    let mut data: AppData = serde_json::from_value(json!({"grants": legacy})).unwrap();
+    register_in(&mut data, "node", Some(MACHINE), TOKEN).unwrap();
+    assert_eq!(serde_json::to_value(&data).unwrap()["grants"], legacy);
+    assert!(!format!("{:?}", data.grants).contains(TOKEN));
 }
 
 #[test]

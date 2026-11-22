@@ -3,6 +3,10 @@
 日期：2026-09-24。状态：**已实施**，本机服务已升级；2026-10-04 在 ChatGPT 上用 grant 口令授权实测过（[审查 §9](../reviews/2026-09-23-lifecycle-and-docs-audit.md#本机升级到-684acdd-与-chatgpt-只读-grant-实测2026-09-25--10-04)）。来源：[2026-09-23 审查](../reviews/2026-09-23-lifecycle-and-docs-audit.md) D07、
 [RFC-0004 §4](0004-one-service-many-projects.md#4-代价和跨仓评审-x07-的关系) 留下的缺口。
 
+> 2026-11-15 后续决定：[RFC-0015](0015-unified-client-access.md) 按用户要求采用不兼容旧代码的统一授权模型，
+> 默认动态包含当前及未来项目，OAuth / token / URL 共用管理；旧命令、授权格式与令牌不作适配，切换时重新授权。
+> 实施排入 [D18](../../task_plan.md)；本文保留现有版本行为与历史依据，新设计尚未改变运行中的授权。
+
 ## 1. 要解决什么
 
 **后续决定（2026-10-17）：浏览器专用短期 grant。** SuperAssistant 这类只能填 URL 的客户端带不了请求头、
@@ -68,7 +72,7 @@ grant，行为和以前一模一样：ChatGPT 连接器不用动。新发的全�
 **同一个项目里不再按主体划分私有记录。** 两把凭据都开了 api，其 Task、History、Planning
 属于共享的项目记录；能否修改仍取决于各自有效工具集，**只读 grant 没有写权限**，不是
 “两个客户端都能改”。命令会话与运行输出仍按主体分
-（[caller.rs](../../crates/core/src/tools/caller.rs)），这一条不变。
+（现由 [CallerId](../../crates/policy/src/caller.rs) 实现），主体隔离继续保持；新身份结构见 RFC-0015。
 
 **noauth 下不给建，有 grant 时也不给改成 noauth。** 没有鉴权就没有"用哪把进来"，谁连上都是全权。
 

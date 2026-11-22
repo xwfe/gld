@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/daemon", "crates/cli"]
+members = ["crates/policy", "crates/protocol", "crates/transport", "crates/runtime", "crates/agent", "crates/core", "crates/host", "crates/daemon", "crates/cli"]
 
 [workspace.package]
 version = "0.10.1"
@@ -12,7 +12,13 @@ repository = "https://github.com/xwfe/gld"
 rust-version = "1.89"
 
 [workspace.dependencies]
+gld-policy = { path = "crates/policy" }
+gld-protocol = { path = "crates/protocol" }
+gld-transport = { path = "crates/transport" }
+gld-runtime = { path = "crates/runtime" }
+gld-agent = { path = "crates/agent" }
 gld-core = { path = "crates/core" }
+gld-host = { path = "crates/host" }
 gld-daemon = { path = "crates/daemon" }
 # 跟 ccnm 共用的文本读取原语（跨仓计划 toexec 的 V2-K）。
 #

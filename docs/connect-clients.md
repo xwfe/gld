@@ -1,5 +1,11 @@
 # 连接 AI 客户端
 
+> **版本边界：**本页既有接入步骤适用于已发布/运行的旧授权版本。
+> 当前源码的专用 API token 已完成真实 HTTP MCP 工具往返；统一签发 CLI、MCP OAuth、
+> URL 和隧道授权仍待实施。不要照旧服务口令和 `--reveal` 步骤部署这一阶段源码：
+> 旧认证方式不会自动获得新授权。
+> 新接口契约见 [RFC-0015](rfc/0015-unified-client-access.md)，实际完成状态见 [task_plan](../task_plan.md)。
+
 gld 只有**一个 MCP 服务**，你的项目都挂在它下面。客户端里只配这一条连接，AI 每次调用
 用 `workspace` 参数（项目名或 id）选项目。先把服务起来、再看连接信息，所有客户端都从这里取值：
 
@@ -13,6 +19,9 @@ gld ls                     # 地址、凭据、项目表；加 --reveal 显示�
 >
 > 改服务的端口、认证用 `gld upgrade`，改公网入口用 `gld share`；它们改完会自动重启服务，
 > 不用再敲 `gld restart`。改某个项目的配置用 `gld set <项目> key=value`，下一次调用就生效。
+
+> 统一接入仍按 OAuth、API token、URL 三种方式推进，默认动态覆盖当前及以后登记的全部项目。
+> 旧授权不导入新存储，旧命令不保留可用别名；完整切换时须重建授权、更新 URL 或重新走 OAuth。
 
 ## 本机客户端（Claude Code、Cursor、Codex 等）
 
@@ -330,7 +339,7 @@ ChatGPT 里：Plugins → `+` → Add custom MCP server，**Connection 选 Tunne
 换这把 key：`gld secret regen openai_tunnel_key`（服务和隧道一起重启，ChatGPT 那边不用动）。
 
 **谁能用它。**关联了这条隧道的 ChatGPT 工作区里，能选到这条隧道建连接器的人，都等于拿到了服务凭据
-（全部项目），见 [security.md](security.md#openai-隧道能选到隧道的人就有服务凭据)。
+（旧版本的全部项目）。D18 已取消该隐式放行，见 [新隧道授权边界](security.md#openai-隧道需要显式授权绑定)。
 
 **官方限制：**单个请求从排队到回包最长 120 秒，请求或回包最大 10 MiB，每条隧道每分钟 600 次。
 gld 单次调用最多等 30 秒（经目标机的调用最多 60 秒）、回包最大 1 MiB，都在范围内。
@@ -483,7 +492,7 @@ Actions 那条线路的字段（端口、认证、隧道）写成 `actions.<字�
 
 **一把钥匙开所有项目的门。** 拿到服务凭据的人能进服务里的全部项目，调一次
 `list_workspaces` 就知道有哪几个。只想给别人开几个项目，用
-[gld grant](concepts.md#只开几个项目gld-grant) 发一把单独的口令或令牌。
+[gld grant](concepts.md#统一授权gld-grant) 的新模型与旧版本区别见概念文档。
 
 ## 老配置：经全局入口挂公网
 

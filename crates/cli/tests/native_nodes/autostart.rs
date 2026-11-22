@@ -1,5 +1,6 @@
 //! 服务模式的退出规则，以及自启动命令和服务管理器之间的步骤。launchctl、systemctl、loginctl 用桩代替：
 //! 测试不能往真实账号里装服务。真实服务管理器的结果记在审查里。
+//! D18-A 未开放原生节点授权；生命周期用不可达端点保持重试，只核验进程与配置锁，不冒充已上线。
 
 use super::*;
 
@@ -32,8 +33,8 @@ exit 0
 
 struct Fixture {
     hub: Env,
-    service: Service,
-    _relay: TlsRelay,
+    _service: Service,
+    relay: TlsRelay,
     machine: Env,
     config: PathBuf,
     stubs: tempfile::TempDir,
@@ -60,13 +61,22 @@ impl Fixture {
         }
         Self {
             hub,
-            service,
-            _relay: relay,
+            _service: service,
+            relay,
             machine,
             config,
             stubs,
             account: tempfile::tempdir().unwrap(),
         }
+    }
+
+    fn unreachable(name: &str) -> Self {
+        let fixture = Self::new(name);
+        let mut value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture.config).unwrap()).unwrap();
+        value["hub_url"] = json!(format!("https://localhost:{}", free_port()));
+        write_config(&fixture.machine, "node.json", &value);
+        fixture
     }
 
     fn cli(&self) -> Command {
@@ -133,12 +143,12 @@ fn parsed(output: &Output) -> Value {
 }
 
 #[test]
-fn enable_starts_the_node_and_enabling_again_replaces_it_without_a_second_connection() {
-    let fixture = Fixture::new("auto");
+fn enable_restarts_a_retrying_node_and_disable_releases_its_lock() {
+    let fixture = Fixture::unreachable("auto");
     let status = parsed(&fixture.autostart("enable"));
     assert_eq!(status["installed"], true);
     assert_eq!(status["running"], true);
-    wait_inventory(&fixture.service, 2, 2);
+    wait_running(&fixture.config);
 
     let definition = fixture.definition(&status);
     let text = std::fs::read_to_string(&definition).unwrap();
@@ -158,7 +168,7 @@ fn enable_starts_the_node_and_enabling_again_replaces_it_without_a_second_connec
     let again = parsed(&fixture.autostart("enable"));
     assert_eq!(again["running"], true);
     assert_ne!(fixture.pid().unwrap(), first, "enable should restart");
-    wait_inventory(&fixture.service, 2, 2);
+    wait_running(&fixture.config);
 
     let shown = parsed(&fixture.autostart("status"));
     assert_eq!(shown["installed"], true);
@@ -167,20 +177,25 @@ fn enable_starts_the_node_and_enabling_again_replaces_it_without_a_second_connec
     let disabled = parsed(&fixture.autostart("disable"));
     assert_eq!(disabled["removed"], true);
     assert!(!definition.exists());
-    wait_inventory(&fixture.service, 0, 2);
+    wait_until(
+        "disabled node should release the configuration lock",
+        || !gld_core::nodes::local_config::LocalConfig::in_use(&fixture.config).unwrap(),
+    );
+    assert_eq!(fixture.relay.connections(), 0);
+    assert_no_native_projects(&fixture.hub);
     let shown = parsed(&fixture.autostart("status"));
     assert_eq!(shown["installed"], false);
     assert_eq!(shown["running"], false);
     assert_eq!(parsed(&fixture.autostart("disable"))["removed"], false);
-    // 配置还在，能接着用前台跑。
+    // 配置还在；禁用自启动不删除节点配置。
     assert!(fixture.config.exists());
 }
 
 #[test]
 fn enable_refuses_while_a_foreground_node_is_running_and_installs_nothing() {
-    let fixture = Fixture::new("foreground");
+    let fixture = Fixture::unreachable("foreground");
     let mut node = NodeProcess::start(&fixture.machine, &fixture.config);
-    wait_inventory(&fixture.service, 2, 2);
+    wait_running(&fixture.config);
     let output = fixture.autostart("enable");
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
@@ -193,9 +208,9 @@ fn enable_refuses_while_a_foreground_node_is_running_and_installs_nothing() {
 
 #[test]
 fn leaving_removes_autostart_so_the_manager_cannot_restart_a_deleted_node() {
-    let fixture = Fixture::new("leaving");
+    let fixture = Fixture::unreachable("leaving");
     let status = parsed(&fixture.autostart("enable"));
-    wait_inventory(&fixture.service, 2, 2);
+    wait_running(&fixture.config);
     let left = fixture
         .cli()
         .args(["--json", "leave", "--yes", "--config"])
@@ -205,7 +220,11 @@ fn leaving_removes_autostart_so_the_manager_cannot_restart_a_deleted_node() {
     parsed(&left);
     assert!(!fixture.config.exists());
     assert!(!fixture.definition(&status).exists());
-    wait_inventory(&fixture.service, 0, 2);
+    assert!(
+        fixture.pid().is_none(),
+        "the service manager should stop the process"
+    );
+    assert_no_native_projects(&fixture.hub);
     assert!(fixture.calls().contains("bootout") || fixture.calls().contains("--user stop"));
 }
 
@@ -227,22 +246,22 @@ fn log_of(config: &Path) -> String {
 #[test]
 fn a_refused_service_keeps_trying_because_a_401_may_not_come_from_the_hub() {
     let fixture = Fixture::new("revoked");
-    let mut node = service_process(&fixture.machine, &fixture.config);
-    wait_inventory(&fixture.service, 2, 2);
-    wait_until("the log should say connected", || {
-        log_of(&fixture.config).contains("connected to the Hub")
-    });
     let machine: Value =
         serde_json::from_str(&std::fs::read_to_string(&fixture.config).unwrap()).unwrap();
     fixture
         .hub
         .ok(&["node", "revoke", machine["machine_id"].as_str().unwrap()]);
+    let mut node = service_process(&fixture.machine, &fixture.config);
     wait_until("the log should show the refusal", || {
         log_of(&fixture.config).contains("trying again in 600s")
     });
     let log = log_of(&fixture.config);
     assert!(log.contains("HTTP 401"), "{log}");
     assert!(log.contains("stopped this node's commands"), "{log}");
+    assert!(!log.contains(TOKEN_A), "{log}");
+    assert!(!log.contains("hunter2"), "{log}");
+    assert!(!log.contains("connected to the Hub"), "{log}");
+    assert_no_native_projects(&fixture.hub);
     assert!(node.0.as_mut().unwrap().try_wait().unwrap().is_none());
     node.stop();
 }
@@ -313,9 +332,9 @@ fn a_service_waits_for_a_missing_project_and_exits_only_when_the_config_is_gone(
 
 #[test]
 fn disable_will_not_claim_success_while_the_node_keeps_running() {
-    let fixture = Fixture::new("stubborn");
+    let fixture = Fixture::unreachable("stubborn");
     let status = parsed(&fixture.autostart("enable"));
-    wait_inventory(&fixture.service, 2, 2);
+    wait_running(&fixture.config);
     let definition = fixture.definition(&status);
     // 模拟连不上用户服务的会话：停止命令什么都没做。
     let pid = fixture.pid().unwrap();
@@ -351,9 +370,9 @@ fn a_failed_start_leaves_no_definition_behind() {
 
 #[test]
 fn leaving_while_a_foreground_node_runs_changes_nothing() {
-    let fixture = Fixture::new("busy");
+    let fixture = Fixture::unreachable("busy");
     let mut node = NodeProcess::start(&fixture.machine, &fixture.config);
-    wait_inventory(&fixture.service, 2, 2);
+    wait_running(&fixture.config);
     let left = fixture
         .cli()
         .args(["leave", "--yes", "--config"])

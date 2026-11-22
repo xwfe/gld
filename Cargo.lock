@@ -596,6 +596,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gld-agent"
+version = "0.10.1"
+dependencies = [
+ "gld-runtime",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "gld-core"
 version = "0.10.1"
 dependencies = [
@@ -604,9 +617,12 @@ dependencies = [
  "dirs",
  "fs2",
  "futures-util",
- "glob",
+ "gld-agent",
+ "gld-policy",
+ "gld-protocol",
+ "gld-runtime",
+ "gld-transport",
  "image",
- "jsonwebtoken",
  "libc",
  "percent-encoding",
  "regex",
@@ -622,12 +638,10 @@ dependencies = [
  "toexec-fs",
  "toexec-mcp",
  "toexec-skill",
- "toexec-text 0.1.0 (git+https://github.com/xwfe/toexec.git?tag=toexec-text-v0.1.0)",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
  "toml",
- "tower-http",
  "uuid",
  "walkdir",
  "which",
@@ -641,12 +655,85 @@ version = "0.10.1"
 dependencies = [
  "fs2",
  "gld-core",
+ "gld-host",
+ "gld-protocol",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "gld-host"
+version = "0.10.1"
+dependencies = [
+ "axum",
+ "base64",
+ "futures-util",
+ "gld-core",
+ "gld-protocol",
+ "jsonwebtoken",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-http",
+ "uuid",
+]
+
+[[package]]
+name = "gld-policy"
+version = "0.10.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gld-protocol"
+version = "0.10.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gld-runtime"
+version = "0.10.1"
+dependencies = [
+ "base64",
+ "fs2",
+ "gld-policy",
+ "gld-protocol",
+ "glob",
+ "image",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "tempfile",
+ "thiserror",
+ "toexec-fs",
+ "toexec-text 0.1.0 (git+https://github.com/xwfe/toexec.git?tag=toexec-text-v0.1.0)",
+ "tokio",
+ "uuid",
+ "walkdir",
+ "which",
+ "windows",
+]
+
+[[package]]
+name = "gld-transport"
+version = "0.10.1"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

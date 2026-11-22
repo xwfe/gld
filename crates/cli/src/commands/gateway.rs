@@ -1,6 +1,6 @@
-use gld_core::global_gateway::{GatewayHealthItem, GlobalGatewayStatusDto};
 use gld_core::settings::{FrpProfile, GlobalGatewayConfig};
 use gld_daemon::Request;
+use gld_daemon::{GatewayHealthItem, GlobalGatewayStatusDto};
 use serde_json::json;
 
 use super::Ctx;

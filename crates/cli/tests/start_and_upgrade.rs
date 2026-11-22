@@ -309,13 +309,17 @@ fn upgrade_replaces_the_public_entry_point() {
 fn upgrade_moves_the_project_and_the_running_service_follows() {
     let env = Env::new();
     env.write("marker.txt", "OLD\n");
-    let service = env.serve("mover", "noauth");
+    env.ok(&["add", ".", "--name", "mover"]);
 
     let moved = tempfile::tempdir().expect("moved project");
     std::fs::write(moved.path().join("marker.txt"), "NEW\n").expect("write marker");
     env.ok(&["upgrade", "mover", "--path", moved.path().to_str().unwrap()]);
 
-    let read = service.call_tool("read_file", serde_json::json!({ "path": "marker.txt" }));
+    let read = env.local_tool(
+        "mover",
+        "read_file",
+        serde_json::json!({ "path": "marker.txt" }),
+    );
     assert_eq!(read["content"], "NEW\n", "服务还在旧目录上跑：{read}");
 }
 

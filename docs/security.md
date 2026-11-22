@@ -1,78 +1,80 @@
 # 你到底暴露了什么
 
-`gld start` + 一条隧道，等于把一个**能在你电脑上跑命令、能读你电脑上文件**的
-接口挂到了公网——而且是**服务里的全部项目**一起挂上去。这篇把边界一条条说清楚：哪些是真的挡住了，哪些只是看起来像挡住了。
+gld 的文件策略和授权决定哪些工具可被调用，**不是操作系统沙箱**。获得命令执行能力后，
+子进程能访问什么最终由运行 gld 的系统账号决定。
 
-先记住一句话：**gld 的权限模型是一层静态策略，不是操作系统沙箱。**
-它能挡住"模型手滑"，挡不住"有人拿到 token 后存心搞你"。
+> **新授权的客户端接入仍在分步实现。** 新授权模型、独立存储、身份隔离和三类材料创建/轮换已有内核用例，
+> 有效的新 API token 已可通过宿主 HTTP MCP 完成认证；MCP OAuth、URL、未绑定隧道与原生节点工具尚未接通；不能把这版源码作为完整接入版本部署。
+> 当前运行中的旧版本未因源码提交而改变。统一接入契约见 [RFC-0015](rfc/0015-unified-client-access.md)，阶段状态见 [task_plan](../task_plan.md)。
 
 ## 一分钟自查
 
 ```bash
-gld status                 # 服务在不在跑、有没有公网地址；各项目的 GPT Actions
-gld ls                     # 客户端要用的地址、认证方式、公网入口和项目表（--reveal 才显示凭据）
-gld doctor                 # 配置自洽性；noauth 挂公网这类会报 ✗
+gld status                 # 监听状态、公网入口与 Actions 状态
+gld grant ls               # 新授权的元数据；空列表不开放任何网络权限
+gld doctor                 # 配置与运行状态检查
 ```
 
-`gld ls` 里 **公网地址** 那一行一旦不是 `-`（或者公网入口是 OpenAI 隧道、某个项目的 GPT Actions 配了公网），
-下面的内容就跟你有关。
+监听端口可达、GET 发现文档成功和完成授权是不同的状态。当前源码仅接受已经由可信应用创建的新 token：
+Bearer 验证失败返回 401；旧 OAuth／隧道入口继续返回 `503 / AUTH_NOT_READY`，不执行工具。
+Actions 继续使用独立的项目身份与认证流程。
 
-## 拿到 token 的人能做什么
+## 新授权模型的权限边界
 
-以默认配置（工具集 `compact`、`permission-mode=trusted`、
-`gld planning mode direct`）为准：
+以下是新模型的能力约束；API token HTTP 逐请求验证已接通，OAuth access/refresh、URL Origin 和隧道绑定仍需 B3。
 
-| 能力 | 范围 | 说明 |
-| --- | --- | --- |
-| 执行命令 | 工作目录选在项目内；子进程访问范围由操作系统账号决定 | 白名单里有 `python` / `node` / `cargo` / `make` / `git`，**等于以你的身份执行任意代码，不限于这个目录**。拿不到名字像密钥的环境变量（[见下](#项目命令拿不到名字像密钥的环境变量)）。原生 API 支持 `cmd` 或 `argv`；两种形式权限一样，只是参数编码不同，客户端是否支持须看它实际发现的 schema |
-| 读文件 | 项目目录内 | 0.3.0 起默认收紧，见下 |
-| 写文件 | 项目目录内 | 绝对路径和 `..` 都会被拒；`.git/` 一律不写，`.github/` 分情况，见下 |
-| 读 Git 历史 | 项目目录内 | status / diff / log / show / blame。项目是某个仓库的子目录时只看这个子目录（2026-09-24 之前看的是整个仓库，兄弟目录的提交和未提交改动都读得到） |
+| 能力 | 必须同时满足 |
+| --- | --- |
+| 读项目文件与 Git | Grant 的动态全部项目或指定稳定 ID 范围、当前 Hub 成员、项目工具与路径策略 |
+| 写文件与执行命令 | 另需显式 write；执行环境、审批与写锁继续约束，不提供系统账号隔离 |
+| 用户级 Prompt | 显式 user_prompts 服务能力；项目 Prompt 按项目范围判断 |
+| 本机 MCP 发现 / 调用 | 显式 machine_mcp；实际调用另需 write，不信任外部 readOnlyHint 放宽授权 |
+| 托管工作区 | 显式 managed_workspaces、write 与服务开关；空间仍按完整 CallerId 归属 |
+| 委派 Agent | OAuth/token 的项目写权限和既有审批；URL 与 Actions 不取得该能力 |
 
-**开了本机 MCP server 的（`gld mcp on`），拿到 token 的人还能调它们**，范围由 server
-自己决定，不受任何项目的读写限制：开了 Filesystem 就是它配的那些目录，开了
-desktop-commander 就是以你的身份跑任意命令，开了不带 `cwd` 的 Playwright MCP，AI 能把你主目录下的任何文件经网页的文件框传出去
-（[怎么配隔离的](concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。默认一个都不开；只放 context7、deepwiki
-这种只查资料的就够用。工具集是 `read-only` 的服务一个都不转。事后查 AI 经转发调过哪些工具：
-`grep relay= ~/.config/gld/logs/hub/mcp-requests.log`（0.8.3 起记 server 和工具名，不记参数）。详见
-[concepts.md](concepts.md#本机装好的-mcp-server)。**项目的 `read-only` 或 Planning 不是本机 MCP
-的权限边界**：这三个服务级工具没有 `workspace`，必须单独评估。服务整体的 `read-only`
-会关闭转发，不能把某个项目只读误认为整台机器只读。
+`AllProjects` 包含当前及以后登记的项目，不扫描硬盘、不包含其他主体的托管空间，
+也不附赠写权限或服务级能力。限定项目使用稳定 ID；同名重建的项目不能继承旧 Selected 授权。
+网络 MCP 必须有有效 GrantId；缺失 grant 不表示全权，本地操作员使用独立身份。
 
-**服务的凭据管的是它的全部项目。** 上表对服务里的**每一个项目**都成立——每个项目
-自己的工具集、白名单、读限制照样生效，但拿服务口令或服务令牌进来的，能进项目表里的每一个。
-要给别人或另一个客户端只开几个项目，发一把 grant，别把服务口令给出去，见
-[concepts.md](concepts.md#只开几个项目gld-grant)。**只读的 grant（默认）才是真的挡得住的范围。**
-`--write` 的能跑命令，而命令能以你的身份读到数据目录里的服务口令（下面说的那几道门只管文件类
-工具），所以它等于全权。
+新授权文件位于数据目录的 `access/v1/grants.json`，只保存验证摘要和必要元数据。
+应用独占写者锁，保存成功后才发布新的只读快照。旧 AppData 的 grants 原样保留为不透明数据，
+不参与认证、不转换、不自动删除；损坏的新文件也不会回退到旧授权。管理列表不返回秘密或摘要。
+新文件缺失且旧授权非空时，管理读取明确要求重建；显式首次创建不会被该提示阻断，
+也不会把旧授权当作默认 All。创建失败保留未初始化状态；合法空新文件优先于遗留数据。
+
+创建和轮换只在原子保存成功后返回新秘密。轮换持有同一写锁，读取当前权限后只替换材料并递增修订号；
+并发轮换不会回写旧权限，撤销与轮换竞争不会复活授权。默认范围和期限见 [统一授权](concepts.md#统一授权gld-grant)。
+
+core 的 token 验证每次读取最新已提交授权，不沿用连接建立时的权限快照；用途、期限、轮换和撤销都重新判断。
+此接口已验证存储与工具边界，HTTP 适配仍待接通，不能据此把当前服务当作可用的新 token 入口。
+
+命令会话、运行记录和自己的文件版本链按稳定 CallerId 隔离。它不包含可变权限、名称或凭据修订号；
+OAuth client_id 和 Actions workspace_id 都是主体隔离的一部分。共用同一 API token 的人仍是同一主体。
+授权模型及源码位置见 [统一授权](concepts.md#统一授权gld-grant)。
 
 ### 浏览器专用地址也是凭据
 
-`gld grant browser` 给只能填 URL 的客户端（SuperAssistant）发一个短期地址 `/mcp/browser/<随机密钥>`：
-只开点名的项目，默认只读，默认 8 小时、最长 24 小时。每次请求都重新核对密钥摘要、有效期、grant 还在不在、
-请求的 Origin；范围和工具权限跟普通 grant 一样。这把密钥只在 `/mcp/browser/…` 认，拿它当标准 `/mcp`
-的 bearer 令牌会 401。浏览器 grant 的口令和 bearer 字段是空的，就算回滚到不认识它的旧版本，也不会凭空多出一条能用的认证路径。
+新 URL 方案使用 `/mcp/connect/<secret>`，只服务于只能填写 URL 的客户端。
+它仍需有效 Grant，并额外限制期限、Origin、委派和服务能力；Origin 不是认证凭据。
+原始秘密仅在创建或轮换成功时交付，Debug 和解析错误不包含它；HTTP 适配必须设置 no-store/no-referrer。
 
-原始地址只在创建时显示一次，数据文件里存的是 SHA-256 摘要，`grant ls --reveal` 找不回来。gld 的请求日志不记密钥和路径，
-这个入口的响应带 `Cache-Control: no-store` 和 `Referrer-Policy: no-referrer`。管不到的是客户端：SuperAssistant
-会把整串地址存下来，侧栏和调试日志也可能显示。别贴进对话或截图；走自建反代时让访问日志别记 `/mcp/browser/` 后面那段，
-跨机器只用 HTTPS。
+core 已签发和轮换 URL 材料；完整地址交付与 HTTP 新路径仍待接通，旧 `/mcp/browser/…` 不保留别名。
+期限、Origin、轮换和撤销的真实 HTTP 正向验收必须在 B3/E 完成，不能把 CORS 预检成功当作已授权。
+客户端保存或展示完整地址时仍可能泄露秘密；新接入完成后跨机器使用 HTTPS。
 
-到期只拦后面的请求，不会杀掉之前起的命令；要立刻停，用 `gld grant rm`，它会一起停掉这把 grant 起的命令。
-带 `--write` 的照样能以你的账号跑命令，有效期短不等于有隔离。接法见
-[DeepSeek 网页与 SuperAssistant](connect-clients.md#deepseek-网页与-superassistant)。
+### OpenAI 隧道需要显式授权绑定
 
-### OpenAI 隧道：能选到隧道的人就有服务凭据
+隧道负责传输，专用头或隧道密钥不再直接取得服务全权。
+后续绑定必须明确指向 token 类型 GrantId 和凭据修订号，并与隧道来源能力取交集；
+缺少绑定或轮换后仍使用旧修订都应拒绝。当前源码中正确的旧隧道密钥也返回 AUTH_NOT_READY。
 
-`--tunnel openai:<隧道 ID>` 时，tunnel-client 给每个转发进来的请求带上服务凭据 `openai_tunnel_key`，
-gld 认出它就按服务凭据放行，**不管服务的认证方式是什么**。能把请求送进这条隧道的，是关联了它的
-ChatGPT 工作区里、能选到它建连接器的人（OpenAI 那边按 Tunnels Use 权限管）。个人账号就是你自己；
-团队或企业工作区先确认只有你有这条隧道的 Use 权限，否则同事建个连接器就能进你的全部项目。
-
-Runtime Key 只能用来跑这条隧道，拿到它的人能顶替你的 tunnel-client 接 ChatGPT 的请求，但进不了 gld；
-`openai_tunnel_key` 才是进 gld 的那把，它只在本机，`gld secret regen openai_tunnel_key` 随时换。
+Runtime Key、隧道传输证明和工具授权是不同的材料；日志不打印这些秘密。
+当前测试分别检查发现文档的监听探针、真正 MCP 初始化被拒绝、失败进程清理和文件无副作用。
 
 ### 原生节点：目标机认 Hub 靠钉住的公钥，不只靠证书
+
+当前 D18-A 保留配对、密钥证明和传输完整性检查；旧 metadata 不再映射成授权主体。
+新身份转发在 D18-C 完成前，节点工具调用明确拒绝。以下说明签名机制本身的边界。
 
 目标机执行的是 Hub 发来的调用，所以“谁是 Hub”和“调用有没有被改过”都要它自己核对。
 Hub 有一把节点专用的 Ed25519 私钥；公钥写在邀请令牌最后一段（预置登记的输出里也有），配对时存进目标机配置的 `hub_public_key`。
@@ -119,16 +121,17 @@ gld set <项目> confine-reads=false      # GPT Actions 那条线路写全 actio
 
 **gld 自己的数据目录是另一道独立的门**（`~/.config/gld`，或 `GLD_HOME` 指的地方），
 **关掉上面那个开关也读不到**，返回 `GLD_DATA_HOME_DENIED`。
-因为 `~/.config/gld/data/profiles.json` 里明文存着服务的 `bearer_token`、
-`oauth_password` 和每个项目的 `actions_api_key`——不挡的话，读到一个文件就等于
-拿到了你全部连接器的钥匙。数据目录里还有命令的运行记录（`runs/`，每条命令原样的
+配置文件仍保存 Actions 等用途的秘密，旧 MCP 凭据可能作为停用数据留在其中；
+新授权摘要与元数据另存在 `GLD_HOME/access/v1/grants.json`，不会从旧字段恢复权限。
+这些文件都不应由项目文件工具读取。数据目录里还有命令的运行记录（`runs/`，每条命令原样的
 输出，不脱敏），同样挡着，谁的记录只有谁经 `read_output` 读得到。
 
 **通用任务空间只把它自己的工作目录作为例外。** 开启 `work_session` 后，文件工具可读写
 `GLD_HOME/work/<返回ID>/`；不能借此读其他空间、登记元数据或 `data/profiles.json`。
-入口默认关闭，只向完整且已认证的服务主体提供，项目只读/可写 grant 均不扩大为通用任务权限。
+入口默认关闭；新模型要求 AllProjects、write 和显式 `managed_workspaces` 服务能力，
+再与服务开关和工具档取交集。普通项目范围或 write 本身不附带这项能力。
 创建者由已验证的连接身份决定，客户端不能指定 owner 或根路径；普通工具按该身份和完整 ID 再检查一次。
-不同 OAuth 客户端可分开，共用 bearer 或同一客户端凭据的聊天仍是同一主体，任务 ID 不是 OS 隔离。
+同一 grant 下不同 OAuth client_id 分开，共用同一 token 或 URL 凭据的客户端仍是同一主体；任务 ID 不是 OS 隔离。
 guarded 命令检查和 confined 文件读写继续生效，但任意子进程仍按服务账号运行；需要更强边界应使用独立账号或容器。
 产物接口按登记 ID 检查归属，不开放任意数据目录路径；文件要先复制、核验再登记，收尾失败保留源。
 图片预览同样先检查归属和校验值，再从已核验字节识别/解码；读取字节、图像尺寸、像素和输出均有上限。
@@ -139,15 +142,15 @@ guarded 命令检查和 confined 文件读写继续生效，但任意子进程�
 
 归档回执同样属于服务元数据，按调用主体检查，不能通过修改文件工具的根目录访问。
 只识别主登记目录的旧程序看不到新归档，因此回退前应核对布局并备份；不删除回执来绕过不兼容。
-容量配置只允许本机操作员修改，MCP 的 capacity 只给完整认证主体汇总数量和字节，不列其他主体的文件。
+容量配置只允许本机操作员修改，MCP 的 capacity 使用同一托管空间能力检查，只汇总数量和字节，不列其他主体的文件。
 字节预算是创建与复制的准入检查，并非对子进程的硬配额；具体统计边界仍只在 concepts 对应章节维护。
 
 **一个窄口子：`get_skill` 的 `file`。**用户级 skill（`~/.claude/skills/<名字>/`）的正文常写"跑 scripts/x.py"，而上面那道门挡住了模型去读。`get_skill` 可以读**这个 skill 自己目录里**的文件，别的一概不行：`..`、绝对路径、指到目录外面的软链、点开头的文件（`.env` 这类）都拒，gld 数据目录照旧挡；一次最多 256 KiB 文本。项目外的 skill，**只有来源是你明确配置的**（`gld cfg runtime --skill-sources claude`）或者你已经关了 confine-reads 才读——默认的 auto 扫描扫到的只给正文、不给文件。skill 目录是链到别处的链接时，读的是链接指向的那个目录；指向主目录本身或文件系统根的不给目录（那等于把整个主目录当成"这个 skill 的文件"）。规则和 ccnm 的 `load_skill` 是同一份（toexec-skill 的 `dir` 模块）。不想让任何主目录里的 skill 被读到（连正文）：`gld cfg runtime --skill-sources disabled`。
 
 **另一个固定范围的只读入口：`prompt_manage`。**默认只读取项目中的
-`.agents/prompts/*.md`；只有已认证且**不使用项目 grant** 的完整主体（或本机 CLI）
-才可按列出的名称/ID 读取 `~/.agents/prompts/*.md`。匿名连接、项目只读/可写 grant
-以及浏览器 grant 都不能读取全局 Prompt，显式请求 `scope=global` 返回
+`.agents/prompts/*.md`；本机操作员，或显式具有 `user_prompts` 服务能力的 AllProjects 主体，
+才可按列出的名称/ID 读取 `~/.agents/prompts/*.md`。缺少该能力、Selected、Actions
+以及 URL 凭据均不能读取全局 Prompt，显式请求 `scope=global` 返回
 `PROMPT_SCOPE_FORBIDDEN`。该工具不接受任意路径，限制首层 Markdown、128 KiB/文件，
 拒绝符号链接与隐藏文件；读取内容仅是用户素材，不自动成为系统指令或运行授权。
 它与 Skill 附件的权限是两套明确限制，不扩展普通 `read_file` 的范围。
@@ -382,82 +385,60 @@ mcp.allowed-commands=only:cargo,git    只有 cargo、git，外加基础诊断�
 直接指向远端项目那条路。**要是你确实把 `ssh` 加进了白名单**，那就是放开了任意远端 shell：
 gld 不限制目标主机、不限制远端执行什么，也挡不住端口转发。这一点没有中间档。
 
-### 4. 认证别用 noauth
+### 4. 网络入口必须绑定明确授权
+
+每个网络 MCP 请求都必须由新 grant 验证；OAuth、专用 token 和 URL 使用同一权限模型。
+AllProjects 默认覆盖当前与以后登记的项目，write 和服务能力仍须单独授予。
+回环地址、隧道密钥、缺少 grant 或旧服务口令都不建立本机操作员身份；MCP 的 noauth 配置拒绝。
+
+专用 API token 已接入 HTTP 并逐请求验证当前授权；错误 token 返回 401，单项目越权返回 403。
+MCP OAuth、URL、未绑定隧道仍明确拒绝，不能从旧服务口令回退为本机操作员。
+不要通过更换旧 bearer_token、启用匿名配置或复制旧 grant 来尝试恢复访问。
+接入方式和后续命令见 [统一授权](concepts.md#统一授权gld-grant) 与 [RFC-0015](rfc/0015-unified-client-access.md)。
+
+### 5. 按 grant 轮换与撤销
+
+新模型按 GrantId 管理生命周期：轮换替换验证材料并递增修订号，保留主体与会话归属；
+撤销先持久化，再回收该 grant 的资源。OAuth 材料轮换已递增修订；B3 必须让旧修订的 access/refresh 同步拒绝，
+不能把只换确认口令当作完整 OAuth 失效验收。应用层创建/轮换已具备，统一 CLI 待 D；当前 `grant ls` 只显示元数据，
+`grant rm` 撤销新存储中的授权；停用的旧创建/reveal 路径不会生成或找回秘密。
+
+Actions 使用独立凭据，仍按项目管理，例如：
 
 ```bash
-gld upgrade --auth bearer      # 或 oauth（默认）
-gld secret regen bearer_token  # 换一把新钥匙，旧的立即失效
+gld secret regen actions_api_key -w api
 ```
 
-`noauth` 只适合"纯本机、且你信任本机上跑的所有程序"。
-
-**开了隧道还用 noauth，绑 127.0.0.1 一点用都没有**——隧道进程就是从
-127.0.0.1 把端口转出去的。服务挂了任何一种公网入口时，gld 直接拒绝改成 `noauth`；
-开了局域网访问还用 noauth，`gld doctor` 报 ✗。
-
-bearer 认证下 token 丢了（手工编辑、旧备份缺字段），服务起来时会当场补一个新的，
-`gld secret ls bearer_token --reveal` 看得到——不会起一个谁都拿 401 的服务。
-
-### 5. 定期换密钥
-
-```bash
-gld secret regen bearer_token
-gld secret regen oauth_password
-```
-
-服务会自动带着新值重启。两把钥匙的影响范围不一样，别搞混：
-
-- `bearer_token` 旧值立即失效，用它的客户端全要更新配置。
-- `oauth_password` **只管"下次授权时填什么"**。已经授权过的客户端照常能用——
-  口令换掉不等于把它们踢下线。
-
-**要把已经授权出去的客户端全部踢掉，换的是签名密钥：**
-
-```bash
-gld secret regen oauth_token_secret
-```
-
-这一条把已经发出去的访问令牌和刷新令牌一起作废，每个客户端都得重新授权
-（ChatGPT 那边不用删连接器，它会自己弹出重新授权，输一次口令）。
-笔记本丢了、把公网地址发错了群、怀疑令牌外泄——用这一条，别去改口令。
-
-口令、token 也可以自己定：`gld secret set oauth_password <你记得住的口令>`。
-项目自己留着的那几把（GPT Actions 用的）加 `-w <项目>`：`gld secret regen actions_api_key -w api`，
-它们和服务的凭据互不影响。
-
-> 为什么不能靠"把注册的客户端删掉"来吊销：ChatGPT 这类连接器注册的是
-> **公共客户端**（OAuth 术语，指没有客户端密钥、只靠 PKCE 的客户端），
-> 它的身份就写在刷新令牌里，拿到令牌的人本来就能续命。真正的开关只有签名密钥。
+它不建立 MCP grant，也不改变其他项目或本机操作员的身份。
+要撤销哪类访问，应操作对应凭据，不能把服务签名密钥当作所有主体的唯一管理开关。
 
 ## 密钥存在哪、丢了会怎样
 
-全部在 `~/.config/gld/data/profiles.json`，明文，文件权限 600（创建时就设好了）。
-浏览器 grant 例外：同一个文件里只存它的密钥摘要、到期时间和允许的 Origin，原始地址找不回来。
-服务一套（4 把，第一次起服务时生成；用了 Cloudflare 固定域名再加一个 Tunnel Token）+
-每个项目 7 把（GPT Actions 用的，以前单项目服务也用它们）+ 一个共享池。
+新授权使用 `GLD_HOME/access/v1/grants.json`，只保存摘要、范围、服务能力、状态、用途与修订号等元数据。
+原始秘密不能通过列表或磁盘反查。当前格式缺字段、版本未知或数据损坏时明确拒绝，
+不会读旧 grants 兜底，也不会自动补出全权授权。该文件丢失后必须重建新授权。
 
-这些值是随机生成的，**没有第二份副本**。文件丢了 = 每个 ChatGPT 连接器、
-每个自定义 GPT 都要重新配一遍。用了原生节点还多一把 `node_hub_key`（Hub 向目标机证明身份的私钥），
-丢了或换了，每台目标机都要重新 `gld join`。
+`~/.config/gld/data/profiles.json` 继续保存项目配置和 Actions 等用途的秘密，文件权限为 600。
+旧 MCP grant 和服务认证字段可能留在配置原件中，但不再作为新授权来源。
+原生节点还使用 `node_hub_key` 证明 Hub 身份；丢失或更换后，需要重新建立各目标机的信任。
 
-旁边还有一个 `data/oauth-clients/hub.json`，记的是各个客户端动态注册时
-领走的 client_id 和回调地址（confidential 客户端还有 client_secret，同样 600 权限）。ChatGPT 连接器
-用的就是这里面那个 `dcr-…`，不是 `gld ls` 显示的 Client ID。它只影响"重启后要不要重新授权"，
-丢了不致命：已经发出去的令牌照常能刷新，只是下次重新授权时客户端要重新注册一次。
+`data/oauth-clients/hub.json` 保存动态注册的 client_id 与回调地址；confidential 客户端的
+client_secret 也在对应注册表中，文件同样为 600。保留这些注册记录可以复用 client_id，
+不等于继续接受旧 access 或 refresh。新 OAuth 的实际接入仍由 B 阶段完成。
 
-这个文件读不了、解析不了时，gld 不会把它当空表再写回去覆盖掉：原文件留着，新注册暂停（回 503），
-已经连着的客户端照常用；修好文件后 `gld restart` 重启服务才会重新读。写盘失败的那次注册不算数，同样回 503，
-不会出现"客户端拿到了 client_id、重启后却查无此人"。满 50 个注册后拒绝新的，不挤掉旧的。
-（`data/oauth-clients/<项目id>.json` 是以前单项目服务的，删项目时一起删。）
+注册表读取或解析失败时保留原文件，拒绝新注册，不把损坏表当空表覆盖；写盘失败也不返回成功注册。
+现有 Actions OAuth 验证要求客户端仍在对应注册表中。满 50 个注册后拒绝新增，不挤掉旧记录。
+`data/oauth-clients/<项目id>.json` 属于对应项目，删除项目时一并清理。
 
 从 0.3.0 起，`profiles.json` 解析失败时 gld 会整体停机并保留原文件，而不是当成
 "还没配过"然后把空白配置写回去。（旧版会：截断一个字节，下一条命令就把所有
 密钥抹掉，全程没提示。）真遇到了，报错里会给三条出路。
 
-想留个后手就自己备份：
+备份要包含整个数据目录，才能同时保存配置、新授权存储和 OAuth 注册表；仅复制 profiles.json 不再完整。
+以下是默认目录的示例，使用自定义 GLD_HOME 时改为对应目录，备份文件按凭据保管：
 
 ```bash
-cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
+tar -czf gld-state-backup.tgz -C ~/.config gld
 ```
 
 ## 本机 IPC 通道
@@ -474,8 +455,8 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
   `mcp.confine-reads` 只管文件类工具，管不住子进程。
 - **`.git` 保护只挡文件工具和明显的命令模式。**绕过方式存在：脚本存成文件再跑、`os.system('cp …')`、`subprocess.run([…])`、`'.'+'git'` 这样拼路径，都看不见。
 - **`only:git` 不等于只能跑 git。**配置那条挡的是常见的键，`git rebase --exec`、`git fetch --upload-pack=…`、`git bisect run` 这些参数没拦，它们一样能跑程序。真要隔离用系统账号或容器。
-- **老的全局入口不做认证。** 它只转发，`/hub` 由服务自己认证（挂公网的服务改不成
-  `noauth`），`/w/<id>/actions` 由那个项目的 GPT Actions 认证。
+- **全局网关只转发。** `/hub` 必须通过 MCP 授权入口；有效的新 API token 可通过当前验证，其他方式仍待接通。
+  `/w/<id>/actions` 由那个项目的 Actions 认证，网关不会将它提升为服务身份。
 - **公网地址是靠请求头推断的**（服务没配公网入口时）。这是给"你自己架
   nginx / cloudflared 反代"用的。全局入口那条路已经不再透传公网来的
   `X-Forwarded-*`，直连仍然认——因为反代场景需要它。
@@ -515,12 +496,12 @@ cp ~/.config/gld/data/profiles.json ~/.config/gld/data/profiles.json.bak
   根本不存在"长得一模一样。gld 重启后从运行记录读也是同一个规矩：记录里存的是
   主体标识（不含令牌），对不上就当没有。
 
-  分得开的：不同的 OAuth 客户端（每个注册客户端一个身份）；不同的 grant（bearer、浏览器地址都算，
-  每把 grant 一个身份）；服务和项目的 GPT Actions（两套凭据本来就不通）；命令行和任何网络连接。
+  MCP 按 GrantId 和 OAuth client_id 等稳定主体字段隔离；重命名、范围或权限变化、凭据轮换
+  不另建主体。Actions 把稳定项目 ID 纳入身份，同一凭据种类不会使两个项目共用命令会话。
+  本机操作员使用单独的显式身份，不由网络请求缺少某个字段推导。
 
-  **分不开的**：`auth_type=noauth` 下连上来的所有人——匿名就是没身份，同一个
-  端口上谁都是同一个主体；共用一条 bearer 令牌的多个客户端也一样。要让两个
-  客户端真的互相看不见对方的命令，得给它们各注册一个 OAuth 客户端，或者各发一把 grant。
+  同一入口下共用同一 token 或 URL 凭据的客户端仍是同一个主体；共用同一 OAuth client_id
+  和 grant 的聊天也不能凭聊天窗口区分。需要独立归属，就分别签发 grant 或使用不同的 OAuth 客户端。
 
 ## 相关文档
 

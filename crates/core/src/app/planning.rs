@@ -1,37 +1,35 @@
-use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 use super::App;
 use crate::error::{AppError, AppResult};
 use crate::planning::{
-    Goal, GoalStatus, Plan, PlanStatus, PlanStepStatus, PlanningMode, PlanningService,
-    PlanningState,
+    Goal, GoalStatus, Plan, PlanStatus, PlanningMode, PlanningService, PlanningState,
 };
 
-/// 对计划中一个步骤的状态更新。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanStepUpdate {
-    pub step_id: String,
-    pub status: PlanStepStatus,
-    #[serde(default)]
-    pub notes: Option<String>,
-}
+pub use gld_protocol::planning::PlanStepUpdate;
 
 impl App {
     pub fn planning_state(&self, id: &str) -> AppResult<PlanningState> {
         self.planning_service(id)?.state()
     }
 
-    /// 切换 Direct / Plan / Goal 模式；进入 Plan 模式时杀掉工作区里仍在运行的命令会话。
-    ///
-    /// 杀会话要同步等进程退出（内部 `block_on`），而守护进程处理请求时在 tokio 异步线程上。
-    /// 直接调会 panic（"Cannot start a runtime from within a runtime"）：模式已经切过去了，
-    /// 命令却还在跑，用户只看到一句"守护进程内部出错"。所以杀会话放进 `spawn_blocking`。
-    pub async fn set_planning_mode(
+    pub async fn set_planning_mode_local(
         &self,
         id: &str,
         mode: PlanningMode,
+    ) -> AppResult<PlanningState> {
+        self.set_planning_mode_with_cleanup(id, mode, |path| {
+            Ok(crate::tools::workspace_runtime::runtime_for(path).terminate_all_sessions())
+        })
+        .await
+    }
+
+    /// 先保存模式；进入 Plan 模式时，再清理仍在运行的命令会话。
+    pub async fn set_planning_mode_with_cleanup(
+        &self,
+        id: &str,
+        mode: PlanningMode,
+        cleanup: impl FnOnce(&Path) -> Result<usize, String> + Send + 'static,
     ) -> AppResult<PlanningState> {
         let path = self.workspace_root(id)?;
         let state = PlanningService::new(&path).set_mode(mode)?;
@@ -41,12 +39,11 @@ impl App {
                     "已切到 plan 模式，但停止工作区里还在跑的命令时出错：{error}"
                 ))
             };
-            tokio::task::spawn_blocking(move || {
-                crate::generation::exec::terminate_workspace_sessions(&path)
-            })
-            .await
-            .map_err(|error| failed(error.to_string()))?
-            .map_err(failed)?;
+            // 清理会同步等待进程退出，不能在 Tokio 异步线程上阻塞。
+            tokio::task::spawn_blocking(move || cleanup(&path))
+                .await
+                .map_err(|error| failed(error.to_string()))?
+                .map_err(failed)?;
         }
         Ok(state)
     }

@@ -11,8 +11,11 @@ use crate::agent_context::{
 };
 use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
-use crate::tools::workspace::{relative_display, Workspace};
 use crate::tools::workspace_runtime::WorkspaceRuntime;
+use crate::tools::{
+    new_workspace,
+    workspace::{relative_display, Workspace},
+};
 use crate::usage::ServiceUsage;
 use crate::workspace::AuthConfig;
 
@@ -66,7 +69,7 @@ pub struct ToolContext {
     /// 管不到什么。
     ///
     /// **会话表不在这儿，要用得带上调用方主体去 `runtime` 取**
-    /// （`runtime.sessions_for(caller)`）。上下文是按入口建的，主体是按连接
+    /// （`runtime.sessions_for(auth.id())`）。上下文是按入口建的，主体是按连接
     /// 来的——放上下文上，一个入口的所有连接就共用一张表，谁都能读谁的命令
     /// 输出。
     pub runtime: Arc<WorkspaceRuntime>,
@@ -78,7 +81,7 @@ pub type SharedToolContext = Arc<ToolContext>;
 
 impl ToolContext {
     pub fn new(workspace_path: PathBuf) -> Result<Self, String> {
-        let workspace = Workspace::new(workspace_path).map_err(|e| e.message())?;
+        let workspace = new_workspace(workspace_path).map_err(|e| e.message())?;
         let auth = AuthConfig {
             auth_type: "noauth".into(),
             ..AuthConfig::default()
@@ -149,7 +152,7 @@ impl ToolContext {
     }
 
     pub fn for_test(workspace_path: PathBuf, harness_root: PathBuf) -> Result<Self, String> {
-        let workspace = Workspace::new(workspace_path).map_err(|e| e.message())?;
+        let workspace = new_workspace(workspace_path).map_err(|e| e.message())?;
         Self::from_workspace_with_harness_root(
             workspace,
             AuthConfig {
@@ -189,12 +192,12 @@ impl ToolContext {
         self
     }
 
-    pub(crate) fn with_usage(mut self, usage: Arc<ServiceUsage>) -> Self {
+    pub fn with_usage(mut self, usage: Arc<ServiceUsage>) -> Self {
         self.usage = usage;
         self
     }
 
-    pub(crate) fn usage(&self) -> Arc<ServiceUsage> {
+    pub fn usage(&self) -> Arc<ServiceUsage> {
         self.usage.clone()
     }
 
@@ -432,7 +435,7 @@ mod tests {
         let bad_harness_root = blocker.join("harness");
 
         let result = ToolContext::from_workspace_with_harness_root(
-            Workspace::new(workspace.path().to_path_buf()).expect("workspace"),
+            Workspace::new(workspace.path().to_path_buf(), Vec::new()).expect("workspace"),
             AuthConfig::default(),
             PolicySettings::default(),
             "full".into(),

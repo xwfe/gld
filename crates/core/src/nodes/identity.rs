@@ -1,184 +1,75 @@
-//! 已认证 Hub 在 params._meta 中传递调用方；身份从不取自工具 arguments。
+//! 原生节点的调用方必须由完整的受限身份协议验证；旧 metadata 不构成授权。
 
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use super::config::{valid_id, validate_workspace_ids};
-use crate::auth::{AuthContext, Grant, Principal};
+use crate::auth::AuthContext;
 
 pub const META_KEY: &str = "gld.node";
 /// 经节点进来的调用方的入口名，和 [`crate::hub::HUB_SCOPE`] 分开。
 pub const NODE_SCOPE: &str = "node";
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ForwardedCaller {
-    hub_id: String,
-    subject: String,
+/// D18-C 接入 grant、主体与有效权限的完整绑定前，不发送旧版裸主体 metadata。
+pub fn forwarded_meta(_auth: &AuthContext, _hub_id: &str) -> Result<Value, String> {
+    Err(
+        "Native node authorization requires scoped identity forwarding, which is not supported yet"
+            .into(),
+    )
 }
 
-/// 返回整个 _meta；调用者须替换外部 metadata，不能合并其中的身份。
-pub fn forwarded_meta(auth: &AuthContext, hub_id: &str) -> Result<Value, String> {
-    if !auth.is_authenticated() || auth.grant().is_some() {
-        return Err("Native nodes require full service authentication".into());
-    }
-    let subject = auth.tag();
-    if !valid_id(hub_id) || !valid_subject(&subject) {
-        return Err("Invalid node caller identity".into());
-    }
-    Ok(json!({ META_KEY: ForwardedCaller { hub_id: hub_id.into(), subject } }))
-}
-
-/// 仅在已认证到预置 Hub 的节点 socket 上调用。
+/// 配对 Hub 的消息签名只证明发送者，不能替代本次工具调用的主体与权限。
+/// 在新协议落地前，空、非法和旧版 metadata 都必须拒绝。
 pub fn auth_from_meta(
-    params: &Value,
-    expected_hub_id: &str,
-    shared_ids: &[String],
-    writable_ids: &[String],
+    _params: &Value,
+    _expected_hub_id: &str,
+    _shared_ids: &[String],
+    _writable_ids: &[String],
 ) -> Result<AuthContext, String> {
-    validate_workspace_ids(shared_ids)?;
-    if !writable_ids.is_empty() {
-        validate_workspace_ids(writable_ids)?;
-    }
-    if writable_ids.iter().any(|id| !shared_ids.contains(id)) {
-        return Err("Writable node projects must be explicitly shared".into());
-    }
-    let caller: ForwardedCaller = serde_json::from_value(
-        params
-            .get("_meta")
-            .and_then(|v| v.get(META_KEY))
-            .cloned()
-            .ok_or("Trusted node caller metadata is required")?,
-    )
-    .map_err(|_| "Invalid trusted node caller metadata")?;
-    if !valid_id(expected_hub_id)
-        || caller.hub_id != expected_hub_id
-        || !valid_subject(&caller.subject)
-    {
-        return Err("Invalid trusted node caller metadata".into());
-    }
-    // Tuple 编码避免分隔符碰撞；node 作用域与本机/MCP 调用方分开。
-    let client_id = serde_json::to_string(&(expected_hub_id, caller.subject))
-        .map_err(|_| "Cannot encode node caller identity")?;
-    // Hub 已把句柄改为目标完整 ID。名称、前缀及外部 metadata 都不能给本次调用加写权。
-    let writable = params
-        .pointer("/arguments/workspace")
-        .and_then(Value::as_str)
-        .is_some_and(|id| writable_ids.iter().any(|allowed| allowed == id));
-    Ok(
-        AuthContext::new(Principal::OAuthClient { client_id }, NODE_SCOPE).with_grant(Some(
-            Grant {
-                id: format!("node-share-{expected_hub_id}"),
-                name: "Explicit node project share".into(),
-                workspaces: shared_ids.to_vec(),
-                read_only: !writable,
-                browser: false,
-            },
-        )),
-    )
-}
-
-fn valid_subject(subject: &str) -> bool {
-    !subject.is_empty() && subject.len() <= 4096 && !subject.chars().any(char::is_control)
+    Err("Native node caller authorization is unavailable; legacy metadata is not accepted".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::Caller;
+    use serde_json::json;
+
     const HUB: &str = "11111111111111111111111111111111";
     const OTHER: &str = "22222222222222222222222222222222";
     const PROJECT: &str = "33333333333333333333333333333333";
 
-    fn owner(id: &str) -> AuthContext {
-        AuthContext::new(
-            Principal::OAuthClient {
-                client_id: id.into(),
-            },
-            "hub",
-        )
-    }
-
-    fn forwarded(id: &str, hub: &str) -> AuthContext {
-        auth_from_meta(
-            &json!({"_meta":forwarded_meta(&owner(id), hub).unwrap()}),
-            hub,
-            &[PROJECT.into()],
-            &[],
-        )
-        .unwrap()
+    #[test]
+    fn local_operator_cannot_be_serialized_as_a_network_caller() {
+        assert!(forwarded_meta(&AuthContext::local_operator(), HUB).is_err());
     }
 
     #[test]
-    fn forwarded_callers_are_stable_and_separate_hubs_and_clients() {
-        let alice = Caller::from_auth(&forwarded("alice", HUB));
-        assert_eq!(alice, Caller::from_auth(&forwarded("alice", HUB)));
-        assert_ne!(alice, Caller::from_auth(&forwarded("bob", HUB)));
-        assert_ne!(alice, Caller::from_auth(&forwarded("alice", OTHER)));
-        assert_ne!(alice, Caller::from_auth(&owner("alice")));
-        assert_ne!(alice, Caller::local());
-        assert!(!alice.may_read_user_prompts());
-        let grant = alice.grant().unwrap();
-        assert!(grant.read_only && grant.allows(PROJECT));
-        assert!(!grant.allows(OTHER));
-    }
-
-    #[test]
-    fn anonymous_and_grant_subjects_cannot_be_forwarded() {
-        assert!(forwarded_meta(&AuthContext::anonymous("hub"), HUB).is_err());
-        assert!(forwarded_meta(&forwarded("alice", HUB), HUB).is_err());
-    }
-
-    #[test]
-    fn metadata_is_required_bound_and_not_read_from_arguments() {
-        let meta = forwarded_meta(&owner("alice"), HUB).unwrap();
-        let ids = vec![PROJECT.into()];
-        assert!(auth_from_meta(&json!({"arguments":{"_meta":meta}}), HUB, &ids, &[]).is_err());
-        assert!(auth_from_meta(&json!({"_meta":meta}), OTHER, &ids, &[]).is_err());
-        let mut extra = meta.clone();
-        extra[META_KEY]["grant"] = json!({"read_only":false});
-        assert!(auth_from_meta(&json!({"_meta":extra}), HUB, &ids, &[]).is_err());
-    }
-
-    #[test]
-    fn file_write_permission_requires_an_exact_locally_selected_project() {
-        let meta = forwarded_meta(&owner("alice"), HUB).unwrap();
-        let shared = vec![PROJECT.into(), OTHER.into()];
-        let writable = vec![PROJECT.into()];
-        let request = |workspace: Value| json!({"name":"apply_patch", "arguments":{"workspace":workspace}, "_meta":meta});
-        let writer = auth_from_meta(&request(json!(PROJECT)), HUB, &shared, &writable).unwrap();
-        assert!(!writer.grant().unwrap().read_only);
-        assert!(!Caller::from_auth(&writer).may_read_user_prompts());
-        for workspace in [json!(OTHER), json!("api"), json!("3333"), Value::Null] {
-            let reader = auth_from_meta(&request(workspace), HUB, &shared, &writable).unwrap();
-            assert!(reader.grant().unwrap().read_only);
-            assert_eq!(
-                reader.tag(),
-                writer.tag(),
-                "permission does not change the verified subject"
-            );
+    fn missing_and_invalid_metadata_are_rejected() {
+        for params in [
+            Value::Null,
+            json!({}),
+            json!({"_meta":null}),
+            json!({"_meta":{META_KEY:"invalid"}}),
+        ] {
+            assert!(auth_from_meta(&params, HUB, &[PROJECT.into()], &[]).is_err());
         }
-        assert!(
-            auth_from_meta(&request(json!(PROJECT)), HUB, &shared, &[])
-                .unwrap()
-                .grant()
-                .unwrap()
-                .read_only
-        );
-        assert!(auth_from_meta(
-            &request(json!(PROJECT)),
-            HUB,
-            &[PROJECT.into()],
-            &[OTHER.into()]
-        )
-        .is_err());
-        let forged = json!({"name":"apply_patch", "arguments":{"workspace":OTHER,"writable_workspaces":[OTHER]}, "_meta":meta});
-        assert!(
-            auth_from_meta(&forged, HUB, &shared, &writable)
-                .unwrap()
-                .grant()
-                .unwrap()
-                .read_only
-        );
+    }
+
+    #[test]
+    fn legacy_subject_metadata_cannot_create_a_project_grant() {
+        let meta = json!({META_KEY:{"hub_id":HUB,"subject":"hub:secret"}});
+        for params in [
+            json!({"_meta":meta}),
+            json!({"arguments":{"workspace":PROJECT,"_meta":meta}}),
+            json!({"_meta":meta,"arguments":{"workspace":PROJECT,"writable_workspaces":[PROJECT]}}),
+        ] {
+            assert!(auth_from_meta(&params, HUB, &[PROJECT.into()], &[PROJECT.into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn wrong_hub_and_invalid_shares_do_not_bypass_refusal() {
+        let params = json!({"_meta":{META_KEY:{"hub_id":HUB,"subject":"hub:secret"}}});
+        assert!(auth_from_meta(&params, OTHER, &[PROJECT.into()], &[]).is_err());
+        assert!(auth_from_meta(&params, HUB, &[], &[PROJECT.into()]).is_err());
+        assert!(auth_from_meta(&params, HUB, &[PROJECT.into()], &[OTHER.into()]).is_err());
     }
 }

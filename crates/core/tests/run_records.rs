@@ -9,7 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gld_core::tools::{call_tool, Caller, ToolContext};
+use gld_core::tools::{call_tool, ToolContext};
+use gld_policy::CallerId;
 use serde_json::{json, Value};
 
 struct Fixture {
@@ -146,8 +147,8 @@ fn a_background_command_is_recorded_when_it_ends_not_when_it_is_read() {
 #[cfg(unix)]
 #[test]
 fn another_caller_cannot_read_my_run_record() {
-    use gld_core::auth::{AuthContext, Principal};
     use gld_core::tools::call_tool_as;
+    use gld_policy::{ActionsSubject, AuthContext};
     let fx = fixture();
     script(&fx.workspace, "tick", "echo 只给我看\nexec sleep 30");
     let started = call_tool(
@@ -158,12 +159,15 @@ fn another_caller_cannot_read_my_run_record() {
     let session = session_id(&started);
     call_tool(&fx.ctx, "kill_session", &json!({"session_id": session}));
 
-    let stranger = Caller::from_auth(&AuthContext::new(
-        Principal::OAuthClient {
+    let stranger = AuthContext::actions(
+        "hub",
+        "test-project",
+        ActionsSubject::OAuth {
             client_id: "stranger".into(),
         },
-        "hub",
-    ));
+        true,
+    )
+    .unwrap();
     let theirs = call_tool_as(
         &fx.ctx,
         &stranger,
@@ -277,7 +281,7 @@ fn task_with_a_finished_background_command(fx: &Fixture, cmd: &str) -> (String, 
 /// 把会话从内存表里拿掉，**不经过 call_tool**：经 call_tool 的 kill_session 本身就会被任务
 /// 那边"看到结局"，之后再从记录读就测不到记录那条路了（独立审查发现原来的写法有这个问题）。
 fn forget_in_memory(fx: &Fixture, session: &str) {
-    let store = fx.ctx.runtime.sessions_for(&Caller::local());
+    let store = fx.ctx.runtime.sessions_for(&CallerId::local_operator());
     gld_core::tools::session::kill_session(&store, &json!({"session_id": session}))
         .expect("从内存拿掉");
 }
@@ -451,18 +455,21 @@ fn my_runs_are_listed_newest_first_and_their_refs_read_back() {
 #[cfg(unix)]
 #[test]
 fn another_caller_lists_none_of_my_runs_not_even_a_count() {
-    use gld_core::auth::{AuthContext, Principal};
     use gld_core::tools::call_tool_as;
+    use gld_policy::{ActionsSubject, AuthContext};
     let fx = fixture();
     script(&fx.workspace, "ok", "echo 只给我看");
     run_to_end(&fx, "./ok");
 
-    let stranger = Caller::from_auth(&AuthContext::new(
-        Principal::OAuthClient {
+    let stranger = AuthContext::actions(
+        "hub",
+        "test-project",
+        ActionsSubject::OAuth {
             client_id: "stranger".into(),
         },
-        "hub",
-    ));
+        true,
+    )
+    .unwrap();
     let theirs = call_tool_as(&fx.ctx, &stranger, "list_runs", &json!({}));
     assert_eq!(theirs["ok"], true, "{theirs}");
     assert_eq!(theirs["total"], 0, "{theirs}");

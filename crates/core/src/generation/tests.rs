@@ -1,8 +1,12 @@
 use super::wire::{
-    read_frame, FrameWriter, GenerationFrame, HostFrame, Op, WireAuth, MAX_FRAME_BYTES,
+    auth_from_wire, auth_to_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, Op,
+    WireAuth, WireCredentialKind, WireGrantStatus, WireProjectScope, MAX_FRAME_BYTES,
 };
 use super::*;
-use crate::auth::{AuthContext, Grant, Principal};
+use gld_policy::{
+    ActionsSubject, AuthContext, CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject,
+    ProjectScope,
+};
 
 fn identity() -> BuildIdentity {
     BuildIdentity {
@@ -15,61 +19,99 @@ fn identity() -> BuildIdentity {
     }
 }
 
-#[test]
-fn only_a_matching_protocol_and_state_format_is_usable() {
-    assert_eq!(identity().incompatibility(), None);
-    let newer = BuildIdentity {
-        generation_protocol: GENERATION_PROTOCOL + 1,
-        ..identity()
-    };
-    assert!(newer.incompatibility().unwrap().contains("协议"));
-    let older = BuildIdentity {
-        generation_protocol: GENERATION_PROTOCOL_MIN - 1,
-        ..identity()
-    };
-    assert!(older.incompatibility().is_some());
-    let other_state = BuildIdentity {
-        state_format: STATE_FORMAT + 1,
-        ..identity()
-    };
-    assert!(other_state.incompatibility().unwrap().contains("状态格式"));
-}
-
-/// `Grant::browser` 标了 serde(skip)。直接序列化会丢，浏览器地址进来的 grant 到了执行代
-/// 就成了能委派全权 Agent 的 grant，这是一次权限提升，不是展示问题。
-#[test]
-fn the_browser_flag_of_a_grant_survives_the_private_channel() {
-    let grant = Grant {
-        id: "g".into(),
-        name: "n".into(),
-        workspaces: vec!["w".into()],
-        read_only: false,
-        browser: true,
-    };
-    let auth = AuthContext::new(Principal::SharedSecret, "hub").with_grant(Some(grant));
-    let wire = serde_json::to_string(&WireAuth::from(&auth)).unwrap();
-    let back = serde_json::from_str::<WireAuth>(&wire).unwrap().into_auth();
-    assert_eq!(back, auth);
-    assert!(!back.grant().unwrap().may_delegate());
+fn grant() -> Grant {
+    Grant {
+        id: "grant-id".into(),
+        name: "client".into(),
+        scope: ProjectScope::AllProjects,
+        permissions: GrantPermissions::default(),
+        status: GrantStatus::Active,
+    }
 }
 
 #[test]
-fn every_principal_keeps_its_identity_across_the_channel() {
-    for auth in [
-        AuthContext::anonymous("hub"),
-        AuthContext::new(Principal::SharedSecret, "hub"),
-        AuthContext::new(
-            Principal::OAuthClient {
+fn every_network_identity_keeps_its_authority_across_the_private_channel() {
+    let subjects = [
+        (
+            CredentialKind::OAuth,
+            McpSubject::OAuth {
                 client_id: "c1".into(),
             },
-            "hub",
         ),
-        AuthContext::new(Principal::OpenAiTunnel, "hub"),
-    ] {
-        let wire = serde_json::to_string(&WireAuth::from(&auth)).unwrap();
-        let back = serde_json::from_str::<WireAuth>(&wire).unwrap().into_auth();
+        (CredentialKind::Token, McpSubject::Token),
+        (CredentialKind::Url, McpSubject::Url),
+        (
+            CredentialKind::Token,
+            McpSubject::Tunnel {
+                binding_id: "binding-id".into(),
+            },
+        ),
+    ];
+    for (kind, subject) in subjects {
+        let auth = AuthContext::verified_mcp("hub", grant(), kind, subject).unwrap();
+        let encoded = serde_json::to_string(&auth_to_wire(&auth).unwrap()).unwrap();
+        let back = auth_from_wire(serde_json::from_str::<WireAuth>(&encoded).unwrap()).unwrap();
         assert_eq!(back, auth);
-        assert_eq!(back.tag(), auth.tag());
+        assert_eq!(back.id(), auth.id());
+        assert!(!back.is_local_operator());
+        assert!(!back.may_read_user_prompts());
+    }
+    for subject in [
+        ActionsSubject::Anonymous,
+        ActionsSubject::ApiKey,
+        ActionsSubject::OAuth {
+            client_id: "c1".into(),
+        },
+    ] {
+        let auth = AuthContext::actions("workspace-a", "project-a", subject, true).unwrap();
+        let encoded = serde_json::to_string(&auth_to_wire(&auth).unwrap()).unwrap();
+        let back = auth_from_wire(serde_json::from_str::<WireAuth>(&encoded).unwrap()).unwrap();
+        assert_eq!(back, auth);
+        assert!(back.allows_project("project-a"));
+        assert!(!back.allows_project("project-b"));
+        assert!(!back.may_manage_workspaces());
+    }
+    assert!(auth_to_wire(&AuthContext::local_operator()).is_err());
+}
+
+#[test]
+fn url_authority_cannot_turn_into_delegation_on_the_private_channel() {
+    let mut grant = grant();
+    grant.permissions.write = true;
+    let auth =
+        AuthContext::verified_mcp("hub", grant, CredentialKind::Url, McpSubject::Url).unwrap();
+    let back = auth_from_wire(auth_to_wire(&auth).unwrap()).unwrap();
+    assert!(!back.read_only());
+    assert!(!back.may_delegate());
+    assert!(!back.may_use_machine_mcp());
+}
+
+#[test]
+fn malformed_or_revoked_authority_is_refused_at_the_receiver() {
+    let auth = AuthContext::verified_mcp("hub", grant(), CredentialKind::Token, McpSubject::Token)
+        .unwrap();
+    for case in 0..5 {
+        let mut wire = auth_to_wire(&auth).unwrap();
+        let WireAuth::Mcp {
+            grant,
+            credential_kind,
+            ..
+        } = &mut wire
+        else {
+            panic!("MCP fixture")
+        };
+        match case {
+            0 => grant.status = WireGrantStatus::Revoked,
+            1 => grant.id.clear(),
+            2 => grant.scope = WireProjectScope::Selected(vec![]),
+            3 => *credential_kind = WireCredentialKind::OAuth,
+            4 => {
+                grant.scope = WireProjectScope::Selected(vec!["project-a".into()]);
+                grant.permissions.service.user_prompts = true;
+            }
+            _ => unreachable!(),
+        }
+        assert!(auth_from_wire(wire).is_err(), "case {case}");
     }
 }
 
@@ -106,29 +148,6 @@ fn writer_bytes(writer: FrameWriter<Vec<u8>>) -> Vec<u8> {
     writer.into_inner()
 }
 
-/// 内容嵌套到 serde 的递归上限也不能让帧本身解析失败：解析不了就拿不到 id，对面只能永远等。
-#[test]
-fn deep_content_never_breaks_the_frame_itself() {
-    let depth = 200;
-    let deep = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
-    let line = serde_json::to_string(&HostFrame::Call {
-        id: 9,
-        op: deep.clone(),
-    })
-    .unwrap();
-    let HostFrame::Call { id, op } = serde_json::from_str(&line).unwrap() else {
-        panic!("{line}");
-    };
-    assert_eq!((id, op), (9, deep));
-    let line = serde_json::to_string(&GenerationFrame::Reply {
-        id: 9,
-        ok: true,
-        value: "[".repeat(depth),
-    })
-    .unwrap();
-    assert!(serde_json::from_str::<GenerationFrame>(&line).is_ok());
-}
-
 /// 对端发一条没有换行的巨型消息时要报错，不能一直攒到把内存吃光。
 #[test]
 fn an_oversized_frame_is_an_error_not_a_memory_leak() {
@@ -144,9 +163,17 @@ fn an_oversized_frame_is_an_error_not_a_memory_leak() {
 #[test]
 fn a_workspace_has_one_owner_key_however_its_path_is_written() {
     let root = tempfile::tempdir().unwrap();
-    let plain = router::root_key(root.path());
-    let dotted = router::root_key(&root.path().join("."));
+    let plain = root_key(root.path());
+    let dotted = root_key(&root.path().join("."));
     assert_eq!(plain, dotted);
+    assert_eq!(plain, router::root_key(root.path()));
+}
+
+#[test]
+fn an_unavailable_root_keeps_its_original_owner_key() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing");
+    assert_eq!(root_key(&missing), missing.display().to_string());
 }
 
 /// 只有确定没发出去的才能叫客户端重试：其余的工具可能已经跑过了。

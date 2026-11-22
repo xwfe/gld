@@ -1,48 +1,53 @@
-//! OpenAI 隧道：gld 托管 `tunnel-client run`，经它进来的请求靠服务凭据 `openai_tunnel_key` 放行。
-//!
-//! 假 tunnel-client 学真的那几步（对着 openai/tunnel-client v0.0.18 源码）：把 `--mcp.extra-headers`
-//! 里 `env:` 引用的值取出来，带着它给服务发一次 `initialize`，再在 `--health.listen-addr` 上答
-//! `/readyz`——探测成功是 200 `ready`，拿到 401 时也是 200，正文是 `ready (mcp initialize requires auth: …)`。
+//! D18-A: a tunnel's transport credentials do not authorize MCP requests.
+//! One fixture probes GET discovery solely to test process arguments and cleanup.
+//! The authorization fixture performs a real MCP initialize and must fail with 503.
 
 #![cfg(unix)]
 
 mod common;
 
 use common::env::{free_port, Env};
-use common::http::request;
+use common::http::{get, request, Reply};
 
 const TUNNEL_ID: &str = "tunnel_0123456789abcdef0123456789abcdef";
 
-/// `send_key` 为 false 时假装带了一把错的请求头。
-fn fake_tunnel_client(seen: &std::path::Path, send_key: bool) -> String {
+/// `probe_mcp=false` tests listener/process plumbing only; it never reports MCP authentication.
+fn fake_tunnel_client(seen: &std::path::Path, probe_mcp: bool) -> String {
     format!(
         r#"#!/usr/bin/env python3
 import json, os, sys, http.server, urllib.request, urllib.error
 args = sys.argv[1:]
 def flag(name):
     return [args[i + 1] for i, a in enumerate(args) if a == name and i + 1 < len(args)]
-with open({seen:?}, "w") as f:
-    json.dump({{"pid": os.getpid(), "args": args,
-               "runtime_key": os.environ.get("GLD_OPENAI_RUNTIME_KEY"),
-               "tunnel_key": os.environ.get("GLD_OPENAI_TUNNEL_KEY"),
-               "no_proxy": os.environ.get("NO_PROXY", "")}}, f)
+observed = {{"pid": os.getpid(), "args": args,
+            "runtime_key": os.environ.get("GLD_OPENAI_RUNTIME_KEY"),
+            "tunnel_key": os.environ.get("GLD_OPENAI_TUNNEL_KEY"),
+            "no_proxy": os.environ.get("NO_PROXY", ""),
+            "probe_kind": "mcp_initialize" if {probe_mcp} else "listener_discovery"}}
 name, value = flag("--mcp.discovery-extra-headers")[0].split(": ", 1)
 if value.startswith("env:"):
     value = os.environ.get(value[4:], "")
-if not {send_key}:
-    value = "wrong"
-body = json.dumps({{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {{
-    "protocolVersion": "2025-06-18", "capabilities": {{}},
-    "clientInfo": {{"name": "fake-tunnel", "version": "0"}}}}}}).encode()
-probe = urllib.request.Request(flag("--mcp.server-url")[0], data=body, headers={{
-    name: value, "Content-Type": "application/json",
-    "Accept": "application/json, text/event-stream"}})
+headers = {{name: value, "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"}}
+if {probe_mcp}:
+    body = json.dumps({{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{
+        "protocolVersion":"2025-06-18","capabilities":{{}},
+        "clientInfo":{{"name":"fake-tunnel","version":"0"}}}}}}).encode()
+    probe = urllib.request.Request(flag("--mcp.server-url")[0], data=body, headers=headers)
+else:
+    probe = urllib.request.Request(flag("--mcp.server-url")[0], headers=headers)
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
 try:
-    opener.open(probe, timeout=5).read()
-    status = "ready"
+    with opener.open(probe, timeout=5) as response:
+        observed["probe_status"] = response.status
+        observed["probe_body"] = response.read().decode()
+    status = "ready" if {probe_mcp} else "ready (listener discovery only)"
 except urllib.error.HTTPError as error:
+    observed["probe_status"] = error.code
+    observed["probe_body"] = error.read().decode()
     status = "ready (mcp initialize requires auth: %d)" % error.code if error.code == 401 else "mcp probe failed: %d" % error.code
+with open({seen:?}, "w") as f:
+    json.dump(observed, f)
 host, port = flag("--health.listen-addr")[0].rsplit(":", 1)
 class Health(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -56,11 +61,11 @@ class Health(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer((host, int(port)), Health).serve_forever()
 "#,
         seen = seen.display().to_string(),
-        send_key = if send_key { "True" } else { "False" },
+        probe_mcp = if probe_mcp { "True" } else { "False" },
     )
 }
 
-fn initialize_with(port: u16, key: &str) -> u16 {
+fn initialize_with(port: u16, key: &str) -> Reply {
     let body = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -77,7 +82,6 @@ fn initialize_with(port: u16, key: &str) -> u16 {
         ],
         &body,
     )
-    .status
 }
 
 fn process_alive(pid: u64) -> bool {
@@ -89,10 +93,12 @@ fn process_alive(pid: u64) -> bool {
 }
 
 #[test]
-fn openai_tunnel_runs_tunnel_client_and_lets_its_requests_in() {
+fn tunnel_process_arguments_and_cleanup_do_not_grant_mcp_authority() {
     let mut env = Env::new();
     let seen = env.home.path().join("tunnel-client-seen.json");
-    env.fake_binary("tunnel-client", &fake_tunnel_client(&seen, true));
+    env.fake_binary("tunnel-client", &fake_tunnel_client(&seen, false));
+    env.write("unchanged.txt", "tunnel-private-marker\n");
+    env.ok(&["add", ".", "--name", "tunnel"]);
     let port = free_port();
     let tunnel = format!("openai:{TUNNEL_ID}");
     let state = env.json(&[
@@ -137,6 +143,8 @@ fn openai_tunnel_runs_tunnel_client_and_lets_its_requests_in() {
     );
     assert!(!joined.contains("fixture-runtime-key"), "{joined}");
     assert_eq!(seen_json["runtime_key"], "fixture-runtime-key");
+    assert_eq!(seen_json["probe_kind"], "listener_discovery");
+    assert_eq!(seen_json["probe_status"], 200);
     let tunnel_key = env.service_secret("openai_tunnel_key");
     assert!(!tunnel_key.is_empty());
     assert_eq!(seen_json["tunnel_key"], tunnel_key.as_str());
@@ -149,20 +157,44 @@ fn openai_tunnel_runs_tunnel_client_and_lets_its_requests_in() {
         "{seen_json}"
     );
 
-    // 服务还是 oauth：带对请求头的进得来，带错的照样 401。
+    // A successful listener probe says nothing about MCP authority.
     assert_eq!(state["service"]["config"]["authType"], "oauth");
-    assert_eq!(initialize_with(port, &tunnel_key), 200);
-    assert_eq!(initialize_with(port, "wrong"), 401);
+    for key in [tunnel_key.as_str(), "wrong"] {
+        let refused = initialize_with(port, key);
+        assert_eq!(refused.status, 503, "{}", refused.body);
+        assert_eq!(refused.json()["error"], "AUTH_NOT_READY");
+        assert!(!refused.body.contains(key));
+    }
+    let write = request(port, "POST", "/mcp", &[
+        ("Content-Type", "application/json"), ("X-Gld-Tunnel-Key", tunnel_key.as_str())
+    ], &serde_json::json!({
+        "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"apply_patch","arguments":{
+                "workspace":"tunnel",
+                "patch":"*** Begin Patch\n*** Add File: forbidden.txt\n+blocked\n*** End Patch\n"
+            }
+        }
+    }).to_string());
+    assert_eq!(write.status, 503, "{}", write.body);
+    assert_eq!(write.json()["error"], "AUTH_NOT_READY");
+    assert!(!env.project.path().join("forbidden.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(env.project.path().join("unchanged.txt")).unwrap(),
+        "tunnel-private-marker\n"
+    );
+    let log = std::fs::read_to_string(env.home.path().join("logs/hub/mcp-requests.log")).unwrap();
+    assert!(!log.contains(&tunnel_key));
+    assert!(!log.contains("fixture-runtime-key"));
 
     let listing = env.ok(&["ls"]);
     assert!(
         listing.contains(&format!("OpenAI 隧道 {TUNNEL_ID}")),
         "{listing}"
     );
-    assert!(listing.contains("Connection 选 Tunnel"), "{listing}");
-    assert!(!listing.contains("还没有公网地址"), "{listing}");
+    assert!(!listing.contains("fixture-runtime-key"));
+    assert!(!listing.contains(&tunnel_key));
 
-    // 隧道 ID 和 Runtime Key 都存下了：不带参数再 share 一次照样起得来。
+    // Stored transport settings can relaunch the listener-only fixture; this is not an MCP success.
     env.ok(&["share", "--tunnel", "openai"]);
 
     let pid = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&seen).unwrap())
@@ -178,12 +210,12 @@ fn openai_tunnel_runs_tunnel_client_and_lets_its_requests_in() {
     assert!(!process_alive(pid), "服务停了，tunnel-client 还在");
 }
 
-/// 探测拿 401 时真的 tunnel-client 也报 200，gld 得从正文认出来，不能说起好了。
+/// A real initialize probe gets 503 even with the configured tunnel header; startup must fail.
 #[test]
 fn a_tunnel_whose_probe_is_refused_is_reported_and_the_service_keeps_running() {
     let mut env = Env::new();
     let seen = env.home.path().join("tunnel-client-seen.json");
-    env.fake_binary("tunnel-client", &fake_tunnel_client(&seen, false));
+    env.fake_binary("tunnel-client", &fake_tunnel_client(&seen, true));
     let port = free_port();
     let output = env.gld_with_env(
         &[
@@ -198,16 +230,34 @@ fn a_tunnel_whose_probe_is_refused_is_reported_and_the_service_keeps_running() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("没认出"), "{stderr}");
+    assert!(
+        stderr.contains("503") && stderr.contains("tunnel-client"),
+        "{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-from-env"));
     assert!(!stderr.contains("fixture-from-env"), "凭据泄露：{stderr}");
     // Runtime Key 取自环境变量 CONTROL_PLANE_API_KEY 并存下了。
     assert_eq!(env.service_secret("openai_runtime_key"), "fixture-from-env");
     let state = env.json(&["--json", "ls"]);
     assert_eq!(state["service"]["state"], "running", "{state}");
-    let pid = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&seen).unwrap())
-        .unwrap()["pid"]
-        .as_u64()
-        .unwrap();
+    let observed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+    assert_eq!(observed["probe_kind"], "mcp_initialize");
+    assert_eq!(observed["probe_status"], 503);
+    let probe_body: serde_json::Value =
+        serde_json::from_str(observed["probe_body"].as_str().unwrap()).unwrap();
+    assert_eq!(probe_body["error"], "AUTH_NOT_READY");
+    let tunnel_key = env.service_secret("openai_tunnel_key");
+    assert!(!stderr.contains(&tunnel_key));
+    assert_eq!(
+        get(port, "/mcp").status,
+        200,
+        "the local listener was stopped with the failed tunnel"
+    );
+    let refused = initialize_with(port, &tunnel_key);
+    assert_eq!(refused.status, 503);
+    assert_eq!(refused.json()["error"], "AUTH_NOT_READY");
+    let pid = observed["pid"].as_u64().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while process_alive(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));

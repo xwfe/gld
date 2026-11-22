@@ -12,7 +12,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, protocol::Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use crate::auth::{AuthContext, Grant, Principal};
 use crate::bridge::peer::PROTOCOL_VERSION;
 use crate::hub::Hub;
 use crate::tools::workspace::{tool_err_code, wrap_tool_result};
@@ -135,7 +134,7 @@ fn node_request(
         .websocket_url()?
         .into_client_request()
         .map_err(|_| "invalid node WebSocket endpoint".to_string())?;
-    let mut credential: axum::http::HeaderValue =
+    let mut credential: tokio_tungstenite::tungstenite::http::HeaderValue =
         format!("Bearer {}", config.credential)
             .parse()
             .map_err(|_| "invalid node credential header".to_string())?;
@@ -367,16 +366,6 @@ fn ca_connector(config: &NodeConfig) -> Result<Option<Connector>, String> {
     .with_root_certificates(roots)
     .with_no_client_auth();
     Ok(Some(Connector::Rustls(Arc::new(tls))))
-}
-
-fn control_auth(config: &NodeConfig) -> AuthContext {
-    AuthContext::new(Principal::SharedSecret, "node-control").with_grant(Some(Grant {
-        id: "node-control".into(),
-        name: "node project inventory".into(),
-        workspaces: config.workspaces.clone(),
-        read_only: config.writable_workspaces.is_empty(),
-        browser: false,
-    }))
 }
 
 /// 节点自己拼的控制和错误回复都很小；超限说明代码出错，按不可重试处理。
@@ -681,14 +670,25 @@ where
                 Err(_) => {
                     send_response(
                         &mut socket,
-                        rpc_error(&body, -32602, "Trusted node caller metadata required"),
+                        rpc_error(&body, -32602, "Native node caller authorization is unavailable; legacy metadata is not accepted"),
                     )
                     .await?;
                     continue;
                 }
             }
         } else {
-            control_auth(config)
+            send_response(
+                &mut socket,
+                rpc_error(
+                    &body,
+                    -32602,
+                    "Native node authorization protocol is not supported yet",
+                ),
+            )
+            .await?;
+            return Err(Failure::permanent(
+                "node inventory requires scoped authorization; legacy control credentials are not accepted",
+            ));
         };
         let tool_call = method == "tools/call";
         let handler = hub.clone();

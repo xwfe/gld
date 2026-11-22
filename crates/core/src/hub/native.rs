@@ -53,10 +53,6 @@ impl Hub {
         )
     }
 
-    pub fn nodes(&self) -> Arc<Nodes> {
-        self.nodes.clone()
-    }
-
     /// 节点复用真实的只读工具表，再单独允许文件补丁和跑命令；策略分类表还含会执行命令的检查。
     /// 这里只按工具名判断整台节点开不开，具体项目在 `call_local` 里再判一次。
     pub(super) fn node_tool_allowed(&self, name: &str) -> bool {
@@ -120,7 +116,7 @@ impl Hub {
         &self,
         info: &mut Value,
         member: &WorkspaceProfile,
-        grant: Option<&Grant>,
+        auth: &AuthContext,
     ) {
         if !matches!(self.members, Members::Node(_)) {
             return;
@@ -129,7 +125,7 @@ impl Hub {
             return;
         };
         let runs = self.node_project_runs_commands(member);
-        let shown = |name: &str| self.exposes(name, grant) && (runs || !runs_commands(name));
+        let shown = |name: &str| self.exposes(name, auth) && (runs || !runs_commands(name));
         tools.retain(|name| name.as_str().is_some_and(shown));
         let read_only = !tools.iter().any(|name| name == "apply_patch");
         let count = tools.len();
@@ -215,10 +211,35 @@ pub(super) fn project_instructions(context: &SharedToolContext) -> String {
         .join("\n\n")
 }
 
+/// 本地权限交集测试直接注入验证后的上下文；不经过或模拟尚未实现的节点转发协议。
+#[cfg(test)]
+fn verified_project_caller(who: &str, projects: Vec<String>, write: bool) -> AuthContext {
+    use gld_policy::{
+        CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject, ProjectScope,
+    };
+    AuthContext::verified_mcp(
+        crate::nodes::identity::NODE_SCOPE,
+        Grant {
+            id: "node-policy-test".into(),
+            name: "Node policy test".into(),
+            scope: ProjectScope::Selected(projects),
+            permissions: GrantPermissions {
+                write,
+                ..Default::default()
+            },
+            status: GrantStatus::Active,
+        },
+        CredentialKind::OAuth,
+        McpSubject::OAuth {
+            client_id: who.into(),
+        },
+    )
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::Principal;
 
     fn native() -> Member {
         Member::Native(NativeMember {
@@ -233,18 +254,11 @@ mod tests {
     }
 
     #[test]
-    fn native_members_require_full_auth_even_if_a_grant_names_their_id() {
-        assert!(visible_for(vec![native()], &AuthContext::anonymous("hub")).is_empty());
-        let full = AuthContext::new(Principal::SharedSecret, "hub");
-        assert_eq!(visible_for(vec![native()], &full).len(), 1);
-        let grant = Grant {
-            id: "grant".into(),
-            name: "grant".into(),
-            workspaces: vec!["n_example".into()],
-            read_only: false,
-            browser: false,
-        };
-        assert!(visible_for(vec![native()], &full.with_grant(Some(grant))).is_empty());
+    fn native_members_wait_for_scoped_forwarding_even_when_the_grant_names_them() {
+        let local = AuthContext::local_operator();
+        assert_eq!(visible_for(vec![native()], &local).len(), 1);
+        let client = verified_project_caller("client", vec!["n_example".into()], true);
+        assert!(visible_for(vec![native()], &client).is_empty());
     }
 
     #[test]

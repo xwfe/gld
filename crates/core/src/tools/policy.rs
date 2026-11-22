@@ -302,6 +302,20 @@ impl PolicyError {
     }
 }
 
+impl From<crate::tools::command_spec::CommandSpecError> for PolicyError {
+    fn from(error: crate::tools::command_spec::CommandSpecError) -> Self {
+        use crate::tools::command_spec::CommandSpecReason;
+
+        let reason = match error.reason {
+            CommandSpecReason::MissingCommand => PolicyReason::MissingCommand,
+            CommandSpecReason::ConflictingCommandForms => PolicyReason::ConflictingCommandForms,
+            CommandSpecReason::InvalidSyntax => PolicyReason::InvalidSyntax,
+            CommandSpecReason::CommandTooLong => PolicyReason::CommandTooLong,
+        };
+        Self::new(reason, error.message)
+    }
+}
+
 /// 配成"只允许这些"的前缀。见 [`merge_default_allowed_commands`]。
 pub const ONLY_PREFIX: &str = "only:";
 
@@ -1298,7 +1312,7 @@ mod tests {
     fn trusted_mode_accepts_an_extensionless_workspace_entry() {
         let dir = tempfile::tempdir().expect("workspace");
         std::fs::write(dir.path().join("project-entry"), "#!/bin/sh\necho ok\n").expect("entry");
-        let workspace = Workspace::new(dir.path().to_path_buf()).expect("workspace");
+        let workspace = crate::tools::new_workspace(dir.path().to_path_buf()).expect("workspace");
         assert!(validate_command_for_workspace(
             &serde_json::json!({ "cmd": "project-entry", "workdir": "." }),
             &PolicySettings::default(),

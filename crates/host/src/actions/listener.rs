@@ -1,0 +1,518 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::listeners::ShutdownSender;
+use axum::{
+    extract::{Form, Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    middleware,
+    response::{Html, IntoResponse, Json, Response},
+    routing::{get, post},
+    Extension, Router,
+};
+use gld_core::async_rt::{self, JoinHandle};
+use gld_core::local_network;
+use gld_core::logs::append_profile_log;
+use gld_core::settings::AppSettings;
+use gld_core::tools::{
+    self, is_allowed_tool, policy::PolicySettings, wrap_tool_result, ToolContext,
+};
+use gld_core::usage::ServiceUsage;
+use serde_json::{json, Value};
+use tokio::sync::{oneshot, Mutex, RwLock};
+use tower_http::cors::CorsLayer;
+
+use crate::auth::{
+    actions_audience, authorization_server_metadata, authorize_get, authorize_post,
+    external_base_url, register_client, token_exchange, AuthContext, AuthorizeForm,
+    AuthorizeParams, ClientRegistrationRequest, ClientRegistry, OAuthRuntime, TokenForm,
+};
+use crate::generation::Router as GenerationRouter;
+
+use super::auth::{require_actions_auth, AuthConfig};
+use super::openapi;
+
+#[derive(Clone)]
+struct AppState {
+    /// 工具发给执行代时要说清是哪个项目。
+    workspace_id: String,
+    ctx: Arc<ToolContext>,
+    generation: Option<Arc<GenerationRouter>>,
+    openapi: Arc<RwLock<Value>>,
+    auth: Arc<AuthConfig>,
+    workspace_path: String,
+    bind_port: u16,
+    configured_public_url: String,
+    oauth: Option<Arc<OAuthRuntime>>,
+    oauth_client_secret: Option<String>,
+    write_lock: Arc<Mutex<()>>,
+    usage: Arc<ServiceUsage>,
+}
+
+async fn oauth_register_post(
+    State(state): State<AppState>,
+    Json(request): Json<ClientRegistrationRequest>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return oauth_not_configured();
+    };
+    register_client(oauth, request)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_listener(
+    workspace_id: &str,
+    actions_port: u16,
+    workspace_path: PathBuf,
+    public_base_url: String,
+    auth_type: String,
+    api_key: Option<String>,
+    oauth_client_id: String,
+    oauth_client_secret: Option<String>,
+    oauth_password: Option<String>,
+    oauth_token_secret: Option<String>,
+    policy: PolicySettings,
+    usage: Arc<ServiceUsage>,
+    generation: Option<Arc<GenerationRouter>>,
+) -> Result<(ShutdownSender, JoinHandle<()>), String> {
+    if auth_type == "api_key" && api_key.as_ref().is_none_or(String::is_empty) {
+        return Err("Actions API key is not configured".into());
+    }
+    if auth_type == "oauth" {
+        if oauth_password.as_ref().is_none_or(String::is_empty) {
+            return Err("Actions OAuth password is not configured".into());
+        }
+        if oauth_token_secret.as_ref().is_none_or(String::is_empty) {
+            return Err("Actions OAuth token secret is not configured".into());
+        }
+    }
+
+    let configured_public_url = public_base_url.trim().to_string();
+    let oauth = if auth_type == "oauth" {
+        let registry_scope = format!("{workspace_id}-actions");
+        Some(Arc::new(OAuthRuntime::new_actions(
+            actions_audience(workspace_id),
+            oauth_client_id,
+            oauth_client_secret.clone(),
+            oauth_password.unwrap_or_default(),
+            oauth_token_secret.unwrap_or_default(),
+            Arc::new(ClientRegistry::load(&registry_scope, workspace_id)),
+        )))
+    } else {
+        None
+    };
+
+    // 在返回 Running 之前完成 bind，避免后台任务里的端口冲突被伪装成启动成功。
+    let allow_lan_access = AppSettings::load_or_default().allow_lan_access;
+    let listener = bind_listener(actions_port, allow_lan_access)?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let profile_id = workspace_id.to_string();
+    let handle = async_rt::spawn(async move {
+        let result = serve(
+            listener,
+            actions_port,
+            allow_lan_access,
+            &profile_id,
+            workspace_path,
+            configured_public_url,
+            auth_type,
+            api_key,
+            oauth,
+            oauth_client_secret,
+            policy,
+            usage,
+            generation,
+            shutdown_rx,
+        )
+        .await;
+        if let Err(err) = &result {
+            append_profile_log(
+                &profile_id,
+                "actions-stderr.log",
+                &format!("[actions] listener stopped: {err}"),
+            );
+            eprintln!("actions listener stopped: {err}");
+        } else {
+            append_profile_log(
+                &profile_id,
+                "actions-stderr.log",
+                "[actions] listener stopped",
+            );
+        }
+    });
+    Ok((shutdown_tx, handle))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve(
+    listener: tokio::net::TcpListener,
+    actions_port: u16,
+    allow_lan_access: bool,
+    profile_id: &str,
+    workspace_path: PathBuf,
+    configured_public_url: String,
+    auth_type: String,
+    api_key: Option<String>,
+    oauth: Option<Arc<OAuthRuntime>>,
+    oauth_client_secret: Option<String>,
+    policy: PolicySettings,
+    usage: Arc<ServiceUsage>,
+    generation: Option<Arc<GenerationRouter>>,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let workspace = tools::new_workspace(workspace_path.clone()).map_err(|e| e.message())?;
+    let ctx = Arc::new(
+        ToolContext::from_workspace(
+            workspace,
+            gld_core::workspace::AuthConfig {
+                auth_type: auth_type.clone(),
+                ..gld_core::workspace::AuthConfig::default()
+            },
+            policy.clone(),
+            "full".into(),
+            policy.permission_mode.clone(),
+        )?
+        .with_usage(usage.clone()),
+    );
+    let tools: Vec<Value> = tools::list_tools()
+        .into_iter()
+        .filter(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .map(is_allowed_tool)
+                .unwrap_or(false)
+        })
+        .collect();
+    let public_base_url = if configured_public_url.is_empty() {
+        format!("http://127.0.0.1:{actions_port}")
+    } else {
+        configured_public_url.clone()
+    };
+    let openapi_doc = openapi::build_openapi(&tools, &public_base_url, &auth_type);
+
+    let auth = Arc::new(AuthConfig::new(
+        auth_type,
+        api_key,
+        oauth.clone(),
+        actions_port,
+        configured_public_url.clone(),
+        profile_id.to_string(),
+        true,
+    ));
+
+    let state = AppState {
+        workspace_id: profile_id.to_string(),
+        workspace_path: ctx.workspace_path(),
+        ctx,
+        generation,
+        openapi: Arc::new(RwLock::new(openapi_doc)),
+        auth: auth.clone(),
+        bind_port: actions_port,
+        configured_public_url,
+        oauth,
+        oauth_client_secret,
+        write_lock: Arc::new(Mutex::new(())),
+        usage,
+    };
+
+    let protected = Router::new()
+        .route("/actions/{tool_name}", post(execute_action))
+        .layer(middleware::from_fn(require_actions_auth))
+        .layer(Extension(auth));
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/openapi.json", get(openapi_json))
+        .route("/privacy", get(privacy))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_authorization_server_metadata),
+        )
+        .route("/register", post(oauth_register_post))
+        .route(
+            "/oauth/authorize",
+            get(oauth_authorize_get).post(oauth_authorize_post),
+        )
+        .route("/oauth/token", post(oauth_token_post))
+        .merge(protected)
+        .with_state(state)
+        .layer(CorsLayer::permissive());
+
+    append_profile_log(
+        profile_id,
+        "actions-stdout.log",
+        &format!(
+            "[actions] listening on http://{}:{actions_port} (public: {public_base_url})",
+            local_network::bind_host(allow_lan_access)
+        ),
+    );
+    let shutdown_profile = profile_id.to_string();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            // 分清两件事：收到停止信号（有人停它）和发送端被丢弃（没人停它，
+            // 但持有它的那条记录没了）。后者是 bug 的征兆，日志里必须能看出来。
+            let reason = match shutdown.await {
+                Ok(()) => "收到停止信号",
+                Err(_) => "停止信号的发送端被丢弃——没有人显式停止它",
+            };
+            append_profile_log(
+                &shutdown_profile,
+                "actions-stderr.log",
+                &format!("[actions] 开始优雅关闭：{reason}"),
+            );
+        })
+        .await?;
+    Ok(())
+}
+
+fn bind_listener(port: u16, allow_lan_access: bool) -> Result<tokio::net::TcpListener, String> {
+    let addr = local_network::bind_addr(port, allow_lan_access);
+    let listener = std::net::TcpListener::bind(addr)
+        .map_err(|err| format!("Actions 本地端口 {port} 绑定失败: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("Actions 本地端口 {port} 设置非阻塞失败: {err}"))?;
+    tokio::net::TcpListener::from_std(listener)
+        .map_err(|err| format!("Actions 本地监听器初始化失败: {err}"))
+}
+
+async fn health(State(state): State<AppState>) -> Json<Value> {
+    let tools_loaded = state
+        .openapi
+        .read()
+        .await
+        .get("paths")
+        .and_then(Value::as_object)
+        .map(|paths| paths.len())
+        .unwrap_or(0);
+
+    Json(json!({
+        "ok": true,
+        "service": "coding-tools-actions",
+        "workspace": state.workspace_path,
+        "auth_type": state.auth.auth_type,
+        "tools_loaded": tools_loaded
+    }))
+}
+
+async fn openapi_json(State(state): State<AppState>) -> Json<Value> {
+    Json(state.openapi.read().await.clone())
+}
+
+async fn privacy() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>gld Actions Privacy</title>
+  </head>
+  <body>
+    <h1>隐私政策</h1>
+    <p>本服务仅供仓库所有者本人使用。</p>
+    <p>请求内容只用于执行用户主动发起的代码操作。</p>
+    <p>服务不会出售或共享请求数据。</p>
+    <p>API 密钥、GitHub 令牌和环境变量不会返回给模型。</p>
+  </body>
+</html>"#,
+    )
+}
+
+fn resolve_oauth_base(state: &AppState, headers: &HeaderMap) -> String {
+    external_base_url(headers, state.bind_port, &state.configured_public_url)
+}
+
+async fn oauth_authorization_server_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.auth.oauth_enabled() {
+        return oauth_not_configured();
+    }
+    Json(authorization_server_metadata(
+        &resolve_oauth_base(&state, &headers),
+        state.oauth_client_secret.as_deref(),
+    ))
+    .into_response()
+}
+
+async fn oauth_authorize_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<AuthorizeParams>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return oauth_not_configured();
+    };
+    authorize_get(
+        oauth,
+        params,
+        Some(state.workspace_path.as_str()),
+        &resolve_oauth_base(&state, &headers),
+    )
+}
+
+async fn oauth_authorize_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<AuthorizeForm>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return oauth_not_configured();
+    };
+    authorize_post(oauth, form, &resolve_oauth_base(&state, &headers))
+}
+
+async fn oauth_token_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<TokenForm>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unsupported_grant_type" })),
+        )
+            .into_response();
+    };
+    token_exchange(oauth, &headers, form, &resolve_oauth_base(&state, &headers))
+}
+
+fn oauth_not_configured() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "OAuth not configured" })),
+    )
+        .into_response()
+}
+
+async fn execute_action(
+    State(state): State<AppState>,
+    Path(tool_name): Path<String>,
+    auth: Option<Extension<AuthContext>>,
+    body: Option<Json<Value>>,
+) -> Response {
+    let Some(Extension(auth)) = auth else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "detail": "Missing Actions authorization" })),
+        )
+            .into_response();
+    };
+    if auth.actions_workspace_id() != Some(state.workspace_id.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "detail": "Actions authority does not match this workspace" })),
+        )
+            .into_response();
+    }
+    let arguments = match body {
+        Some(Json(value)) if value.is_object() || value.is_null() => {
+            if value.is_null() {
+                json!({})
+            } else {
+                value
+            }
+        }
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": "Request body must be a JSON object" })),
+            )
+                .into_response();
+        }
+        None => json!({}),
+    };
+    let input_bytes = serde_json::to_vec(&arguments)
+        .map(|bytes| bytes.len())
+        .unwrap_or_default();
+
+    if let Err(err) = tools::policy::validate_actions_exposure(&tool_name) {
+        let response = json!({ "detail": err.to_string() });
+        let output_bytes = serde_json::to_vec(&response)
+            .map(|bytes| bytes.len())
+            .unwrap_or_default();
+        state.usage.record(input_bytes, output_bytes, true, true);
+        return (StatusCode::BAD_REQUEST, Json(response)).into_response();
+    }
+
+    // 工具内核是同步的，exec_command / read_output 里有 block_on，在 async worker 上直接调
+    // 会 panic、连接被掐断，客户端什么也收不到（以前只测过 read_file，碰不到这条）。和 MCP
+    // 监听器一样放进 spawn_blocking。
+    let run = {
+        let ctx = Arc::clone(&state.ctx);
+        let name = tool_name.clone();
+        let workspace_id = state.workspace_id.clone();
+        let generation = state.generation.clone();
+        move || match generation {
+            Some(generation) => generation
+                .actions_call(
+                    &workspace_id,
+                    ctx.workspace.root(),
+                    &auth,
+                    &name,
+                    &arguments,
+                )
+                .unwrap_or_else(|error| {
+                    tools::workspace::tool_err(tools::workspace::WorkspaceError::Tool {
+                        code: "GENERATION_UNAVAILABLE",
+                        message: error.to_string(),
+                        category: "runtime",
+                        retryable: error.surely_not_executed(),
+                    })
+                }),
+            None => tools::call_tool_as(ctx.as_ref(), &auth, &name, &arguments),
+        }
+    };
+    let joined = if tools::registry::MUTATING_TOOLS.contains(&tool_name.as_str()) {
+        let _guard = state.write_lock.lock().await;
+        tokio::task::spawn_blocking(run).await
+    } else {
+        tokio::task::spawn_blocking(run).await
+    };
+    let structured = match joined {
+        Ok(structured) => structured,
+        Err(error) => {
+            let response = json!({ "detail": format!("tool {tool_name} crashed: {error}") });
+            state.usage.record(input_bytes, 0, true, true);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(response)).into_response();
+        }
+    };
+    let result = wrap_tool_result(structured);
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let status = if is_error {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::OK
+    };
+    let response = json!({
+        "ok": !is_error,
+        "tool": tool_name,
+        "structured_content": result.get("structuredContent").cloned().unwrap_or(Value::Null),
+        "content": result.get("content").cloned().unwrap_or_else(|| json!([])),
+        "is_error": is_error
+    });
+    let output_bytes = serde_json::to_vec(&response)
+        .map(|bytes| bytes.len())
+        .unwrap_or_default();
+    state
+        .usage
+        .record(input_bytes, output_bytes, true, is_error);
+    (status, Json(response)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_listener;
+
+    #[test]
+    fn bind_listener_reports_port_conflict_synchronously() {
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("占用测试端口");
+        let port = occupied.local_addr().expect("读取测试端口").port();
+
+        assert!(bind_listener(port, false).is_err());
+    }
+}

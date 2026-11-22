@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use super::current_build_identity;
 use super::wire::{
-    read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op, WireAuth, WireNative,
+    auth_from_wire, auth_to_wire, read_frame, FrameWriter, GenerationFrame, HostFrame, HostOp, Op,
+    WireAuth, WireNative,
 };
-use super::BuildIdentity;
 use crate::agents;
 use crate::auth::AuthContext;
 use crate::data::{forbid_writes, DataStore};
@@ -24,11 +25,11 @@ use crate::error::{AppError, AppResult};
 use crate::hub::{context_fingerprint, Hub, NodeBridge};
 use crate::managed_workspaces::startup::StartupSweep;
 use crate::mcp::handle_request;
-use crate::nodes::registry::NativeMember;
+use crate::nodes::NativeMember;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{canonical_tool_name, exposed_tool_names};
 use crate::tools::workspace_runtime::{self, WorkspaceHandoff};
-use crate::tools::{self, build_tool_context, Caller, SharedToolContext, ToolContext};
+use crate::tools::{self, build_tool_context, SharedToolContext, ToolContext};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, WorkspaceProfile};
 
@@ -61,7 +62,20 @@ pub fn serve() -> AppResult<()> {
         .map_err(|error| AppError::Message(format!("读宿主消息失败：{error}")))?;
     let _ = hello_seen.send(());
     match hello.as_deref().map(serde_json::from_str::<HostFrame>) {
-        Some(Ok(HostFrame::Hello { .. })) => {}
+        Some(Ok(HostFrame::Hello {
+            generation_protocol,
+        })) => {
+            if generation_protocol != super::GENERATION_PROTOCOL {
+                let reason = format!(
+                    "宿主执行代协议 {generation_protocol} 和这个执行代的 {} 不一样",
+                    super::GENERATION_PROTOCOL
+                );
+                let _ = writer.send(&GenerationFrame::Refused {
+                    reason: reason.clone(),
+                });
+                return Err(AppError::Message(reason));
+            }
+        }
         // 宿主没打招呼就走了，或者发的不是这个协议：没人要这一代。
         _ => return Err(AppError::Message("宿主没有发来可用的 hello".into())),
     }
@@ -75,7 +89,7 @@ pub fn serve() -> AppResult<()> {
     }
     writer
         .send(&GenerationFrame::Ready {
-            identity: BuildIdentity::current(),
+            identity: current_build_identity(),
         })
         .map_err(|error| AppError::Message(format!("回复宿主失败：{error}")))?;
 
@@ -238,7 +252,7 @@ impl Generation {
 
     fn run(&self, op: Op) -> Result<Value, String> {
         match op {
-            Op::Ping => Ok(json!({ "identity": BuildIdentity::current() })),
+            Op::Ping => Ok(json!({ "identity": current_build_identity() })),
             Op::Status => Ok(status()),
             Op::ToolNames => Ok(json!({ "tools": self.all_tool_names() })),
             Op::HubConfigure { config, sweep } => {
@@ -261,8 +275,9 @@ impl Generation {
                 }))
             }
             Op::HubMcp { auth, body, route } => {
+                let auth = mcp_auth(auth)?;
                 let hub = self.current_hub()?;
-                let (response, routed) = hub.handle_routed(&auth.into_auth(), &body, &route);
+                let (response, routed) = hub.handle_routed(&auth, &body, &route);
                 let member = routed.as_ref().map(|routed| routed.workspace_id.clone());
                 let audit = routed
                     .and_then(|routed| routed.context)
@@ -275,8 +290,10 @@ impl Generation {
                 auth,
                 body,
             } => {
+                let auth = mcp_auth(auth)?;
+                require_workspace(&auth, &workspace_id)?;
                 let context = self.context_for(&workspace_id, ContextKind::Mcp)?;
-                let response = handle_request(&context, &caller_of(auth), &body);
+                let response = handle_request(&context, &auth, &body);
                 Ok(json!({ "response": response, "member": null, "audit": audit_digest(&context) }))
             }
             Op::ActionsCall {
@@ -285,13 +302,13 @@ impl Generation {
                 tool,
                 arguments,
             } => {
+                if !matches!(&auth, WireAuth::Actions { .. }) {
+                    return Err("Actions requires an explicit Actions identity".into());
+                }
+                let auth = auth_from_wire(auth)?;
+                require_workspace(&auth, &workspace_id)?;
                 let context = self.context_for(&workspace_id, ContextKind::Actions)?;
-                Ok(tools::call_tool_as(
-                    &context,
-                    &caller_of(auth),
-                    &tool,
-                    &arguments,
-                ))
+                Ok(tools::call_tool_as(&context, &auth, &tool, &arguments))
             }
             Op::LocalTool {
                 workspace_id,
@@ -386,7 +403,15 @@ impl Generation {
             });
         };
         let runtime = workspace_runtime::runtime_for(&root);
-        let blockers = runtime.handoff_blockers(&root);
+        let mut blockers = runtime.handoff_blockers();
+        // 执行层只报告命令、输出和写入；Agent 的生命周期由应用层合并。
+        if crate::agents::running_in(&root).is_some() {
+            let before_writes = blockers
+                .iter()
+                .position(|blocker| *blocker == "write_in_progress")
+                .unwrap_or(blockers.len());
+            blockers.insert(before_writes, "running_agents");
+        }
         if !blockers.is_empty() {
             return Ok(json!({ "blocked": blockers }));
         }
@@ -423,7 +448,7 @@ impl Generation {
     fn configure_hub(&self, config: &HubConfig, sweep: bool) {
         self.shutdown_hub();
         let bridge: Arc<dyn NodeBridge> = self.bridge.clone();
-        let hub = Arc::new(Hub::new(config).with_node_bridge(bridge));
+        let hub = Arc::new(Hub::new(config, bridge));
         let sweep = sweep.then(|| StartupSweep::launch(config)).flatten();
         *self
             .hub
@@ -431,7 +456,7 @@ impl Generation {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(HubSlot { hub, sweep });
     }
 
-    /// 和原来 `hub::runtime::stop_runtime` 里的同一段：停启动检查、收 Hub 入口起的命令、关远端。
+    /// 执行代自己的清理步骤：停启动检查、收 Hub 入口起的命令、关远端。
     fn shutdown_hub(&self) {
         let slot = self
             .hub
@@ -533,9 +558,18 @@ fn interrupt_everything() {
     agents::interrupt_all(INTERRUPT_WAIT);
 }
 
-fn caller_of(auth: WireAuth) -> Caller {
-    let auth: AuthContext = auth.into_auth();
-    Caller::from_auth(&auth)
+fn mcp_auth(auth: WireAuth) -> Result<AuthContext, String> {
+    if !matches!(&auth, WireAuth::Mcp { .. }) {
+        return Err("MCP requires an explicit grant-bound identity".into());
+    }
+    auth_from_wire(auth)
+}
+
+fn require_workspace(auth: &AuthContext, workspace_id: &str) -> Result<(), String> {
+    if !auth.allows_project(workspace_id) {
+        return Err("The authenticated identity does not allow this project".into());
+    }
+    Ok(())
 }
 
 fn agent_failure(error: agents::AgentError) -> String {
@@ -575,7 +609,7 @@ fn status() -> Value {
         .map(|count| count as usize)
         .sum();
     json!({
-        "identity": BuildIdentity::current(),
+        "identity": current_build_identity(),
         "active_commands": total,
         "active_agents": agents::live_count(),
         "unsettled_output": workspace_runtime::any_unsettled_output(),
@@ -636,7 +670,7 @@ impl ContextKind {
                 Arc::new(ServiceUsage::default()),
             ),
             Self::Actions => {
-                let workspace = tools::Workspace::new(PathBuf::from(&profile.path))
+                let workspace = tools::new_workspace(PathBuf::from(&profile.path))
                     .map_err(|error| error.message())?;
                 let policy = tools::PolicySettings::from_actions_config(&profile.actions);
                 let permission_mode = policy.permission_mode.clone();
@@ -705,9 +739,13 @@ impl NodeBridge for HostBridge {
     }
 
     fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value {
+        let auth = match auth_to_wire(auth) {
+            Ok(auth) => auth,
+            Err(message) => return crate::hub::node_bridge_failure(&message),
+        };
         let asked = self.ask(
             HostOp::NodeCall {
-                auth: WireAuth::from(auth),
+                auth,
                 member: WireNative::from(member),
                 tool: tool.to_string(),
                 args,

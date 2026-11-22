@@ -26,6 +26,10 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 写不出去说明连接已坏，不必多等。
 pub(super) const MESSAGE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 最长工具等待 30 秒，给回包再留 30 秒。上限不能超过节点的 `IDLE_TIMEOUT`：
+/// 调用期间 Hub 不发 Ping，节点空闲这么久会先断开。
+pub const HUB_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// 握手或接管 HTTP/1.1 Upgrade 时使用；限制应在库接收/拼接 message 之前生效。
 pub fn socket_config() -> WebSocketConfig {
     WebSocketConfig::default()
@@ -64,7 +68,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocketTransport<S> {
 }
 
 impl<S> SocketTransport<S> {
-    pub(crate) fn bounded(socket: S) -> Self {
+    /// 宿主须在 Upgrade 前把 message/frame 都限制为 `MAX_MESSAGE_BYTES`；接管后才能绑定签名和取消通知。
+    pub fn from_bounded_host_socket(socket: S, signer: MessageSigner, cancel: Arc<Notify>) -> Self {
+        let mut transport = Self::bounded(socket);
+        transport.signer = Some(signer);
+        transport.cancellable(cancel)
+    }
+
+    fn bounded(socket: S) -> Self {
         Self {
             socket: Some(socket),
             signer: None,
@@ -75,14 +86,8 @@ impl<S> SocketTransport<S> {
         }
     }
 
-    /// Hub 的生产连接都要签名；不签的只剩只测传输层的用例。
-    pub(crate) fn signed(mut self, signer: MessageSigner) -> Self {
-        self.signer = Some(signer);
-        self
-    }
-
     /// 发一次通知就切断正在等的收发。调用方持着 Peer 的锁阻塞在这里，别的线程没有别的办法叫停它。
-    pub(crate) fn cancellable(mut self, cancel: Arc<Notify>) -> Self {
+    fn cancellable(mut self, cancel: Arc<Notify>) -> Self {
         self.cancel = Some(cancel);
         self
     }

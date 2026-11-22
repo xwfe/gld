@@ -1,12 +1,14 @@
 //! 协议 → 业务的唯一翻译层。
 //!
-//! 每个 [`Request`] 变体对应一次 [`App`] 调用，结果统一序列化成 JSON。
-//! 命令行直连模式和守护进程模式都走这个函数，所以两边不可能行为不一致。
+//! 每个 [`Request`] 变体映射到应用操作或执行代请求，结果统一序列化成 JSON。
+//! 直连模式使用本地应用操作，守护进程显式把执行请求交给它持有的 Router。
 
 use std::sync::Arc;
 
 use gld_core::app::{App, WorkspaceTarget};
+use gld_core::runtime::ListenerManager;
 use gld_core::workspace::WorkspaceProfile;
+use gld_host::global_gateway;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -16,10 +18,12 @@ use crate::protocol::{Request, RpcError};
 pub struct DaemonContext {
     pub info: Box<dyn Fn() -> crate::protocol::DaemonInfo + Send + Sync>,
     pub request_shutdown: Box<dyn Fn() + Send + Sync>,
+    pub router: Arc<gld_host::generation::Router>,
 }
 
 pub async fn dispatch(
     app: &Arc<App>,
+    listeners: &ListenerManager,
     daemon: Option<&DaemonContext>,
     request: Request,
 ) -> Result<Value, RpcError> {
@@ -69,13 +73,41 @@ pub async fn dispatch(
             assignments,
         } => {
             let profile = resolve(app, &target)?;
-            ok(&app.set_workspace_fields(&profile.id, &assignments).await?)
+            ok(&app
+                .set_workspace_fields(listeners, &profile.id, &assignments)
+                .await?)
         }
         R::DeleteWorkspace { target } => {
             let profile = resolve(app, &target)?;
-            ok(&app.delete_workspace(&profile.id).await?)
+            let deleted = match daemon {
+                Some(context) => {
+                    let router = context.router.clone();
+                    app.delete_workspace_with_cleanup(listeners, &profile.id, move |root| {
+                        router
+                            .terminate_workspace(root)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await?
+                }
+                None => app.delete_workspace(listeners, &profile.id).await?,
+            };
+            ok(&deleted)
         }
-        R::Prune { confirmed } => ok(&app.prune(confirmed).await?),
+        R::Prune { confirmed } => {
+            let pruned = match daemon {
+                Some(context) => {
+                    let router = context.router.clone();
+                    app.prune_with_cleanup(listeners, confirmed, move |root| {
+                        router
+                            .terminate_workspace(root)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await?
+                }
+                None => app.prune(listeners, confirmed).await?,
+            };
+            ok(&pruned)
+        }
         R::UseWorkspace { target } => {
             let profile = resolve(app, &target)?;
             app.set_last_workspace(&profile.id)?;
@@ -85,26 +117,26 @@ pub async fn dispatch(
         // ---- 服务 ----
         R::StartService { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.start_service(&profile.id, kind).await?)
+            ok(&app.start_service(listeners, &profile.id, kind).await?)
         }
         R::StopService { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.stop_service(&profile.id, kind).await?)
+            ok(&app.stop_service(listeners, &profile.id, kind).await?)
         }
         R::RestartService { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.restart_service(&profile.id, kind).await?)
+            ok(&app.restart_service(listeners, &profile.id, kind).await?)
         }
         R::ServiceStatus { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.service_status(&profile.id, kind)?)
+            ok(&app.service_status(listeners, &profile.id, kind)?)
         }
-        R::Overview => ok(&app.overview().await?),
+        R::Overview => ok(&app.overview(listeners).await?),
 
         // ---- 隧道 ----
         R::TunnelStart { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.start_tunnel(&profile.id, kind).await?)
+            ok(&app.start_tunnel(listeners, &profile.id, kind).await?)
         }
         R::TunnelStop { target, kind } => {
             let profile = resolve(app, &target)?;
@@ -112,11 +144,11 @@ pub async fn dispatch(
         }
         R::TunnelRestart { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.restart_tunnel(&profile.id, kind).await?)
+            ok(&app.restart_tunnel(listeners, &profile.id, kind).await?)
         }
         R::TunnelTest { target, kind } => {
             let profile = resolve(app, &target)?;
-            ok(&app.test_tunnel(&profile.id, kind).await?)
+            ok(&app.test_tunnel(listeners, &profile.id, kind).await?)
         }
         R::TunnelStatus { target, kind } => {
             let profile = resolve(app, &target)?;
@@ -137,33 +169,35 @@ pub async fn dispatch(
             app.set_gateway_config(config)?;
             ok(&app.gateway_config()?)
         }
-        R::GatewayStart => ok(&app.start_gateway().await?),
+        R::GatewayStart => ok(&global_gateway::ensure_started().await?),
         R::GatewayStop => {
-            app.stop_gateway().await?;
-            ok(&app.gateway_status().await)
+            global_gateway::stop().await?;
+            ok(&global_gateway::status().await)
         }
-        R::GatewayStatus => ok(&app.gateway_status().await),
-        R::GatewayHealth => ok(&app.gateway_health().await),
+        R::GatewayStatus => ok(&global_gateway::status().await),
+        R::GatewayHealth => ok(&global_gateway::health().await),
 
         // ---- 聚合入口 ----
-        R::HubStatus => ok(&app.hub_status().await?),
-        R::SetHubConfig { config } => ok(&app.set_hub_config(config).await?),
-        R::HubAddMembers { targets } => ok(&app.add_hub_members(&targets).await?),
-        R::HubRemoveMembers { targets } => ok(&app.remove_hub_members(&targets).await?),
-        R::HubAddRemote { spec } => ok(&app.add_ccnm_member(spec).await?),
-        R::HubRemoveRemote { selector } => ok(&app.remove_ccnm_member(&selector).await?),
-        R::HubStart => ok(&app.start_hub().await?),
-        R::HubStop => ok(&app.stop_hub().await?),
+        R::HubStatus => ok(&app.hub_status(listeners).await?),
+        R::SetHubConfig { config } => ok(&app.set_hub_config(listeners, config).await?),
+        R::HubAddMembers { targets } => ok(&app.add_hub_members(listeners, &targets).await?),
+        R::HubRemoveMembers { targets } => ok(&app.remove_hub_members(listeners, &targets).await?),
+        R::HubAddRemote { spec } => ok(&app.add_ccnm_member(listeners, spec).await?),
+        R::HubRemoveRemote { selector } => {
+            ok(&app.remove_ccnm_member(listeners, &selector).await?)
+        }
+        R::HubStart => ok(&app.start_hub(listeners).await?),
+        R::HubStop => ok(&app.stop_hub(listeners).await?),
         R::HubSecret { key } => ok(&app.hub_secret(&key)?),
-        R::RegenerateHubSecret { key } => ok(&app.regenerate_hub_secret(&key).await?),
+        R::RegenerateHubSecret { key } => ok(&app.regenerate_hub_secret(listeners, &key).await?),
         R::SetHubSecret { key, value } => {
-            app.set_hub_secret(&key, &value).await?;
+            app.set_hub_secret(listeners, &key, &value).await?;
             ok(&true)
         }
         R::HubJoinAll => ok(&app.join_all_workspaces()?),
-        R::HubHealth => ok(&app.hub_health().await?),
-        R::HubEnsureStarted => ok(&app.ensure_hub_started().await?),
-        R::HubUsage => ok(&gld_core::hub::runtime::usage().await),
+        R::HubHealth => ok(&app.hub_health(listeners).await?),
+        R::HubEnsureStarted => ok(&app.ensure_hub_started(listeners).await?),
+        R::HubUsage => ok(&gld_host::hub_runtime::usage().await),
         R::HubLogs { max_bytes } => ok(&app.hub_logs(max_bytes)?),
 
         // ---- 密钥 ----
@@ -173,19 +207,24 @@ pub async fn dispatch(
         }
         R::SetWorkspaceSecret { target, key, value } => {
             let profile = resolve(app, &target)?;
-            app.set_workspace_secret(&profile.id, &key, &value).await?;
+            app.set_workspace_secret(listeners, &profile.id, &key, &value)
+                .await?;
             ok(&true)
         }
         R::RegenerateWorkspaceSecret { target, key } => {
             let profile = resolve(app, &target)?;
-            ok(&app.regenerate_workspace_secret(&profile.id, &key).await?)
+            ok(&app
+                .regenerate_workspace_secret(listeners, &profile.id, &key)
+                .await?)
         }
         R::SharedSecret { key } => ok(&app.shared_secret(&key)?),
         R::SetSharedSecret { key, value } => {
-            app.set_shared_secret(&key, &value).await?;
+            app.set_shared_secret(listeners, &key, &value).await?;
             ok(&true)
         }
-        R::RegenerateSharedSecret { key } => ok(&app.regenerate_shared_secret(&key).await?),
+        R::RegenerateSharedSecret { key } => {
+            ok(&app.regenerate_shared_secret(listeners, &key).await?)
+        }
 
         // ---- 设置 ----
         R::Proxy => ok(&app.proxy()?),
@@ -195,7 +234,7 @@ pub async fn dispatch(
         }
         R::RuntimeSettings => ok(&app.global_runtime_settings()?),
         R::SetRuntimeSettings { runtime } => {
-            app.set_global_runtime_settings(runtime)?;
+            app.set_global_runtime_settings(listeners, runtime)?;
             ok(&app.global_runtime_settings()?)
         }
         R::ListGrants => ok(&app.list_grants()?),
@@ -204,10 +243,16 @@ pub async fn dispatch(
         R::RemoveGrant { selector } => {
             // 停命令要等子进程收尾（每条最多 1.5 秒），不能占异步 worker。
             let app = app.clone();
-            let removed = tokio::task::spawn_blocking(move || app.remove_grant(&selector))
-                .await
-                .map_err(|error| RpcError::internal(format!("作废 grant 的任务失败：{error}")))?
-                .map_err(RpcError::from)?;
+            let router = daemon.map(|context| context.router.clone());
+            let removed = tokio::task::spawn_blocking(move || match router {
+                Some(router) => app.remove_grant_with_cleanup(&selector, move |grant_id, _home| {
+                    router.revoke_grant(grant_id)
+                }),
+                None => app.remove_grant_local(&selector),
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("作废 grant 的任务失败：{error}")))?
+            .map_err(RpcError::from)?;
             ok(&removed)
         }
         R::ListAgentTasks => ok(&app.list_agent_tasks()?),
@@ -220,13 +265,24 @@ pub async fn dispatch(
         } => {
             // 起 Agent 前要问一次 `--version`（最多 5 秒）、拍 git 快照，不能占异步 worker。
             let app = app.clone();
-            let started = tokio::task::spawn_blocking(move || {
-                app.approve_agent_task(
+            let router = daemon.map(|context| context.router.clone());
+            let started = tokio::task::spawn_blocking(move || match router {
+                Some(router) => {
+                    let root = app.agent_task_root(&task_id)?;
+                    agent_reply(router.approve_agent(
+                        &root,
+                        &task_id,
+                        agent.as_deref(),
+                        model.as_deref(),
+                        effort.as_deref(),
+                    ))
+                }
+                None => app.approve_agent_task_local(
                     &task_id,
                     agent.as_deref(),
                     model.as_deref(),
                     effort.as_deref(),
-                )
+                ),
             })
             .await
             .map_err(|error| RpcError::internal(format!("放行委派的任务失败：{error}")))?
@@ -237,10 +293,14 @@ pub async fn dispatch(
         R::StopAgentTask { task_id } => {
             // 要经管道问执行代，不占异步 worker。
             let app = app.clone();
-            let stopped = tokio::task::spawn_blocking(move || app.stop_agent_task(&task_id))
-                .await
-                .map_err(|error| RpcError::internal(format!("停止委派的任务失败：{error}")))?
-                .map_err(RpcError::from)?;
+            let router = daemon.map(|context| context.router.clone());
+            let stopped = tokio::task::spawn_blocking(move || match router {
+                Some(router) => agent_reply(router.stop_agent(&task_id)),
+                None => app.stop_agent_task_local(&task_id),
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("停止委派的任务失败：{error}")))?
+            .map_err(RpcError::from)?;
             ok(&stopped)
         }
         R::McpServers => ok(&app.mcp_servers()?),
@@ -284,7 +344,19 @@ pub async fn dispatch(
         }
         R::SetPlanningMode { target, mode } => {
             let profile = resolve(app, &target)?;
-            ok(&app.set_planning_mode(&profile.id, mode).await?)
+            let state = match daemon {
+                Some(context) => {
+                    let router = context.router.clone();
+                    app.set_planning_mode_with_cleanup(&profile.id, mode, move |root| {
+                        router
+                            .terminate_workspace(root)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await?
+                }
+                None => app.set_planning_mode_local(&profile.id, mode).await?,
+            };
+            ok(&state)
         }
         R::CreateGoal {
             target,
@@ -375,7 +447,7 @@ pub async fn dispatch(
             ok(&app.list_tools(&profile.id)?)
         }
         R::ServedTools => {
-            let Some((build, tools)) = gld_core::hub::runtime::served_tools().await else {
+            let Some((build, tools)) = gld_host::hub_runtime::served_tools().await else {
                 return Err(RpcError::from(gld_core::AppError::Message(
                     "服务没在跑，没有正在给客户端的工具表；`gld start` 之后再查".into(),
                 )));
@@ -391,15 +463,25 @@ pub async fn dispatch(
             // 工具内核是同步 API，内部用 block_on 驱动子进程，不能占用异步 worker 线程。
             let app = app.clone();
             let id = profile.id;
-            tokio::task::spawn_blocking(move || app.call_tool(&id, &name, args))
-                .await
-                .map_err(|error| RpcError::internal(format!("工具调用任务失败：{error}")))?
-                .map_err(RpcError::from)
+            let router = daemon.map(|context| context.router.clone());
+            tokio::task::spawn_blocking(move || match router {
+                Some(router) => {
+                    // 与旧 App 入口相同，在阻塞线程里重读当前目录，不沿用更早的 selector 快照。
+                    let root = app.tool_workspace_root(&id)?;
+                    router
+                        .local_tool(&id, &root, &name, &args)
+                        .map_err(|error| gld_core::AppError::Message(error.to_string()))
+                }
+                None => app.call_tool_local(&id, &name, args),
+            })
+            .await
+            .map_err(|error| RpcError::internal(format!("工具调用任务失败：{error}")))?
+            .map_err(RpcError::from)
         }
 
         // ---- 观察 ----
         R::Doctor => {
-            let mut diagnosis = app.doctor().await?;
+            let mut diagnosis = app.doctor(listeners).await?;
             // 直连模式跑在命令行进程里，查出来的不是守护进程的会话和授权。
             if daemon.is_some() && app.uses_screen_capture()? {
                 diagnosis.checks.push(probe_desktop().await?.check);
@@ -422,7 +504,7 @@ pub async fn dispatch(
         }
         R::Usage { target } => {
             let profile = resolve(app, &target)?;
-            ok(&app.usage_stats(&profile.id)?)
+            ok(&app.usage_stats(listeners, &profile.id)?)
         }
         R::AgentContext { target } => {
             let profile = resolve(app, &target)?;
@@ -431,26 +513,35 @@ pub async fn dispatch(
         R::GlobalAgentContext => ok(&app.global_agent_context()),
 
         // ---- 升级 ----
-        R::UpgradeStatus => upgrade(|router| Ok(router.status())).await,
+        R::UpgradeStatus => upgrade(daemon, |router| Ok(router.status())).await,
         R::UpgradePrepare { exe, timeout_secs } => {
-            upgrade(move |router| {
+            upgrade(daemon, move |router| {
                 router.prepare(&exe, std::time::Duration::from_secs(timeout_secs))
             })
             .await
         }
-        R::UpgradeSwitch => upgrade(|router| router.switch()).await,
-        R::UpgradeAbort => upgrade(|router| router.abort()).await,
+        R::UpgradeSwitch => upgrade(daemon, |router| router.switch()).await,
+        R::UpgradeAbort => upgrade(daemon, |router| router.abort()).await,
         // ---- 软件 ----
     }
 }
 
+fn agent_reply(
+    reply: Result<Value, gld_core::generation::CallError>,
+) -> gld_core::AppResult<gld_core::agents::store::AgentTask> {
+    let value = reply.map_err(|error| gld_core::AppError::Message(error.to_string()))?;
+    Ok(serde_json::from_value(value)?)
+}
+
 /// 这些操作要等子进程应答，放阻塞线程。
 async fn upgrade(
-    run: impl FnOnce(&gld_core::generation::Router) -> Result<Value, String> + Send + 'static,
+    daemon: Option<&DaemonContext>,
+    run: impl FnOnce(&gld_host::generation::Router) -> Result<Value, String> + Send + 'static,
 ) -> Result<Value, RpcError> {
-    let Some(router) = gld_core::generation::router() else {
+    let Some(context) = daemon else {
         return Err(RpcError::protocol("当前不是守护进程，没有执行代可操作"));
     };
+    let router = context.router.clone();
     tokio::task::spawn_blocking(move || run(&router))
         .await
         .map_err(|error| RpcError::internal(format!("升级操作失败：{error}")))?
@@ -495,7 +586,7 @@ async fn remove_node(machine: String) -> Result<Value, RpcError> {
 
 /// 登记已经落盘之后才调，所以失败时要说清楚变更本身已经生效。
 async fn close_stale_connection(machine_id: String, done: &str) -> Result<(), RpcError> {
-    if let Some(nodes) = gld_core::hub::runtime::nodes().await {
+    if let Some(nodes) = gld_host::hub_runtime::nodes().await {
         tokio::task::spawn_blocking(move || nodes.close_stale(&machine_id))
             .await
             .map_err(|_| RpcError::internal(format!("{done}，但旧连接收回任务失败")))?
@@ -510,4 +601,21 @@ fn resolve(app: &App, target: &WorkspaceTarget) -> Result<WorkspaceProfile, RpcE
 
 fn ok<T: Serialize>(value: &T) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|error| RpcError::internal(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_reply;
+    use gld_core::generation::CallError;
+    use gld_core::AppError;
+
+    #[test]
+    fn routed_agent_replies_preserve_transport_and_json_errors() {
+        let lost = agent_reply(Err(CallError::Lost)).expect_err("transport error");
+        assert!(matches!(&lost, AppError::Message(_)));
+        assert_eq!(lost.to_string(), CallError::Lost.to_string());
+        let malformed = agent_reply(Ok(serde_json::json!({}))).expect_err("invalid task");
+        assert!(matches!(&malformed, AppError::Json(_)));
+        assert!(malformed.to_string().starts_with("json error: "));
+    }
 }

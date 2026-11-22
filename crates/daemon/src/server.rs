@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gld_core::app::App;
+use gld_core::runtime::ListenerManager;
 use gld_core::{AppError, AppResult};
+use gld_host::listener_manager;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 
@@ -50,6 +52,7 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     let app = Arc::new(App::load()?);
     // 配置先就位再起执行代：它要读数据文件，第一次运行时文件是上面 App::load 建的。
     let router = start_generations(&paths)?;
+    let listeners = Arc::new(listener_manager(app.clone(), Some(router.clone())));
     let listener = ipc::bind(&paths.socket).map_err(|error| {
         AppError::Message(format!("绑定 {} 失败：{error}", paths.socket.display()))
     })?;
@@ -82,8 +85,10 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     spawn_signal_handler(shutdown_tx.clone());
 
     let context = Arc::new(DaemonContext {
+        router: router.clone(),
         info: {
             let app = app.clone();
+            let listeners = listeners.clone();
             let paths = paths.clone();
             Box::new(move || DaemonInfo {
                 pid: std::process::id(),
@@ -98,8 +103,11 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
                 // 服务本身。不加后面那一项的话，服务跑得好好的时候
                 // `gld daemon status` 也说"运行中的服务 0"——升级完想确认服务
                 // 回来没有的人，第一眼看到的就是这个数。
-                running_services: app.running_services().map(|s| s.len()).unwrap_or(0)
-                    + usize::from(gld_core::hub::runtime::started_hint()),
+                running_services: app
+                    .running_services(&listeners)
+                    .map(|s| s.len())
+                    .unwrap_or(0)
+                    + usize::from(gld_host::hub_runtime::started_hint()),
             })
         },
         request_shutdown: {
@@ -111,7 +119,7 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
     });
 
     if options.restore_runtime_state {
-        match app.restore_runtime_state().await {
+        match app.restore_runtime_state(&listeners).await {
             Ok(restored) if restored.is_empty() => {}
             Ok(restored) => logging::info(format!(
                 "restored {} service(s): {}",
@@ -131,9 +139,10 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
             accepted = ipc::accept(&listener) => match accepted {
                 Ok(stream) => {
                     let app = app.clone();
+                    let listeners = listeners.clone();
                     let context = context.clone();
                     tokio::spawn(async move {
-                        handle_connection(app, context, stream).await;
+                        handle_connection(app, listeners, context, stream).await;
                     });
                 }
                 Err(error) => {
@@ -151,7 +160,14 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
 
     logging::info("shutdown requested; stopping services");
     drop(listener);
-    app.shutdown_all().await;
+    // 先记 interrupted，再停服务；服务的正常 stop 会将命令记为 killed。
+    let stopping = router.clone();
+    let _ = tokio::task::spawn_blocking(move || stopping.interrupt_all()).await;
+    app.shutdown_services(&listeners).await;
+    if let Err(error) = gld_host::global_gateway::stop().await {
+        eprintln!("停止全局入口失败：{error}");
+    }
+    let _ = tokio::task::spawn_blocking(move || router.shutdown()).await;
     ipc::cleanup(&paths.socket);
     let _ = std::fs::remove_file(&paths.record);
     logging::info("daemon exited cleanly");
@@ -159,13 +175,13 @@ pub async fn run(options: ServerOptions) -> AppResult<()> {
 }
 
 /// 起第一个执行代，之后每次代数变化把 pid 写回 `daemon.json`。
-fn start_generations(paths: &DaemonPaths) -> AppResult<Arc<gld_core::generation::Router>> {
+fn start_generations(paths: &DaemonPaths) -> AppResult<Arc<gld_host::generation::Router>> {
     let exe = std::env::current_exe()
         .map_err(|error| AppError::Message(format!("找不到自己的可执行文件：{error}")))?;
     let record_path = paths.record.clone();
     // 一把锁：两次变化并发时，后写的必须是更新的那份。
     let writing = std::sync::Mutex::new(());
-    let router = gld_core::generation::Router::start(
+    let router = gld_host::generation::Router::start(
         exe,
         Box::new(move |router| {
             let _guard = writing.lock().unwrap_or_else(|e| e.into_inner());
@@ -179,11 +195,15 @@ fn start_generations(paths: &DaemonPaths) -> AppResult<Arc<gld_core::generation:
         }),
     )
     .map_err(AppError::Message)?;
-    gld_core::generation::install(Arc::clone(&router));
     Ok(router)
 }
 
-async fn handle_connection(app: Arc<App>, context: Arc<DaemonContext>, mut stream: ipc::Stream) {
+async fn handle_connection(
+    app: Arc<App>,
+    listeners: Arc<ListenerManager>,
+    context: Arc<DaemonContext>,
+    mut stream: ipc::Stream,
+) {
     let (read_half, mut write_half) = tokio::io::split(&mut stream);
     let mut reader = BufReader::new(read_half);
 
@@ -218,8 +238,9 @@ async fn handle_connection(app: Arc<App>, context: Arc<DaemonContext>, mut strea
     // 单独 spawn 一层：业务代码 panic 只影响这条连接，并且能转成错误回给客户端。
     let outcome = tokio::spawn({
         let app = app.clone();
+        let listeners = listeners.clone();
         let context = context.clone();
-        async move { dispatch(&app, Some(&context), request).await }
+        async move { dispatch(&app, &listeners, Some(&context), request).await }
     })
     .await
     .unwrap_or_else(|join_error| {

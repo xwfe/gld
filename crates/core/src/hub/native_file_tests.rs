@@ -1,13 +1,9 @@
 use super::*;
 
-use crate::auth::Principal;
-use crate::nodes::identity::{auth_from_meta, forwarded_meta};
 use crate::planning::{PlanningMode, PlanningService};
 
-const HUB_ID: &str = "11111111111111111111111111111111";
-
 #[test]
-fn node_file_ceiling_rejects_execution_and_management_even_with_full_auth() {
+fn node_file_ceiling_rejects_execution_and_management_even_for_local_operator() {
     let id = "a".repeat(32);
     let hub = Hub::with_members(
         &HubConfig {
@@ -21,7 +17,7 @@ fn node_file_ceiling_rejects_execution_and_management_even_with_full_auth() {
         }),
         Connections::new(),
     );
-    let auth = AuthContext::new(Principal::SharedSecret, "node-test");
+    let auth = AuthContext::local_operator();
     for name in [
         "exec_command",
         "exec_health_check",
@@ -52,10 +48,10 @@ fn node_file_ceiling_rejects_execution_and_management_even_with_full_auth() {
             "{name}: {result}"
         );
     }
-    assert!(hub.exposes("apply_patch", None));
-    assert!(hub.exposes("patch_check", None));
+    assert!(hub.exposes("apply_patch", &auth));
+    assert!(hub.exposes("patch_check", &auth));
     assert!(
-        hub.exposes("planning_state", None),
+        hub.exposes("planning_state", &auth),
         "retain the pre-existing read surface"
     );
 }
@@ -111,16 +107,13 @@ fn exercise_local_policy() {
         runnable: Vec::new(),
     })
     .unwrap();
-    let origin = AuthContext::new(
-        Principal::OAuthClient {
-            client_id: "alice".into(),
-        },
-        "hub",
-    );
     let call = |name: &str, args: Value| {
-        let params =
-            json!({"name":name,"arguments":args,"_meta":forwarded_meta(&origin,HUB_ID).unwrap()});
-        let auth = auth_from_meta(&params, HUB_ID, &shared, &writable).unwrap();
+        let write = args
+            .get("workspace")
+            .and_then(Value::as_str)
+            .is_some_and(|id| writable.iter().any(|allowed| allowed == id));
+        let auth = verified_project_caller("alice", shared.clone(), write);
+        let params = json!({"name":name,"arguments":args});
         hub.handle_request(
             &auth,
             &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params}),
@@ -139,13 +132,7 @@ fn exercise_local_policy() {
         projects.iter().find(|p| p["id"] == web.id).unwrap()["read_only"],
         true
     );
-    let control = origin.clone().with_grant(Some(Grant {
-        id: "node-control".into(),
-        name: "inventory".into(),
-        workspaces: shared.clone(),
-        read_only: false,
-        browser: false,
-    }));
+    let control = verified_project_caller("alice", shared.clone(), true);
     let catalog = hub
         .handle_request(
             &control,

@@ -1,5 +1,8 @@
 # gld
 
+> **源码接入边界（D18）：** 授权模型与新存储已更换，MCP 和原生节点的新认证尚未开放，
+> 当前源码不是完整接入版本。以下日用功能对应已发布/运行版本；阶段边界和后续工作见 [task_plan.md](task_plan.md)。
+
 让 ChatGPT、Claude Code、Cursor、Codex 直接在**你电脑上的项目**里读代码、改代码、跑命令、看 Git。
 
 不管有几个项目，每个 AI 客户端只配一条连接。AI 用哪个项目，它每次调用时自己点名。
@@ -15,7 +18,7 @@
 - **AI 说测过了不算**：任务收尾只认期间真跑通过的命令（[详情](docs/concepts.md#任务怎么收尾带证据才算-completed)）。
 - **让 AI 起 dev server、用浏览器看页面**（[怎么配](docs/concepts.md#用浏览器验页面单独配一个隔离的-playwright-mcp)）。
 - **让 AI 用你装好的 [Skill](docs/concepts.md#本机和项目里的-skill) 和 [MCP server](docs/concepts.md#本机装好的-mcp-server)**。
-- **只给别人开几个项目**：发一份单独的凭据，默认只读，随时作废（[详情](docs/concepts.md#只开几个项目gld-grant)）。
+- **独立的授权范围**：新模型默认动态全部项目，也可指定稳定项目 ID；写权限和服务能力分别授予（[详情](docs/concepts.md#统一授权gld-grant)）。
 - **把活交给本机的 Codex、Claude Code 等 Agent**：做完交回 AI 审核，默认关（[怎么用](docs/concepts.md#能用哪些-agent怎么放权)、[风险](docs/security.md#委派出去的-agent-是全权跑的)）。
 - **操作另一台机器上的项目**：目标机安装 gld、按邀请命令加入同一个 Hub，并明确共享项目和权限（[原生节点](docs/concepts.md#原生-gld-节点项目读写与凭据管理)）；已有的 [ccnm 接法](docs/concepts.md#成员还可以在别的机器上) 继续可用。
 

@@ -1,5 +1,5 @@
 use gld_core::app::FrpProfileDto;
-use gld_core::settings::FrpProfile;
+use gld_core::settings::{new_frp_profile, FrpProfile};
 use gld_daemon::Request;
 use serde_json::json;
 
@@ -44,7 +44,7 @@ pub async fn run(ctx: &mut Ctx, command: FrpCmd) -> CliResult {
             let saved: FrpProfileDto = ctx
                 .backend
                 .call_typed(Request::SaveFrpProfile {
-                    profile: FrpProfile::new(name, server, port),
+                    profile: new_frp_profile(name, server, port),
                     token,
                 })
                 .await?;

@@ -36,6 +36,15 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 | 测试 | 位置 | 覆盖什么 |
 | --- | --- | --- |
 | 单元测试 | 各 crate `src/**` 的 `#[cfg(test)]` | 解析、策略、协议编解码、路径回退、字段表 |
+| crate 依赖边界 | `crates/core/tests/crate_boundaries.rs` | 读取离线、锁定的 Cargo metadata，阻止 policy/protocol/transport/runtime/agent 引入上层、网络框架或构建脚本；代码依赖检查不等于 OS 沙箱 |
+| 协议兼容 | `crates/protocol/tests/daemon_contract.rs` 与 protocol 单元测试 | 固定 JSON、默认值、别名、错误码和执行代消息；core 保留身份转换与管道 I/O 测试 |
+| 文件执行边界 | `crates/runtime/src/**` | 显式保护目录与别名、有界文件读取、补丁版本前置条件、提交/回滚、Notebook；core 保留共享锁和调用方版本链集成测试 |
+| 命令与会话边界 | runtime 的 exec/session/runs/workspace_runtime；core 的 run_records/task_acceptance；CLI 的 generation_boundary/scoped_grants/agent_delegation | 启动与写锁、主体隔离、输出/终态/记录证据、撤销、交接状态；Agent 阻塞条件在应用层组合 |
+| Agent 边界 | agent 的 profile/store/run；core 的 agents；CLI 的 agent_delegation/generation_boundary | 档案、存储和进程机制随实现；审批、主体隔离、撤销、互斥、环境注入和换代组合在实际调用侧验证 |
+| 宿主节点所有权 | core 的 hub/tests/node_bridge；host 的 native_node_lifecycle；CLI 的 native_nodes/ownership | 桥接错误与离线成员保留、关闭顺序、换代保持同一 WSS、Hub 重启后原进程重连、直连/网关共用登记表 |
+| 监听管理所有权 | core 的 runtime/manager；host 的 listener_supervisor；CLI 的 service_lifecycle/start_and_upgrade | 一次恢复、独立锁范围、同实例启停/状态、配置更新与重启 |
+| 应用清理与执行代装配 | core 的 app_cleanup；daemon 的 typed agent reply；CLI 的 daemon_lifecycle/generation_boundary/agent_delegation/scoped_grants/planning_output | 先落盘后清理、真实 35 秒复清、错误保真、直连与执行代分支、退出终态 |
+| 宿主 HTTP / OAuth | `crates/host/src/auth/`、`mcp.rs`、`actions/`；CLI 的 oauth_connector_flow / scoped_grants / actions_and_gateway | 错误与元数据、动态注册/PKCE/刷新、持久化损坏拒绝、鉴权和工具选路 |
 | 工具契约 | `crates/core/tests/call_tool_contract.rs` | 每个 profile 暴露的工具集与返回结构 |
 | 安全契约 | `crates/core/tests/call_tool_security.rs` | 路径穿越、命令白名单、`.git` 保护、危险操作确认 |
 | Harness / History | `crates/core/tests/harness_*.rs`、`history_session.rs` | Durable Task、历史档案的幂等追加与分页读取 |
@@ -50,18 +59,24 @@ shell，`$(…)` 这种展开不认。改用 cargo 自己的配置传环境变�
 只跑某一块：
 
 ```bash
+cargo test -p gld-runtime --all-targets --locked
+cargo test -p gld-agent --all-targets --locked
 cargo test -p gld-core tools::
+cargo test -p gld-policy -p gld-protocol -p gld-transport --locked
 cargo test -p gld-daemon
 cargo test -p gld --test daemon_lifecycle
 ```
 
 **Windows CI 不跑全套**，只跑 `ci.yml` 里 `windows` job 列出的两小组：补丁落盘与写锁
-（`gld-core` 单元测试），和 `daemon_lifecycle.rs` 里点名的一小组端到端测试（命名管道上的
+（补丁与写锁机制归 `gld-runtime`，上下文组合测试归 `gld-core`），和 `daemon_lifecycle.rs` 里点名的一小组端到端测试（命名管道上的
 守护进程起停、单实例锁、经守护进程跑命令、停命令不留孤儿、运行记录的 `exited` /
 `interrupted`）。后者跑的是这次编出来的 `target/debug/gld`，**不算下载包验收**。清单只写在
 `ci.yml` 一处；往里加测试前先把 fixture 改成两边都能跑（`sh` 脚本、`sleep`、`pgrep` 在
 Windows 上都没有，`daemon_lifecycle.rs` 里的 `Sleeper`、`write_script` 是现成的写法）。
 测试改了名要同步改清单，否则那一步会报"条数不对"。
+补丁测试按 runtime 的 `patch` 过滤，写锁机制按 runtime 的 `workspace_runtime` 过滤，
+上下文组合按 core 的 `tools::workspace_runtime` 过滤；三组以 `&&` 连接，任意一组失败都会使该步骤失败。
+Unix 专属的 scope 停止测试不在 Windows 过滤结果中。实际运行结果与平台范围见 [task_plan.md](../task_plan.md)。
 
 ## 文档与完成声明的契约
 
@@ -154,8 +169,11 @@ gld stop && gld daemon stop
 
 ```text
 crates/core/src/app/        应用服务层（加用例先改这里）
-crates/core/src/tools/      工具内核（改工具行为改这里，同时更新契约测试）
-crates/daemon/src/          协议 / IPC / 守护进程
+crates/core/src/tools/      工具编排与适配（授权、任务、共享锁和契约测试）
+crates/runtime/src/         工作区路径 / 文件补丁 / 命令会话与共享执行状态
+crates/agent/src/           Agent 档案 / 任务记录 / 委派进程生命周期
+crates/protocol/src/        配置 DTO / daemon 和执行代消息 / 参数范围与纯规则
+crates/daemon/src/          IPC / 请求分发 / 守护进程
 crates/cli/src/cli.rs       全部命令与帮助文本
 crates/cli/src/commands/    子命令实现
 crates/core/tests/fixtures/ 契约测试用的示例项目
@@ -168,9 +186,9 @@ scripts/package.sh          构建 + 打包发布件（CI 也调它）
 
 ## 版本
 
-三个 crate 共用 workspace 版本（根 `Cargo.toml` 的 `[workspace.package].version`）。
+所有 Rust crate 共用 workspace 版本（根 `Cargo.toml` 的 `[workspace.package].version`）。
 守护进程会把版本和协议版本报给命令行，不一致时命令行拒绝转发；
-改了 `Request` / `Response` 的形状记得把 `PROTOCOL_VERSION` 加一。
+改了 `gld-protocol::daemon` 的 `Request` / `Response` 形状记得把 `PROTOCOL_VERSION` 加一；仅迁移 Rust 类型不改版本。
 
 ## 升级连续性
 

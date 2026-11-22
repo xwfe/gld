@@ -1,4 +1,5 @@
-//! 只能经代理出网的目标机：配对和长连接都走 CONNECT 隧道，TLS 和 Hub 身份校验照常在隧道里做。
+//! 配对和节点握手经 CONNECT 隧道，TLS 与固定 Hub 身份校验照常进行。
+//! 传输可达不会授予项目权限：D18-A 的正式节点控制随后明确拒绝。
 
 use super::*;
 use std::net::TcpListener as StdListener;
@@ -82,7 +83,7 @@ fn tunnel(mut client: std::net::TcpStream, upstream: u16, seen: Arc<Mutex<Vec<St
 }
 
 #[test]
-fn a_machine_behind_a_connect_proxy_pairs_and_stays_connected() {
+fn a_machine_behind_a_connect_proxy_pairs_then_refuses_legacy_control() {
     let hub = Env::new();
     let service = hub.serve("local", "bearer");
     let relay = TlsRelay::new(service.port);
@@ -124,10 +125,12 @@ fn a_machine_behind_a_connect_proxy_pairs_and_stays_connected() {
         .arg(&config)
         .spawn()
         .unwrap();
-    let mut node = NodeProcess(Some(child));
-    let items = wait_inventory(&service, 1, 1);
-    let api = find(&items, "proxied/api");
-    assert_eq!(read(&service, &api)["content"], "proxied/api\n");
+    assert_node_auth_pending(&NodeProcess(Some(child)).rejected());
+    assert_no_native_projects(&hub);
+    assert_eq!(
+        std::fs::read_to_string(machine.project.path().join("api/README.md")).unwrap(),
+        "proxied/api\n"
+    );
     let targets = proxy.targets();
     assert_eq!(
         targets.len(),
@@ -137,11 +140,10 @@ fn a_machine_behind_a_connect_proxy_pairs_and_stays_connected() {
     assert!(targets
         .iter()
         .all(|target| *target == format!("localhost:{}", relay.port)));
-    node.stop();
 }
 
 #[test]
-fn no_proxy_keeps_the_connection_direct() {
+fn no_proxy_keeps_the_authorization_refusal_on_the_direct_connection() {
     let hub = Env::new();
     let service = hub.serve("local", "bearer");
     let relay = TlsRelay::new(service.port);
@@ -159,10 +161,10 @@ fn no_proxy_keeps_the_connection_direct() {
         .arg(&path)
         .spawn()
         .unwrap();
-    let mut node = NodeProcess(Some(child));
-    wait_inventory(&service, 2, 2);
+    assert_node_auth_pending(&NodeProcess(Some(child)).rejected());
     assert!(proxy.targets().is_empty());
-    node.stop();
+    assert_eq!(relay.connections(), 1);
+    assert_no_native_projects(&hub);
 }
 
 #[test]

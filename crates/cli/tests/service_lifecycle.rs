@@ -7,12 +7,11 @@ mod common;
 
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Output};
-use std::time::Duration;
 
 use common::env::{free_port, Env};
 use common::http::post_json;
 
-/// 发一个 tools/list，只关心状态码：这里要区分的是 200 还是 401。
+/// 监听器仍应响应；D18-A 尚未接通新授权，因此 MCP 必须明确拒绝。
 fn post_mcp(port: u16, bearer: Option<&str>) -> u16 {
     post_json(
         port,
@@ -39,7 +38,7 @@ fn service_state(env: &Env) -> String {
 #[test]
 fn starting_an_already_running_service_is_a_no_op() {
     let env = Env::new();
-    let service = env.serve("again", "noauth");
+    let service = env.serve("again", "oauth");
 
     for attempt in 1..=2 {
         let started = env.json(&["--json", "start"]);
@@ -51,7 +50,7 @@ fn starting_an_already_running_service_is_a_no_op() {
         );
     }
 
-    assert_eq!(post_mcp(service.port, None), 200);
+    assert_eq!(post_mcp(service.port, None), 503);
     let stdout = std::fs::read_to_string(env.home.path().join("logs/hub/stdout.log"))
         .expect("服务的 stdout.log");
     assert_eq!(
@@ -83,31 +82,19 @@ fn starting_when_a_stranger_holds_the_port_still_fails() {
     );
 }
 
-/// 改服务的认证不用再敲 `gld restart`，新配置当场生效；改项目的字段也不用。
-///
-/// "忘了重启"的表现是改了没反应——看不出跟没重启有关。这里用认证方式验：
-/// 没重启的话没凭据的请求仍然是 200。
+/// 改端口在已运行服务上立即生效；无关的项目字段不能把它带停。
 #[test]
 fn a_change_takes_effect_without_a_restart() {
     let env = Env::new();
-    let service = env.serve("live", "noauth");
-    assert_eq!(post_mcp(service.port, None), 200, "noauth 时无凭据应当放行");
-
-    env.ok(&["upgrade", "--auth", "bearer"]);
-    assert_eq!(
-        post_mcp(service.port, None),
-        401,
-        "新认证方式没生效，说明没重启"
-    );
-
-    // 项目的字段服务每次调用都重新读，不重启任何东西；Actions 没在跑也不该动它。
+    let service = env.serve("live", "oauth");
+    assert_eq!(post_mcp(service.port, None), 503);
+    let next_port = free_port();
+    env.ok(&["upgrade", "--port", &next_port.to_string()]);
+    assert!(TcpStream::connect(("127.0.0.1", service.port)).is_err());
+    assert_eq!(post_mcp(next_port, None), 503);
     let other_side = env.json(&["--json", "set", "live", "actions.auth=none"]);
-    assert_eq!(
-        other_side["restarted"].as_array().map(Vec::len),
-        Some(0),
-        "Actions 没在跑，不该有任何重启：{other_side}"
-    );
-    assert_eq!(post_mcp(service.port, None), 401, "服务被无关的改动带停了");
+    assert_eq!(other_side["restarted"].as_array().map(Vec::len), Some(0));
+    assert_eq!(post_mcp(next_port, None), 503);
 }
 
 /// 新配置起不来时要说清楚：配置存下了，但服务现在是停的。
@@ -117,7 +104,7 @@ fn a_change_takes_effect_without_a_restart() {
 #[test]
 fn a_failed_restart_after_a_change_is_reported_as_an_error() {
     let env = Env::new();
-    env.serve("broken", "noauth");
+    env.serve("broken", "oauth");
 
     // 这个监听器属于测试进程，冒充"别的程序占着新端口"。
     let squatter = TcpListener::bind(("127.0.0.1", 0)).expect("占住一个端口");
@@ -138,50 +125,23 @@ fn a_failed_restart_after_a_change_is_reported_as_an_error() {
     );
 }
 
-/// 换凭据后，正在跑的服务必须带着新值重启：旧 Token 立刻失效、新 Token 可用。
-///
-/// 这条链路（凭据落盘 → 重启 → 监听器读取新值）出问题时只表现为客户端一直 401，
-/// 从日志里看不出原因。自己定一个值（`secret set`）走的是同一条路。
+/// 旧共享 secret 的更新仍可保存，但绝不能恢复 MCP master 认证。
 #[test]
-fn a_new_credential_restarts_the_service_with_the_new_value() {
+fn changing_a_legacy_secret_does_not_restore_mcp_authority() {
     let env = Env::new();
     let service = env.serve("sec", "bearer");
     let old = service.token.clone();
-    assert_eq!(post_mcp(service.port, Some(&old)), 200);
-    assert_eq!(post_mcp(service.port, None), 401, "没有凭据必须被拒");
-
     let new = env.json(&["--json", "secret", "regen", "bearer_token"])["value"]
         .as_str()
         .expect("new token")
         .to_string();
     assert_ne!(new, old);
-    assert!(
-        wait_until_accepted(service.port, &new),
-        "新凭据应当在服务重启后生效"
-    );
-    assert_eq!(
-        post_mcp(service.port, Some(&old)),
-        401,
-        "旧凭据必须立即失效"
-    );
-
-    // `secret ls` 报的就是真能用的那个。
     assert_eq!(env.service_secret("bearer_token"), new);
-
-    env.ok(&["secret", "set", "bearer_token", "my-own-token"]);
-    assert!(wait_until_accepted(service.port, "my-own-token"));
-    assert_eq!(post_mcp(service.port, Some(&new)), 401);
-}
-
-/// 重启是在守护进程里做完才返回的，但给它一点余量，免得机器忙时误报。
-fn wait_until_accepted(port: u16, token: &str) -> bool {
-    for _ in 0..50 {
-        if post_mcp(port, Some(token)) == 200 {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    for token in [None, Some(old.as_str()), Some(new.as_str())] {
+        assert_eq!(post_mcp(service.port, token), 503);
     }
-    false
+    env.ok(&["secret", "set", "bearer_token", "test-legacy-token"]);
+    assert_eq!(post_mcp(service.port, Some("test-legacy-token")), 503);
 }
 
 /// 同时发起多个 start 不该把服务启起来两遍，也不该报错。
@@ -193,7 +153,7 @@ fn concurrent_starts_converge_on_a_single_running_service() {
     let env = Env::new();
     let port = free_port();
     env.ok(&["add", ".", "--name", "race"]);
-    env.ok(&["upgrade", "--port", &port.to_string(), "--auth", "noauth"]);
+    env.ok(&["upgrade", "--port", &port.to_string(), "--auth", "oauth"]);
     // 先把守护进程拉起来，让这几个 start 真的并发，而不是抢着拉守护进程。
     env.ok(&["daemon", "start"]);
 
@@ -226,44 +186,44 @@ fn concurrent_starts_converge_on_a_single_running_service() {
     assert!(failures.is_empty(), "并发 start 不该失败：{failures:?}");
 
     assert_eq!(service_state(&env), "running");
-    assert_eq!(post_mcp(port, None), 200);
+    assert_eq!(post_mcp(port, None), 503);
 
     // 停一次就该彻底停掉，不会残留第二个监听器。
     env.ok(&["stop"]);
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
 }
 
-/// 改项目名，服务列给 AI 的名字立刻跟着变，不用重启。
-///
-/// AI 调用时用名字选项目。服务每次请求都重新读项目表——要是它缓存了旧名字，
-/// `gld ls` 显示新名字、AI 却只能用旧名字，这种不一致只有真去调才发现。
+/// 改项目名后，本地选择器立即使用新名字，仍在真实执行代内读取新上下文。
 #[test]
-fn renaming_a_project_changes_the_name_the_ai_uses_right_away() {
+fn renaming_a_project_changes_the_local_selector_right_away() {
     let env = Env::new();
     env.write("probe.txt", "rename-marker\n");
-    let service = env.serve("oldname", "noauth");
-    let names = |service: &common::service::Service| -> Vec<String> {
-        service.call_raw("list_workspaces", serde_json::json!({}))["workspaces"]
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item["name"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    assert_eq!(names(&service), vec!["oldname"]);
-
+    env.ok(&["add", ".", "--name", "oldname"]);
+    assert!(env
+        .local_tool(
+            "oldname",
+            "read_file",
+            serde_json::json!({"path":"probe.txt"})
+        )
+        .to_string()
+        .contains("rename-marker"));
     env.ok(&["set", "oldname", "name=newname"]);
-    assert_eq!(names(&service), vec!["newname"], "改完名服务还在报旧名字");
-    let renamed = common::service::Service {
-        port: service.port,
-        token: service.token.clone(),
-        workspace: "newname".into(),
-    };
-    let read = renamed.call_tool("read_file", serde_json::json!({ "path": "probe.txt" }));
-    assert!(read.to_string().contains("rename-marker"), "{read}");
-
-    env.ok(&["stop"]);
+    let old = env.gld(&[
+        "--json",
+        "-w",
+        "oldname",
+        "tool",
+        "call",
+        "read_file",
+        "path=probe.txt",
+    ]);
+    assert!(!old.status.success());
+    assert!(env
+        .local_tool(
+            "newname",
+            "read_file",
+            serde_json::json!({"path":"probe.txt"})
+        )
+        .to_string()
+        .contains("rename-marker"));
 }

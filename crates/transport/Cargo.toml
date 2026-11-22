@@ -1,0 +1,11 @@
+[package]
+name = "gld-transport"
+description = "MCP peer, capability snapshots and stdio transport for gld"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

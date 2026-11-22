@@ -5,6 +5,7 @@
 //! AI 看到的完全一样（同一个 [`crate::tools::build_tool_context`]、
 //! 同一个 [`crate::tools::call_tool`]）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -21,18 +22,17 @@ impl App {
         Ok(list_tools_for_profile(&profile.runtime.tool_profile))
     }
 
-    /// 执行一次工具调用，返回结构化结果（含 `ok` 字段）。
+    /// 读取当前配置的目录；路径归属键由执行代路由计算。
+    pub fn tool_workspace_root(&self, id: &str) -> AppResult<PathBuf> {
+        Ok(self.profile_by_id(id)?.path.into())
+    }
+
+    /// 在本进程执行工具，返回结构化结果（含 `ok` 字段）。
     ///
     /// 未知工具名在这里就被拒绝，而不是交给内核返回一个含糊的错误；
     /// 别名（如 `grep` → `grep_text`）与 MCP 侧用同一张映射表。
-    pub fn call_tool(&self, id: &str, name: &str, args: Value) -> AppResult<Value> {
+    pub fn call_tool_local(&self, id: &str, name: &str, args: Value) -> AppResult<Value> {
         let profile = self.profile_by_id(id)?;
-        // 守护进程里命令会话在执行代那边，在这里跑就是另起一套，写入序号也对不上。
-        if let Some(router) = crate::generation::router() {
-            return router
-                .local_tool(id, std::path::Path::new(&profile.path), name, &args)
-                .map_err(|error| AppError::Message(error.to_string()));
-        }
         let canonical = crate::generation::child::check_tool_call(&profile, name, &args)?;
         let ctx = self.tool_context(id)?;
         Ok(call_tool(&ctx, canonical, &args))

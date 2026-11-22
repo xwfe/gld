@@ -48,6 +48,20 @@ pub struct AuthConfig {
     pub use_shared_secrets: bool,
 }
 
+impl AuthConfig {
+    pub fn oauth_enabled(&self) -> bool {
+        self.auth_type == "oauth"
+    }
+
+    pub fn bearer_enabled(&self) -> bool {
+        self.auth_type == "bearer"
+    }
+
+    pub fn auth_enabled(&self) -> bool {
+        self.auth_type != "noauth"
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     #[serde(default = "default_mcp_port")]
@@ -496,6 +510,16 @@ fn computed_public_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_enabled_only_for_oauth_type() {
+        let mut auth = AuthConfig::default();
+        assert!(auth.oauth_enabled());
+        auth.auth_type = "bearer".into();
+        assert!(!auth.oauth_enabled());
+        auth.auth_type = "noauth".into();
+        assert!(!auth.oauth_enabled());
+    }
 
     /// 0.2.x 写出来的配置文件里没有 `confine_reads` 字段，
     /// 反序列化必须补成 `true`——升级后越界读要被挡住，而不是维持旧的放开状态。

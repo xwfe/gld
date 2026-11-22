@@ -2,14 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const PLANNING_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanningMode {
-    #[default]
-    Direct,
-    Plan,
-    Goal,
-}
+pub use gld_protocol::planning::{GoalStatus, PlanStatus, PlanStepStatus, PlanningMode};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,42 +28,6 @@ pub struct PlanningProposal {
     #[serde(default)]
     pub approval_status: ProposalStatus,
     pub created_at: String,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalStatus {
-    #[default]
-    Active,
-    Paused,
-    Completed,
-    AwaitingAcceptance,
-    Archived,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanStatus {
-    #[default]
-    Draft,
-    Active,
-    Paused,
-    Completed,
-    AwaitingAcceptance,
-    Archived,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanStepStatus {
-    #[default]
-    Pending,
-    InProgress,
-    Completed,
-    Blocked,
-    Skipped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

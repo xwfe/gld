@@ -1,6 +1,7 @@
-//! 稳定宿主和执行代的边界（RFC-0008 §3.4、§5）。全部用真进程、真 HTTP、隔离的 `GLD_HOME`。
+//! 稳定宿主和执行代的边界（RFC-0008 §3.4、§5）。本地 CLI 经真实执行代验证工具交接；
+//! HTTP 独立验证 D18-A 授权尚未接通时持续拒绝，全部使用隔离的 `GLD_HOME`。
 //!
-//! 要证明的只有一件事：工具实现出了什么问题、换成哪个版本，对外的端口和认证都不动。
+//! 工具实现退出或换版本，不得改变宿主端口与授权边界，也不得重放已开始的操作。
 //! 这里没有一条测试说明已经零中断：哪些还没做到写在 RFC 的 §5。
 //!
 //! 只在 Unix 跑：要 `kill -9`、要用 shell 脚本冒充坏掉的新版本。
@@ -10,12 +11,12 @@
 mod common;
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::env::{free_port, Env};
-use common::http::{post_form, post_json, query_param, request, request_waiting, Reply};
-use common::oauth::{authorize, connect_a_connector, endpoint_path, pkce, REDIRECT};
+use common::http::{get, post_form, post_json, request, Reply};
+use common::oauth::{authorize, endpoint_path, pkce};
 use serde_json::{json, Value};
 
 struct Fixture {
@@ -56,15 +57,72 @@ fn call_body(name: &str, arguments: Value) -> String {
     )
 }
 
+/// 只用于本文件：真实 CLI -> 私有 daemon IPC -> 执行代，身份为本机操作员。
+/// 保存路径而非 Env，线程结束时不会触发 Env 的守护进程清理。
+#[derive(Clone)]
+struct LocalTools {
+    home: PathBuf,
+    project: PathBuf,
+}
+
+impl LocalTools {
+    fn command(&self, name: &str, mut arguments: Value) -> Command {
+        let workspace = arguments
+            .as_object_mut()
+            .and_then(|args| args.remove("workspace"))
+            .and_then(|value| value.as_str().map(str::to_string))
+            .expect("local project calls require an explicit workspace");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_gld"));
+        command
+            .args([
+                "--json",
+                "-w",
+                &workspace,
+                "tool",
+                "call",
+                name,
+                "--args-json",
+            ])
+            .arg(arguments.to_string())
+            .env("GLD_HOME", &self.home)
+            .env("NO_COLOR", "1")
+            .env_remove("GLD_WORKSPACE")
+            .env_remove("TUNNEL_TOKEN")
+            .env_remove("CONTROL_PLANE_API_KEY")
+            .current_dir(&self.project);
+        command
+    }
+
+    fn raw(&self, name: &str, arguments: Value) -> Output {
+        self.command(name, arguments)
+            .output()
+            .expect("run local tool CLI")
+    }
+
+    fn tool(&self, name: &str, arguments: Value) -> Value {
+        let output = self.raw(name, arguments);
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!("local {name} did not return a tool result ({error}); status={} stdout={} stderr={}",
+                output.status, String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr))
+        })
+    }
+}
+
 impl Fixture {
     fn post(&self, body: &str) -> Reply {
         post_json(self.port, "/mcp", body, Some(&self.token))
     }
 
+    fn local(&self) -> LocalTools {
+        LocalTools {
+            home: self.env.home.path().to_path_buf(),
+            project: self.env.project.path().to_path_buf(),
+        }
+    }
+
     fn tool(&self, name: &str, arguments: Value) -> Value {
-        let reply = self.post(&call_body(name, arguments));
-        assert_eq!(reply.status, 200, "{}", reply.body);
-        structured(&reply)
+        self.local().tool(name, arguments)
     }
 
     fn status(&self) -> Value {
@@ -88,16 +146,14 @@ impl Fixture {
             .unwrap_or_else(|| panic!("运行记录没有 pid：{listed}")) as u32
     }
 
-    fn wait_until_answering(&self) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            let reply = self.post(&call_body("list_workspaces", json!({})));
-            if reply.status == 200 && reply.json().get("error").is_none() {
-                return;
-            }
-            assert!(Instant::now() < deadline, "服务一直没恢复：{}", reply.body);
-            std::thread::sleep(Duration::from_millis(100));
-        }
+    fn wait_until_local_tools_answer(&self) {
+        wait_for("本地工具恢复", || {
+            let result = self.local().raw("server_info", json!({"workspace":"api"}));
+            result.status.success()
+                && serde_json::from_slice::<Value>(&result.stdout)
+                    .is_ok_and(|value| value["ok"] == true)
+        });
+        assert_auth_not_ready(&self.post(&rpc_body("tools/list", json!({}))));
     }
 
     fn listener_pid(&self) -> Option<u32> {
@@ -107,17 +163,10 @@ impl Fixture {
     }
 }
 
-fn structured(reply: &Reply) -> Value {
-    let body = reply.json();
-    let text = body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("没有工具结果：{}", reply.body));
-    serde_json::from_str(text).expect("工具结果是 JSON")
-}
-
-fn structured_list(reply: &Reply) -> Value {
-    let body: Value = serde_json::from_str(&reply.body).expect("JSON-RPC");
-    body["result"]["tools"].clone()
+fn assert_auth_not_ready(reply: &Reply) {
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert_eq!(reply.json()["error"], "AUTH_NOT_READY", "{}", reply.body);
+    assert_eq!(reply.header("cache-control"), Some("no-store"));
 }
 
 fn generation_pids(status: &Value) -> Vec<u32> {
@@ -219,6 +268,31 @@ fn tools_run_in_a_child_and_the_port_stays_with_the_host() {
     );
 }
 
+/// 旧凭据和缺省身份均不得让网络请求进入执行代或产生文件副作用。
+#[test]
+fn unconnected_mcp_requests_are_refused_before_any_workspace_execution() {
+    let fixture = fixture();
+    let patch = call_body(
+        "apply_patch",
+        json!({
+            "workspace":"api",
+            "patch":"*** Begin Patch\n*** Add File: must-not-exist.txt\n+unauthorized\n*** End Patch",
+        }),
+    );
+    for token in [None, Some(fixture.token.as_str()), Some("old-grant-token")] {
+        assert_auth_not_ready(&post_json(fixture.port, "/mcp", &patch, token));
+    }
+    assert!(!fixture
+        .env
+        .project
+        .path()
+        .join("must-not-exist.txt")
+        .exists());
+    let g1 = generation(&fixture.status(), "g1");
+    assert_eq!(g1["in_flight"], 0, "{g1}");
+    assert!(g1["workspaces"].as_array().unwrap().is_empty(), "{g1}");
+}
+
 /// 项目命令拿不到私有通道：除了 stdio 再没有别的继承下来的描述符。
 /// 有的话它就能冒充宿主发消息，或者抢走发给执行代的消息。
 ///
@@ -267,63 +341,45 @@ fn project_commands_inherit_nothing_from_the_private_channel() {
     assert_eq!(pipes, 3, "项目命令继承了多余的管道：\n{text}");
 }
 
-/// 杀掉执行代：在途请求如实失败，端口、认证都不变，新请求接着能用。
+/// 杀掉执行代：本地在途调用报告结果未知；端口和网络拒绝边界不变，本地调用可恢复。
 #[test]
-fn killing_the_generation_keeps_the_port_and_the_auth() {
+fn killing_the_generation_preserves_the_port_and_authorization_refusal() {
     let fixture = fixture();
     let before = fixture.status();
     let host = fixture.host_pid();
     let old = generation_pids(&before)[0];
-
     let sleeper = unique_sleep();
     let in_flight = {
-        let (port, token) = (fixture.port, fixture.token.clone());
+        let local = fixture.local();
         let sleeper = sleeper.clone();
         std::thread::spawn(move || {
-            let body = call_body(
+            local.raw(
                 "exec_command",
-                json!({ "workspace": "api", "cmd": sleeper, "yield_time_ms": 30000 }),
-            );
-            let auth = format!("Bearer {token}");
-            let headers = [
-                ("Content-Type", "application/json"),
-                ("Authorization", auth.as_str()),
-            ];
-            request_waiting(
-                port,
-                "POST",
-                "/mcp",
-                &headers,
-                &body,
-                Duration::from_secs(30),
+                json!({"workspace":"api","cmd":sleeper,"yield_time_ms":30000}),
             )
         })
     };
-    wait_for("请求进到执行代", || {
+    wait_for("本地调用进到执行代", || {
         generation(&fixture.status(), "g1")["in_flight"] == 1
     });
-
     kill_9(old);
     let reply = in_flight.join().expect("请求线程");
-    assert_eq!(reply.status, 200, "入口是好的，不该回 5xx：{}", reply.body);
-    let error = &reply.json()["error"];
-    assert_eq!(error["data"]["reason"], "generation_lost", "{}", reply.body);
-    assert_eq!(
-        error["data"]["retryable"], false,
-        "结果未知时不能叫客户端直接重试：{}",
-        reply.body
+    assert!(!reply.status.success(), "{reply:?}");
+    assert!(
+        String::from_utf8_lossy(&reply.stderr).contains("结果未知"),
+        "{reply:?}"
     );
 
-    // 没有执行代时也不能放松鉴权。
-    let wrong = post_json(
-        fixture.port,
-        "/mcp",
-        &call_body("list_workspaces", json!({})),
-        Some("wrong-token"),
-    );
-    assert_eq!(wrong.status, 401, "{}", wrong.body);
-
-    fixture.wait_until_answering();
+    // 执行代退出不能把尚未接通的网络凭据降成任何本机权限。
+    for token in [None, Some("wrong-token"), Some(fixture.token.as_str())] {
+        assert_auth_not_ready(&post_json(
+            fixture.port,
+            "/mcp",
+            &call_body("list_workspaces", json!({})),
+            token,
+        ));
+    }
+    fixture.wait_until_local_tools_answer();
     assert_eq!(fixture.host_pid(), host, "宿主不该动");
     assert_eq!(fixture.listener_pid(), Some(host), "端口不该换主人");
     let after = fixture.status();
@@ -331,79 +387,66 @@ fn killing_the_generation_keeps_the_port_and_the_auth() {
     let new = generation_pids(&after);
     assert_eq!(new.len(), 1, "{after}");
     assert_ne!(new[0], old);
-    assert!(
-        after["last_failure"].is_null(),
-        "恢复之后不该还挂着失败：{after}"
-    );
+    assert!(after["last_failure"].is_null(), "{after}");
     assert_eq!(fixture.runner_of("api"), new[0]);
     let _ = Command::new("pkill").args(["-f", &sleeper]).status();
 }
 
-/// 已有 token、refresh token、client_id、签名密钥，和进行到一半的授权码，都在宿主手里。
+/// D18-A 未接通统一凭据存储时，切代、执行代恢复和宿主重启都不得恢复旧 OAuth 授权。
 #[test]
-fn oauth_state_survives_losing_the_generation() {
+fn unconnected_oauth_entries_stay_rejected_across_generation_and_host_restarts() {
     let env = Env::new();
     let port = free_port();
     env.ok(&["add", ".", "--name", "api"]);
     env.ok(&["start", "--port", &port.to_string()]);
     let password = env.service_secret("oauth_password");
-    let token_secret = env.service_secret("oauth_token_secret");
-    let (client_id, access, refresh, token_path) = connect_a_connector(port, &password);
-
-    // 授权进行到一半：码发了还没换。
-    let metadata = common::http::get(port, "/.well-known/oauth-authorization-server").json();
+    let metadata = get(port, "/.well-known/oauth-authorization-server").json();
     let authorize_path = endpoint_path(&metadata, "authorization_endpoint");
-    let (verifier, challenge) = pkce();
-    let granted = authorize(port, &authorize_path, &client_id, &challenge, &password);
-    let code = query_param(granted.header("location").unwrap_or_default(), "code");
-
-    // 先切一代、再把当前代杀掉：两种换代都不碰认证状态。
+    let token_path = endpoint_path(&metadata, "token_endpoint");
+    let (_, challenge) = pkce();
+    let refused = || {
+        let authorization = authorize(
+            port,
+            &authorize_path,
+            "legacy-client",
+            &challenge,
+            &password,
+        );
+        assert_auth_not_ready(&authorization);
+        assert!(authorization.header("location").is_none());
+        for grant_type in ["authorization_code", "refresh_token"] {
+            assert_auth_not_ready(&post_form(
+                port,
+                &token_path,
+                &[
+                    ("grant_type", grant_type),
+                    ("code", "legacy-code"),
+                    ("refresh_token", "legacy-refresh"),
+                    ("client_id", "legacy-client"),
+                ],
+            ));
+        }
+        assert_auth_not_ready(&post_json(
+            port,
+            "/mcp",
+            &rpc_body("tools/list", json!({})),
+            Some("legacy-oauth-access"),
+        ));
+    };
+    refused();
     env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
     env.ok(&["daemon", "upgrade", "switch"]);
+    refused();
     let status = env.json(&["--json", "daemon", "upgrade", "status"]);
     let current = generation(&status, status["current"].as_str().unwrap());
     kill_9(current["pid"].as_u64().unwrap() as u32);
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let tools = rpc_body("tools/list", json!({}));
-    loop {
-        let reply = post_json(port, "/mcp", &tools, Some(&access));
-        assert_ne!(reply.status, 401, "已有 token 不该失效：{}", reply.body);
-        if reply.status == 200 && reply.json().get("error").is_none() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "没恢复：{}", reply.body);
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    let exchanged = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", REDIRECT),
-            ("client_id", &client_id),
-            ("code_verifier", &verifier),
-        ],
-    );
-    assert_eq!(exchanged.status, 200, "授权码丢了：{}", exchanged.body);
-
-    let refreshed = post_form(
-        port,
-        &token_path,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &refresh),
-            ("client_id", &client_id),
-        ],
-    );
-    assert_eq!(refreshed.status, 200, "refresh 失效：{}", refreshed.body);
-    assert_eq!(
-        env.service_secret("oauth_token_secret"),
-        token_secret,
-        "签名密钥被重新生成了"
-    );
+    wait_for("执行代恢复", || {
+        let status = env.json(&["--json", "daemon", "upgrade", "status"]);
+        status["restarts"] == 1 && status["current"].is_string()
+    });
+    refused();
+    env.ok(&["daemon", "restart"]);
+    refused();
 }
 
 /// 隧道进程是宿主的子进程，执行代没了它照跑，公网地址不变。
@@ -516,6 +559,110 @@ fn ready_frame(protocol: u32, state: u32) -> String {
     )
 }
 
+#[test]
+fn an_incompatible_host_is_refused_before_reading_state_or_executing_calls() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    fn exchange(
+        home: &std::path::Path,
+        protocol: u32,
+        op: &Value,
+        expected_marker: Option<&std::path::Path>,
+    ) -> Output {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gld"))
+            .args(["daemon", "generation"])
+            .env("GLD_HOME", home)
+            .current_dir(home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let hello = json!({"frame":"hello", "generation_protocol":protocol});
+        let call = json!({"frame":"call", "id":1, "op":op.to_string()});
+        let mut input = child.stdin.take();
+        // 执行代可能在后续调用写入管道前就拒绝 hello。
+        let _ = input
+            .as_mut()
+            .unwrap()
+            .write_all(format!("{hello}\n{call}\n").as_bytes());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if expected_marker.is_some_and(|path| path.exists()) {
+                drop(input.take());
+            }
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!("执行代没有在握手/写入后退出：{output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(input);
+        child.wait_with_output().unwrap()
+    }
+
+    fn assert_protocol_refused(output: Output, protocol: u32) {
+        assert!(!output.status.success(), "{output:?}");
+        let frames: Vec<Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["frame"], "refused", "{frames:?}");
+        let reason = frames[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("宿主执行代协议"), "{reason}");
+        assert!(reason.contains(&protocol.to_string()), "{reason}");
+    }
+
+    let current = gld_core::generation::GENERATION_PROTOCOL;
+    for protocol in [current - 1, current + 1] {
+        let home = tempfile::tempdir().unwrap();
+        let data = home.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let profiles = data.join("profiles.json");
+        let original = b"deliberately invalid state: do not read before checking hello";
+        std::fs::write(&profiles, original).unwrap();
+        let output = exchange(home.path(), protocol, &json!({"op":"ping"}), None);
+        assert_protocol_refused(output, protocol);
+        assert_eq!(std::fs::read(&profiles).unwrap(), original);
+        assert!(!home.path().join("access").exists());
+        assert!(!home.path().join("daemon.sock").exists());
+    }
+
+    // 登记真实项目；同一条有效写操作先验拒绝，再用当前协议证明能执行。
+    let env = Env::new();
+    env.ok(&["--no-autostart", "add", ".", "--name", "api"]);
+    let profiles = env.home.path().join("data/profiles.json");
+    let original = std::fs::read(&profiles).unwrap();
+    let data: Value = serde_json::from_slice(&original).unwrap();
+    let workspace_id = data["profiles"][0]["id"].as_str().unwrap();
+    let marker = env.project.path().join("handshake-write.txt");
+    let op = serde_json::to_value(gld_core::generation::wire::Op::LocalTool {
+        workspace_id: workspace_id.into(),
+        name: "apply_patch".into(),
+        args: json!({
+            "patch":"*** Begin Patch\n*** Add File: handshake-write.txt\n+executed\n*** End Patch\n"
+        }),
+    })
+    .unwrap();
+    for protocol in [current - 1, current + 1] {
+        let output = exchange(env.home.path(), protocol, &op, None);
+        assert_protocol_refused(output, protocol);
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read(&profiles).unwrap(), original);
+    }
+    let output = exchange(env.home.path(), current, &op, Some(&marker));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed\n");
+    assert_eq!(std::fs::read(&profiles).unwrap(), original);
+}
+
 /// 不管新版本坏成什么样，失败都发生在动路由之前，在线服务一点不受影响。
 #[test]
 fn a_bad_new_version_fails_before_the_live_service_notices() {
@@ -523,7 +670,6 @@ fn a_bad_new_version_fails_before_the_live_service_notices() {
     let env = &fixture.env;
     let current = gld_core::generation::GENERATION_PROTOCOL;
     let state = gld_core::generation::STATE_FORMAT;
-    fixture.tool("list_workspaces", json!({}));
     let before = fixture.status();
     let g1 = generation_pids(&before)[0];
     let served = fixture.runner_of("api");
@@ -553,6 +699,35 @@ done"#,
         ),
         ("hangs", "sleep 300".into(), "没有就绪"),
         ("refuses", refuses, "拒绝"),
+        (
+            "duplicate-ready",
+            format!(
+                "read hello\n{}\n{}\nsleep 300",
+                ready_frame(current, state),
+                ready_frame(current, state)
+            ),
+            "不应答",
+        ),
+        (
+            "old-protocol",
+            format!("read hello\n{}\nsleep 300", ready_frame(current - 1, state)),
+            "协议",
+        ),
+        (
+            "old-state",
+            format!("read hello\n{}\nsleep 300", ready_frame(current, state - 1)),
+            "状态格式",
+        ),
+        (
+            "early-host-call",
+            "read hello\nprintf '%s\\n' '{\"frame\":\"host_call\",\"id\":1,\"op\":\"{\\\"op\\\":\\\"node_members\\\"}\"}'\nsleep 300".into(),
+            "ready 之前",
+        ),
+        (
+            "early-reply",
+            "read hello\nprintf '%s\\n' '{\"frame\":\"reply\",\"id\":1,\"ok\":true,\"value\":\"null\"}'\nsleep 300".into(),
+            "ready 之前",
+        ),
         (
             "wrong-protocol",
             format!("read hello\n{}\nsleep 300", ready_frame(current + 1, state)),
@@ -662,20 +837,36 @@ fn switching_keeps_running_work_with_its_generation_and_sends_new_workspaces_to_
         .unwrap_or_else(|| panic!("{interactive}"))
         .to_string();
 
-    // 长请求：切换时还没返回。
-    let long = {
-        let (port, token) = (fixture.port, fixture.token.clone());
-        std::thread::spawn(move || {
-            let body = call_body(
+    // 长请求在收到文件信号前不退出，避免短 sleep 在慢 runner 上先于状态轮询结束。
+    let mut long = {
+        let local = fixture.local();
+        Some(std::thread::spawn(move || {
+            local.tool(
                 "exec_command",
-                json!({ "workspace": "api", "argv": ["sh", "-c", "sleep 2; echo long-marker"], "yield_time_ms": 30000 }),
-            );
-            post_json(port, "/mcp", &body, Some(&token))
-        })
+                json!({
+                    "workspace": "api",
+                    "argv": [
+                        "sh",
+                        "-c",
+                        "while [ ! -e long-command-release ]; do sleep 0.05; done; echo long-marker"
+                    ],
+                    "yield_time_ms": 30000
+                }),
+            )
+        }))
     };
+    let mut early_result = None;
     wait_for("长请求进到执行代", || {
+        if long.as_ref().is_some_and(|task| task.is_finished()) {
+            early_result = Some(long.take().unwrap().join().expect("长请求线程"));
+            return true;
+        }
         generation(&fixture.status(), "g1")["in_flight"] == 1
     });
+    assert!(
+        early_result.is_none(),
+        "长请求在进入执行代前就返回了：{early_result:?}"
+    );
 
     let exe = env!("CARGO_BIN_EXE_gld");
     env.ok(&["daemon", "upgrade", "prepare", exe]);
@@ -690,8 +881,8 @@ fn switching_keeps_running_work_with_its_generation_and_sends_new_workspaces_to_
         .unwrap()
         .contains(&json!("owned_workspaces")));
 
-    let finished = long.join().expect("长请求线程");
-    let finished = structured(&finished);
+    env.write("long-command-release", "release\n");
+    let finished = long.take().unwrap().join().expect("长请求线程");
     assert_eq!(finished["exit_code"], 0, "{finished}");
     assert!(
         finished["stdout"]
@@ -888,6 +1079,77 @@ fn a_running_command_keeps_its_workspace_back_until_it_finishes() {
     );
 }
 
+/// 没有命令、只有委派在跑时，core 仍把项目留在旧代；本机停止委派后才允许交接。
+#[test]
+fn a_running_agent_keeps_its_workspace_back_until_stopped() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    let env = &fixture.env;
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(env.project.path())
+        .status()
+        .expect("git init")
+        .success());
+    // 和 agent_delegation 一样，经真实 agents.toml 启动临时脚本，不依赖本机 Agent 安装。
+    let script = env.home.path().join("holding-agent.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'fake-agent 1.0'; exit 0; fi\ncat >/dev/null\nexec sleep 120\n",
+    )
+    .expect("agent script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::fs::write(
+        env.home.path().join("agents.toml"),
+        format!(
+            "[agents.holding]\ncommand = [\"{}\"]\nresult = {{ from = \"stdout\" }}\n",
+            script.display()
+        ),
+    )
+    .expect("agents.toml");
+    env.ok(&["set", "api", "agent-delegation=auto"]);
+    let g1 = fixture.runner_of("api");
+    assert_eq!(fixture.runner_of("web"), g1);
+    let started = fixture.tool(
+        "agent_manage",
+        json!({ "workspace": "api", "action": "start", "agent": "holding", "prompt": "等待本机停止" }),
+    );
+    assert_eq!(started["state"], "running", "{started}");
+    let task_id = started["task_id"].as_str().expect("task_id").to_string();
+
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    let switched = env.json(&["--json", "daemon", "upgrade", "switch"]);
+    assert_eq!(switched["moved_workspaces"], 1, "{switched}");
+    assert_eq!(switched["waiting_workspaces"], 1, "{switched}");
+    let status = fixture.status();
+    let g2 = generation(&status, "g2")["pid"].as_u64().unwrap() as u32;
+    let old = generation(&status, "g1");
+    assert_eq!(old["role"], "draining", "{status}");
+    assert_eq!(old["workspaces"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(
+        old["workspaces"][0]["handoff_blocked_by"],
+        json!(["running_agents"]),
+        "没有命令可挡，委派必须由 core 组合进换代门禁：{status}"
+    );
+    assert!(alive(g1), "委派还在跑，旧代不能退：{status}");
+    assert_eq!(fixture.runner_of("web"), g2);
+    let running = fixture.tool(
+        "agent_manage",
+        json!({ "workspace": "api", "action": "status", "task_id": task_id }),
+    );
+    assert_eq!(running["state"], "running", "换代停掉了委派：{running}");
+
+    env.ok(&["agent", "stop", &task_id]);
+    wait_gone(g1);
+    assert_eq!(fixture.runner_of("api"), g2);
+    let stopped = fixture.tool(
+        "agent_manage",
+        json!({ "workspace": "api", "action": "status", "task_id": task_id }),
+    );
+    assert_eq!(stopped["state"], "stopped", "{stopped}");
+}
+
 /// 命令退了，留下的进程还占着输出管道：旧代一退管道就断，那个进程下次写输出就没了。
 /// 所以项目留在旧代，直到它自己退出；一点都不杀。重定向走了的不占管道，不用等。
 #[test]
@@ -965,55 +1227,61 @@ fn writes_going_on_through_two_handoffs_are_each_counted_once() {
     let env = &fixture.env;
     fixture.tool(
         "exec_command",
-        json!({ "workspace": "api", "cmd": "true", "yield_time_ms": 30000 }),
+        json!({"workspace":"api","cmd":"true","yield_time_ms":30000}),
     );
-    let listed = fixture.tool("list_runs", json!({ "workspace": "api", "limit": 1 }));
+    let listed = fixture.tool("list_runs", json!({"workspace":"api","limit":1}));
     let session = listed["runs"][0]["session_id"]
         .as_str()
         .unwrap()
         .to_string();
-
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let writer = {
-        let (port, token, stop) = (fixture.port, fixture.token.clone(), stop.clone());
+        let (local, stop, progress) = (fixture.local(), stop.clone(), progress.clone());
         std::thread::spawn(move || {
             let mut count = 0u32;
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                 let patch = format!(
                     "*** Begin Patch\n*** Add File: written-{count}.txt\n+{count}\n*** End Patch\n"
                 );
-                let body = call_body("apply_patch", json!({ "workspace": "api", "patch": patch }));
-                let reply = post_json(port, "/mcp", &body, Some(&token));
-                assert_eq!(reply.status, 200, "{}", reply.body);
-                assert_eq!(structured(&reply)["ok"], true, "{}", reply.body);
+                let reply = local.tool("apply_patch", json!({"workspace":"api","patch":patch}));
+                assert_eq!(reply["ok"], true, "{reply}");
                 count += 1;
+                progress.store(count, std::sync::atomic::Ordering::SeqCst);
             }
             count
         })
     };
+    wait_for("首次写入完成", || {
+        progress.load(std::sync::atomic::Ordering::SeqCst) > 0
+    });
     for _ in 0..2 {
-        std::thread::sleep(Duration::from_millis(300));
         env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
         env.ok(&["daemon", "upgrade", "switch"]);
         wait_for("工作区搬走", || {
-            let status = fixture.status();
-            generation_pids(&status).len() == 1
+            generation_pids(&fixture.status()).len() == 1
+        });
+        let moved_at = progress.load(std::sync::atomic::Ordering::SeqCst);
+        wait_for("迁移后继续写入", || {
+            progress.load(std::sync::atomic::Ordering::SeqCst) > moved_at
         });
     }
-    std::thread::sleep(Duration::from_millis(300));
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let count = writer.join().expect("写入线程没有报错");
-    assert!(count > 10, "这段时间只写了 {count} 次，没覆盖到换代");
-
-    let status = fixture.status();
-    assert_eq!(status["retired"], 2, "{status}");
+    assert!(count >= 3, "两次迁移前后均必须有成功写入");
+    assert_eq!(fixture.status()["retired"], 2);
     for index in 0..count {
-        let written = env.project.path().join(format!("written-{index}.txt"));
-        assert!(written.exists(), "第 {index} 次写报了成功，文件却不在");
+        assert!(env
+            .project
+            .path()
+            .join(format!("written-{index}.txt"))
+            .exists());
     }
     let read = fixture.tool(
         "read_output",
-        json!({ "workspace": "api", "output_ref": format!("session:{session}:stdout") }),
+        json!({
+            "workspace":"api","output_ref":format!("session:{session}:stdout"),
+        }),
     );
     assert_eq!(read["workspace_writes_since_start"], count, "{read}");
 }
@@ -1024,13 +1292,10 @@ fn a_new_generation_that_cannot_adopt_leaves_the_workspace_where_it_was() {
     let fixture = fixture();
     let env = &fixture.env;
     let g1 = fixture.runner_of("api");
+    let served = env.json(&["--json", "tool", "list", "--served"]);
     let mut names: Vec<String> = gld_core::tools::list_tools()
         .iter()
-        .chain(
-            structured_list(&fixture.post(&rpc_body("tools/list", json!({}))))
-                .as_array()
-                .unwrap(),
-        )
+        .chain(served["tools"].as_array().unwrap())
         .filter_map(|tool| tool["name"].as_str().map(str::to_string))
         .collect();
     names.sort();
@@ -1071,13 +1336,13 @@ done"#,
     assert!(alive(g1), "{status}");
 }
 
-/// 切换前后一直有请求：同一个端口、同一个 token，没有一条因为切换报错。延迟预算没有验。
+/// 本地请求在切代前后持续成功；网络入口仍拒绝未接通的授权。延迟预算没有验。
 ///
 /// 请求一条接一条不停发，所以“切换前有一条答完、切换后又有两条答完”就说明切换落在了请求中间，
 /// 而且至少有一条是完全在切换之后发出的。只数总条数说明不了这一点：条数随机器快慢变，慢的
 /// runner 上不切换也发不够（审查 §118）。
 #[test]
-fn requests_keep_succeeding_across_prepare_and_switch() {
+fn local_calls_keep_succeeding_across_prepare_and_switch() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -1086,17 +1351,12 @@ fn requests_keep_succeeding_across_prepare_and_switch() {
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicU32::new(0));
     let client = {
-        let (port, token) = (fixture.port, fixture.token.clone());
-        let (stop, done) = (stop.clone(), done.clone());
+        let (local, stop, done) = (fixture.local(), stop.clone(), done.clone());
         std::thread::spawn(move || {
-            let body = call_body(
-                "read_file",
-                json!({ "workspace": "api", "path": "hello.txt" }),
-            );
             while !stop.load(Ordering::SeqCst) {
-                let reply = post_json(port, "/mcp", &body, Some(&token));
-                assert_eq!(reply.status, 200, "{}", reply.body);
-                assert!(reply.body.contains("steady"), "{}", reply.body);
+                let reply = local.tool("read_file", json!({"workspace":"api","path":"hello.txt"}));
+                assert_eq!(reply["ok"], true, "{reply}");
+                assert_eq!(reply["content"], "steady\n", "{reply}");
                 done.fetch_add(1, Ordering::SeqCst);
             }
         })
@@ -1109,6 +1369,7 @@ fn requests_keep_succeeding_across_prepare_and_switch() {
             done.load(Ordering::SeqCst) >= target
         });
     };
+    wait_for_more("首次读取完成", 1);
     for round in 1..=2 {
         std::thread::sleep(Duration::from_millis(200));
         wait_for_more(&format!("第 {round} 次切换前有请求答完"), 1);
@@ -1117,8 +1378,8 @@ fn requests_keep_succeeding_across_prepare_and_switch() {
             .ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
         fixture.env.ok(&["daemon", "upgrade", "switch"]);
         wait_for_more(&format!("第 {round} 次切换后还有请求答完"), 2);
+        assert_auth_not_ready(&fixture.post(&rpc_body("tools/list", json!({}))));
     }
-    // 请求一直不停也要搬得走：这时几乎任何一刻看，这个项目都有在途调用。
     wait_for("旧代都退出", || {
         generation_pids(&fixture.status()).len() == 1
     });
@@ -1133,17 +1394,16 @@ fn a_call_with_side_effects_runs_once_across_a_switch_and_a_failed_candidate() {
     let fixture = fixture();
     let env = &fixture.env;
     let call = {
-        let (port, token) = (fixture.port, fixture.token.clone());
+        let local = fixture.local();
         std::thread::spawn(move || {
-            let body = call_body(
+            local.tool(
                 "exec_command",
                 json!({
-                    "workspace": "api",
-                    "argv": ["sh", "-c", "sleep 2; echo once >> effect.log; echo effect-done"],
-                    "yield_time_ms": 30000,
+                    "workspace":"api",
+                    "argv":["sh","-c","sleep 2; echo once >> effect.log; echo effect-done"],
+                    "yield_time_ms":30000,
                 }),
-            );
-            post_json(port, "/mcp", &body, Some(&token))
+            )
         })
     };
     wait_for("调用进到执行代", || {
@@ -1157,7 +1417,7 @@ fn a_call_with_side_effects_runs_once_across_a_switch_and_a_failed_candidate() {
     env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
     env.ok(&["daemon", "upgrade", "switch"]);
 
-    let reply = structured(&call.join().expect("请求线程"));
+    let reply = call.join().expect("请求线程");
     assert!(
         reply["stdout"]
             .as_str()
@@ -1183,7 +1443,7 @@ fn an_old_generation_with_nothing_to_finish_retires_after_the_switch() {
     let status = fixture.status();
     assert_eq!(status["retired"], 1, "{status}");
     assert_eq!(generation_pids(&status).len(), 1, "{status}");
-    fixture.wait_until_answering();
+    fixture.wait_until_local_tools_answer();
 }
 
 /// 切换之后旧代可能再也收不到调用，可 `gld rm` 的项目在里面起的命令还得有人收，
@@ -1206,7 +1466,7 @@ fn removing_a_project_reaches_the_old_generation_that_owns_it() {
     env.ok(&["rm", "api", "--yes"]);
     // 请求都进新代，旧代从此收不到调用。
     wait_for("旧代退出", || {
-        fixture.tool("list_workspaces", json!({}));
+        fixture.tool("server_info", json!({"workspace":"web"}));
         !alive(g1)
     });
     let leftover = Command::new("pgrep")
@@ -1216,6 +1476,56 @@ fn removing_a_project_reaches_the_old_generation_that_owns_it() {
         .expect("pgrep");
     assert!(!leftover.success(), "被移除项目的命令没人收");
     assert_eq!(fixture.status()["retired"], 1);
+}
+
+/// prune 使用同一个删除边界：目录消失不等于在旧代运行的命令已经结束。
+#[test]
+fn pruning_a_missing_project_reclaims_its_old_generation_commands() {
+    let fixture = fixture();
+    let env = &fixture.env;
+    let old = fixture.runner_of("web");
+    let sleeper = unique_sleep();
+    let started = fixture.tool(
+        "exec_command",
+        json!({ "workspace": "web", "cmd": sleeper, "yield_time_ms": 0, "timeout_ms": 120000 }),
+    );
+    assert_eq!(started["status"], "running", "{started}");
+    env.ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
+    env.ok(&["daemon", "upgrade", "switch"]);
+    assert_ne!(fixture.runner_of("api"), old);
+    std::fs::remove_dir_all(fixture.other.path()).expect("remove registered project directory");
+
+    let preview = env.json(&["--json", "prune", "--dry-run"]);
+    assert!(
+        preview["missingProjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["name"] == "web"),
+        "{preview}"
+    );
+    assert!(alive(old), "preview must not terminate running commands");
+    let done = env.json(&["--json", "prune", "-y"]);
+    assert!(done["failures"].as_array().unwrap().is_empty(), "{done}");
+    assert!(
+        done["missingProjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["name"] == "web"),
+        "{done}"
+    );
+    wait_for("prune 收回旧代", || !alive(old));
+    let leftover = Command::new("pgrep")
+        .args(["-f", &sleeper])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("pgrep");
+    assert!(!leftover.success(), "prune 删除了登记却遗留命令");
+    assert_eq!(
+        fixture.tool("server_info", json!({"workspace":"api"}))["ok"],
+        true
+    );
 }
 
 /// 代数到了上限就拒绝再准备，旧代一个不杀。
@@ -1293,33 +1603,27 @@ fn the_status_report_carries_no_secret_or_tool_argument() {
 
 /// 在途计数看的是执行代有没有跑完，不是客户端还在不在。
 #[test]
-fn in_flight_counts_a_call_until_it_finishes_even_if_the_client_left() {
+fn in_flight_counts_a_local_call_until_it_finishes_even_if_the_cli_left() {
     let fixture = fixture();
-    let body = call_body(
-        "exec_command",
-        json!({ "workspace": "api", "cmd": "sleep 3", "yield_time_ms": 30000 }),
-    );
-    // 客户端发完请求，等一下就走了。
-    {
-        use std::io::Write;
-        let mut stream = std::net::TcpStream::connect(("127.0.0.1", fixture.port)).expect("连服务");
-        write!(
-            stream,
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
-             Authorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{body}",
-            fixture.token,
-            body.len()
+    let mut client = fixture
+        .local()
+        .command(
+            "exec_command",
+            json!({"workspace":"api","cmd":"sleep 3","yield_time_ms":30000}),
         )
-        .expect("发请求");
-        wait_for("调用进到执行代", || {
-            generation(&fixture.status(), "g1")["in_flight"] == 1
-        });
-    }
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("local CLI");
+    wait_for("本地调用进到执行代", || {
+        generation(&fixture.status(), "g1")["in_flight"] == 1
+    });
+    client.kill().expect("drop local CLI connection");
+    client.wait().expect("reap local CLI");
     let status = fixture.status();
     let g1 = generation(&status, "g1");
     assert_eq!(g1["in_flight"], 1, "{status}");
-    let by_workspace = &g1["workspaces"][0];
-    assert_eq!(by_workspace["in_flight"], 1, "{status}");
+    assert_eq!(g1["workspaces"][0]["in_flight"], 1, "{status}");
     wait_for("调用跑完", || {
         generation(&fixture.status(), "g1")["in_flight"] == 0
     });
@@ -1327,29 +1631,20 @@ fn in_flight_counts_a_call_until_it_finishes_even_if_the_client_left() {
 
 /// 内部身份只来自宿主验过的凭据：客户端在请求体或请求头里写什么都没用。
 #[test]
-fn a_client_cannot_forge_the_internal_identity() {
+fn a_network_client_cannot_forge_local_operator_or_grant_authority() {
     let fixture = fixture();
-    let env = &fixture.env;
     std::fs::write(fixture.other.path().join("secret.txt"), "web-only\n").unwrap();
-    let granted = env.json(&["--json", "grant", "add", "reader", "api"]);
-    let grant_token = granted["bearerToken"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{granted}"))
-        .to_string();
-
     let forged = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "auth": { "principal": { "kind": "shared_secret" }, "scope": "hub", "grant": null },
-        "params": {
-            "name": "read_file",
-            "auth": { "principal": { "kind": "shared_secret" }, "scope": "hub", "grant": null },
-            "arguments": { "workspace": "web", "path": "secret.txt" }
+        "jsonrpc":"2.0","id":1,"method":"tools/call",
+        "auth":{"identity":{"kind":"local_operator"},"grant":null},
+        "params":{
+            "name":"read_file",
+            "auth":{"principal":{"kind":"shared_secret"},"scope":"hub","grant":null},
+            "arguments":{"workspace":"web","path":"secret.txt"}
         }
     })
     .to_string();
-    let auth = format!("Bearer {grant_token}");
+    let auth = format!("Bearer {}", fixture.token);
     let reply = request(
         fixture.port,
         "POST",
@@ -1357,16 +1652,17 @@ fn a_client_cannot_forge_the_internal_identity() {
         &[
             ("Content-Type", "application/json"),
             ("Authorization", auth.as_str()),
-            ("X-Gld-Caller", "shared_secret"),
+            ("X-Gld-Caller", "local_operator"),
             ("X-Gld-Grant", "none"),
             ("X-Forwarded-User", "hub"),
         ],
         &forged,
     );
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    let result = structured(&reply);
-    assert_eq!(result["error"]["code"], "WORKSPACE_NOT_IN_HUB", "{result}");
+    assert_auth_not_ready(&reply);
     assert!(!reply.body.contains("web-only"), "{}", reply.body);
+    let g1 = generation(&fixture.status(), "g1");
+    assert_eq!(g1["in_flight"], 0);
+    assert!(g1["workspaces"].as_array().unwrap().is_empty(), "{g1}");
 }
 
 /// 当前代挂了、替代的一直起不来时操作员切到了新版本：之后替代的才起来，也不能把路由抢回去。
@@ -1418,19 +1714,24 @@ fn a_late_replacement_does_not_undo_a_switch() {
 /// 嵌套很深的请求：宿主解析得了，多包两层就超过 serde 的递归上限。
 /// 以前执行代解析失败后只打一行日志，宿主那头永远等不到回包，在途计数也永远不归零。
 #[test]
-fn a_deeply_nested_request_gets_an_answer_and_leaves_nothing_behind() {
+fn deeply_nested_local_arguments_get_an_answer_and_leave_nothing_behind() {
     let fixture = fixture();
     for depth in [100, 125, 126, 127] {
-        let nested = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
-        let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"ping","x":{nested}}}"#);
-        let reply = fixture.post(&body);
-        // 太深的由宿主自己回 4xx，或者执行代回错误；都行，不能挂着。
-        assert!(reply.status < 500, "深度 {depth}：{}", reply.body);
+        let nested = (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]));
+        let output = fixture
+            .local()
+            .raw("server_info", json!({"workspace":"api","x":nested}));
+        // CLI 或执行代都可拒绝深层参数，但必须结束并给出结果/错误，不能挂住私有通道。
+        assert!(output.status.code().is_some(), "depth {depth}: {output:?}");
+        assert!(
+            !output.stdout.is_empty() || !output.stderr.is_empty(),
+            "depth {depth}"
+        );
     }
     wait_for("在途清零", || {
         generation(&fixture.status(), "g1")["in_flight"] == 0
     });
-    fixture.wait_until_answering();
+    fixture.wait_until_local_tools_answer();
     assert_eq!(fixture.status()["restarts"], 0, "执行代不该被弄死");
 }
 
@@ -1544,29 +1845,22 @@ fn a_replaced_incompatible_binary_is_reported_and_the_host_keeps_answering() {
         "{refused:?}"
     );
 
-    // 宿主和认证都还在；工具调用如实报不可用，没执行。
-    let wrong = post_json(port, "/mcp", &rpc_body("tools/list", json!({})), Some("x"));
-    assert_eq!(wrong.status, 401, "{}", wrong.body);
-    let auth = format!("Bearer {token}");
-    let reply = request_waiting(
-        port,
-        "POST",
-        "/mcp",
-        &[
-            ("Content-Type", "application/json"),
-            ("Authorization", auth.as_str()),
-        ],
-        &rpc_body("tools/list", json!({})),
-        // 等替代的执行代最多 10 秒，然后如实回不可用。
-        Duration::from_secs(20),
-    );
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(
-        reply.json()["error"]["data"]["reason"],
-        "generation_unavailable",
-        "{}",
-        reply.body
-    );
+    // 当前代不可用时，宿主仍保持网络拒绝；本地调用也必须如实失败。
+    for credential in [Some("x"), Some(token.as_str()), None] {
+        assert_auth_not_ready(&post_json(
+            port,
+            "/mcp",
+            &rpc_body("tools/list", json!({})),
+            credential,
+        ));
+    }
+    let local = LocalTools {
+        home: env.home.path().to_path_buf(),
+        project: env.project.path().to_path_buf(),
+    }
+    .raw("server_info", json!({"workspace":"api"}));
+    assert!(!local.status.success(), "{local:?}");
+    assert!(!local.stderr.is_empty(), "{local:?}");
     let after = env.json(&["--json", "daemon", "status"]);
     assert_eq!(after["info"]["pid"].as_u64(), Some(u64::from(host)));
 }

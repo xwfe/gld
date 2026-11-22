@@ -1,0 +1,717 @@
+use std::sync::LazyLock;
+use std::time::Duration;
+
+use axum::body::{Body, Bytes};
+use axum::extract::{Path as AxumPath, State};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{any, get};
+use axum::{Json, Router};
+use serde::Serialize;
+use serde_json::json;
+use tokio::sync::{oneshot, Mutex};
+
+use gld_core::data::DataStore;
+use gld_core::error::{AppError, AppResult};
+use gld_core::local_network;
+use gld_core::settings::{AppSettings, GlobalGatewayConfig};
+use gld_core::tunnel::standalone::{self, CloudflareSpec, FrpSpec, StandaloneTunnel};
+
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalGatewayStatusDto {
+    pub state: String,
+    pub local_url: String,
+    pub public_url: String,
+    pub detail: String,
+}
+
+async fn proxy_mcp_protected_resource_metadata(
+    State(state): State<ProxyState>,
+    AxumPath(workspace_id): AxumPath<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    proxy(
+        state,
+        workspace_id,
+        ".well-known/oauth-protected-resource".into(),
+        Method::GET,
+        uri,
+        headers,
+        Bytes::new(),
+    )
+    .await
+}
+
+async fn proxy_mcp_authorization_server_metadata(
+    State(state): State<ProxyState>,
+    AxumPath(workspace_id): AxumPath<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    proxy(
+        state,
+        workspace_id,
+        ".well-known/oauth-authorization-server".into(),
+        Method::GET,
+        uri,
+        headers,
+        Bytes::new(),
+    )
+    .await
+}
+
+async fn proxy_actions_authorization_server_metadata(
+    State(state): State<ProxyState>,
+    AxumPath(workspace_id): AxumPath<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    proxy(
+        state,
+        workspace_id,
+        "actions/.well-known/oauth-authorization-server".into(),
+        Method::GET,
+        uri,
+        headers,
+        Bytes::new(),
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayHealthItem {
+    pub label: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Clone)]
+struct ProxyState {
+    client: reqwest::Client,
+}
+
+struct GatewayRuntime {
+    config: GlobalGatewayConfig,
+    public_url: String,
+    shutdown: Option<oneshot::Sender<()>>,
+    handle: gld_core::async_rt::JoinHandle<()>,
+    running: bool,
+    tunnel: Option<StandaloneTunnel>,
+}
+
+static RUNTIME: LazyLock<Mutex<Option<GatewayRuntime>>> = LazyLock::new(|| Mutex::new(None));
+
+#[allow(dead_code)]
+pub fn workspace_public_base(public_url: &str, workspace_id: &str, actions: bool) -> String {
+    let base = public_url.trim_end_matches('/');
+    if base.is_empty() {
+        return String::new();
+    }
+    if actions {
+        format!("{base}/w/{workspace_id}/actions")
+    } else {
+        format!("{base}/w/{workspace_id}")
+    }
+}
+
+pub async fn ensure_started() -> AppResult<GlobalGatewayStatusDto> {
+    let settings = AppSettings::load_or_default();
+    let config = settings.global_gateway.clone();
+    if !config.enabled {
+        return Err(AppError::Message("全局共享公网入口尚未启用。".into()));
+    }
+
+    let mut guard = RUNTIME.lock().await;
+    if let Some(runtime) = guard.as_ref() {
+        if runtime.config == config && runtime.running {
+            return Ok(status_from_runtime(runtime));
+        }
+    }
+    if let Some(runtime) = guard.take() {
+        stop_runtime(runtime).await;
+    }
+
+    let listener = bind_listener(config.local_port, settings.allow_lan_access)?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let port = config.local_port;
+    let handle = gld_core::async_rt::spawn(async move {
+        if let Err(error) = serve(listener, shutdown_rx).await {
+            eprintln!("global gateway stopped: {error}");
+        }
+    });
+
+    let tunnel_result = start_tunnel(&config, &settings).await;
+    let (public_url, tunnel) = match tunnel_result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = shutdown_tx.send(());
+            let _ = handle.await;
+            return Err(error);
+        }
+    };
+
+    let mut effective_config = config.clone();
+    if !public_url.is_empty() && effective_config.public_url != public_url {
+        effective_config.public_url = public_url.clone();
+        let resolved = public_url.clone();
+        DataStore::update_file(|data| {
+            data.global_gateway.public_url = resolved;
+            Ok(())
+        })?;
+    }
+
+    let runtime = GatewayRuntime {
+        config: effective_config,
+        public_url,
+        shutdown: Some(shutdown_tx),
+        handle,
+        tunnel,
+        running: true,
+    };
+    let status = status_from_runtime(&runtime);
+    *guard = Some(runtime);
+    eprintln!("global gateway listening on http://127.0.0.1:{port}");
+    Ok(status)
+}
+
+pub async fn stop() -> AppResult<()> {
+    let mut guard = RUNTIME.lock().await;
+    if let Some(runtime) = guard.take() {
+        stop_runtime(runtime).await;
+    }
+    Ok(())
+}
+
+pub async fn status() -> GlobalGatewayStatusDto {
+    let guard = RUNTIME.lock().await;
+    if let Some(runtime) = guard.as_ref() {
+        if runtime.running {
+            return status_from_runtime(runtime);
+        }
+    }
+    let settings = AppSettings::load_or_default();
+    GlobalGatewayStatusDto {
+        state: "stopped".into(),
+        local_url: format!("http://127.0.0.1:{}", settings.global_gateway.local_port),
+        public_url: settings.global_gateway.public_url,
+        detail: if settings.global_gateway.enabled {
+            "已配置，当前未运行".into()
+        } else {
+            "未启用".into()
+        },
+    }
+}
+
+pub async fn health() -> Vec<GatewayHealthItem> {
+    let status = status().await;
+    let local_client = reqwest::Client::builder()
+        .timeout(HEALTH_TIMEOUT)
+        .no_proxy()
+        .build()
+        .expect("health client");
+    let public_client = reqwest::Client::builder()
+        .timeout(HEALTH_TIMEOUT)
+        .build()
+        .expect("health client");
+    let local = check_url(
+        &local_client,
+        &format!("{}/health", status.local_url.trim_end_matches('/')),
+    )
+    .await;
+    let public = if status.public_url.trim().is_empty() {
+        (false, "公网 URL 未配置或尚未获取".into())
+    } else {
+        check_url(
+            &public_client,
+            &format!("{}/health", status.public_url.trim_end_matches('/')),
+        )
+        .await
+    };
+    vec![
+        GatewayHealthItem {
+            label: "全局 Gateway 本地入口".into(),
+            ok: local.0,
+            detail: local.1,
+        },
+        GatewayHealthItem {
+            label: "全局 Gateway 公网入口".into(),
+            ok: public.0,
+            detail: public.1,
+        },
+    ]
+}
+
+async fn check_url(client: &reqwest::Client, url: &str) -> (bool, String) {
+    match client.get(url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            (
+                status.is_success(),
+                format!("HTTP {} · {url}", status.as_u16()),
+            )
+        }
+        Err(error) => (false, error.to_string()),
+    }
+}
+
+fn status_from_runtime(runtime: &GatewayRuntime) -> GlobalGatewayStatusDto {
+    GlobalGatewayStatusDto {
+        state: "running".into(),
+        local_url: format!("http://127.0.0.1:{}", runtime.config.local_port),
+        public_url: runtime.public_url.clone(),
+        detail: format!(
+            "{} · path prefix /w/<workspace-id>, /hub",
+            runtime.config.tunnel_type
+        ),
+    }
+}
+
+async fn stop_runtime(mut runtime: GatewayRuntime) {
+    if let Some(shutdown) = runtime.shutdown.take() {
+        let _ = shutdown.send(());
+    }
+    let _ = runtime.handle.await;
+    if let Some(tunnel) = runtime.tunnel.take() {
+        tunnel.stop().await;
+    }
+}
+
+async fn start_tunnel(
+    config: &GlobalGatewayConfig,
+    settings: &AppSettings,
+) -> AppResult<(String, Option<StandaloneTunnel>)> {
+    match config.tunnel_type.as_str() {
+        "" | "none" => Ok((config.public_url.trim_end_matches('/').to_string(), None)),
+        "cloudflare" => {
+            if config.cloudflare_mode == "named" {
+                return Err(AppError::Message(
+                    "全局 Gateway 当前优先支持 Cloudflare Quick；固定域名请使用 FRP 或外部反向代理。独立 Workspace Tunnel 仍保留 Named Cloudflare。".into(),
+                ));
+            }
+            let (public_url, tunnel) = standalone::start_cloudflare(CloudflareSpec {
+                port: config.local_port,
+                log_name: "global-gateway-cloudflared.log",
+                mode: "quick",
+                token: "",
+                public_url: "",
+                use_proxy: config.use_proxy,
+            })
+            .await?;
+            Ok((public_url, Some(tunnel)))
+        }
+        "frp" => {
+            if config.frp_subdomain.trim().is_empty() {
+                return Err(AppError::Message(
+                    "全局 Gateway FRP 子域名不能为空。".into(),
+                ));
+            }
+            let (public_url, tunnel) = standalone::start_frp(
+                FrpSpec {
+                    name: "global-gateway",
+                    port: config.local_port,
+                    frp_profile_id: &config.frp_profile_id,
+                    frp_server: &config.frp_server,
+                    frp_server_port: config.frp_server_port,
+                    subdomain: &config.frp_subdomain,
+                    use_proxy: config.use_proxy,
+                },
+                settings,
+            )
+            .await?;
+            Ok((public_url, Some(tunnel)))
+        }
+        other => Err(AppError::Message(format!(
+            "不支持的全局 Gateway tunnel_type: {other}"
+        ))),
+    }
+}
+
+fn bind_listener(port: u16, allow_lan_access: bool) -> AppResult<tokio::net::TcpListener> {
+    let addr = local_network::bind_addr(port, allow_lan_access);
+    let listener = std::net::TcpListener::bind(addr).map_err(|error| {
+        AppError::Message(format!("全局 Gateway 端口 {port} 绑定失败: {error}"))
+    })?;
+    listener.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(listener).map_err(AppError::from)
+}
+
+async fn serve(
+    listener: tokio::net::TcpListener,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 上游永远是本机 127.0.0.1，必须绕过环境变量里的 HTTP(S)_PROXY。
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()?;
+    let app = Router::new()
+        .route(
+            "/health",
+            get(|| async { Json(json!({ "ok": true, "service": "global-gateway" })) }),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/w/{workspace_id}/mcp",
+            get(proxy_mcp_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/w/{workspace_id}",
+            get(proxy_mcp_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/w/{workspace_id}",
+            get(proxy_mcp_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/w/{workspace_id}/mcp",
+            get(proxy_mcp_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/w/{workspace_id}/actions",
+            get(proxy_actions_authorization_server_metadata),
+        )
+        .route("/w/{workspace_id}", any(proxy_root))
+        .route("/w/{workspace_id}/{*path}", any(proxy_path))
+        .route(
+            "/.well-known/oauth-protected-resource/hub/mcp",
+            get(proxy_hub_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/hub",
+            get(proxy_hub_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/hub",
+            get(proxy_hub_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/hub/mcp",
+            get(proxy_hub_authorization_server_metadata),
+        )
+        .route("/hub", any(proxy_hub_root))
+        .route("/hub/nodes/v1/connect/{machine_id}", get(hub_node_connect))
+        .route("/hub/{*path}", any(proxy_hub_path))
+        .with_state(ProxyState { client });
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown.await;
+        })
+        .await?;
+    Ok(())
+}
+
+async fn proxy_root(
+    State(state): State<ProxyState>,
+    AxumPath(workspace_id): AxumPath<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy(
+        state,
+        workspace_id,
+        String::new(),
+        method,
+        uri,
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn proxy_path(
+    State(state): State<ProxyState>,
+    AxumPath((workspace_id, path)): AxumPath<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy(state, workspace_id, path, method, uri, headers, body).await
+}
+
+async fn proxy(
+    state: ProxyState,
+    workspace_id: String,
+    path: String,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let profile = match DataStore::read_file(|data| {
+        Ok(data
+            .profiles
+            .iter()
+            .find(|profile| profile.id == workspace_id)
+            .cloned())
+    }) {
+        Ok(Some(profile)) => profile,
+        Ok(None) => return (StatusCode::NOT_FOUND, "workspace not found").into_response(),
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    };
+
+    let actions_request = path == "actions" || path.starts_with("actions/");
+    if actions_request && !profile.actions.use_global_gateway {
+        return (
+            StatusCode::NOT_FOUND,
+            "actions is not routed through global gateway",
+        )
+            .into_response();
+    }
+    if !actions_request && !profile.tunnel.use_global_gateway {
+        return (
+            StatusCode::NOT_FOUND,
+            "mcp is not routed through global gateway",
+        )
+            .into_response();
+    }
+
+    let (port, upstream_path) = if actions_request {
+        let stripped = path
+            .strip_prefix("actions")
+            .unwrap_or("")
+            .trim_start_matches('/');
+        (profile.actions.local_port, format!("/{}", stripped))
+    } else {
+        (
+            profile.runtime.local_port,
+            format!("/{}", path.trim_start_matches('/')),
+        )
+    };
+    forward(&state, port, &upstream_path, method, &uri, &headers, body).await
+}
+
+async fn proxy_hub_root(
+    State(state): State<ProxyState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_hub(state, String::new(), method, uri, headers, body).await
+}
+
+async fn hub_node_connect(
+    AxumPath(machine_id): AxumPath<String>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let enabled = DataStore::read_file(|data| Ok(data.hub.use_global_gateway));
+    if !matches!(enabled, Ok(true)) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(nodes) = crate::hub_runtime::nodes().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    crate::nodes::endpoint::upgrade(nodes, machine_id, headers, ws).await
+}
+
+async fn proxy_hub_path(
+    State(state): State<ProxyState>,
+    AxumPath(path): AxumPath<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_hub(state, path, method, uri, headers, body).await
+}
+
+async fn proxy_hub_protected_resource_metadata(
+    State(state): State<ProxyState>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    proxy_hub(
+        state,
+        ".well-known/oauth-protected-resource".into(),
+        Method::GET,
+        uri,
+        headers,
+        Bytes::new(),
+    )
+    .await
+}
+
+async fn proxy_hub_authorization_server_metadata(
+    State(state): State<ProxyState>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    proxy_hub(
+        state,
+        ".well-known/oauth-authorization-server".into(),
+        Method::GET,
+        uri,
+        headers,
+        Bytes::new(),
+    )
+    .await
+}
+
+/// `/hub/...` 转给聚合入口的本地端口。
+///
+/// 只在 hub 自己设了经入口暴露时才转，和 `/w/<id>` 要求工作区打开 global-gateway 是一个道理：
+/// 入口是挂在公网上的，没要求暴露的服务不该因为"入口恰好开着"就被人从外面连上。
+async fn proxy_hub(
+    state: ProxyState,
+    path: String,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let hub = match DataStore::read_file(|data| Ok(data.hub.clone())) {
+        Ok(hub) => hub,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    };
+    if !hub.use_global_gateway {
+        return (
+            StatusCode::NOT_FOUND,
+            "hub is not routed through global gateway",
+        )
+            .into_response();
+    }
+    let upstream_path = format!("/{}", path.trim_start_matches('/'));
+    forward(
+        &state,
+        hub.local_port,
+        &upstream_path,
+        method,
+        &uri,
+        &headers,
+        body,
+    )
+    .await
+}
+
+async fn forward(
+    state: &ProxyState,
+    port: u16,
+    upstream_path: &str,
+    method: Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = uri
+        .query()
+        .map(|value| format!("?{value}"))
+        .unwrap_or_default();
+    let target = format!("http://127.0.0.1:{port}{upstream_path}{query}");
+
+    let mut request = state.client.request(method, &target).body(body);
+    for (name, value) in headers {
+        if !is_hop_header(name.as_str()) && !is_client_supplied_forwarding_header(name.as_str()) {
+            request = request.header(name, value);
+        }
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                // 浏览器能力 URL 的路径含密钥，不能随 reqwest 错误回显。
+                format!("upstream unavailable: {}", error.without_url()),
+            )
+                .into_response();
+        }
+    };
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let mut builder = Response::builder().status(status);
+    if let Some(target_headers) = builder.headers_mut() {
+        for (name, value) in &response_headers {
+            if !is_hop_header(name.as_str()) {
+                target_headers.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    builder
+        .body(Body::from_stream(response.bytes_stream()))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// 客户端自己塞的"我从哪来"类请求头，一律不往上游转。
+///
+/// 上游的 `external_base_url` 在没配 public_url 时会认 `X-Forwarded-Host` /
+/// `Forwarded` 来拼自己的对外地址——OAuth 的 issuer、发现文档里的各个端点、
+/// 授权页表单的 action 全从那个地址来。网关是直接挂在公网上的，把公网来的
+/// 这几个头原样透传，等于让任何人指定"这个服务对外叫什么"。
+///
+/// 网关自己拼不出正确的值（对外地址还带 `/w/<id>` 前缀，而这几个头只能表达
+/// scheme + host），所以这里的做法是**只删不加**：上游要么用配置里的
+/// public_url（gateway 路由的工作区一定有），要么退回 127.0.0.1，
+/// 反正不会用公网传进来的值。
+///
+/// `host` 也在此列：reqwest 会按上游地址自己填。
+fn is_client_supplied_forwarding_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host" | "forwarded" | "x-forwarded-host" | "x-forwarded-proto" | "x-forwarded-port"
+    )
+}
+
+fn is_hop_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 公网传进来的转发头必须在网关这一层被丢掉，
+    /// 否则上游会拿它拼 OAuth issuer 和授权页的表单地址。
+    #[test]
+    fn client_supplied_forwarding_headers_are_dropped() {
+        for header in [
+            "Host",
+            "X-Forwarded-Host",
+            "x-forwarded-proto",
+            "X-Forwarded-Port",
+            "Forwarded",
+        ] {
+            assert!(
+                is_client_supplied_forwarding_header(header),
+                "{header} 不该往上游转"
+            );
+        }
+        // 正常业务头别误伤。
+        for header in ["authorization", "content-type", "accept", "user-agent"] {
+            assert!(!is_client_supplied_forwarding_header(header), "{header}");
+        }
+    }
+
+    #[test]
+    fn workspace_prefixes_are_stable() {
+        assert_eq!(
+            workspace_public_base("https://mcp.example.com/", "abc", false),
+            "https://mcp.example.com/w/abc"
+        );
+        assert_eq!(
+            workspace_public_base("https://mcp.example.com", "abc", true),
+            "https://mcp.example.com/w/abc/actions"
+        );
+    }
+}

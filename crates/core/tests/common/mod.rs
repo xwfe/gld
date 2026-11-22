@@ -175,7 +175,7 @@ pub fn ctx_for(root: &Path) -> ToolContext {
 /// `permission-mode=dangerous` 下的上下文。
 pub fn ctx_for_dangerous_mode(root: &Path) -> ToolContext {
     isolate_data_home();
-    let workspace = gld_core::tools::Workspace::new(root.to_path_buf()).expect("workspace");
+    let workspace = gld_core::tools::new_workspace(root.to_path_buf()).expect("workspace");
     ToolContext::from_workspace(
         workspace,
         gld_core::workspace::AuthConfig {
@@ -196,7 +196,7 @@ pub fn ctx_for_dangerous_mode(root: &Path) -> ToolContext {
 /// 的原文，`only:` 前缀等语义由生产代码自己解析，测试不另写一份。
 pub fn ctx_with_allowed_commands(root: &Path, configured: &str) -> ToolContext {
     isolate_data_home();
-    let workspace = gld_core::tools::Workspace::new(root.to_path_buf()).expect("workspace");
+    let workspace = gld_core::tools::new_workspace(root.to_path_buf()).expect("workspace");
     let actions = gld_core::workspace::ActionsConfig {
         allowed_commands: configured.into(),
         ..gld_core::workspace::ActionsConfig::default()
@@ -236,7 +236,7 @@ pub fn ctx_with_allowed_commands_and_path(
 /// 造成的。
 pub fn ctx_with_policy(root: &Path, policy: PolicySettings) -> ToolContext {
     isolate_data_home();
-    let workspace = gld_core::tools::Workspace::new(root.to_path_buf()).expect("workspace");
+    let workspace = gld_core::tools::new_workspace(root.to_path_buf()).expect("workspace");
     ToolContext::from_workspace(
         workspace,
         gld_core::workspace::AuthConfig {
@@ -256,7 +256,7 @@ pub fn ctx_with_policy(root: &Path, policy: PolicySettings) -> ToolContext {
 /// 否则它们测到的只是外层那道门，而不是自己想验的东西。
 pub fn ctx_for_unconfined_reads(root: &Path) -> ToolContext {
     isolate_data_home();
-    let workspace = gld_core::tools::Workspace::new(root.to_path_buf()).expect("workspace");
+    let workspace = gld_core::tools::new_workspace(root.to_path_buf()).expect("workspace");
     ToolContext::from_workspace(
         workspace,
         gld_core::workspace::AuthConfig {

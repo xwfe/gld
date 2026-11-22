@@ -1,5 +1,8 @@
 use super::*;
-use crate::auth::Principal;
+use gld_policy::{
+    CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject, ProjectScope,
+    ServiceCapabilities,
+};
 
 struct Fixture {
     hub: Hub,
@@ -56,13 +59,32 @@ impl Drop for Fixture {
     }
 }
 
-fn owner(name: &str) -> AuthContext {
-    AuthContext::new(
-        Principal::OAuthClient {
+fn client(name: &str, scope: ProjectScope, write: bool, managed: bool) -> AuthContext {
+    AuthContext::verified_mcp(
+        HUB_SCOPE,
+        Grant {
+            id: "managed-test".into(),
+            name: "Managed test".into(),
+            scope,
+            permissions: GrantPermissions {
+                write,
+                service: ServiceCapabilities {
+                    managed_workspaces: managed,
+                    ..Default::default()
+                },
+            },
+            status: GrantStatus::Active,
+        },
+        CredentialKind::OAuth,
+        McpSubject::OAuth {
             client_id: name.into(),
         },
-        HUB_SCOPE,
     )
+    .unwrap()
+}
+
+fn owner(name: &str) -> AuthContext {
+    client(name, ProjectScope::AllProjects, true, true)
 }
 
 #[test]
@@ -141,7 +163,7 @@ fn ownership_applies_to_listing_status_and_every_workspace_tool() {
 }
 
 #[test]
-fn disabled_read_only_anonymous_and_scoped_grants_cannot_create_or_access() {
+fn disabled_read_only_and_clients_without_service_access_cannot_create_or_access() {
     let disabled = Fixture::new(false);
     assert!(!disabled.hub.list_tools().iter().any(|t| t["name"] == TOOL));
     assert_eq!(
@@ -156,20 +178,22 @@ fn disabled_read_only_anonymous_and_scoped_grants_cannot_create_or_access() {
     let auth = owner("a");
     let id = fixture.start(&auth, "one");
     for read_only in [true, false] {
-        let grant = auth.clone().with_grant(Some(Grant {
-            id: "grant".into(),
-            name: "limited".into(),
-            workspaces: vec![id.clone()],
-            read_only,
-            browser: false,
-        }));
+        let grant = client(
+            "a",
+            ProjectScope::Selected(vec![id.clone()]),
+            !read_only,
+            false,
+        );
         assert!(!fixture
             .hub
-            .list_tools_for(grant.grant())
+            .list_tools_for(&grant)
             .iter()
             .any(|t| t["name"] == TOOL));
         let denied = fixture.call(&grant, WORKSPACE_CONTEXT, json!({"workspace":id}));
-        assert_eq!(denied["error"]["code"], "WORK_SESSION_REQUIRES_FULL_AUTH");
+        assert_eq!(
+            denied["error"]["code"],
+            "WORK_SESSION_REQUIRES_SERVICE_ACCESS"
+        );
     }
     fixture.hub.tool_profile = "read-only".into();
     assert!(!fixture.hub.list_tools().iter().any(|t| t["name"] == TOOL));
@@ -178,17 +202,20 @@ fn disabled_read_only_anonymous_and_scoped_grants_cannot_create_or_access() {
         "WORK_SESSIONS_DISABLED"
     );
     fixture.hub.tool_profile = "compact".into();
-    fixture.hub.auth.auth_type = "noauth".into();
-    let anonymous = AuthContext::anonymous(HUB_SCOPE);
-    assert!(!fixture.hub.list_tools().iter().any(|t| t["name"] == TOOL));
-    assert_eq!(
-        fixture.call(
-            &anonymous,
-            TOOL,
-            json!({"action":"start","client_request_id":"one"})
-        )["error"]["code"],
-        "WORK_SESSION_REQUIRES_FULL_AUTH"
-    );
+    for denied in [
+        client("a", ProjectScope::AllProjects, true, false),
+        client("a", ProjectScope::AllProjects, false, true),
+    ] {
+        assert!(!fixture
+            .hub
+            .list_tools_for(&denied)
+            .iter()
+            .any(|t| t["name"] == TOOL));
+        assert_eq!(
+            fixture.call(&denied, WORKSPACE_CONTEXT, json!({"workspace":id}))["error"]["code"],
+            "WORK_SESSION_REQUIRES_SERVICE_ACCESS"
+        );
+    }
 }
 
 #[test]

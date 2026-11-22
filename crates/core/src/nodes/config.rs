@@ -448,15 +448,8 @@ fn unused_credential_hash(data: &AppData, credential: &str) -> Result<String, St
     if shared
         .into_iter()
         .any(|s| !s.is_empty() && digest_matches(&credential_hash(s), &hash))
-        || data.grants.iter().any(|g| {
-            [&g.bearer_token, &g.oauth_password]
-                .iter()
-                .any(|s| !s.is_empty() && digest_matches(&credential_hash(s), &hash))
-        })
     {
-        return Err(
-            "Node credential must be separate from existing service and grant credentials".into(),
-        );
+        return Err("Node credential must be separate from existing service credentials".into());
     }
     Ok(hash)
 }

@@ -19,4 +19,16 @@ impl serde::Serialize for AppError {
     }
 }
 
+impl From<AppError> for gld_protocol::daemon::RpcError {
+    fn from(error: AppError) -> Self {
+        Self::app(error.to_string())
+    }
+}
+
+impl From<gld_protocol::service::ParseServiceKindError> for AppError {
+    fn from(error: gld_protocol::service::ParseServiceKindError) -> Self {
+        Self::Message(error.to_string())
+    }
+}
+
 pub type AppResult<T> = Result<T, AppError>;

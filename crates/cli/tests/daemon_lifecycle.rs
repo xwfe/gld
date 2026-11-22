@@ -25,7 +25,7 @@ fn full_lifecycle_through_the_real_binary() {
     // 直连模式下加项目、改配置，不需要守护进程。
     let created = env.json(&["--json", "add", ".", "--name", "it"]);
     assert_eq!(created[0]["name"], "it");
-    env.ok(&["upgrade", "--port", &port_arg, "--auth", "noauth"]);
+    env.ok(&["upgrade", "--port", &port_arg, "--auth", "oauth"]);
     assert!(!Path::new(&env.home.path().join("daemon.json")).exists());
 
     // start 会自动拉起守护进程。
@@ -820,18 +820,16 @@ fn the_next_direct_tool_call_reads_what_the_previous_one_left() {
     );
 }
 
-/// 经服务（MCP，ChatGPT 走的就是这条路）起的命令，守护进程重启后同一个客户端读得到，
-/// 结局是 `interrupted` 而不是 `killed`：不是谁要停它，是守护进程要走了（审查 D09）。
-///
-/// 守护进程退出时先停服务、服务再停经它起的命令，那一步记的是 `killed`（`gld stop` 也走
-/// 那里，那时确实是有人要停）。所以退出时要先按 `interrupted` 把命令收掉，再停服务。
+/// 本地操作员经执行代起的命令，守护进程退出后仍能读到 interrupted 终态和输出。
+/// 新 grant 的网络正向链路在 D18-B 恢复验收。
 #[test]
-fn a_command_started_through_the_service_is_interrupted_by_a_daemon_restart() {
+fn a_local_generation_command_is_interrupted_by_a_daemon_restart() {
     let env = Env::new();
     let sleeper = Sleeper { ms: 68330 };
     let ticker = write_ticker(&env, &sleeper);
-    let service = env.serve("it", "bearer");
-    let started = service.call_tool(
+    env.ok(&["add", ".", "--name", "it"]);
+    let started = env.local_tool(
+        "it",
         "exec_command",
         serde_json::json!({"cmd": ticker, "yield_time_ms": 500, "timeout_ms": 120000}),
     );
@@ -842,8 +840,9 @@ fn a_command_started_through_the_service_is_interrupted_by_a_daemon_restart() {
         .to_string();
 
     env.ok(&["daemon", "stop"]);
-    env.ok(&["start"]);
-    let read = service.call_tool(
+    env.ok(&["daemon", "start"]);
+    let read = env.local_tool(
+        "it",
         "read_output",
         serde_json::json!({"output_ref": format!("session:{session_id}:stdout")}),
     );

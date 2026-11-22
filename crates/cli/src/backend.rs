@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gld_core::app::App;
+use gld_core::runtime::ListenerManager;
 use gld_daemon::lifecycle::{self, DaemonPaths, DaemonProbe};
 use gld_daemon::{Client, ClientError, Request, PROTOCOL_VERSION};
 use serde::de::DeserializeOwned;
@@ -35,9 +36,15 @@ pub struct Backend {
     out: Output,
 }
 
+#[derive(Clone)]
+struct LocalApplication {
+    app: Arc<App>,
+    listeners: Arc<ListenerManager>,
+}
+
 enum Mode {
     Remote(Client),
-    Local(Option<Arc<App>>),
+    Local(Option<LocalApplication>),
 }
 
 impl Backend {
@@ -119,12 +126,16 @@ impl Backend {
                 let app = match app {
                     Some(app) => app.clone(),
                     None => {
-                        let loaded = Arc::new(App::load()?);
+                        let local_app = Arc::new(App::load()?);
+                        let loaded = LocalApplication {
+                            listeners: Arc::new(gld_daemon::local_listeners(local_app.clone())),
+                            app: local_app,
+                        };
                         *app = Some(loaded.clone());
                         loaded
                     }
                 };
-                gld_daemon::dispatch::dispatch(&app, None, request)
+                gld_daemon::dispatch::dispatch(&app.app, &app.listeners, None, request)
                     .await
                     .map_err(|error| CliError::new(error.message))
             }

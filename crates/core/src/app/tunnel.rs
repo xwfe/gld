@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::App;
 use crate::error::{AppError, AppResult};
 use crate::platform::platform;
+use crate::runtime::ListenerManager;
 use crate::tunnel::{frp_snippet, supervisor, TunnelServiceKind, TunnelStatus};
 use crate::workspace::resources::validate_service_start;
 use crate::workspace::WorkspaceProfile;
@@ -40,10 +41,15 @@ impl App {
         Ok(guard.status(&profile, kind, &settings))
     }
 
-    pub async fn start_tunnel(&self, id: &str, kind: TunnelServiceKind) -> AppResult<TunnelStatus> {
+    pub async fn start_tunnel(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        kind: TunnelServiceKind,
+    ) -> AppResult<TunnelStatus> {
         let profile = self.profile_by_id(id)?;
         self.validate_tunnel_start(id, kind)?;
-        self.sync_tunnel_routes_from_runtime().await?;
+        self.sync_tunnel_routes_from_runtime(listeners).await?;
         let settings = self.settings()?;
         let status = {
             let mut guard = supervisor().lock().await;
@@ -64,12 +70,13 @@ impl App {
     /// 重启隧道。FRP 走 supervisor 的原子替换：新子域名成功后才释放旧线路，失败则回滚配置。
     pub async fn restart_tunnel(
         &self,
+        listeners: &ListenerManager,
         id: &str,
         kind: TunnelServiceKind,
     ) -> AppResult<TunnelStatus> {
         let profile = self.profile_by_id(id)?;
         self.validate_tunnel_start(id, kind)?;
-        self.sync_tunnel_routes_from_runtime().await?;
+        self.sync_tunnel_routes_from_runtime(listeners).await?;
         let settings = self.settings()?;
 
         let result = {
@@ -101,12 +108,13 @@ impl App {
     /// 验证隧道配置：本地服务没在跑时，测完自动断开，不留下悬空隧道。
     pub async fn test_tunnel(
         &self,
+        listeners: &ListenerManager,
         id: &str,
         kind: TunnelServiceKind,
     ) -> AppResult<TunnelTestResult> {
         let profile = self.profile_by_id(id)?;
         self.validate_tunnel_start(id, kind)?;
-        self.sync_tunnel_routes_from_runtime().await?;
+        self.sync_tunnel_routes_from_runtime(listeners).await?;
         let settings = self.settings()?;
         let runtime_running = local_service_listening(&profile, kind)?;
 
@@ -166,7 +174,7 @@ impl App {
     }
 
     fn validate_tunnel_start(&self, id: &str, kind: TunnelServiceKind) -> AppResult<()> {
-        self.with_data(|store| validate_service_start(store.list(), id, kind.workspace_service()))
+        self.with_data(|store| validate_service_start(store.list(), id, kind.into()))
     }
 
     fn unwrap_tunnel_result(

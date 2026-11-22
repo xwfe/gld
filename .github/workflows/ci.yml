@@ -75,13 +75,17 @@ jobs:
       #
       # 为什么不是 --workspace：其余测试大多没在 Windows 上跑过，一次全开只会得到
       # 一片红，分不出哪些是真问题。要扩就一块一块加（守护进程那一组见下一步）。
-      # 连 tools::workspace_runtime 一起跑：写锁的跨进程那一层在 Windows 上是
+      # runtime 的 workspace_runtime 和 core 的组合测试一起跑：写锁的跨进程层在 Windows 上是
       # LockFileEx，跟 Unix 的 flock 不是一回事（强制锁、按句柄），编得过不代表
       # 拦得住。
       - name: 补丁落盘与写锁测试
         run: |
           export GLD_HOME="$(mktemp -d)"
-          if cargo test -p gld-core --lib --locked -- tools::patch tools::workspace_runtime 2>&1 | tee test.log; then
+          if {
+            cargo test -p gld-runtime --lib --locked -- patch &&
+              cargo test -p gld-runtime --lib --locked -- workspace_runtime &&
+              cargo test -p gld-core --lib --locked -- tools::workspace_runtime
+          } 2>&1 | tee test.log; then
             exit 0
           fi
           # 完整日志要登录 GitHub 才看得到（仓库公开也一样），annotation 匿名
@@ -111,6 +115,7 @@ jobs:
       # 上的守护进程起停、daemon.lock 的单实例锁（LockFileEx）、按映像路径认 pid、
       # 经守护进程跑命令拿退出码和输出、taskkill 停命令不留孤儿、运行记录里的
       # exited / interrupted。每条为什么选、怎么跨平台写的，看测试上方的注释。
+      # D18 仍拒绝网络服务转发；最后一条覆盖本地执行代命令的 interrupted 记录。
       # 测试改了名，--exact 就一条也匹配不上，所以每条都要核对"1 passed"。
       - name: 构建包运行测试（不是下载包验收）
         timeout-minutes: 20
@@ -125,7 +130,7 @@ jobs:
             a_direct_tool_call_does_not_leave_its_background_command_behind
             a_command_stopped_by_a_daemon_restart_is_on_record_as_interrupted
             the_next_direct_tool_call_reads_what_the_previous_one_left
-            a_command_started_through_the_service_is_interrupted_by_a_daemon_restart
+            a_local_generation_command_is_interrupted_by_a_daemon_restart
           )
           # 先编好，下面逐条跑时不把编译时间算进每条的超时。
           cargo test -p gld --test daemon_lifecycle --locked --no-run

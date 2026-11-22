@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::auth::GrantRecord;
 use crate::bridge::member::CcnmMember;
 use crate::nodes::config::MachineRecord;
 use crate::nodes::pairing::InvitationRecord;
@@ -71,13 +70,102 @@ pub struct AppData {
     /// 未消费的一次性节点邀请；仅保存摘要，过期记录在下次创建邀请时清理。
     #[serde(default)]
     pub node_invitations: Vec<InvitationRecord>,
-    /// 只开部分项目的凭据（RFC-0007），连同它们自己的钥匙。
-    #[serde(default)]
-    pub grants: Vec<GrantRecord>,
+    /// 旧授权原件只随普通配置保存保留，不参与新授权查询或验证。
+    #[serde(default, skip_serializing_if = "OpaqueLegacyGrants::is_absent")]
+    pub grants: OpaqueLegacyGrants,
 }
 
 /// Legacy `{ "profiles": [...] }` file at the app root.
 #[derive(Debug, Deserialize)]
 pub struct LegacyProfilesOnlyFile {
     pub profiles: Vec<WorkspaceProfile>,
+}
+
+/// 旧授权只作为未解释的数据保留；仅判断是否需要提示重建，不作为授权来源。
+#[derive(Clone, Default)]
+pub struct OpaqueLegacyGrants(Option<serde_json::Value>);
+
+impl OpaqueLegacyGrants {
+    fn is_absent(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub(crate) fn requires_rebuild(&self) -> bool {
+        match self.0.as_ref() {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Array(values)) => !values.is_empty(),
+            Some(serde_json::Value::Object(values)) => !values.is_empty(),
+            Some(serde_json::Value::String(value)) => !value.is_empty(),
+            Some(_) => true,
+        }
+    }
+}
+
+impl std::fmt::Debug for OpaqueLegacyGrants {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpaqueLegacyGrants(<redacted>)")
+    }
+}
+
+impl Serialize for OpaqueLegacyGrants {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueLegacyGrants {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // present null 也保留；只有整个字段缺席才使用 Default。
+        serde_json::Value::deserialize(deserializer).map(|value| Self(Some(value)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rebuild_detection_does_not_interpret_legacy_fields() {
+        assert!(!OpaqueLegacyGrants::default().requires_rebuild());
+        for (value, expected) in [
+            (json!(null), false),
+            (json!([]), false),
+            (json!({}), false),
+            (json!(""), false),
+            (json!([null]), true),
+            (json!({"unknown": null}), true),
+            (json!(" "), true),
+            (json!(0), true),
+            (json!(false), true),
+        ] {
+            let opaque: OpaqueLegacyGrants = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(opaque.requires_rebuild(), expected);
+            assert_eq!(serde_json::to_value(opaque).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn legacy_authorization_is_opaque_and_absent_data_stays_absent() {
+        assert!(serde_json::to_value(AppData::default())
+            .unwrap()
+            .get("grants")
+            .is_none());
+        for original in [
+            serde_json::Value::Null,
+            json!([]),
+            json!({"unrecognized": {"bearer_token": "preserve-secret"}}),
+            json!([{"id": "old", "oauth_password": "preserve-secret"}]),
+        ] {
+            let data: AppData = serde_json::from_value(json!({"grants": original})).unwrap();
+            assert_eq!(serde_json::to_value(&data).unwrap()["grants"], original);
+            assert!(!format!("{data:?}").contains("preserve-secret"));
+        }
+    }
 }

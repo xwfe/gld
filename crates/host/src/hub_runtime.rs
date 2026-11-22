@@ -1,0 +1,242 @@
+//! 聚合入口在守护进程里的运行状态：起、停、现在是不是在跑。
+//!
+//! 和全局入口一样是进程级单例（一个守护进程里只有一个 hub），所以用静态量，
+//! 没有挂到 `RuntimeSupervisor` 上——那边的键是（工作区 id, 服务）。
+//! 配置校验、凭据、恢复标记这些业务规则在 `App`（app/hub.rs），这里只管进程内的监听器。
+
+use std::sync::{Arc, LazyLock};
+
+use tokio::sync::Mutex;
+
+use crate::generation::Router;
+use crate::listeners::ShutdownSender;
+use crate::nodes::registry::Nodes;
+use gld_core::async_rt::JoinHandle;
+use gld_core::auth::AccessReader;
+use gld_core::error::{AppError, AppResult};
+use gld_core::hub::runtime::{HubState, StartupSweep, TunnelOutcome, TunnelSnapshot};
+use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE};
+use gld_core::runtime::await_listener_shutdown;
+use gld_core::settings::HubConfig;
+use gld_core::tunnel::standalone::StandaloneTunnel;
+
+struct HubRuntime {
+    port: u16,
+    shutdown: Option<ShutdownSender>,
+    handle: JoinHandle<()>,
+    hub: Arc<Hub>,
+    nodes: Arc<Nodes>,
+    router: Option<Arc<Router>>,
+    /// 监听器启动后的单轮维护；停服务时取消后续项并收回任务，不留下脱管清理线程。
+    startup_sweep: Option<StartupSweep>,
+    /// 服务自己的隧道进程，跟着监听器一起停。
+    tunnel: Option<StandaloneTunnel>,
+    /// 这次起来实际用的公网基地址。Cloudflare 临时地址每次都不一样，配置里推不出来。
+    public_base: String,
+    /// 隧道没起来的原因。服务照样在本地跑（本机客户端不受影响），`gld ls` 把它报出来。
+    tunnel_error: String,
+}
+
+static RUNTIME: LazyLock<Mutex<Option<HubRuntime>>> = LazyLock::new(|| Mutex::new(None));
+
+/// 监听器起过、还没停。给**同步**上下文用：守护进程回 `daemon status` 的那段
+/// 代码不是异步的，拿不到上面那把 tokio 锁，而它要是数不到这个服务，
+/// `gld daemon status` 就会在服务跑着的时候说"运行中的服务 0"。
+///
+/// 只反映"起了没停"：监听任务自己退了（[`HubState::Exited`]）这里看不出来，
+/// 那种情况 `gld ls` 和 `gld doctor` 会说。
+static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn started_hint() -> bool {
+    STARTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 按给定配置起监听器。调用方要先 [`stop`] 并确认端口空出来。
+pub async fn start(
+    config: &HubConfig,
+    outcome: TunnelOutcome,
+    secrets: HubSecrets,
+    router: Option<Arc<Router>>,
+    access: AccessReader,
+) -> AppResult<()> {
+    let mut guard = RUNTIME.lock().await;
+    if let Some(previous) = guard.take() {
+        stop_runtime(previous).await;
+    }
+    let nodes = Arc::new(Nodes::new());
+    let hub = Arc::new(Hub::new(config, nodes.clone()));
+    // 有执行代时工具在那边跑：监听器开始收请求之前，那边的 Hub 要先建好。
+    if let Some(router) = router.clone() {
+        let nodes = nodes.clone();
+        let config = config.clone();
+        let _ = tokio::task::spawn_blocking(move || router.hub_started(&config, nodes)).await;
+    }
+    let spawned = crate::mcp::spawn_hub_listener(
+        config.local_port,
+        hub.clone(),
+        nodes.clone(),
+        &config.auth_type,
+        outcome.public_base.clone(),
+        secrets,
+        router.clone(),
+        access,
+    );
+    let (shutdown, handle) = match spawned {
+        Ok(listener) => listener,
+        Err(error) => {
+            // 监听器起不来，隧道留着就成了一条转到没人听的端口的孤儿进程。
+            if let Some(tunnel) = outcome.tunnel {
+                tunnel.stop().await;
+            }
+            stop_generations_hub(router).await;
+            return Err(AppError::Message(error));
+        }
+    };
+    STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    *guard = Some(HubRuntime {
+        port: config.local_port,
+        shutdown: Some(shutdown),
+        handle,
+        hub,
+        nodes,
+        // 有执行代时启动检查在那边跑：它碰的命令和工作区都归那边。
+        startup_sweep: if router.is_some() {
+            None
+        } else {
+            StartupSweep::launch(config)
+        },
+        router,
+        tunnel: outcome.tunnel,
+        public_base: outcome.public_base,
+        tunnel_error: outcome.error,
+    });
+    Ok(())
+}
+
+pub async fn stop() {
+    if let Some(runtime) = RUNTIME.lock().await.take() {
+        stop_runtime(runtime).await;
+    }
+}
+
+/// 监听器起好之后再挂上隧道：OpenAI 隧道一起来就要探本机服务，只能排在监听器后面。
+/// 这中间服务被停掉了的话隧道没人用，直接停。
+pub async fn attach_tunnel(outcome: TunnelOutcome) {
+    let mut guard = RUNTIME.lock().await;
+    let Some(runtime) = guard.as_mut() else {
+        if let Some(tunnel) = outcome.tunnel {
+            tunnel.stop().await;
+        }
+        return;
+    };
+    let previous = std::mem::replace(&mut runtime.tunnel, outcome.tunnel);
+    runtime.public_base = outcome.public_base;
+    runtime.tunnel_error = outcome.error;
+    if let Some(previous) = previous {
+        previous.stop().await;
+    }
+}
+
+/// 跑着的服务此刻对客户端 tools/list 给出的工具表；没在跑是 `None`。
+///
+/// 和监听器用的是同一个 `Hub`，所以就是客户端拿到的那一份——不是按当前 CLI 的
+/// 代码重新算的（审查 D04：客户端看不到的工具，要分清是服务没给还是客户端缓存了旧表）。
+pub async fn served_tools() -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
+    let (hub, router) = {
+        let guard = RUNTIME.lock().await;
+        let runtime = guard.as_ref()?;
+        (runtime.hub.clone(), runtime.router.clone())
+    };
+    // 列远端成员要读配置，别在 async worker 上做同步 IO。
+    tokio::task::spawn_blocking(move || match router {
+        Some(router) => {
+            let reply = router.served_tools().ok()?;
+            let tools = reply["tools"].as_array().cloned()?;
+            Some((reply["build"].clone(), tools))
+        }
+        None => Some((gld_core::tools::exec::server_snapshot(), hub.list_tools())),
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// 旧 /hub 入口直接把节点 socket 交给同一个 Hub，不再建立代理连接。
+pub async fn nodes() -> Option<Arc<crate::nodes::registry::Nodes>> {
+    let runtime = RUNTIME.lock().await;
+    let active = runtime
+        .as_ref()
+        .filter(|runtime| !runtime.handle.is_finished())?;
+    Some(active.nodes.clone())
+}
+
+/// 跑着的服务实际用的公网基地址和隧道报错；没在跑是 `None`。
+pub async fn public_base() -> Option<(String, String)> {
+    RUNTIME
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| (runtime.public_base.clone(), runtime.tunnel_error.clone()))
+}
+
+pub async fn tunnel_snapshot() -> Option<TunnelSnapshot> {
+    let mut guard = RUNTIME.lock().await;
+    let runtime = guard.as_mut()?;
+    let (managed, pid, alive) = match runtime.tunnel.as_mut() {
+        Some(tunnel) => (true, tunnel.pid(), Some(tunnel.still_running())),
+        None => (false, None, None),
+    };
+    Some(TunnelSnapshot {
+        public_base: runtime.public_base.clone(),
+        error: runtime.tunnel_error.clone(),
+        managed,
+        pid,
+        alive,
+    })
+}
+
+/// 服务这次运行期间的请求统计（所有项目合计）。没在跑是 `None`。
+pub async fn usage() -> Option<gld_core::usage::ServiceUsageStats> {
+    RUNTIME
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| runtime.hub.usage().snapshot(HUB_SCOPE, "mcp"))
+}
+
+pub async fn state() -> HubState {
+    match RUNTIME.lock().await.as_ref() {
+        None => HubState::Stopped,
+        Some(runtime) if runtime.handle.is_finished() => HubState::Exited { port: runtime.port },
+        Some(runtime) => HubState::Running { port: runtime.port },
+    }
+}
+
+async fn stop_generations_hub(router: Option<Arc<Router>>) {
+    if let Some(router) = router {
+        let _ = tokio::task::spawn_blocking(move || router.hub_stopping()).await;
+    }
+}
+
+async fn stop_runtime(mut runtime: HubRuntime) {
+    STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Some(sweep) = &runtime.startup_sweep {
+        sweep.cancel();
+    }
+    if let Some(shutdown) = runtime.shutdown.take() {
+        let _ = shutdown.send(());
+    }
+    await_listener_shutdown(Some(runtime.handle), runtime.port).await;
+    if let Some(sweep) = runtime.startup_sweep.take() {
+        sweep.join().await;
+    }
+    if let Some(tunnel) = runtime.tunnel.take() {
+        tunnel.stop().await;
+    }
+    stop_generations_hub(runtime.router).await;
+    // 成员里经 hub 起的命令，hub 停了就没人能再读它们的输出或杀掉它们。
+    // 结束进程要阻塞等待，不能占着异步 worker。
+    let hub = runtime.hub;
+    let nodes = runtime.nodes;
+    let _ = tokio::task::spawn_blocking(move || hub.shutdown_with(|| nodes.close_all())).await;
+}

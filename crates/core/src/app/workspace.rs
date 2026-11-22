@@ -5,39 +5,14 @@ use serde::{Deserialize, Serialize};
 use super::App;
 use crate::error::{AppError, AppResult};
 use crate::logs::append_profile_log;
-use crate::runtime::ServiceKind;
+use crate::runtime::{ListenerManager, ServiceKind};
 use crate::tunnel::drop_workspace as drop_tunnel_workspace;
 use crate::workspace::resources::{
     assign_free_workspace_ports, validate_workspace_resources, validate_workspace_resources_update,
 };
 use crate::workspace::WorkspaceProfile;
 
-/// 调用方对“哪个工作区”的描述。
-///
-/// - `selector`：用户显式给出的 id / id 前缀 / 名称 / 路径；
-/// - `cwd`：调用方所在目录，用于在没有 selector 时按目录归属推断。
-///
-/// 解析规则见 [`App::resolve_workspace`]。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkspaceTarget {
-    #[serde(default)]
-    pub selector: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<PathBuf>,
-}
-
-impl WorkspaceTarget {
-    pub fn selector(selector: impl Into<String>) -> Self {
-        Self {
-            selector: Some(selector.into()),
-            cwd: None,
-        }
-    }
-
-    pub fn new(selector: Option<String>, cwd: Option<PathBuf>) -> Self {
-        Self { selector, cwd }
-    }
-}
+pub use gld_protocol::daemon::{WorkspaceCreateOptions, WorkspaceTarget};
 
 /// [`App::ensure_workspace`] 的结果：目录对应的工作区，以及它是不是刚建出来的。
 ///
@@ -48,17 +23,6 @@ impl WorkspaceTarget {
 pub struct EnsuredWorkspace {
     pub profile: WorkspaceProfile,
     pub created: bool,
-}
-
-/// 创建工作区时可选的覆盖项。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkspaceCreateOptions {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub mcp_port: Option<u16>,
-    #[serde(default)]
-    pub actions_port: Option<u16>,
 }
 
 /// `ws set` 的结果：改完的配置，以及为了让它生效做了什么。
@@ -205,6 +169,7 @@ impl App {
     /// 值没变（`auth=oauth` 设成本来就是 oauth）则一个都不重启，免得白白掐断客户端。
     pub async fn set_workspace_fields(
         &self,
+        listeners: &ListenerManager,
         id: &str,
         assignments: &[(String, String)],
     ) -> AppResult<WorkspaceUpdate> {
@@ -234,10 +199,13 @@ impl App {
             if !service_config_changed(&before, &saved, kind) {
                 continue;
             }
-            if !self.is_service_running(id, kind).unwrap_or(false) {
+            if !self
+                .is_service_running(listeners, id, kind)
+                .unwrap_or(false)
+            {
                 continue;
             }
-            match self.restart_service(id, kind).await {
+            match self.restart_service(listeners, id, kind).await {
                 Ok(_) => restarted.push(kind),
                 Err(error) => restart_failures.push(RestartFailure {
                     service: kind,
@@ -269,16 +237,41 @@ impl App {
         Ok(saved)
     }
 
-    /// 删除工作区：先停掉它的服务和隧道，再移除配置与密钥。
-    pub async fn delete_workspace(&self, id: &str) -> AppResult<WorkspaceProfile> {
+    /// 删除工作区：先收回命令，再停服务和隧道，最后移除配置与密钥。
+    pub async fn delete_workspace(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+    ) -> AppResult<WorkspaceProfile> {
+        self.delete_workspace_with_cleanup(listeners, id, |root| {
+            Ok(crate::tools::workspace_runtime::runtime_for(root).terminate_all_sessions())
+        })
+        .await
+    }
+
+    /// 命令在执行代时由宿主提供清理；清理失败前不更动登记和凭据。
+    pub async fn delete_workspace_with_cleanup(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        cleanup: impl FnOnce(&Path) -> Result<usize, String> + Send + 'static,
+    ) -> AppResult<WorkspaceProfile> {
         let profile = self.profile_by_id(id)?;
+        // 目录可能已经不存在（prune）；必须用原登记路径定位仍持有命令的执行代。
+        let root = PathBuf::from(&profile.path);
+        let failed =
+            |error: String| AppError::Message(format!("工作区命令未停止，配置未删除：{error}"));
+        tokio::task::spawn_blocking(move || cleanup(&root))
+            .await
+            .map_err(|error| failed(error.to_string()))?
+            .map_err(failed)?;
         for kind in [ServiceKind::Mcp, ServiceKind::Actions] {
-            if self.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))? {
-                let _ = self.stop_service(id, kind).await;
+            if listeners.with_runtime(|runtime| Ok(runtime.is_running(id, kind)))? {
+                let _ = self.stop_service(listeners, id, kind).await;
             }
         }
         drop_tunnel_workspace(id).await?;
-        self.with_runtime(|runtime| {
+        listeners.with_runtime(|runtime| {
             runtime.drop_workspace(&profile);
             Ok(())
         })?;
@@ -644,9 +637,11 @@ mod tests {
             .create_workspace(project_dir.path(), WorkspaceCreateOptions::default())
             .expect("create workspace");
         let id = created.id.clone();
+        let listeners = std::sync::Arc::new(crate::runtime::test_listener_manager());
 
         // 预置两个待删除项，确保并发 += 和 -= 互不覆盖（MCP 与 Actions 两套白名单都测）。
         app.set_workspace_fields(
+            &listeners,
             &id,
             &[
                 (
@@ -673,9 +668,11 @@ mod tests {
                 std::sync::Arc::clone(&app_b)
             };
             let id = id.clone();
+            let listeners = std::sync::Arc::clone(&listeners);
             handles.push(tokio::spawn(async move {
                 target_app
                     .set_workspace_fields(
+                        &listeners,
                         &id,
                         &[
                             ("allowed-commands+".to_string(), format!("mcp_cmd_{idx}")),
@@ -702,9 +699,11 @@ mod tests {
                 std::sync::Arc::clone(&app_b)
             };
             let id = id.clone();
+            let listeners = std::sync::Arc::clone(&listeners);
             handles.push(tokio::spawn(async move {
                 target_app
                     .set_workspace_fields(
+                        &listeners,
                         &id,
                         &[
                             ("allowed-commands-".to_string(), mcp_rm.to_string()),

@@ -1,6 +1,6 @@
 use super::App;
 use crate::error::{AppError, AppResult};
-use crate::runtime::ServiceKind;
+use crate::runtime::{ListenerManager, ServiceKind};
 use crate::workspace::WorkspaceProfile;
 
 /// 工作区级密钥的合法 key。
@@ -73,7 +73,13 @@ impl App {
     }
 
     /// 设置工作区密钥，并重启正在使用它的服务。
-    pub async fn set_workspace_secret(&self, id: &str, key: &str, value: &str) -> AppResult<()> {
+    pub async fn set_workspace_secret(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        key: &str,
+        value: &str,
+    ) -> AppResult<()> {
         validate_workspace_key(key)?;
         if value.is_empty() {
             return Err(AppError::Message("密钥不能为空。".into()));
@@ -81,17 +87,22 @@ impl App {
         self.ensure_workspace_exists(id)?;
         self.with_data(|store| store.set_workspace_secret(id, key, value))?;
         let profile = self.profile_by_id(id)?;
-        self.restart_services_using_key(&[profile], key, false)
+        self.restart_services_using_key(listeners, &[profile], key, false)
             .await;
         Ok(())
     }
 
-    pub async fn regenerate_workspace_secret(&self, id: &str, key: &str) -> AppResult<String> {
+    pub async fn regenerate_workspace_secret(
+        &self,
+        listeners: &ListenerManager,
+        id: &str,
+        key: &str,
+    ) -> AppResult<String> {
         validate_workspace_key(key)?;
         self.ensure_workspace_exists(id)?;
         let value = self.with_data(|store| store.regenerate_workspace_secret(id, key))?;
         let profile = self.profile_by_id(id)?;
-        self.restart_services_using_key(&[profile], key, false)
+        self.restart_services_using_key(listeners, &[profile], key, false)
             .await;
         Ok(value)
     }
@@ -101,7 +112,12 @@ impl App {
         self.with_data(|store| Ok(store.get_shared_secret(key)))
     }
 
-    pub async fn set_shared_secret(&self, key: &str, value: &str) -> AppResult<()> {
+    pub async fn set_shared_secret(
+        &self,
+        listeners: &ListenerManager,
+        key: &str,
+        value: &str,
+    ) -> AppResult<()> {
         validate_shared_key(key)?;
         if value.is_empty() {
             return Err(AppError::Message("密钥不能为空。".into()));
@@ -115,17 +131,21 @@ impl App {
         })?;
         if changed {
             let workspaces = self.list_workspaces()?;
-            self.restart_services_using_key(&workspaces, key, true)
+            self.restart_services_using_key(listeners, &workspaces, key, true)
                 .await;
         }
         Ok(())
     }
 
-    pub async fn regenerate_shared_secret(&self, key: &str) -> AppResult<String> {
+    pub async fn regenerate_shared_secret(
+        &self,
+        listeners: &ListenerManager,
+        key: &str,
+    ) -> AppResult<String> {
         validate_shared_key(key)?;
         let value = self.with_data(|store| store.regenerate_shared_secret(key))?;
         let workspaces = self.list_workspaces()?;
-        self.restart_services_using_key(&workspaces, key, true)
+        self.restart_services_using_key(listeners, &workspaces, key, true)
             .await;
         Ok(value)
     }
@@ -136,6 +156,7 @@ impl App {
     /// 重启在这里统一处理，调用方不需要再额外 restart。
     async fn restart_services_using_key(
         &self,
+        listeners: &ListenerManager,
         profiles: &[WorkspaceProfile],
         key: &str,
         shared: bool,
@@ -146,10 +167,13 @@ impl App {
             let mcp_affected = MCP_KEYS.contains(&key)
                 && reads_from_shared_pool(profile, key) == shared
                 && self
-                    .is_service_running(&profile.id, ServiceKind::Mcp)
+                    .is_service_running(listeners, &profile.id, ServiceKind::Mcp)
                     .unwrap_or(false);
             if mcp_affected {
-                if let Err(error) = self.restart_service(&profile.id, ServiceKind::Mcp).await {
+                if let Err(error) = self
+                    .restart_service(listeners, &profile.id, ServiceKind::Mcp)
+                    .await
+                {
                     eprintln!("密钥变更后重启 MCP 失败（{}）：{error}", profile.id);
                 }
             }
@@ -157,11 +181,11 @@ impl App {
             let actions_affected = ACTIONS_KEYS.contains(&key)
                 && reads_from_shared_pool(profile, key) == shared
                 && self
-                    .is_service_running(&profile.id, ServiceKind::Actions)
+                    .is_service_running(listeners, &profile.id, ServiceKind::Actions)
                     .unwrap_or(false);
             if actions_affected {
                 if let Err(error) = self
-                    .restart_service(&profile.id, ServiceKind::Actions)
+                    .restart_service(listeners, &profile.id, ServiceKind::Actions)
                     .await
                 {
                     eprintln!("密钥变更后重启 Actions 失败（{}）：{error}", profile.id);

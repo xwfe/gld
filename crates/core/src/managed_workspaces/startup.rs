@@ -7,7 +7,7 @@ use std::sync::Arc;
 const LIMIT: usize = 16;
 const REPORT: &str = ".startup-sweep";
 
-pub(crate) struct StartupSweep {
+pub struct StartupSweep {
     cancelled: Arc<AtomicBool>,
     task: crate::async_rt::JoinHandle<()>,
 }

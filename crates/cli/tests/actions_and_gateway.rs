@@ -199,7 +199,7 @@ fn global_gateway_routes_only_what_opted_in() {
         "--port",
         &service_port.to_string(),
         "--auth",
-        "noauth",
+        "oauth",
     ]);
     env.ok(&["start"]);
 
@@ -443,6 +443,23 @@ fn actions_and_the_local_cli_do_not_see_each_others_runs() {
     let runs = &listed["structured_content"];
     assert_eq!(runs["total"], 1, "Actions 列到了命令行的命令：{runs}");
     assert_eq!(runs["runs"][0]["command"], "./hello", "{runs}");
+
+    // 身份隔离不能证明发生了转发：宿主在本地执行也能保留 Actions 身份。
+    let status = env.json(&["--json", "daemon", "upgrade", "status"]);
+    let generations = status["generations"].as_array().expect("执行代列表");
+    assert_eq!(generations.len(), 1, "{status}");
+    let generation_pid = generations[0]["pid"].as_u64().expect("执行代 PID");
+    assert_eq!(
+        runs["runs"][0]["started_by_gld_pid"].as_u64(),
+        Some(generation_pid),
+        "Actions 命令没有在执行代运行：{runs}"
+    );
+    assert_eq!(
+        from_cli["runs"][0]["started_by_gld_pid"].as_u64(),
+        Some(generation_pid),
+        "CLI 命令没有在同一执行代运行：{from_cli}"
+    );
+
     let output_ref = runs["runs"][0]["output_refs"]["stdout"]
         .as_str()
         .expect("output_ref");

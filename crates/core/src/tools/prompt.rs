@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::tools::caller::Caller;
+use crate::auth::AuthContext;
 use crate::tools::context::ToolContext;
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
@@ -48,7 +48,7 @@ struct PromptScan {
 
 pub fn prompt_manage(
     ctx: &ToolContext,
-    caller: &Caller,
+    caller: &AuthContext,
     args: &Value,
 ) -> Result<Value, WorkspaceError> {
     manage_at(ctx, caller, args, dirs::home_dir().as_deref())
@@ -57,7 +57,7 @@ pub fn prompt_manage(
 /// 允许测试把用户主目录换成临时目录，不碰真实用户的 Prompt 文件。
 fn manage_at(
     ctx: &ToolContext,
-    caller: &Caller,
+    caller: &AuthContext,
     args: &Value,
     home: Option<&Path>,
 ) -> Result<Value, WorkspaceError> {
@@ -76,7 +76,7 @@ fn manage_at(
     if scope == Some("global") && !caller.may_read_user_prompts() {
         return Err(WorkspaceError::Tool {
             code: "PROMPT_SCOPE_FORBIDDEN",
-            message: "User-level prompts require full authenticated access".into(),
+            message: "User-level prompts require the user_prompts service capability".into(),
             category: "permission",
             retryable: false,
         });
@@ -354,7 +354,10 @@ fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AuthContext, Grant, Principal};
+    use gld_policy::{
+        ActionsSubject, CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject,
+        ProjectScope, ServiceCapabilities,
+    };
 
     fn ctx(path: &Path, harness: &Path) -> ToolContext {
         ToolContext::for_test(path.to_path_buf(), harness.to_path_buf()).expect("context")
@@ -365,7 +368,7 @@ mod tests {
         fs::write(path, content).expect("write");
     }
 
-    fn call(ctx: &ToolContext, caller: &Caller, args: Value, home: &Path) -> Value {
+    fn call(ctx: &ToolContext, caller: &AuthContext, args: Value, home: &Path) -> Value {
         manage_at(ctx, caller, &args, Some(home)).expect("prompt tool")
     }
 
@@ -375,7 +378,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let harness = tempfile::tempdir().unwrap();
         let ctx = ctx(workspace.path(), harness.path());
-        let caller = Caller::local();
+        let caller = AuthContext::local_operator();
         assert_eq!(
             call(&ctx, &caller, json!({"action":"list"}), home.path())["count"],
             0
@@ -436,7 +439,7 @@ mod tests {
         );
         let listed = call(
             &ctx,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             json!({"action":"list"}),
             home.path(),
         );
@@ -444,7 +447,7 @@ mod tests {
         assert_eq!(listed["prompts"][0]["scope"], "workspace");
         let err = manage_at(
             &ctx,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             &json!({"action":"read","name":"review"}),
             Some(home.path()),
         )
@@ -452,7 +455,7 @@ mod tests {
         assert_eq!(err.code(), "AMBIGUOUS_PROMPT");
         let loaded = call(
             &ctx,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             json!({"action":"read","name":"review","scope":"workspace"}),
             home.path(),
         );
@@ -460,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn anon_and_grant_do_not_see_global_prompts_even_by_id() {
+    fn clients_without_user_prompts_capability_cannot_read_global_prompts() {
         let workspace = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let harness = tempfile::tempdir().unwrap();
@@ -473,24 +476,57 @@ mod tests {
             &home.path().join(".agents/prompts/secret.md"),
             "user-level prompt",
         );
-        let full = Caller::from_auth(&AuthContext::new(Principal::SharedSecret, "hub"));
+        let client = |scope, service, kind, subject| {
+            AuthContext::verified_mcp(
+                "hub",
+                Grant {
+                    id: "prompt-client".into(),
+                    name: "Prompt client".into(),
+                    scope,
+                    permissions: GrantPermissions {
+                        write: true,
+                        service,
+                    },
+                    status: GrantStatus::Active,
+                },
+                kind,
+                subject,
+            )
+            .unwrap()
+        };
+        let full = client(
+            ProjectScope::AllProjects,
+            ServiceCapabilities {
+                user_prompts: true,
+                ..Default::default()
+            },
+            CredentialKind::Token,
+            McpSubject::Token,
+        );
         let listed = call(&ctx, &full, json!({"action":"list"}), home.path());
         assert_eq!(listed["count"], 2);
         let global_id = listed["prompts"][1]["id"].as_str().unwrap();
-        let grant = Grant {
-            id: "restricted".into(),
-            name: "restricted".into(),
-            workspaces: vec![],
-            read_only: true,
-            browser: false,
-        };
-        let restricted = Caller::from_auth(
-            &AuthContext::new(Principal::SharedSecret, "hub").with_grant(Some(grant)),
+        let restricted = client(
+            ProjectScope::Selected(vec!["project".into()]),
+            ServiceCapabilities::default(),
+            CredentialKind::Token,
+            McpSubject::Token,
         );
-        for caller in [
-            &Caller::from_auth(&AuthContext::anonymous("hub")),
-            &restricted,
-        ] {
+        let without_service = client(
+            ProjectScope::AllProjects,
+            ServiceCapabilities::default(),
+            CredentialKind::Token,
+            McpSubject::Token,
+        );
+        let url = client(
+            ProjectScope::AllProjects,
+            ServiceCapabilities::default(),
+            CredentialKind::Url,
+            McpSubject::Url,
+        );
+        let actions =
+            AuthContext::actions("actions", "project", ActionsSubject::Anonymous, false).unwrap();
+        for caller in [&restricted, &without_service, &url, &actions] {
             let scoped = call(&ctx, caller, json!({"action":"list"}), home.path());
             assert_eq!(scoped["count"], 1);
             assert_eq!(scoped["prompts"][0]["scope"], "workspace");
@@ -531,7 +567,7 @@ mod tests {
         fs::create_dir(root.join("directory.md")).unwrap();
         let listed = call(
             &ctx,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             json!({"action":"list"}),
             home.path(),
         );
@@ -540,7 +576,7 @@ mod tests {
         assert_eq!(listed["skipped"].as_array().unwrap().len(), 3);
         let error = manage_at(
             &ctx,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             &json!({"action":"read","name":"huge"}),
             Some(home.path()),
         )
@@ -563,7 +599,7 @@ mod tests {
         symlink(outside.path().join("secret.md"), root.join("linked.md")).unwrap();
         let listed = call(
             &ctx,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             json!({"action":"list"}),
             home.path(),
         );
@@ -575,7 +611,7 @@ mod tests {
         write(&outside.path().join("prompts/escape.md"), "escaped");
         let listed = call(
             &ctx,
-            &Caller::local(),
+            &AuthContext::local_operator(),
             json!({"action":"list"}),
             home.path(),
         );

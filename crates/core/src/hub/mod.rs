@@ -42,6 +42,7 @@
 //! gld 本机也有 `search_text` 和 `list_files`，跟 ccnm 的同名工具根本不是
 //! 一个契约（分页、参数、错误码都不同）。
 
+mod grant_scope;
 mod native;
 #[cfg(test)]
 mod node_transport_tests;
@@ -55,7 +56,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::agent_context::render_skill_catalog_for_profile;
-use crate::auth::{AuthContext, Grant};
+use crate::auth::AuthContext;
 use crate::bridge::member::{CcnmMember, Mode};
 use crate::bridge::peer::PeerError;
 #[cfg(test)]
@@ -65,16 +66,14 @@ use crate::bridge::tools::{self as remote_tools, RemoteTool};
 use crate::data::DataStore;
 use crate::machine_mcp::{self, installed::Installed, relay::Relay};
 use crate::nodes::config::NodeAccess;
-use crate::nodes::registry::{NativeMember, Nodes};
+use crate::nodes::NativeMember;
 use crate::planning::PlanningService;
 use crate::settings::{AppSettings, HubConfig};
 use crate::tools::registry::{
     canonical_tool_name, exposed_tool_names, list_tools_for_profile, normalize_tool_profile,
 };
 use crate::tools::workspace::{tool_err, tool_ok, WorkspaceError};
-use crate::tools::{
-    build_tool_context, call_tool_as, wrap_mcp_tool_result, Caller, SharedToolContext,
-};
+use crate::tools::{build_tool_context, call_tool_as, wrap_mcp_tool_result, SharedToolContext};
 use crate::usage::ServiceUsage;
 use crate::workspace::{AuthConfig, WorkspaceProfile};
 
@@ -233,25 +232,16 @@ pub struct Routed {
 /// 本机 MCP server 转发在路由表里的名字，见 [`Hub::execution_route`]。
 const MACHINE_MCP_ROUTE: &str = "machine-mcp";
 
-/// 执行代摸不到节点连接（归宿主，RFC-0008 §3.4），要用就经这个接口问。
+/// Hub 只查询和调用节点；宿主注入实际登记表，执行代注入私有管道桥，不转移连接关闭权。
 pub trait NodeBridge: Send + Sync {
     fn members(&self) -> Result<Vec<NativeMember>, String>;
     fn call(&self, auth: &AuthContext, member: &NativeMember, tool: &str, args: Value) -> Value;
 }
 
-/// 一条请求在执行代之间该怎么走，见 [`Hub::execution_route`]。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ExecutionRoute {
-    /// 工具表这类发现请求：走最老的一代。
-    Discovery,
-    /// 不碰工作区状态（`list_workspaces`、节点调用、选不中成员的报错）：走当前代。
-    Unbound,
-    /// 碰这个工作区：走它的主人，没主人就绑给当前代。
-    Owned(String),
-}
+pub use gld_protocol::generation::ExecutionRoute;
 
 /// 经宿主问节点失败时给模型的回包。等不到回复时节点可能已经执行了，所以不能叫它直接重试。
-pub(crate) fn node_bridge_failure(message: &str) -> Value {
+pub fn node_bridge_failure(message: &str) -> Value {
     plain_result(tool_err(WorkspaceError::Tool {
         code: "NODE_RESULT_UNKNOWN",
         message: format!(
@@ -271,8 +261,7 @@ pub struct Hub {
     contexts: Mutex<HashMap<String, CachedContext>>,
     /// 远端成员的 bridge 连接。本地成员一条都用不到。
     connections: Connections,
-    nodes: Arc<Nodes>,
-    /// 在执行代里跑时才有：节点调用经它交给宿主，[`Self::nodes`] 那张表此时是空的。
+    /// 宿主注入实际节点表，执行代注入管道桥；节点自身不再转发到其他节点。
     node_bridge: Option<Arc<dyn NodeBridge>>,
     /// 转发本机装好的 MCP server（`gld mcp on` 开了才有东西）。
     relay: Relay,
@@ -286,8 +275,9 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn new(config: &HubConfig) -> Self {
+    pub fn new(config: &HubConfig, node_bridge: Arc<dyn NodeBridge>) -> Self {
         Self::with_members(config, Members::DataFile, Connections::new())
+            .with_node_bridge(node_bridge)
     }
 
     #[cfg(test)]
@@ -320,7 +310,6 @@ impl Hub {
             usage: Arc::new(ServiceUsage::default()),
             contexts: Mutex::new(HashMap::new()),
             connections,
-            nodes: Arc::new(Nodes::new()),
             node_bridge: None,
             relay: Relay::new(),
             #[cfg(test)]
@@ -340,7 +329,7 @@ impl Hub {
     fn node_members(&self) -> Result<Vec<NativeMember>, String> {
         match &self.node_bridge {
             Some(bridge) => bridge.members(),
-            None => self.nodes.members(),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -353,7 +342,7 @@ impl Hub {
     ) -> Value {
         match &self.node_bridge {
             Some(bridge) => bridge.call(auth, member, tool, args),
-            None => self.nodes.call(auth, member, tool, args),
+            None => node_bridge_failure("服务没在跑"),
         }
     }
 
@@ -473,11 +462,14 @@ impl Hub {
         args: &Value,
         settings: &AppSettings,
     ) -> Value {
-        if self.tool_profile == "read-only" {
+        if self.tool_profile == "read-only"
+            || !auth.may_use_machine_mcp()
+            || (tool == machine_mcp::relay::CALL && !auth.may_call_machine_mcp())
+        {
             return plain_result(tool_err(WorkspaceError::Tool {
                 code: "TOOL_NOT_ALLOWED",
                 message: format!(
-                    "{tool} is not available: this service's tool profile is read-only, and a relayed MCP tool can do whatever its server does."
+                    "{tool} requires the machine_mcp service capability; calling a relayed MCP tool also requires project write permission and a writable service profile."
                 ),
                 category: "permission",
                 retryable: false,
@@ -513,8 +505,15 @@ impl Hub {
     /// 只停 [`HUB_SCOPE`] 这个入口的：会话表按目录 + 主体分，同一个目录上
     /// 还有命令行和工作区自己监听器起的命令，操作员停的是 hub，不该连累它们。
     ///
+    /// 注入的节点桥由宿主管理，本方法不关闭它。
     /// 会阻塞等进程退出，必须在 `spawn_blocking` 里调。
     pub fn shutdown(&self) {
+        self.shutdown_with(|| {});
+    }
+
+    /// 宿主在 CCNM 与本机 MCP 之间关闭自己的节点连接，保持原先的关闭顺序。
+    /// 调用方须在阻塞线程里调用，且只关此 Hub 对应的节点表。
+    pub fn shutdown_with(&self, close_nodes: impl FnOnce()) {
         let contexts: Vec<CachedContext> = self
             .contexts
             .lock()
@@ -531,7 +530,7 @@ impl Hub {
         // 远端 bridge 必须走正常关闭：直接留着进程不管，远端 Runtime 的写锁
         // 会留下 held 标记要人工恢复。
         self.connections.close_all();
-        self.nodes.close_all();
+        close_nodes();
         self.relay.close_all();
     }
 
@@ -561,7 +560,7 @@ impl Hub {
         let result = match method {
             "initialize" => Ok(self.initialize_result(auth)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": self.list_tools_for(auth.grant()) })),
+            "tools/list" => Ok(json!({ "tools": self.list_tools_for(auth) })),
             "tools/call" => self.call(auth, &params, &mut routed, route),
             _ => Err(json!({
                 "code": -32601,
@@ -576,13 +575,12 @@ impl Hub {
     }
 
     fn initialize_result(&self, auth: &AuthContext) -> Value {
-        let grant = auth.grant();
         let catalog = match self
             .snapshot()
             .map(|(members, settings)| (visible_for(members, auth), settings))
         {
             Ok((members, settings)) if members.is_empty() => {
-                if self.work_sessions_offered(&settings, grant) {
+                if self.work_sessions_offered(&settings, auth) {
                     "No user projects are registered. For a non-project task use work_session action=start; no gld add or Git repository is needed.".into()
                 } else {
                     "No workspaces are in this hub yet; the operator adds them from the gld CLI."
@@ -616,7 +614,7 @@ impl Hub {
             Err(error) => format!("The workspace list is unavailable right now: {error}"),
         };
         let relayed = match self.snapshot() {
-            Ok((_, settings)) if grant.is_none() && !self.relay_definitions(&settings).is_empty() => format!(
+            Ok((_, settings)) if auth.may_use_machine_mcp() && !self.relay_definitions(&settings).is_empty() => format!(
                 "\n\nMCP servers installed on this machine are relayed too, outside any workspace: {} lists them and their tools, {} calls one.",
                 machine_mcp::relay::LIST,
                 machine_mcp::relay::CALL
@@ -638,15 +636,14 @@ impl Hub {
         })
     }
 
-    /// 服务凭据看到的工具表（全权）。
+    /// 本机操作员看到的工具表。
     pub fn list_tools(&self) -> Vec<Value> {
-        self.list_tools_for(None)
+        self.list_tools_for(&AuthContext::local_operator())
     }
 
-    /// 这把凭据看到的工具表。grant 看不到本机 MCP 转发；只读 grant 只有读的工具，
-    /// 远端也只有读的那几个（RFC-0007）。
-    fn list_tools_for(&self, grant: Option<&Grant>) -> Vec<Value> {
-        let read_only = grant.is_some_and(|grant| grant.read_only);
+    /// 这条连接被授权的工具表；项目权限、服务能力和节点上限取交集。
+    fn list_tools_for(&self, auth: &AuthContext) -> Vec<Value> {
+        let read_only = auth.read_only();
         let mut tools = vec![list_workspaces_definition(), workspace_context_definition()];
         tools.extend(
             list_tools_for_profile(&self.tool_profile)
@@ -673,13 +670,20 @@ impl Hub {
         // 全是只读成员时列出 `remote_coding_begin`，模型只会得到一个必然
         // 失败的调用。
         if let Ok((members, settings)) = self.snapshot() {
-            if self.work_sessions_offered(&settings, grant) {
+            if self.work_sessions_offered(&settings, auth) {
                 tools.push(work_sessions::definition());
             }
-            if grant.is_none() {
-                tools.extend(self.relay_definitions(&settings));
+            if auth.may_use_machine_mcp() {
+                tools.extend(
+                    self.relay_definitions(&settings)
+                        .into_iter()
+                        .filter(|tool| {
+                            tool["name"].as_str() != Some(machine_mcp::relay::CALL)
+                                || auth.may_call_machine_mcp()
+                        }),
+                );
             }
-            let members = visible(members, grant);
+            let members = visible_for(members, auth);
             let remotes: Vec<&CcnmMember> = members
                 .iter()
                 .filter_map(|m| match m {
@@ -690,7 +694,7 @@ impl Hub {
             if !remotes.is_empty() {
                 // grant 一律不开远端写会话，见 coding_session。
                 let any_coding =
-                    grant.is_none() && remotes.iter().any(|r| r.max_mode == Mode::Coding);
+                    auth.is_local_operator() && remotes.iter().any(|r| r.max_mode == Mode::Coding);
                 tools.extend(remote_tools::definitions(any_coding));
             }
         }
@@ -702,9 +706,9 @@ impl Hub {
     /// 成员自己的 server_info 报的是成员工具集那一份：含 hub 隐藏掉的
     /// get/set_default_cwd，不含 list_workspaces、远端和中继工具，也没有参数。
     /// 拿它跟客户端看到的表对，对不上也说明不了问题。
-    fn with_connection_surface(&self, mut info: Value, grant: Option<&Grant>) -> Value {
+    fn with_connection_surface(&self, mut info: Value, auth: &AuthContext) -> Value {
         if let Some(object) = info.as_object_mut() {
-            let mut surface = crate::tools::registry::surface_digest(&self.list_tools_for(grant));
+            let mut surface = crate::tools::registry::surface_digest(&self.list_tools_for(auth));
             surface["note"] = json!(
                 "The tool list this connection's tools/list returns right now. If your own tool list lacks any of these tools or parameters, the client is using a cached older list: refresh the connector's tools (ChatGPT: connector settings → refresh) instead of guessing arguments or asking for permissions."
             );
@@ -714,15 +718,17 @@ impl Hub {
     }
 
     /// 和 [`Self::list_tools_for`] 一个口径：表里没有的，硬发 `tools/call` 也是 Unknown tool。
-    fn exposes(&self, name: &str, grant: Option<&Grant>) -> bool {
+    fn exposes(&self, name: &str, auth: &AuthContext) -> bool {
         if !self.node_tool_allowed(name) {
             return false;
         }
-        let read_only = grant.is_some_and(|grant| grant.read_only);
+        let read_only = auth.read_only();
         name == LIST_WORKSPACES
             || name == WORKSPACE_CONTEXT
-            || (name == work_sessions::TOOL && grant.is_none())
-            || (grant.is_none() && machine_mcp::is_tool(name))
+            || (name == work_sessions::TOOL && auth.may_manage_workspaces())
+            || (auth.may_use_machine_mcp()
+                && machine_mcp::is_tool(name)
+                && (name != machine_mcp::relay::CALL || auth.may_call_machine_mcp()))
             || remote_tools::find(name).is_some()
             || remote_tools::is_session_tool(name)
             || (!HIDDEN_TOOLS.contains(&name)
@@ -742,7 +748,7 @@ impl Hub {
             .and_then(Value::as_str)
             .ok_or_else(|| json!({ "code": -32602, "message": "Missing tool name" }))?;
         let canonical = canonical_tool_name(name);
-        if !self.exposes(canonical, auth.grant()) {
+        if !self.exposes(canonical, auth) {
             return Err(json!({
                 "code": -32602,
                 "message": format!("Unknown tool: {name}"),
@@ -770,7 +776,7 @@ impl Hub {
         let members = visible_for(members, auth);
         if canonical == LIST_WORKSPACES {
             let mut listed = self.node_catalog(&members);
-            if self.work_sessions_offered(&settings, auth.grant()) && auth.is_authenticated() {
+            if self.work_sessions_offered(&settings, auth) {
                 listed["work_sessions"] = json!({
                     "tool": work_sessions::TOOL,
                     "usage": "For a non-project task call work_session action=start with a unique client_request_id; use its returned workspace ID on every subsequent workspace tool call."
@@ -856,7 +862,7 @@ impl Hub {
                 let result = self.node_call(auth, native, canonical, args.clone());
                 if canonical == "server_info" && result["structuredContent"]["ok"] == true {
                     // 工具在节点执行，但 connection 描述的是客户端当前连接的 Hub。
-                    let structured = self.with_connection_surface(result["structuredContent"].clone(), auth.grant());
+                    let structured = self.with_connection_surface(result["structuredContent"].clone(), auth);
                     let mut wrapped = wrap_mcp_tool_result(canonical, &args, structured);
                     wrapped["_meta"] = result["_meta"].clone();
                     return Ok(wrapped);
@@ -948,26 +954,26 @@ impl Hub {
         }
 
         let structured = if canonical == WORKSPACE_CONTEXT {
-            self.workspace_context(member, &context, auth.grant())
+            self.workspace_context(member, &context, auth)
         } else if native::runs_commands(canonical) && !self.node_project_runs_commands(member) {
             native::commands_not_allowed(canonical, member)
         } else if !exposed_tool_names(&context.tool_profile).contains(&canonical) {
             tool_not_in_workspace(canonical, member, &context.tool_profile)
         } else if canonical == "server_info" {
-            let mut info = call_tool_as(&context, &Caller::from_auth(auth), canonical, args);
+            let mut info = call_tool_as(&context, auth, canonical, args);
             // 成员的 server_info 按项目工具集报 tools；只读 grant 调不了其中写和执行的那些，
             // 照报的话模型会去试（审查 D07）。
-            if auth.grant().is_some_and(|grant| grant.read_only) {
+            if auth.read_only() {
                 if let Some(tools) = info.get_mut("tools").and_then(Value::as_array_mut) {
                     tools.retain(|name| name.as_str().is_some_and(read_only_allows));
                     let count = tools.len();
                     info["tool_count"] = json!(count);
                 }
             }
-            self.restrict_node_surface(&mut info, member, auth.grant());
-            self.with_connection_surface(info, auth.grant())
+            self.restrict_node_surface(&mut info, member, auth);
+            self.with_connection_surface(info, auth)
         } else {
-            call_tool_as(&context, &Caller::from_auth(auth), canonical, args)
+            call_tool_as(&context, auth, canonical, args)
         };
         let result = wrap_mcp_tool_result(canonical, args, tag_workspace(structured, member));
         context.record_context_block("tool_return", &result);
@@ -1053,6 +1059,9 @@ impl Hub {
         args: &Value,
         forwarded: Value,
     ) -> Value {
+        if !auth.is_local_operator() {
+            return remote_authorization_not_ready(member);
+        }
         let Some(handle) = args
             .get(remote_tools::HANDLE_ARG)
             .and_then(Value::as_str)
@@ -1089,33 +1098,9 @@ impl Hub {
         member: &CcnmMember,
         args: &Value,
     ) -> Value {
-        // RFC-0002 5.3：第一版 remote coding 要求可验证的认证身份，
-        // noauth 不开放该能力。只读不受这条限制。
-        if !auth.is_authenticated() {
-            return plain_result(tool_err(WorkspaceError::ToolDetails {
-                code: "CODING_REQUIRES_AUTH",
-                message: format!(
-                    "Writing to a remote workspace needs an authenticated connection, and this hub is running with auth_type=noauth. Reading {} still works.",
-                    member.name
-                ),
-                category: "permission",
-                retryable: false,
-                details: json!({ "workspace": remote_ref(member) }),
-            }));
-        }
-        // 远端写会话只给服务凭据（RFC-0007）。一个远端成员同一时刻只有一条写连接，换个
-        // 主体来开就把原来那条顶掉：grant 开一个，操作员正开着的会话、后台命令和写锁就没了。
-        if auth.grant().is_some() {
-            return plain_result(tool_err(WorkspaceError::ToolDetails {
-                code: "GRANT_CANNOT_WRITE_REMOTE",
-                message: format!(
-                    "This connection came in with a grant, and grants cannot open a writing session on a remote workspace: a remote workspace has one writing connection at a time, so opening one would cut off whoever has it now. Reading {} still works.",
-                    member.name
-                ),
-                category: "permission",
-                retryable: false,
-                details: json!({ "workspace": remote_ref(member) }),
-            }));
+        // D18-C 建立受限身份转发和写租约前，网络主体不能开启或关闭远端写会话。
+        if !auth.is_local_operator() {
+            return remote_authorization_not_ready(member);
         }
         if member.max_mode < Mode::Coding {
             return plain_result(tool_err(WorkspaceError::ToolDetails {
@@ -1299,10 +1284,10 @@ impl Hub {
         &self,
         member: &WorkspaceProfile,
         context: &SharedToolContext,
-        grant: Option<&Grant>,
+        auth: &AuthContext,
     ) -> Value {
         let member_tools = exposed_tool_names(&context.tool_profile);
-        let read_only = grant.is_some_and(|grant| grant.read_only);
+        let read_only = auth.read_only();
         let tools: Vec<&str> = exposed_tool_names(&self.tool_profile)
             .into_iter()
             .filter(|name| {
@@ -1335,7 +1320,7 @@ impl Hub {
         if context.policy.allows_all_commands() {
             out["risk"] = json!(crate::tools::policy::ALLOW_ALL_NOTICE);
         }
-        self.restrict_node_surface(&mut out, member, grant);
+        self.restrict_node_surface(&mut out, member, auth);
         tool_ok(out)
     }
 }
@@ -1367,7 +1352,7 @@ pub fn known_owner_keys() -> Result<std::collections::HashSet<String>, String> {
     let (mut keys, _) = DataStore::read_file(|data| {
         let mut keys = std::collections::HashSet::new();
         for profile in &data.profiles {
-            keys.insert(crate::generation::router::root_key(std::path::Path::new(
+            keys.insert(crate::generation::root_key(std::path::Path::new(
                 &profile.path,
             )));
         }
@@ -1389,7 +1374,7 @@ pub fn known_owner_keys() -> Result<std::collections::HashSet<String>, String> {
 /// 这个成员的工作区状态归谁管。节点上的状态在节点那台机器上，这边哪一代转发都一样。
 fn member_route(member: &Member) -> ExecutionRoute {
     match member {
-        Member::Local(profile) => ExecutionRoute::Owned(crate::generation::router::root_key(
+        Member::Local(profile) => ExecutionRoute::Owned(crate::generation::root_key(
             std::path::Path::new(&profile.path),
         )),
         Member::Remote(remote) => ExecutionRoute::Owned(remote.id.clone()),
@@ -1411,21 +1396,27 @@ fn route_changed(selector: &str) -> Value {
 
 /// 这把凭据看得到的成员（RFC-0007）。范围外的当成不存在：不列、不进任何报错的候选，
 /// 按名字或 id 去调报的也是 `WORKSPACE_NOT_IN_HUB`。
-fn visible(members: Vec<Member>, grant: Option<&Grant>) -> Vec<Member> {
-    match grant {
-        None => members,
-        Some(grant) => members
-            .into_iter()
-            .filter(|member| !matches!(member, Member::Native(_)) && grant.allows(member.id()))
-            .collect(),
-    }
+fn visible_for(members: Vec<Member>, auth: &AuthContext) -> Vec<Member> {
+    members
+        .into_iter()
+        .filter(|member| {
+            auth.allows_project(member.id())
+                && (auth.is_local_operator() || !matches!(member, Member::Native(_)))
+        })
+        .collect()
 }
 
-fn visible_for(members: Vec<Member>, auth: &AuthContext) -> Vec<Member> {
-    visible(members, auth.grant())
-        .into_iter()
-        .filter(|member| auth.is_authenticated() || !matches!(member, Member::Native(_)))
-        .collect()
+fn remote_authorization_not_ready(member: &CcnmMember) -> Value {
+    plain_result(tool_err(WorkspaceError::ToolDetails {
+        code: "GRANT_CANNOT_WRITE_REMOTE",
+        message: format!(
+            "Remote writing is unavailable to this client until scoped identity forwarding and write ownership are supported. Reading {} still works.",
+            member.name
+        ),
+        category: "permission",
+        retryable: false,
+        details: json!({ "workspace": remote_ref(member) }),
+    }))
 }
 
 /// 只读 grant 能调的本地工具：就是 read-only 工具集那一份，和服务、项目自己的工具集
@@ -1832,6 +1823,14 @@ fn workspace_context_definition() -> Value {
 mod tests {
     use super::*;
     use crate::planning::PlanningMode;
+    use gld_policy::{
+        CredentialKind, Grant, GrantPermissions, GrantStatus, McpSubject, ProjectScope,
+        ServiceCapabilities,
+    };
+
+    mod access_scope;
+    mod node_bridge;
+    mod routing;
 
     struct Fixture {
         _dirs: Vec<tempfile::TempDir>,
@@ -1919,19 +1918,57 @@ mod tests {
         }
     }
 
-    /// 测试里统一用这个主体；专门验"按主体分连接"的那条会换。
-    fn caller() -> AuthContext {
-        AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE)
+    fn service_client(subject: McpSubject) -> AuthContext {
+        let kind = if matches!(&subject, McpSubject::OAuth { .. }) {
+            CredentialKind::OAuth
+        } else {
+            CredentialKind::Token
+        };
+        AuthContext::verified_mcp(
+            HUB_SCOPE,
+            Grant {
+                id: "service-test".into(),
+                name: "Explicit service test".into(),
+                scope: ProjectScope::AllProjects,
+                permissions: GrantPermissions {
+                    write: true,
+                    service: ServiceCapabilities {
+                        user_prompts: true,
+                        machine_mcp: true,
+                        managed_workspaces: true,
+                    },
+                },
+                status: GrantStatus::Active,
+            },
+            kind,
+            subject,
+        )
+        .unwrap()
     }
 
-    /// 一个具名 OAuth 客户端。两个不同的 `client_id` 是两个主体。
+    fn caller() -> AuthContext {
+        service_client(McpSubject::Token)
+    }
+
     fn oauth_client(id: &str) -> AuthContext {
-        AuthContext::new(
-            crate::auth::Principal::OAuthClient {
-                client_id: id.into(),
-            },
-            HUB_SCOPE,
-        )
+        service_client(McpSubject::OAuth {
+            client_id: id.into(),
+        })
+    }
+
+    fn operator_call(hub: &Hub, tool: &str, arguments: Value) -> Value {
+        call_as(hub, &AuthContext::local_operator(), tool, arguments)
+    }
+
+    fn operator_raw_call(hub: &Hub, tool: &str, arguments: Value) -> Value {
+        let (response, _) = hub.handle_request(
+            &AuthContext::local_operator(),
+            &json!({
+                "jsonrpc":"2.0", "id":1, "method":"tools/call",
+                "params":{"name":tool,"arguments":arguments}
+            }),
+        );
+        response["result"].clone()
     }
 
     fn call(hub: &Hub, tool: &str, arguments: Value) -> Value {
@@ -3133,12 +3170,7 @@ mod tests {
     fn two_principals_do_not_share_one_bridge() {
         let fixture = remote_fixture(RemoteSpy::new());
         let as_client = |client: &str| {
-            let auth = AuthContext::new(
-                crate::auth::Principal::OAuthClient {
-                    client_id: client.into(),
-                },
-                HUB_SCOPE,
-            );
+            let auth = oauth_client(client);
             let (response, _) = fixture.hub.handle_request(
                 &auth,
                 &json!({
@@ -3192,7 +3224,7 @@ mod tests {
 
     /// 开一个 coding 会话，返回句柄。
     fn begin(fixture: &RemoteFixture) -> String {
-        let out = call(
+        let out = operator_call(
             &fixture.hub,
             "remote_coding_begin",
             json!({ "workspace": "prod" }),
@@ -3207,7 +3239,7 @@ mod tests {
     fn a_remote_ccnm_that_is_too_old_is_named_not_guessed_at() {
         let fixture = coding_fixture(RemoteSpy::new().without_tools(&["stop_command"]));
         let handle = begin(&fixture);
-        let refused = raw_call(
+        let refused = operator_raw_call(
             &fixture.hub,
             "remote_stop_command",
             json!({ "workspace": "prod", "coding_handle": handle, "output_ref": "r-0000" }),
@@ -3230,7 +3262,7 @@ mod tests {
         );
 
         // 会话还在：被拒的那次调用没碰传输层，句柄不该跟着作废。
-        let ok = raw_call(
+        let ok = operator_raw_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle, "cmd": ["true"] }),
@@ -3247,7 +3279,7 @@ mod tests {
         let fixture =
             coding_fixture(RemoteSpy::new().without_argument("exec_command", "run_in_background"));
         let handle = begin(&fixture);
-        let refused = raw_call(
+        let refused = operator_raw_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle,
@@ -3273,7 +3305,7 @@ mod tests {
     fn a_wait_longer_than_the_call_budget_is_refused_before_it_is_sent() {
         let fixture = coding_fixture(RemoteSpy::new());
         let handle = begin(&fixture);
-        let refused = raw_call(
+        let refused = operator_raw_call(
             &fixture.hub,
             "remote_read_output",
             json!({ "workspace": "prod", "coding_handle": handle,
@@ -3290,7 +3322,7 @@ mod tests {
         assert!(fixture.spy.calls().is_empty(), "不该发出去");
 
         // 预算之内的照常发，参数原样带过去。
-        let ok = raw_call(
+        let ok = operator_raw_call(
             &fixture.hub,
             "remote_read_output",
             json!({ "workspace": "prod", "coding_handle": handle,
@@ -3312,7 +3344,7 @@ mod tests {
         let fixture = coding_fixture(RemoteSpy::new());
         let handle = begin(&fixture);
 
-        let ok = raw_call(
+        let ok = operator_raw_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle, "cmd": ["cargo", "test"] }),
@@ -3325,7 +3357,7 @@ mod tests {
         );
 
         // 自己给的、撑得住的期限原样带过去，一个字不改。
-        let ok = raw_call(
+        let ok = operator_raw_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle,
@@ -3338,7 +3370,7 @@ mod tests {
         );
 
         // 后台命令不管：调用立刻返回，期限是那条命令自己的事。
-        let ok = raw_call(
+        let ok = operator_raw_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle,
@@ -3359,7 +3391,7 @@ mod tests {
     fn a_foreground_deadline_past_the_call_budget_is_refused_and_says_what_to_do() {
         let fixture = coding_fixture(RemoteSpy::new());
         let handle = begin(&fixture);
-        let refused = raw_call(
+        let refused = operator_raw_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle,
@@ -3380,7 +3412,7 @@ mod tests {
         assert!(fixture.spy.calls().is_empty(), "不该发出去");
 
         // 同样长的期限，后台要就给：那条调用立刻返回，撞不上 hub 的预算。
-        let ok = raw_call(
+        let ok = operator_raw_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle,
@@ -3406,7 +3438,7 @@ mod tests {
             "isError": false
         });
         let fixture = remote_fixture(RemoteSpy::new().answering(picture.clone()));
-        let result = raw_call(
+        let result = operator_raw_call(
             &fixture.hub,
             "remote_view_image",
             json!({ "workspace": "prod", "path": "shots/red.png" }),
@@ -3459,7 +3491,7 @@ mod tests {
     #[test]
     fn a_read_only_member_refuses_to_open_a_writing_session() {
         let fixture = remote_fixture(RemoteSpy::new());
-        let out = call(
+        let out = operator_call(
             &fixture.hub,
             "remote_coding_begin",
             json!({ "workspace": "prod" }),
@@ -3474,7 +3506,7 @@ mod tests {
 
         // 拿不到句柄，写工具也就无从调起——句柄只能由 begin 发，而 begin
         // 在只读成员上过不去。这是"只收紧不放宽"在远端这一侧的样子。
-        let forged = call(
+        let forged = operator_call(
             &fixture.hub,
             "remote_apply_patch",
             json!({ "workspace": "prod", "coding_handle": "rc-whatever",
@@ -3487,14 +3519,14 @@ mod tests {
         assert_eq!(fixture.spy.opens(), 0, "还是一条都不该开");
     }
 
-    /// noauth 不开放 remote coding（RFC-0002 5.3），但只读照常。
+    /// D18-C 受限转发与写租约落地前，客户端只能读取远端。
     #[test]
-    fn writing_needs_an_authenticated_connection() {
+    fn a_client_grant_waits_for_remote_write_authorization() {
         let fixture = coding_fixture(RemoteSpy::new());
-        let anonymous = AuthContext::anonymous(HUB_SCOPE);
+        let reader = granted(McpSubject::Token, &[&fixture.remote.id], true);
         let ask = |tool: &str, args: Value| -> Value {
             let (response, _) = fixture.hub.handle_request(
-                &anonymous,
+                &reader,
                 &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                          "params": { "name": tool, "arguments": args } }),
             );
@@ -3503,14 +3535,14 @@ mod tests {
 
         let refused = ask("remote_coding_begin", json!({ "workspace": "prod" }));
         assert_eq!(
-            refused["error"]["code"], "CODING_REQUIRES_AUTH",
+            refused["error"]["code"], "GRANT_CANNOT_WRITE_REMOTE",
             "{refused}"
         );
         assert_eq!(fixture.spy.opens(), 0);
 
-        // 只读不受这条限制：操作员选了 noauth 就是自己决定把端口敞开。
+        // 范围内的只读仍可用，且不会创建写连接。
         let (response, _) = fixture.hub.handle_request(
-            &anonymous,
+            &reader,
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                      "params": { "name": "remote_read_file",
                                  "arguments": { "workspace": "prod", "path": "a.rs" } } }),
@@ -3536,7 +3568,7 @@ mod tests {
             let mut full = args.clone();
             full["workspace"] = json!("prod");
             full["coding_handle"] = json!(handle);
-            let out = raw_call(&fixture.hub, tool, full);
+            let out = operator_raw_call(&fixture.hub, tool, full);
             assert_eq!(out["isError"], json!(false), "{tool}: {out}");
             assert_eq!(out["_meta"]["gld/mode"], json!("coding"), "{tool}");
         }
@@ -3557,7 +3589,7 @@ mod tests {
         // cmd 原样是数组，不会被拍成 shell 字符串。
         assert_eq!(calls[1]["arguments"]["cmd"], json!(["cargo", "test"]));
 
-        let closed = call(
+        let closed = operator_call(
             &fixture.hub,
             "remote_coding_end",
             json!({ "workspace": "prod", "coding_handle": handle }),
@@ -3574,7 +3606,7 @@ mod tests {
 
         let mut no_handle = patch.clone();
         no_handle["workspace"] = json!("prod");
-        let out = call(&fixture.hub, "remote_apply_patch", no_handle);
+        let out = operator_call(&fixture.hub, "remote_apply_patch", no_handle);
         assert_eq!(out["error"]["code"], "MISSING_ARGUMENT", "{out}");
         assert!(
             out["summary"]
@@ -3587,7 +3619,7 @@ mod tests {
         let mut made_up = patch;
         made_up["workspace"] = json!("prod");
         made_up["coding_handle"] = json!("rc-0000000000000000");
-        let out = call(&fixture.hub, "remote_apply_patch", made_up);
+        let out = operator_call(&fixture.hub, "remote_apply_patch", made_up);
         assert_eq!(
             out["error"]["code"], "REMOTE_CODING_HANDLE_UNKNOWN",
             "{out}"
@@ -3607,7 +3639,7 @@ mod tests {
         let fixture = coding_fixture(spy);
         let handle = begin(&fixture);
 
-        let out = call(
+        let out = operator_call(
             &fixture.hub,
             "remote_exec_command",
             json!({ "workspace": "prod", "coding_handle": handle, "cmd": ["rm", "-rf", "build"] }),
@@ -3704,52 +3736,29 @@ mod tests {
         );
     }
 
-    /// 两个会话争同一把远端写锁：第二个拿到的是 busy，**不会**降级成只读，
-    /// 也不会静默重试到它"好了"。
+    /// 受限客户端在本机操作员持有写会话时被拒，原会话继续有效。
     #[test]
-    fn a_second_session_competing_for_the_same_writer_is_refused() {
-        let mut spy = RemoteSpy::new();
-        spy.coding_opens_allowed = 1; // 第一条 coding 连接成功，之后都报 busy
-        let fixture = coding_fixture(spy);
-
-        let first = call(
+    fn a_client_cannot_replace_the_local_operators_remote_writer() {
+        let fixture = coding_fixture(RemoteSpy::new());
+        let handle = begin(&fixture);
+        let refused = call_as(
             &fixture.hub,
+            &oauth_client("another-client"),
             "remote_coding_begin",
-            json!({ "workspace": "prod" }),
+            json!({ "workspace":"prod" }),
         );
-        assert_eq!(first["ok"], true, "{first}");
-
-        // 换一个主体来开：它拿的是另一条连接，于是撞上远端那把锁。
-        let other = AuthContext::new(
-            crate::auth::Principal::OAuthClient {
-                client_id: "another-client".into(),
-            },
-            HUB_SCOPE,
-        );
-        let (response, _) = fixture.hub.handle_request(
-            &other,
-            &json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call",
-                     "params": { "name": "remote_coding_begin",
-                                 "arguments": { "workspace": "prod" } } }),
-        );
-        let refused = response["result"]["structuredContent"].clone();
         assert_eq!(
-            refused["error"]["code"], "REMOTE_WRITE_LOCK_BUSY",
+            refused["error"]["code"], "GRANT_CANNOT_WRITE_REMOTE",
             "{refused}"
         );
-        assert_eq!(refused["error"]["retryable"], json!(true), "{refused}");
-
-        // gld 不替远端认定占锁的是谁：ccnm 的 guard 是 Managed session 和
-        // 外部 coding 共用的（协议 4.4），说成"另一个远端会话"是在瞎猜。
-        let text = refused.to_string();
-        assert!(
-            !text.contains("another remote") && !text.contains("another managed"),
-            "不该替远端认定占锁的是哪一种会话：{text}"
+        assert_eq!(refused["error"]["retryable"], false, "{refused}");
+        assert_eq!(fixture.spy.opens(), 1);
+        let result = operator_raw_call(
+            &fixture.hub,
+            "remote_apply_patch",
+            json!({"workspace":"prod","coding_handle":handle,"files":[]}),
         );
-        assert!(
-            text.contains("still owns this working tree"),
-            "远端原话该带出来：{text}"
-        );
+        assert_eq!(result["isError"], false, "{result}");
     }
 
     /// 写锁被占着的时候，**只读照常**——ccnm 的 read 模式不碰这把锁（协议 4.4）。
@@ -3759,7 +3768,7 @@ mod tests {
         spy.coding_opens_allowed = 0; // coding 一律 busy
         let fixture = coding_fixture(spy);
 
-        let refused = call(
+        let refused = operator_call(
             &fixture.hub,
             "remote_coding_begin",
             json!({ "workspace": "prod" }),
@@ -3769,7 +3778,7 @@ mod tests {
             "{refused}"
         );
 
-        let read = raw_call(
+        let read = operator_raw_call(
             &fixture.hub,
             "remote_read_file",
             json!({ "workspace": "prod", "path": "src/main.rs" }),
@@ -3834,7 +3843,7 @@ mod tests {
         let handle = begin(&fixture);
 
         for path in ["a.txt", "b.txt"] {
-            let out = raw_call(
+            let out = operator_raw_call(
                 &fixture.hub,
                 "remote_apply_patch",
                 json!({ "workspace": "prod", "coding_handle": handle,
@@ -3856,7 +3865,7 @@ mod tests {
                 .name = "api".into();
         });
 
-        let ambiguous = call(
+        let ambiguous = operator_call(
             &fixture.hub,
             "read_file",
             json!({ "workspace": "api", "path": "only-api.txt" }),
@@ -3866,7 +3875,7 @@ mod tests {
             "{ambiguous}"
         );
 
-        let by_id = call(
+        let by_id = operator_call(
             &fixture.hub,
             "read_file",
             json!({ "workspace": fixture.web.id, "path": "only-web.txt" }),
@@ -3879,7 +3888,7 @@ mod tests {
     #[test]
     fn a_remote_mcp_call_goes_through_the_coding_session() {
         let fixture = coding_fixture(RemoteSpy::new());
-        let without = raw_call(
+        let without = operator_raw_call(
             &fixture.hub,
             "remote_call_mcp_tool",
             json!({ "workspace": "prod", "server": "db" }),
@@ -3890,7 +3899,7 @@ mod tests {
             "没有句柄就不起远端的 server：{without}"
         );
         let handle = begin(&fixture);
-        let out = raw_call(
+        let out = operator_raw_call(
             &fixture.hub,
             "remote_call_mcp_tool",
             json!({
@@ -3913,7 +3922,7 @@ mod tests {
     fn a_remote_with_nothing_to_relay_is_not_blamed_on_its_version() {
         let fixture = coding_fixture(RemoteSpy::new().without_tools(&["call_mcp_tool"]));
         let handle = begin(&fixture);
-        let refused = raw_call(
+        let refused = operator_raw_call(
             &fixture.hub,
             "remote_call_mcp_tool",
             json!({ "workspace": "prod", "coding_handle": handle }),
@@ -4094,26 +4103,100 @@ mod tests {
         assert_eq!(opened.load(Ordering::SeqCst), 2);
     }
 
+    #[test]
+    fn machine_mcp_discovery_and_execution_use_separate_capability_checks() {
+        let (hub, opened, _dir) = relay_hub(&["context7"], "compact");
+        let mut grant = caller().grant().unwrap().clone();
+        grant.permissions.write = false;
+        let reader =
+            AuthContext::verified_mcp(HUB_SCOPE, grant, CredentialKind::Token, McpSubject::Token)
+                .unwrap();
+        let names = tool_names(&hub, &reader);
+        assert!(names.iter().any(|name| name == machine_mcp::relay::LIST));
+        assert!(!names.iter().any(|name| name == machine_mcp::relay::CALL));
+        assert!(!names.iter().any(|name| name == work_sessions::TOOL));
+        let (_, settings) = hub.snapshot().unwrap();
+        let denied = hub.call_relay(
+            &reader,
+            machine_mcp::relay::CALL,
+            &json!({"server":"context7","tool":"echo"}),
+            &settings,
+        );
+        assert_eq!(
+            denied["structuredContent"]["error"]["code"],
+            "TOOL_NOT_ALLOWED"
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 0);
+
+        // Actions 没有 grant，也不能因此继承服务权限。
+        let actions = AuthContext::actions(
+            "actions",
+            "project",
+            gld_policy::ActionsSubject::ApiKey,
+            true,
+        )
+        .unwrap();
+        assert!(actions.grant().is_none());
+        assert!(!tool_names(&hub, &actions)
+            .iter()
+            .any(|name| machine_mcp::is_tool(name)));
+        let denied = rpc(
+            &hub,
+            &actions,
+            "tools/call",
+            json!({"name":machine_mcp::relay::LIST,"arguments":{}}),
+        );
+        assert_eq!(denied["error"]["data"]["reason"], "unknown_tool");
+        assert_eq!(opened.load(Ordering::SeqCst), 0);
+    }
+
     // ---- grant：一把凭据只开几个项目（RFC-0007） ----
 
-    fn granted(principal: crate::auth::Principal, ids: &[&str], read_only: bool) -> AuthContext {
-        AuthContext::new(principal, HUB_SCOPE).with_grant(Some(Grant {
-            id: format!("g-{}", ids.join("-")),
-            name: "alice".into(),
-            workspaces: ids.iter().map(|id| id.to_string()).collect(),
-            read_only,
-            browser: false,
-        }))
+    fn granted(subject: McpSubject, ids: &[&str], read_only: bool) -> AuthContext {
+        let kind = if matches!(&subject, McpSubject::OAuth { .. }) {
+            CredentialKind::OAuth
+        } else {
+            CredentialKind::Token
+        };
+        AuthContext::verified_mcp(
+            HUB_SCOPE,
+            Grant {
+                id: format!("g-{}", ids.join("-")),
+                name: "alice".into(),
+                scope: ProjectScope::Selected(ids.iter().map(|id| id.to_string()).collect()),
+                permissions: GrantPermissions {
+                    write: !read_only,
+                    ..Default::default()
+                },
+                status: GrantStatus::Active,
+            },
+            kind,
+            subject,
+        )
+        .unwrap()
     }
 
     fn bearer_grant(id: &str, ids: &[&str]) -> AuthContext {
-        AuthContext::new(crate::auth::Principal::SharedSecret, HUB_SCOPE).with_grant(Some(Grant {
-            id: id.into(),
-            name: id.into(),
-            workspaces: ids.iter().map(|id| id.to_string()).collect(),
-            read_only: false,
-            browser: false,
-        }))
+        AuthContext::verified_mcp(
+            HUB_SCOPE,
+            Grant {
+                id: id.into(),
+                name: id.into(),
+                scope: if ids.is_empty() {
+                    ProjectScope::AllProjects
+                } else {
+                    ProjectScope::Selected(ids.iter().map(|id| id.to_string()).collect())
+                },
+                permissions: GrantPermissions {
+                    write: true,
+                    ..Default::default()
+                },
+                status: GrantStatus::Active,
+            },
+            CredentialKind::Token,
+            McpSubject::Token,
+        )
+        .unwrap()
     }
 
     fn rpc(hub: &Hub, auth: &AuthContext, method: &str, params: Value) -> Value {
@@ -4134,12 +4217,12 @@ mod tests {
     }
 
     /// 范围外的项目当成不存在：不列、说明里没有、按名字或 id 调报的和不存在的一样，
-    /// 候选里也没有它。服务凭据照旧看到全部。
+    /// 候选里也没有它；AllProjects 明确授权的客户端看到全部。
     #[test]
     fn a_grant_sees_only_its_workspaces() {
         let fixture = fixture();
         let alice = granted(
-            crate::auth::Principal::OAuthClient {
+            McpSubject::OAuth {
                 client_id: "dcr-a".into(),
             },
             &[&fixture.api.id],
@@ -4196,11 +4279,7 @@ mod tests {
     #[test]
     fn a_read_only_grant_can_read_but_not_write_or_run() {
         let fixture = fixture();
-        let viewer = granted(
-            crate::auth::Principal::SharedSecret,
-            &[&fixture.api.id],
-            true,
-        );
+        let viewer = granted(McpSubject::Token, &[&fixture.api.id], true);
         let names = tool_names(&fixture.hub, &viewer);
         for writer in ["exec_command", "apply_patch", "write_stdin", "kill_session"] {
             assert!(
@@ -4261,7 +4340,7 @@ mod tests {
         );
     }
 
-    /// 本机 MCP 转发是服务级的，grant 一律不给：不列、硬发也是 Unknown tool，server 不会被拉起。
+    /// 未授予 machine_mcp 服务能力的 grant 不列中继工具，硬发也不会启动 server。
     #[test]
     fn a_grant_gets_no_machine_mcp_relay() {
         let (hub, opened, _dir) = relay_hub(&["context7"], "compact");
@@ -4390,11 +4469,7 @@ mod tests {
     fn a_grant_opens_no_remote_writing_session() {
         let fixture = coding_fixture(RemoteSpy::new());
         for read_only in [true, false] {
-            let holder = granted(
-                crate::auth::Principal::SharedSecret,
-                &[&fixture.remote.id],
-                read_only,
-            );
+            let holder = granted(McpSubject::Token, &[&fixture.remote.id], read_only);
             let names = tool_names(&fixture.hub, &holder);
             assert!(
                 !names.iter().any(|name| name == "remote_coding_begin"),
@@ -4417,14 +4492,14 @@ mod tests {
         }
         assert_eq!(fixture.spy.opens(), 0, "被拒的调用不该连到远端");
         assert!(
-            tool_names(&fixture.hub, &caller())
+            tool_names(&fixture.hub, &AuthContext::local_operator())
                 .iter()
                 .any(|name| name == "remote_coding_begin"),
-            "服务凭据照旧能开"
+            "本机操作员仍可打开写会话"
         );
     }
 
-    /// 项目关了 confine-reads，读工具能读到项目外面：grant 用它一律拒，服务凭据照旧。
+    /// 项目关闭 confine-reads 时拒绝 MCP grant，本机操作员仍可使用。
     #[test]
     fn a_grant_cannot_use_a_workspace_that_reads_outside_itself() {
         let fixture = fixture();
@@ -4433,11 +4508,7 @@ mod tests {
                 profile.runtime.confine_reads = false;
             }
         });
-        let alice = granted(
-            crate::auth::Principal::SharedSecret,
-            &[&fixture.api.id],
-            true,
-        );
+        let alice = granted(McpSubject::Token, &[&fixture.api.id], true);
         let refused = call_as(
             &fixture.hub,
             &alice,
@@ -4448,7 +4519,7 @@ mod tests {
             refused["error"]["code"], "GRANT_NEEDS_CONFINED_READS",
             "{refused}"
         );
-        let owner = call(
+        let owner = operator_call(
             &fixture.hub,
             "read_file",
             json!({ "workspace": "api", "path": "only-api.txt" }),
@@ -4460,11 +4531,7 @@ mod tests {
     #[test]
     fn server_info_reports_only_what_a_read_only_grant_can_call() {
         let fixture = fixture();
-        let viewer = granted(
-            crate::auth::Principal::SharedSecret,
-            &[&fixture.api.id],
-            true,
-        );
+        let viewer = granted(McpSubject::Token, &[&fixture.api.id], true);
         let info = call_as(
             &fixture.hub,
             &viewer,

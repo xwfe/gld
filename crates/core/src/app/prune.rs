@@ -17,74 +17,36 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use super::App;
 use crate::error::AppResult;
+use crate::runtime::ListenerManager;
 use crate::workspace::WorkspaceProfile;
 
-/// `gld prune` 看到的（只列清单时）或者做了的（真删时）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PruneReport {
-    /// 登记了、目录却已经不在的项目。
-    pub missing_projects: Vec<MissingProject>,
-    /// 对不上任何留下的项目的数据：已删项目的，和上面那些项目的。
-    pub leftovers: Vec<Leftover>,
-    /// 也对不上，但里面还有命令或 Agent 在跑，这次不动。
-    #[serde(default)]
-    pub busy: Vec<Leftover>,
-    /// 真删了是 true；只列清单是 false。
-    #[serde(default)]
-    pub applied: bool,
-    /// 删的时候出了错的。
-    #[serde(default)]
-    pub failures: Vec<PruneFailure>,
-}
-
-impl PruneReport {
-    pub fn is_empty(&self) -> bool {
-        self.missing_projects.is_empty()
-            && self.leftovers.is_empty()
-            && self.busy.is_empty()
-            && self.failures.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MissingProject {
-    pub id: String,
-    pub name: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Leftover {
-    /// logs | oauth | harness | runs | agents
-    pub kind: String,
-    pub path: String,
-    pub bytes: u64,
-    /// 属于上面哪个目录不在了的项目（它的 id）；已经删掉的项目留下的是空串。
-    #[serde(default)]
-    pub project: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PruneFailure {
-    /// 项目 id 或路径。
-    pub target: String,
-    pub error: String,
-}
+pub use gld_protocol::daemon::{Leftover, MissingProject, PruneFailure, PruneReport};
 
 impl App {
     /// `confirmed` 是 `None` 时只列清单，什么都不动。
     ///
     /// 给了就删，但只删**这次重新扫出来、并且在 `confirmed` 里**的：用户看清单、确认、再发回来，
     /// 中间可能有目录被加了回来、有命令刚起——那些这次扫不出来，自然不删；用户没看到过的新残留也不删。
-    pub async fn prune(&self, confirmed: Option<PruneReport>) -> AppResult<PruneReport> {
+    pub async fn prune(
+        &self,
+        listeners: &ListenerManager,
+        confirmed: Option<PruneReport>,
+    ) -> AppResult<PruneReport> {
+        self.prune_with_cleanup(listeners, confirmed, |root| {
+            Ok(crate::tools::workspace_runtime::runtime_for(root).terminate_all_sessions())
+        })
+        .await
+    }
+
+    /// 只在重新扫描、筛选已确认的项目之后清理执行资源；失败项目及其记录保留。
+    pub async fn prune_with_cleanup(
+        &self,
+        listeners: &ListenerManager,
+        confirmed: Option<PruneReport>,
+        cleanup: impl Fn(&Path) -> Result<usize, String> + Clone + Send + 'static,
+    ) -> AppResult<PruneReport> {
         let home = crate::home::data_home()?;
         let profiles = self.list_workspaces()?;
         let scan_home = home.clone();
@@ -102,7 +64,10 @@ impl App {
         let mut failures = Vec::new();
         let mut kept_projects = HashSet::new();
         for project in &plan.missing_projects {
-            if let Err(error) = self.delete_workspace(&project.id).await {
+            if let Err(error) = self
+                .delete_workspace_with_cleanup(listeners, &project.id, cleanup.clone())
+                .await
+            {
                 kept_projects.insert(project.id.clone());
                 failures.push(PruneFailure {
                     target: project.id.clone(),
