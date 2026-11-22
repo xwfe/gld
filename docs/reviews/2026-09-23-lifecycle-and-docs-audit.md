@@ -6220,3 +6220,37 @@ ocra 身份未定只阻塞其 adapter、不另建任务账本，这几项与 D18
   本次只改 Markdown，clippy 与 fmt 沿用 `fe4f26c` 上的通过结果，未重跑。
 
 **实际边界：**没有实现任何模块，没有更换本机二进制、重启服务或变更真实授权。
+
+## 151. 2026-11-22：匿名 OAuth 动态注册 pending 回收
+
+**范围：**PR #12 审查遗留：匿名 `/register` 不完成授权也会落盘并占满注册表。只改客户端注册状态与 OAuth
+兑换落盘顺序；没有改隧道绑定、统一 CLI、daemon 协议，本机二进制、本机守护进程和真实 grant 未碰。
+方案先经审查方批准，约束已按批准执行。
+
+**改了什么：**
+- `crates/core/src/auth/client_registry.rs`：`RegisteredClient` 增加持久化 `status`（`authorized` / `pending`，
+  旧记录缺省按 authorized）；pending 最多 10 个、从 `created_at` 起 24 小时，过期按不存在处理，插入时清理过期
+  并只淘汰最旧 pending；已授权记录不淘汰，50 个占满仍 `CapacityReached`。新增 `mark_authorized`：先落盘再
+  返回成功，写失败不发布状态。
+- `crates/host/src/auth/oauth_flow.rs`：`/register` 新建 client 为 pending；授权码兑换在 client、PKCE 和
+  grant/确认口令都通过后，Actions 与 MCP 都先 `mark_authorized` 再签发 token；落盘失败 `server_error` 不签发。
+  refresh 不触发状态迁移。
+- `docs/concepts.md`、`docs/security.md`、`task_plan.md` 同步行为与剩余限制。
+
+**审查方确认的决定：**状态枚举 `serde(default)` 为 Authorized 且总是写出；满 10 个 pending 淘汰最旧；
+24 小时 TTL 从 `created_at` 算，`/oauth/authorize` 和 token 兑换把过期 pending 当不存在；授权码、PKCE、
+grant 都校验通过后先落盘再签发，重复兑换幂等；50 个 authorized 占满仍 503，留给 D 的撤销/清理命令；
+日志和回包不出现 client_secret。
+
+**验证：**Linux、隔离 `GLD_HOME`，PATH 含 Node v24.22.2。
+- `cargo test --workspace --all-targets --locked`：通过（1526 passed / 0 failed）。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。
+- core：旧无 status 文件加载/保存/重载不变；pending TTL 隐藏与插入回收；pending 上限只淘汰最旧 pending；
+  authorized 占满仍拒绝新增。
+- host：注册后到兑换前保持 pending；兑换后 authorized 且重启可 refresh；授权页到兑换之间过期或被挤掉返回
+  `invalid_client` 不签发；状态落盘失败 `server_error` 无 token 且仍 pending；50 个 authorized 占满注册 503。
+
+**未验证与已知限制：**
+- 没有用真实 ChatGPT / Claude 连接器走一遍动态注册；没有更换本机二进制、重启本机守护进程或改动真实 grant。
+- 持续匿名刷注册仍可能挤掉正在授权中的 pending client；它重新注册即可恢复，`docs/security.md` 已写明代价。
+- 已授权 50 个占满后不回收，需要有效确认口令才能到达；撤销/清理命令属 D，`task_plan.md` 已记为剩余限制。
