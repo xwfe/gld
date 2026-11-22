@@ -6066,3 +6066,11 @@ subagent，也未调整委派开关。未操作在用授权、推送、部署或
 - 首次全量测试时 `command_write_paths` 的一条用例因测试进程 PATH 上没有 `node` 失败，加入 Node 后通过；
   `native_nodes::enable_refuses_while_a_foreground_node_is_running_and_installs_nothing` 在并行全量跑中失败过一次
   （“Node configuration is in use”），单独重跑和随后的全量跑均通过，未查原因，与本轮改动的文件无交集。
+
+**审查后补充（同日，PR #12）：**Devin Review 提出三条，均落在本轮未改动的既有代码上。
+- 已修：授权页现在要求 S256 的 `code_challenge` 正好是 43 个 base64url 字符，待兑换授权码先清过期再插入、
+  上限 256，到上限时返回 `503` + `no-store` 且不覆盖已有的码；`code_verifier` 的 43–128 字符校验原本就有，补了单测
+  （`crates/host/src/auth/oauth_flow.rs` 及其测试）。
+- 未修、已列入 `task_plan.md`：匿名动态注册可占满注册表；`gld gateway start` 换地址后 401 发现链接仍是旧地址
+  （后者未复现，排在真实客户端验收之前）。
+- 无 grant 时 `/mcp` 的 `AUTH_NOT_READY` 经审查方确认保留，依据 RFC-0015 §6。
