@@ -177,9 +177,15 @@ fn issued_token_reads_through_real_hub_but_cannot_write_or_imitate_oauth() {
     assert_eq!(url_not_ready.json()["error"], "AUTH_NOT_READY");
     assert!(!url_not_ready.body.contains(&url_secret));
 
+    // 没带凭据，或带着旧服务 token / 旧 OAuth token：按 OAuth Bearer 验证失败，直接 401，
+    // 回包带发现信息，不回落到别的凭据。
     for legacy in [None, Some("old-service-token"), Some("old-oauth-access")] {
         let response = rpc(port, legacy, "tools/list", json!({}));
-        assert_eq!(response.status, 503, "{}", response.body);
-        assert_eq!(response.json()["error"], "AUTH_NOT_READY");
+        assert_eq!(response.status, 401, "{}", response.body);
+        assert_eq!(response.json()["error"], "AUTHENTICATION_FAILED");
+        assert!(response
+            .header("www-authenticate")
+            .unwrap()
+            .contains("resource_metadata="));
     }
 }

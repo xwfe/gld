@@ -11,13 +11,18 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use gld_core::auth::{
-    bearer_token, constant_time_eq_str, ClientRegistry, RegisteredClient, RegistrationError,
+    bearer_token, constant_time_eq_str, parse_credential, AccessReader, AuthContext,
+    ClientRegistry, CredentialKind, OAuthBinding, RegisteredClient, RegistrationError,
 };
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
+/// 同时等待兑换的授权码上限；每个码最多占用几百字节。
+const MAX_PENDING_CODES: usize = 256;
 pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
 pub const OAUTH_REFRESH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 90;
 const ACTIONS_CLAIMS_VERSION: u32 = 2;
+/// MCP 的 claims 带 grant 绑定，字段和版本都与 Actions 不同，两边的 token 互不通过。
+const MCP_CLAIMS_VERSION: u32 = 3;
 
 #[derive(Clone)]
 pub struct OAuthRuntime {
@@ -37,14 +42,19 @@ pub struct OAuthRuntime {
 
 #[derive(Clone)]
 enum OAuthAuthorization {
-    /// The unified MCP credential store is connected in D18-B.
-    McpPending,
+    /// MCP 授权页收 OAuth 用途 grant 的确认口令（RFC-0015 §2.2）；签发和每次验证都读
+    /// 与 App 写者共享的同一份授权快照，这里不保存认证结果。
+    Mcp {
+        access: AccessReader,
+        /// 写进 CallerId 的入口名：工作区 id 或聚合入口。
+        entry: String,
+    },
     Actions {
         password: String,
     },
 }
 
-/// A verified Actions token. MCP identities additionally require a live grant/revision.
+/// A verified Actions token. MCP tokens go through [`OAuthRuntime::authenticate_mcp_access`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessIdentity {
     pub client_id: String,
@@ -84,6 +94,8 @@ struct PendingCode {
     client_id: String,
     redirect_uri: String,
     expires_at: u64,
+    /// MCP 授权码记下确认口令当时对应的 grant 和凭据修订号；Actions 没有 grant。
+    binding: Option<OAuthBinding>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -99,14 +111,41 @@ struct TokenClaims {
     token_use: String,
 }
 
+/// MCP access/refresh 的 claims。`grant_id` 和 `credential_revision` 是签发时的绑定，
+/// 验证时必须与当前授权快照一致；没有这两项的旧 token 反序列化就失败。
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpTokenClaims {
+    version: u32,
+    iss: String,
+    aud: String,
+    iat: i64,
+    exp: i64,
+    client_id: String,
+    grant_id: String,
+    credential_revision: u64,
+    token_use: String,
+}
+
+impl McpTokenClaims {
+    fn binding(&self) -> OAuthBinding {
+        OAuthBinding {
+            grant_id: self.grant_id.clone(),
+            credential_revision: self.credential_revision,
+        }
+    }
+}
+
 impl OAuthRuntime {
-    /// Discovery and registration stay available; this runtime cannot authorize MCP calls.
-    pub fn new_mcp_pending(
+    /// MCP 入口：`access` 必须是 App 授权写者发出的共享读者，`entry` 是该入口的作用域。
+    pub fn new_mcp(
         audience: String,
+        entry: String,
         client_id: String,
         client_secret: Option<String>,
         token_secret: String,
         clients: Arc<ClientRegistry>,
+        access: AccessReader,
     ) -> Self {
         Self {
             client_id,
@@ -115,7 +154,7 @@ impl OAuthRuntime {
             audience,
             pending: Arc::new(Mutex::new(HashMap::new())),
             clients,
-            authorization: OAuthAuthorization::McpPending,
+            authorization: OAuthAuthorization::Mcp { access, entry },
         }
     }
 
@@ -128,10 +167,45 @@ impl OAuthRuntime {
         token_secret: String,
         clients: Arc<ClientRegistry>,
     ) -> Self {
-        let mut runtime =
-            Self::new_mcp_pending(audience, client_id, client_secret, token_secret, clients);
-        runtime.authorization = OAuthAuthorization::Actions { password };
-        runtime
+        Self {
+            client_id,
+            client_secret,
+            token_secret,
+            audience,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            clients,
+            authorization: OAuthAuthorization::Actions { password },
+        }
+    }
+
+    /// 空签名密钥等于谁都能伪造 token：没有密钥的入口不签发也不接受 OAuth token。
+    fn can_sign(&self) -> bool {
+        !self.token_secret.is_empty()
+    }
+
+    /// 验证 `/mcp` 上的 OAuth access token：验签、版本、用途、受众、期限、client 仍已注册，
+    /// 再用共享读者核对 grant 有效且凭据修订号仍是签发时那个。任何一步失败都返回 None，
+    /// 调用方直接拒绝，不拿这个 token 去试别的凭据类型。
+    pub fn authenticate_mcp_access(&self, token: &str) -> Option<AuthContext> {
+        let OAuthAuthorization::Mcp { access, entry } = &self.authorization else {
+            return None;
+        };
+        let claims = self.decode_mcp(token, "access")?;
+        access
+            .authenticate_oauth(entry, &claims.binding(), &claims.client_id, unix_now())
+            .ok()
+    }
+
+    fn decode_mcp(&self, token: &str, kind: &str) -> Option<McpTokenClaims> {
+        if !self.can_sign() {
+            return None;
+        }
+        let claims: McpTokenClaims =
+            decode_claims(token, &self.token_secret, &self.audience).ok()?;
+        (claims.version == MCP_CLAIMS_VERSION
+            && claims.token_use == mcp_token_use(kind)
+            && self.client_id_allowed(&claims.client_id))
+        .then_some(claims)
     }
 
     fn actions_enabled(&self) -> bool {
@@ -200,7 +274,7 @@ impl OAuthRuntime {
     }
 
     fn decode_current(&self, token: &str) -> Option<TokenClaims> {
-        let claims = decode_token_claims(token, &self.token_secret, &self.audience).ok()?;
+        let claims: TokenClaims = decode_claims(token, &self.token_secret, &self.audience).ok()?;
         (claims.version == ACTIONS_CLAIMS_VERSION
             && claims.scope == "actions"
             && !claims.client_id.is_empty())
@@ -378,8 +452,8 @@ pub fn authorize_get(
     workspace_path: Option<&str>,
     server_url: &str,
 ) -> Response {
-    if !oauth.actions_enabled() {
-        return authorization_not_ready();
+    if !oauth.can_sign() {
+        return oauth_unavailable();
     }
     if params.response_type != "code" {
         return html_error("response_type must be 'code'", StatusCode::BAD_REQUEST);
@@ -399,35 +473,43 @@ pub fn authorize_get(
             StatusCode::BAD_REQUEST,
         );
     }
-    Html(login_page(
-        &params.client_id,
-        &params.redirect_uri,
-        &params.code_challenge,
-        &params.code_challenge_method,
-        &params.state,
-        "",
-        workspace_path,
-        server_url,
-    ))
-    .into_response()
+    page(
+        StatusCode::OK,
+        login_page(
+            &params.client_id,
+            &params.redirect_uri,
+            &params.code_challenge,
+            &params.code_challenge_method,
+            &params.state,
+            "",
+            workspace_path,
+            server_url,
+        ),
+    )
 }
 
 pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &str) -> Response {
-    let OAuthAuthorization::Actions { password } = &oauth.authorization else {
-        return authorization_not_ready();
+    if !oauth.can_sign() {
+        return oauth_unavailable();
+    }
+    // 出错时重画授权页；页面里只回填客户端参数，从不回填或回显提交的口令。
+    let retry = |status: StatusCode, error: &str| {
+        page(
+            status,
+            login_page(
+                &form.client_id,
+                &form.redirect_uri,
+                &form.code_challenge,
+                &form.code_challenge_method,
+                &form.state,
+                error,
+                None,
+                server_url,
+            ),
+        )
     };
     if !oauth.client_id_allowed(&form.client_id) {
-        return Html(login_page(
-            &form.client_id,
-            &form.redirect_uri,
-            &form.code_challenge,
-            &form.code_challenge_method,
-            &form.state,
-            "Invalid client",
-            None,
-            server_url,
-        ))
-        .into_response();
+        return retry(StatusCode::OK, "Invalid client");
     }
     if !oauth.redirect_uri_allowed(&form.client_id, &form.redirect_uri) {
         return html_error(
@@ -435,41 +517,37 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
             StatusCode::BAD_REQUEST,
         );
     }
-    if form.code_challenge_method != "S256" || form.code_challenge.is_empty() {
-        return Html(login_page(
-            &form.client_id,
-            &form.redirect_uri,
-            &form.code_challenge,
-            &form.code_challenge_method,
-            &form.state,
-            "Invalid PKCE parameters",
-            None,
-            server_url,
-        ))
-        .into_response();
+    if form.code_challenge_method != "S256" || !valid_s256_challenge(&form.code_challenge) {
+        return retry(StatusCode::OK, "Invalid PKCE parameters");
     }
-    if password.is_empty() || !constant_time_eq_str(&form.password, password) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Html(login_page(
-                &form.client_id,
-                &form.redirect_uri,
-                &form.code_challenge,
-                &form.code_challenge_method,
-                &form.state,
-                "Invalid password",
-                None,
-                server_url,
-            )),
-        )
-            .into_response();
-    }
+    let binding = match &oauth.authorization {
+        OAuthAuthorization::Actions { password } => {
+            if password.is_empty() || !constant_time_eq_str(&form.password, password) {
+                return retry(StatusCode::UNAUTHORIZED, "Invalid password");
+            }
+            None
+        }
+        OAuthAuthorization::Mcp { access, .. } => {
+            // 公开 ID 不存在、用途不是 OAuth、秘密错误、已轮换或已撤销，页面上是同一句话。
+            let confirmed = parse_credential(&form.password, CredentialKind::OAuth)
+                .ok()
+                .and_then(|id| access.confirm_oauth(id, &form.password, unix_now()).ok());
+            let Some(binding) = confirmed else {
+                return retry(StatusCode::UNAUTHORIZED, "Invalid authorization credential");
+            };
+            Some(binding)
+        }
+    };
 
     let code = uuid::Uuid::new_v4().to_string().replace('-', "");
     let now = unix_now();
     {
         let mut pending = oauth.pending.lock().expect("oauth pending lock");
         pending.retain(|_, v| v.expires_at >= now);
+        // 未兑换的码只活 5 分钟；满了就拒绝新的，不挤掉别人已经拿到的码。
+        if pending.len() >= MAX_PENDING_CODES {
+            return pending_codes_full();
+        }
         pending.insert(
             code.clone(),
             PendingCode {
@@ -477,6 +555,7 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
                 client_id: form.client_id.clone(),
                 redirect_uri: form.redirect_uri.clone(),
                 expires_at: now + OAUTH_CODE_TTL_SECONDS,
+                binding,
             },
         );
     }
@@ -492,7 +571,11 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
     };
     // 授权页面通过 POST 表单提交，但客户端回调必须使用 GET。
     // 307 会保留 POST 并把表单体转发到 ChatGPT connector，导致 Bad Request。
-    Redirect::to(&format!("{}{}{}", form.redirect_uri, sep, qs)).into_response()
+    (
+        NO_STORE_HEADERS,
+        Redirect::to(&format!("{}{}{}", form.redirect_uri, sep, qs)),
+    )
+        .into_response()
 }
 
 pub fn token_exchange(
@@ -501,8 +584,8 @@ pub fn token_exchange(
     mut form: TokenForm,
     _server_url: &str,
 ) -> Response {
-    if !oauth.actions_enabled() {
-        return authorization_not_ready();
+    if !oauth.can_sign() {
+        return oauth_unavailable();
     }
     if let Some((id, secret)) = basic_auth_credentials(headers) {
         if form.client_id.is_empty() {
@@ -558,49 +641,114 @@ fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Respons
     if !verify_pkce(&form.code_verifier, &code_data.code_challenge) {
         return token_error("invalid_grant", "PKCE verification failed");
     }
-    issue_token_pair(oauth, &form.client_id)
+    match (&oauth.authorization, code_data.binding) {
+        (OAuthAuthorization::Actions { .. }, None) => {
+            issue_actions_token_pair(oauth, &form.client_id)
+        }
+        (OAuthAuthorization::Mcp { .. }, Some(binding)) => {
+            issue_mcp_token_pair(oauth, &form.client_id, &binding)
+        }
+        _ => token_error("invalid_grant", "Authorization code is not valid here"),
+    }
 }
 
 fn refresh_token_exchange(oauth: &OAuthRuntime, mut form: TokenForm) -> Response {
     if form.refresh_token.is_empty() {
         return token_error("invalid_grant", "refresh_token is required");
     }
-    let Some(claims) = oauth
-        .decode_current(&form.refresh_token)
-        .filter(|claims| claims.token_use == token_use("refresh"))
-    else {
-        return token_error("invalid_grant", "Invalid refresh_token");
+    // 只取 refresh 用途的 claims；MCP 的续签沿用 refresh 里签名过的 grant 绑定。
+    let (claimed_client, binding) = match &oauth.authorization {
+        OAuthAuthorization::Actions { .. } => {
+            let Some(claims) = oauth
+                .decode_current(&form.refresh_token)
+                .filter(|claims| claims.token_use == token_use("refresh"))
+            else {
+                return token_error("invalid_grant", "Invalid refresh_token");
+            };
+            (claims.client_id, None)
+        }
+        OAuthAuthorization::Mcp { .. } => {
+            let Some(claims) = oauth.decode_mcp(&form.refresh_token, "refresh") else {
+                return token_error("invalid_grant", "Invalid refresh_token");
+            };
+            let binding = claims.binding();
+            (claims.client_id, Some(binding))
+        }
     };
     if form.client_id.is_empty() {
-        form.client_id = claims.client_id.clone();
+        form.client_id = claimed_client.clone();
     }
-    if !constant_time_eq_str(&form.client_id, &claims.client_id)
+    if !constant_time_eq_str(&form.client_id, &claimed_client)
         || !oauth.client_id_allowed(&form.client_id)
         || !oauth.client_credentials_allowed(&form.client_id, &form.client_secret)
     {
         return token_error("invalid_client", "Invalid client credentials");
     }
-    issue_token_pair(oauth, &form.client_id)
+    match binding {
+        Some(binding) => issue_mcp_token_pair(oauth, &form.client_id, &binding),
+        None => issue_actions_token_pair(oauth, &form.client_id),
+    }
 }
 
-fn issue_token_pair(oauth: &OAuthRuntime, client_id: &str) -> Response {
-    let access = sign_token(
-        &oauth.audience,
-        &oauth.token_secret,
-        OAUTH_TOKEN_TTL_SECONDS,
-        client_id,
-        "access",
-    );
-    let refresh = sign_token(
-        &oauth.audience,
-        &oauth.token_secret,
-        OAUTH_REFRESH_TOKEN_TTL_SECONDS,
-        client_id,
-        "refresh",
-    );
+/// 授权码兑换和 refresh 共用：签发前用共享读者确认 grant 仍有效、修订号仍是绑定的那个。
+/// 轮换或撤销之后，旧授权码和旧 refresh 都换不出新 token。
+fn issue_mcp_token_pair(oauth: &OAuthRuntime, client_id: &str, binding: &OAuthBinding) -> Response {
+    let OAuthAuthorization::Mcp { access, entry } = &oauth.authorization else {
+        return token_error("invalid_grant", "Authorization is not valid here");
+    };
+    if access
+        .authenticate_oauth(entry, binding, client_id, unix_now())
+        .is_err()
+    {
+        return token_error("invalid_grant", "Authorization is no longer valid");
+    }
+    let sign = |ttl: i64, kind: &str| {
+        let now = unix_now() as i64;
+        sign_claims(
+            &McpTokenClaims {
+                version: MCP_CLAIMS_VERSION,
+                iss: oauth.audience.clone(),
+                aud: oauth.audience.clone(),
+                iat: now,
+                exp: now + ttl,
+                client_id: client_id.to_string(),
+                grant_id: binding.grant_id.clone(),
+                credential_revision: binding.credential_revision,
+                token_use: mcp_token_use(kind),
+            },
+            &oauth.token_secret,
+        )
+    };
+    token_pair_response(
+        sign(OAUTH_TOKEN_TTL_SECONDS, "access"),
+        sign(OAUTH_REFRESH_TOKEN_TTL_SECONDS, "refresh"),
+    )
+}
+
+fn issue_actions_token_pair(oauth: &OAuthRuntime, client_id: &str) -> Response {
+    token_pair_response(
+        sign_token(
+            &oauth.audience,
+            &oauth.token_secret,
+            OAUTH_TOKEN_TTL_SECONDS,
+            client_id,
+            "access",
+        ),
+        sign_token(
+            &oauth.audience,
+            &oauth.token_secret,
+            OAUTH_REFRESH_TOKEN_TTL_SECONDS,
+            client_id,
+            "refresh",
+        ),
+    )
+}
+
+fn token_pair_response(access: Result<String, ()>, refresh: Result<String, ()>) -> Response {
     match (access, refresh) {
         (Ok(access_token), Ok(refresh_token)) => (
             StatusCode::OK,
+            NO_STORE_HEADERS,
             axum::Json(json!({
                 "access_token": access_token,
                 "token_type": "Bearer",
@@ -628,6 +776,10 @@ fn token_use(kind: &str) -> String {
     format!("actions_{kind}_v2")
 }
 
+fn mcp_token_use(kind: &str) -> String {
+    format!("mcp_{kind}_v3")
+}
+
 fn sign_token(
     server_url: &str,
     token_secret: &str,
@@ -646,24 +798,31 @@ fn sign_token(
         client_id: client_id.to_string(),
         token_use: token_use(kind),
     };
+    sign_claims(&claims, token_secret)
+}
+
+fn sign_claims<T: Serialize>(claims: &T, token_secret: &str) -> Result<String, ()> {
+    if token_secret.is_empty() {
+        return Err(());
+    }
     encode(
         &Header::new(Algorithm::HS256),
-        &claims,
+        claims,
         &EncodingKey::from_secret(token_secret.as_bytes()),
     )
     .map_err(|_| ())
 }
 
-fn decode_token_claims(
+fn decode_claims<T: serde::de::DeserializeOwned>(
     token: &str,
     token_secret: &str,
     server_url: &str,
-) -> Result<TokenClaims, ()> {
+) -> Result<T, ()> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_audience(&[server_url]);
     validation.set_issuer(&[server_url]);
     validation.leeway = 0;
-    decode::<TokenClaims>(
+    decode::<T>(
         token,
         &DecodingKey::from_secret(token_secret.as_bytes()),
         &validation,
@@ -676,6 +835,14 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
     let digest = Sha256::digest(code_verifier.as_bytes());
     let expected = URL_SAFE_NO_PAD.encode(digest);
     constant_time_eq_str(&expected, code_challenge)
+}
+
+/// S256 的 challenge 是 SHA-256 摘要的无填充 base64url，固定 43 个字符（RFC 7636 §4.2）。
+fn valid_s256_challenge(challenge: &str) -> bool {
+    challenge.len() == 43
+        && challenge
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn valid_code_verifier(verifier: &str) -> bool {
@@ -696,13 +863,37 @@ fn basic_auth_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     Some((id.to_string(), secret.to_string()))
 }
 
-fn authorization_not_ready() -> Response {
+/// 授权页、授权码跳转和 token 响应都带口令或凭据的上下文：不缓存，不外带 Referer。
+const NO_STORE_HEADERS: [(axum::http::HeaderName, &str); 2] = [
+    (axum::http::header::CACHE_CONTROL, "no-store"),
+    (axum::http::header::REFERRER_POLICY, "no-referrer"),
+];
+
+fn page(status: StatusCode, html: String) -> Response {
+    (status, NO_STORE_HEADERS, Html(html)).into_response()
+}
+
+/// 这个入口没有配置 token 签名密钥（工作区没开 OAuth）：发现和注册仍可用，但不能授权。
+fn oauth_unavailable() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        NO_STORE_HEADERS,
         axum::Json(json!({
-            "error": "AUTH_NOT_READY",
-            "error_description": "Unified MCP credential authorization is not connected."
+            "error": "temporarily_unavailable",
+            "error_description": "OAuth is not enabled for this endpoint."
+        })),
+    )
+        .into_response()
+}
+
+/// 未兑换的授权码已到上限：稍后重试即可，已有的码不受影响。
+fn pending_codes_full() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        NO_STORE_HEADERS,
+        axum::Json(json!({
+            "error": "temporarily_unavailable",
+            "error_description": "Too many authorizations are waiting to be exchanged. Try again in a few minutes."
         })),
     )
         .into_response()
@@ -761,7 +952,7 @@ fn login_page(
         <input type='hidden' name='code_challenge' value='{}'>\
         <input type='hidden' name='code_challenge_method' value='{}'>\
         <input type='hidden' name='state' value='{}'>\
-        <label>Password<input type='password' name='password' autocomplete='current-password' required></label>\
+        <label>Password or authorization credential<input type='password' name='password' autocomplete='off' required></label>\
         <button type='submit'>Authorize</button>\
         </form></body></html>",
         html_escape(client_id),

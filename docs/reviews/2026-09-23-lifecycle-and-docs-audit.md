@@ -6016,3 +6016,61 @@ subagent，也未调整委派开关。未操作在用授权、推送、部署或
 `cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check`
 均通过；CLI 文档生成脚本在 `cargo build --locked -p gld` 后成功运行，且文档包含 `--if-idle`。
 没有操作 `~/.config/gld`，没有创建 PR，也未等待或监看远端 CI。
+
+## 148. 2026-11-22：D18-B3.3 OAuth access/refresh 接入统一授权
+
+依据 RFC-0015 §2.2、§4.1 第二行、§5、§7 B 与 §146 末尾「未完成」。范围只含 OAuth；URL Origin 和隧道显式绑定未动。
+
+**grant 怎么选定：**RFC-0015 §2.2 已有定论，本轮没有新增决定。OAuth 用途 grant 的确认口令
+（`gld_oauth_v1.<id>.<secret>`）只用于授权页；用户把它填进授权页的口令框，宿主按公开 ID 找到凭据记录，
+由此得到 GrantId 和当前修订号。页面没有下拉框，也没有新命令。签发口令的 `gld grant add --via oauth` 属于 D，
+本轮未接；测试在 daemon 启动前用 `AccessStore::create_grant(kind: OAuth)` 创建。
+
+**实现落点：**
+- `crates/core/src/auth/access_store/authorize.rs`：`AccessReader::confirm_oauth` 核对记录存在、用途为 OAuth、
+  grant 有效、凭据期限和秘密摘要，返回 `OAuthBinding { grant_id, credential_revision }`；
+  `authenticate_oauth` 每次读当前快照，要求用途、状态、修订号和期限都符合，产出带
+  `McpSubject::OAuth { client_id }` 的上下文。各类失败是同一条 `AUTHENTICATION_FAILED`。
+- `crates/host/src/auth/oauth_flow.rs`：MCP 运行时持有 B3.2 的共享 AccessReader，没有新建存储或缓存。
+  授权码记下绑定；access（30 天）/ refresh（90 天）使用独立的 MCP claims（版本、iss、aud、iat、exp、
+  client_id、grant_id、credential_revision、用途），与 Actions claims 互不通过。授权码兑换、refresh 和
+  `/mcp` 的 access 验证都调用 `authenticate_oauth`。授权页、跳转和 token 回包带 `no-store` / `no-referrer`，
+  口令只从 POST 正文读取，错误页不回显。
+- `crates/host/src/mcp.rs`：`require_mcp_auth` 先分类出唯一来源，再只按那一种验证；OAuth 失败是 401 加
+  `WWW-Authenticate` 发现信息，不回落。单工作区入口沿用项目范围与 confine-reads 的 403。
+- 修订号没有新的存放位置：就是 `access/v1/grants.json` 里 `CredentialRecord.revision`。daemon
+  `Request` / `Response` 未改，`PROTOCOL_VERSION` 未动。
+
+**AUTH_NOT_READY 的去留：**OAuth 授权页、token 端点和 `/mcp` 的 OAuth 分支已删除该回包。仍然返回
+`503 / AUTH_NOT_READY` 的有三处：隧道、URL 入口（集成测试各断言一次），以及授权文件尚未初始化的服务
+（一条 grant 都没建过）。最后一处是 B3.2 的既有判断，对所有来源生效，本轮保留；
+`hub_one_connection`、`generation_boundary` 中没有任何 grant 的用例因此仍断言 503。是否把它也改成 401，留给审查方决定。
+
+**验证：**Linux、隔离 `GLD_HOME`，PATH 含 Node v24.22.2。
+- `cargo test --workspace --all-targets --locked --no-fail-fast`：**75 个目标，1509 passed / 0 failed / 0 ignored**。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 通过。
+- 真实 daemon/HTTP（`crates/cli/tests/oauth_connector_flow.rs`，不构造 LocalOperator）：发现 → 动态注册 →
+  PKCE（错 verifier 拒绝）→ access 与 refresh 的 `exp - iat` 分别为 30 / 90 天 → `initialize`、`tools/list`、
+  `read_file` 成功，写被拒 → refresh 当 access 拒绝 → refresh 成功且新 access 可用 → 同 grant 两个 client 的
+  身份不同、refresh 不能互换 → 重启后注册表和签名密钥文件未变、重启前的 token 仍可用 → 停 daemon、
+  `AccessStore::rotate_grant`、再启动：旧 access 401、旧 refresh `invalid_grant`、旧确认口令被授权页拒绝，
+  新口令重新授权成功 → 撤销后 `/mcp` 401、refresh `invalid_grant`，无关的 API token 仍可用。
+  服务口令、API token、URL 凭据、不存在的 ID 和错误秘密填进授权页得到同一个 401 页面。
+- host 单测（共享 reader，进程不重启）：运行中轮换和撤销后，下一次 access、refresh 和未兑换的授权码都被拒绝。
+
+**未验证与已知限制：**
+- 运行中轮换未经真实 daemon 验证，待 D：运行中的 daemon 没有轮换入口，集成测试是停机轮换，
+  运行中立即失效只有 host 单测证明。
+- refresh 是无状态的：同一修订号内，一个 refresh 在到期前可以重复使用；要收紧只能轮换或撤销 grant（审查方决定不加一次性表）。
+- 没有用真实的 ChatGPT / Claude 连接器验收；没有更换本机二进制、重启本机守护进程或改动真实 grant。
+- 首次全量测试时 `command_write_paths` 的一条用例因测试进程 PATH 上没有 `node` 失败，加入 Node 后通过；
+  `native_nodes::enable_refuses_while_a_foreground_node_is_running_and_installs_nothing` 在并行全量跑中失败过一次
+  （“Node configuration is in use”），单独重跑和随后的全量跑均通过，未查原因，与本轮改动的文件无交集。
+
+**审查后补充（同日，PR #12）：**Devin Review 提出三条，均落在本轮未改动的既有代码上。
+- 已修：授权页现在要求 S256 的 `code_challenge` 正好是 43 个 base64url 字符，待兑换授权码先清过期再插入、
+  上限 256，到上限时返回 `503` + `no-store` 且不覆盖已有的码；`code_verifier` 的 43–128 字符校验原本就有，补了单测
+  （`crates/host/src/auth/oauth_flow.rs` 及其测试）。
+- 未修、已列入 `task_plan.md`：匿名动态注册可占满注册表；`gld gateway start` 换地址后 401 发现链接仍是旧地址
+  （后者未复现，排在真实客户端验收之前）。
+- 无 grant 时 `/mcp` 的 `AUTH_NOT_READY` 经审查方确认保留，依据 RFC-0015 §6。

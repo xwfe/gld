@@ -5,7 +5,7 @@ mod credential;
 
 pub use access_store::{
     AccessReader, AccessRecord, AccessSnapshot, AccessStore, CredentialRecord, GrantCreation,
-    IssuedAccess,
+    IssuedAccess, OAuthBinding,
 };
 pub use bearer::{bearer_token, constant_time_eq_str};
 pub use client_registry::{

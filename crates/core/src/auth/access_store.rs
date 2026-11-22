@@ -17,6 +17,7 @@ use crate::nodes::local_config::{check_private_file, create_private_file};
 mod authorize;
 mod lifecycle;
 mod model;
+pub use authorize::OAuthBinding;
 pub use lifecycle::{GrantCreation, IssuedAccess};
 pub use model::{AccessRecord, CredentialRecord, MAX_URL_TTL_SECONDS};
 
