@@ -501,7 +501,11 @@ mod access_tests {
             // open_in 建立私有父目录；写入明确的空 schema，区分缺文件与合法空文件。
             drop(AccessStore::open_in(home.path()).unwrap());
             let path = home.path().join("access/v1/grants.json");
-            std::fs::write(&path, br#"{"schema_version":1,"records":[]}"#).unwrap();
+            std::fs::write(
+                &path,
+                br#"{"schema_version":1,"records":[],"tunnel_bindings":[]}"#,
+            )
+            .unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
