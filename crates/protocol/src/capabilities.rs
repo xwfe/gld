@@ -210,6 +210,7 @@ pub enum CapabilityContractError {
     EmptyIdentifier(&'static str),
     AmbiguousTarget,
     MissingTarget,
+    TargetMismatch,
     UnknownCapability(String),
     UnknownReason(String),
     DuplicateCapability(CapabilityId),
@@ -224,7 +225,9 @@ impl CapabilityContractError {
         match self {
             Self::UnsupportedContractVersion { .. } => "CAPABILITY_PROTOCOL_UNSUPPORTED",
             Self::EmptyIdentifier(_) => "CAPABILITY_TARGET_INVALID",
-            Self::AmbiguousTarget | Self::MissingTarget => "CAPABILITY_TARGET_INVALID",
+            Self::AmbiguousTarget | Self::MissingTarget | Self::TargetMismatch => {
+                "CAPABILITY_TARGET_INVALID"
+            }
             Self::UnknownCapability(_) => "CAPABILITY_UNKNOWN",
             Self::UnknownReason(_) => "CAPABILITY_REASON_UNKNOWN",
             Self::DuplicateCapability(_) => "CAPABILITY_SNAPSHOT_INVALID",
@@ -247,6 +250,7 @@ impl fmt::Display for CapabilityContractError {
             Self::EmptyIdentifier(field) => write!(f, "{field} must not be empty"),
             Self::AmbiguousTarget => f.write_str("workspace_id and machine_id are mutually exclusive"),
             Self::MissingTarget => f.write_str("either workspace_id or machine_id is required"),
+            Self::TargetMismatch => f.write_str("capability target does not match the snapshot node"),
             Self::UnknownCapability(id) => write!(f, "unknown capability id: {id}"),
             Self::UnknownReason(reason) => write!(f, "unknown capability reason code: {reason}"),
             Self::DuplicateCapability(id) => write!(f, "duplicate capability id: {id}"),
