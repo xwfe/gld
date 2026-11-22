@@ -311,6 +311,43 @@ fn a_nonzero_exit_or_missing_result_fails_but_still_lists_changes() {
     );
 }
 
+/// 记录写着跑完后，同一项目可以重新起一个委派。
+#[test]
+fn a_task_recorded_as_finished_no_longer_holds_its_project() {
+    let f = Fixture::new();
+    f.agent("fake", "cat >/dev/null\necho ok", STDOUT, "");
+    let first = f.start("fake", Approval::Auto).expect("起");
+    assert_eq!(f.finished(&first).state, State::AwaitingReview);
+    assert_eq!(running_in(&f.root()), None, "记录写着跑完了，项目还占着");
+    let second = f.start("fake", Approval::Auto).expect("跑完就能再起");
+    assert_eq!(f.finished(&second).state, State::AwaitingReview);
+}
+
+/// 读记录的人手里拿着收尾前的 `running`，等它查表时任务已经收完尾：要认盘上的结局，
+/// 不能判成 `unknown` 再把跑完的记录盖掉。
+#[test]
+fn a_stale_running_copy_does_not_overwrite_the_finished_record() {
+    let f = Fixture::new();
+    f.agent("fake", "cat >/dev/null\necho ok", STDOUT, "");
+    let started = f.start("fake", Approval::Auto).expect("起");
+    let done = f.finished(&started);
+    assert_eq!(done.state, State::AwaitingReview);
+    // 收尾在同一把锁里写记录、放开项目：这次查表回来时，项目已经放开了。
+    assert_eq!(running_in(&f.root()), None);
+    let (dir, _) = get(f.data_home(), &started.task_id).expect("任务");
+
+    let mut stale = done.clone();
+    stale.state = State::Running;
+    stale.recap = None;
+    let settled = settle(&store::root(f.data_home()), &dir, stale);
+    assert_eq!(settled.state, State::AwaitingReview);
+    assert_eq!(settled.recap, done.recap);
+    assert_eq!(
+        store::read(&dir).expect("记录").state,
+        State::AwaitingReview
+    );
+}
+
 #[test]
 fn ask_waits_for_local_approval_and_deny_or_stop_ends_it() {
     let f = Fixture::new();

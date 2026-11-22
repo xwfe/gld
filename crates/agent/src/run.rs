@@ -86,8 +86,39 @@ pub fn reserve(task_id: &str, project_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn release(task_id: &str) {
-    live().remove(task_id);
+/// 把结局写进记录、再放开项目，两步在同一把锁里做。
+///
+/// 分开做的话，中间有一小段：记录已经写着跑完了，项目却还占着。这时照着记录再起一个委派，
+/// 会被 `AGENT_TASK_RUNNING` 挡回去，说的还是刚跑完的那个任务（审查 §119）。
+/// 先放开再写也不行：记录还是 `running` 而表里已经没有它，读的人会把它判成 `unknown`。
+fn finish(task_dir: &Path, task: &AgentTask) {
+    let mut live = live();
+    if let Err(error) = store::write(task_dir, task) {
+        eprintln!("委派记录写不进 {}：{error}", task_dir.display());
+    }
+    #[cfg(all(test, unix))]
+    tests_hook::pause_before_release(Path::new(&task.workspace_root));
+    live.remove(&task.task_id);
+}
+
+/// 只给测试用（委派的测试只在 unix 上跑）：把“写完记录”和“放开项目”之间拉长，让先后顺序的问题每次都露出来。
+#[cfg(all(test, unix))]
+pub(super) mod tests_hook {
+    use super::*;
+
+    static PAUSE_IN: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    /// 之后这个项目的委派收尾时，在放开项目前停 200 毫秒。别的项目不受影响。
+    pub fn pause_when_finishing_in(project_root: &Path) {
+        *PAUSE_IN.lock().unwrap_or_else(|p| p.into_inner()) = Some(project_root.to_path_buf());
+    }
+
+    pub(super) fn pause_before_release(project_root: &Path) {
+        let wanted = PAUSE_IN.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if wanted.is_some_and(|wanted| same_dir(&wanted, project_root)) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
 }
 
 /// 叫停一个在跑的委派。不在本进程里跑的返回 false。
@@ -159,8 +190,7 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
             profile.name, task.agent_approval
         ));
         task.finished_at_ms = Some(now_ms());
-        let _ = store::write(&task_dir, &task);
-        release(&task.task_id);
+        finish(&task_dir, &task);
         return Err(task.failure.clone().unwrap_or_default());
     }
     task.agent_version = agent_version(&argv[0], &task_dir);
@@ -184,8 +214,7 @@ pub fn launch(launch: Launch) -> Result<AgentTask, String> {
             task.state = State::Failed;
             task.failure = Some(format!("起不来 {}：{error}", argv[0]));
             task.finished_at_ms = Some(now_ms());
-            let _ = store::write(&task_dir, &task);
-            release(&task.task_id);
+            finish(&task_dir, &task);
             return Err(task.failure.clone().unwrap_or_default());
         }
     };
@@ -411,10 +440,7 @@ fn watch(
         },
         _ => task.changes_unknown = true,
     }
-    if let Err(error) = store::write(&task_dir, &task) {
-        eprintln!("委派记录写不进 {}：{error}", task_dir.display());
-    }
-    release(&task.task_id);
+    finish(&task_dir, &task);
 }
 
 fn output_size(task_dir: &Path) -> u64 {
@@ -683,6 +709,76 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_task_recorded_as_finished_no_longer_holds_its_project() {
+        let home = tempfile::tempdir().expect("home");
+        let root = home.path().join("project");
+        fs::create_dir_all(&root).expect("project");
+        let task_dir = store::task_dir(home.path(), "project", "task");
+        let task = AgentTask {
+            task_id: "task".into(),
+            project_id: "project".into(),
+            workspace_root: root.to_string_lossy().into_owned(),
+            workspace_name: "project".into(),
+            agent: "fake".into(),
+            caller: "local".into(),
+            grant: None,
+            client_request_id: None,
+            prompt_preview: String::new(),
+            agent_approval: "all".into(),
+            model: String::new(),
+            effort: String::new(),
+            approval_changes: Vec::new(),
+            state: State::Running,
+            created_at_ms: 1,
+            timeout_minutes: 30,
+            started_at_ms: Some(1),
+            finished_at_ms: None,
+            pid: None,
+            owner: None,
+            owner_pid: None,
+            exit_code: None,
+            agent_version: None,
+            version_unverified: false,
+            recap: None,
+            failure: None,
+            changed_files: Vec::new(),
+            file_stats: Vec::new(),
+            changed_files_truncated: false,
+            changes_unknown: false,
+            diff_bytes: None,
+            before_tree: None,
+            after_tree: None,
+            head_moved: false,
+            review: None,
+        };
+        store::write(&task_dir, &task).expect("running record");
+        reserve(&task.task_id, &root).expect("reserve project");
+
+        let mut finished = task.clone();
+        finished.state = State::AwaitingReview;
+        finished.finished_at_ms = Some(2);
+        tests_hook::pause_when_finishing_in(&root);
+        let finish_dir = task_dir.clone();
+        let finishing = std::thread::spawn(move || finish(&finish_dir, &finished));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !store::read(&task_dir).is_some_and(|record| record.state == State::AwaitingReview) {
+            assert!(Instant::now() < deadline, "finished record was not written");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let next = reserve("next", &root);
+        finishing.join().expect("finish thread");
+        assert_eq!(next, Ok(()), "finished task still holds its project");
+        live().remove("next");
+        assert_eq!(
+            store::read(&task_dir).expect("finished record").state,
+            State::AwaitingReview
+        );
+    }
 
     /// `--numstat -z` 的路径原样带着，里面有制表符也不切开。
     #[test]

@@ -1050,6 +1050,7 @@ mod tests {
             "trusted".into(),
             root.join("harness"),
         )
+        .expect("tool context")
         .with_workspace_name(workspace_name);
         ListenerState {
             endpoint: Endpoint::Workspace(Arc::new(context)),

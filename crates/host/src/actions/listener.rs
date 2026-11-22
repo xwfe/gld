@@ -171,7 +171,7 @@ async fn serve(
             policy.clone(),
             "full".into(),
             policy.permission_mode.clone(),
-        )
+        )?
         .with_usage(usage.clone()),
     );
     let tools: Vec<Value> = tools::list_tools()

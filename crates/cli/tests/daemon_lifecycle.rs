@@ -550,6 +550,86 @@ fn restart_refuses_while_a_command_runs_and_force_still_restarts() {
     env.ok(&["daemon", "stop"]);
 }
 
+/// `gld daemon stop --if-idle`：有命令在跑时不停、把命令列出来；不带它 `stop` 照旧连命令一起停。
+///
+/// launchd / systemd 管着守护进程时，升级是 `gld daemon stop` 之后让它们拉起，走不到
+/// `restart` 的检查；以前文档只能让人先 `pgrep` 自己看一眼。
+#[test]
+fn stop_if_idle_refuses_while_a_command_runs_and_plain_stop_still_stops() {
+    let env = Env::new();
+    let sleeper = Sleeper { ms: 60731 };
+    env.ok(&["add", ".", "--name", "it"]);
+    env.ok(&[
+        "set",
+        "it",
+        &format!("allowed-commands={}", sleeper.program()),
+    ]);
+    env.ok(&["daemon", "start"]);
+    let daemon_pid = |env: &Env| env.json(&["--json", "daemon", "status"])["info"]["pid"].clone();
+    let before = daemon_pid(&env);
+    let started = env.json(&[
+        "--json",
+        "tool",
+        "call",
+        "exec_command",
+        &format!("cmd={}", sleeper.command()),
+        "yield_time_ms:=0",
+        "timeout_ms:=120000",
+    ]);
+    assert_eq!(started["status"], "running", "{started}");
+
+    let refused = env.gld(&["daemon", "stop", "--if-idle"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let held = !refused.status.success()
+        && stderr.contains(&format!("\n  it  {}", sleeper.command()))
+        && stderr.contains("没停守护进程")
+        && daemon_pid(&env) == before
+        && sleeper.is_running();
+    if !held {
+        sleeper.kill();
+    }
+    assert!(
+        held,
+        "有命令在跑时 --if-idle 该拒绝、列出命令、守护进程和命令都不动：{stderr}"
+    );
+
+    // 给脚本用：--json 时 stdout 是这份列表，退出码照样非零，`&&` 后面的拉起不会跑。
+    let refused = env.gld(&["--json", "daemon", "stop", "--if-idle"]);
+    assert!(!refused.status.success());
+    let listed: serde_json::Value =
+        serde_json::from_slice(&refused.stdout).expect("stdout 是 JSON");
+    assert_eq!(listed["stopped"], false, "{listed}");
+    assert_eq!(
+        listed["running_commands"][0]["session_id"], started["session_id"],
+        "{listed}"
+    );
+
+    // 和 --force 意思相反，一起给是用法错误，什么都不动。
+    let conflict = env.gld(&["daemon", "stop", "--if-idle", "--force"]);
+    assert!(!conflict.status.success());
+    assert_eq!(daemon_pid(&env), before, "参数冲突时不该动守护进程");
+
+    // 不带 --if-idle：照旧停，命令跟着停。
+    env.ok(&["daemon", "stop"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while sleeper.is_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let leaked = sleeper.is_running();
+    if leaked {
+        sleeper.kill();
+    }
+    assert!(!leaked, "不带 --if-idle 的 stop 之后命令还在跑");
+
+    // 空闲时 --if-idle 就是普通的 stop；守护进程不在时也不报错。
+    env.ok(&["daemon", "start"]);
+    env.ok(&["daemon", "stop", "--if-idle"]);
+    assert_eq!(
+        env.json(&["--json", "daemon", "stop", "--if-idle"])["outcome"],
+        "NotRunning"
+    );
+}
+
 /// 没有守护进程时，`gld tool call` 起的后台命令是命令行进程的子进程：命令行退出前要停掉它，
 /// 并说清楚为什么。不停的话它成了孤儿，下一条命令读不到也停不掉。
 #[test]

@@ -587,6 +587,86 @@ fn search_text_filters_by_glob() {
     assert_eq!(miss_payload["total_matches"].as_u64().unwrap_or(1), 0);
 }
 
+/// `**/` 后面再带子目录的 glob 以前一个都匹配不上（审查 §85、§89）：
+/// `**/tests/*.rs` 在 crates 下搜返回 scanned_files=0、rejected_by_glob=321，
+/// 已知测试文件明明存在；list_files 的 `**/bridge/*.rs` 同样空手而归。
+/// glob 的基准是工作区根，`**/` 要能匹配任意深度的子目录。
+#[test]
+fn recursive_globs_match_nested_directories() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    fs::create_dir_all(root.join("crates/core/tests")).expect("tests dir");
+    fs::create_dir_all(root.join("crates/core/src/bridge")).expect("bridge dir");
+    fs::write(
+        root.join("crates/core/tests/call_tool_contract.rs"),
+        "fn needle() {}\n",
+    )
+    .expect("test file");
+    fs::write(
+        root.join("crates/core/src/bridge/peer.rs"),
+        "fn needle() {}\n",
+    )
+    .expect("bridge file");
+    fs::write(root.join("crates/core/src/main.rs"), "fn needle() {}\n").expect("main file");
+    let ctx = ctx_for(root);
+
+    // §89 的原样场景：在 crates 下用 include_globs=["**/tests/*.rs"]。
+    let search = invoke(
+        &ctx,
+        "search_text",
+        json!({ "query": "needle", "path": "crates", "include_globs": ["**/tests/*.rs"] }),
+    );
+    let payload = assert_ok(&search);
+    assert_eq!(payload["total_matches"], 1, "{search}");
+    assert_eq!(payload["scanned_files"], 1, "{search}");
+
+    // §85 的原样场景：list_files 用 **/bridge/*.rs。
+    let listed = invoke(
+        &ctx,
+        "list_files",
+        json!({ "patterns": ["**/bridge/*.rs"] }),
+    );
+    let listed_payload = assert_ok(&listed);
+    let files = listed_payload["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 1, "{listed}");
+    assert_eq!(files[0]["path"], "crates/core/src/bridge/peer.rs");
+}
+
+/// 「目录名结尾」的 glob（`**/deps` 这种写法）要能排掉目录下所有文件
+/// （PR #3 复核）：glob 只比文件的工作区相对路径，目录本身不进匹配，模式
+/// 不带文件名通配时必须靠路径前缀命中，否则这种排除一个文件都排不掉。
+/// 用 `deps` 而不是 `node_modules`：node_modules、target 这类名字在遍历时
+/// 就整棵跳过，根本到不了 glob 这一步，排除它们的 glob 等于没写。
+#[test]
+fn directory_globs_exclude_everything_below() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path();
+    fs::create_dir_all(root.join("web/deps/y")).expect("deps dir");
+    fs::create_dir_all(root.join("web/src")).expect("src dir");
+    fs::write(root.join("web/deps/y/b.js"), "fn needle() {}\n").expect("deps file");
+    fs::write(root.join("web/src/a.js"), "fn needle() {}\n").expect("src file");
+    let ctx = ctx_for(root);
+
+    let listed = invoke(
+        &ctx,
+        "list_files",
+        json!({ "patterns": ["**/*.js"], "exclude_patterns": ["**/deps"] }),
+    );
+    let listed_payload = assert_ok(&listed);
+    let files = listed_payload["files"].as_array().expect("files array");
+    let paths: Vec<&str> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+    assert_eq!(paths, ["web/src/a.js"], "{listed}");
+
+    // search_text：同一套 glob_match。
+    let search = invoke(
+        &ctx,
+        "search_text",
+        json!({ "query": "needle", "exclude_globs": ["**/deps"] }),
+    );
+    let payload = assert_ok(&search);
+    assert_eq!(payload["total_matches"], 1, "{search}");
+}
+
 #[test]
 fn search_text_skips_binary_and_oversized_files() {
     let fx = tiny_js_fixture();
@@ -1057,39 +1137,261 @@ fn the_builtin_ls_resolves_relative_paths_against_workdir() {
 /// sh 脚本，所以只在 unix 上跑。
 #[cfg(unix)]
 #[test]
-fn enabling_gh_opens_read_only_diagnostics_only() {
+fn enabling_gh_tiers_read_only_confirmable_write_and_hard_blocked() {
     let fx = repo_maintenance_fixture();
     let ctx = common::ctx_with_allowed_commands_and_path(&fx.root, "gh", &fx.root.join("tools"));
 
+    // 1. 只读诊断：配了 gh 直接放行。
     for allowed in [
         "gh run list",
         "gh run view 42 --log",
+        "gh run watch 42",
         "gh workflow view ci.yml",
         "gh pr checks",
+        "gh repo list",
+        "gh repo view",
+        "gh auth status",
         "gh version",
+        "gh status",
     ] {
         let checked = invoke(&ctx, "check_command", json!({ "cmd": allowed }));
         assert_eq!(checked["decision"], "allow", "{allowed}: {checked}");
     }
 
-    for denied in [
+    // 2. 日常写操作：不带 confirm 返回 needs_approval（resolved_by=confirm），带 confirm=true 放行。
+    for confirmable in [
+        "gh repo create my-repo --private",
+        "gh pr create --title test",
+        "gh issue create --title bug",
         "gh run rerun 42",
         "gh run cancel 42",
-        "gh pr merge 7",
         "gh release create v1",
-        "gh secret set TOKEN",
+        "gh pr merge 7",
         "gh workflow run deploy.yml",
-        "gh auth token",
-        "gh api /repos/o/r/actions/runs",
         "gh repo clone o/r",
+        "gh repo clone o/r subdir",
+        "gh repo fork o/r --clone",
+        "gh repo edit o/r --description hi",
     ] {
+        let checked = invoke(&ctx, "check_command", json!({ "cmd": confirmable }));
+        assert_eq!(
+            checked["decision"], "needs_approval",
+            "{confirmable}: {checked}"
+        );
+        assert_eq!(
+            checked["rule"], "confirmation_required",
+            "{confirmable}: {checked}"
+        );
+        assert_eq!(
+            checked["resolved_by"], "confirm",
+            "{confirmable}: {checked}"
+        );
+
+        let confirmed = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": confirmable, "confirm": true }),
+        );
+        assert_eq!(
+            confirmed["decision"], "allow",
+            "{confirmable} with confirm=true: {confirmed}"
+        );
+    }
+
+    // 3. 凭据、不可逆高危、clone/fork 透传 git 参数、高危 flag：即使带 confirm=true 也硬拒。
+    let hard_denied = [
+        "gh auth token",
+        "gh auth login",
+        "gh secret set TOKEN",
+        "gh repo delete o/r",
+        "gh ssh-key add key.pub",
+        "gh api /repos/o/r/actions/runs",
+        "gh api -X POST /repos/o/r/issues",
+        "gh repo clone o/r -- --config core.sshCommand=sh",
+        "gh repo clone o/r -- -c core.sshCommand=sh",
+        "gh repo clone o/r -- -u /tmp/evil",
+        "gh repo clone o/r -- --upload-pack /tmp/evil",
+        "gh repo clone o/r -- --depth 1",
+        "gh repo fork o/r --clone -- --upload-pack /tmp/evil",
+        "gh repo fork o/r --clone -- -c core.sshCommand=sh",
+        "gh pr merge 7 --admin",
+        "gh pr merge --admin 7",
+        "gh pr merge --admin=true 7",
+        "gh --admin pr merge 7",
+        "gh pr --admin merge 7",
+        "gh repo edit o/r --visibility public",
+        "gh repo edit --visibility=public o/r",
+        "gh --visibility public repo edit o/r",
+        "gh repo --visibility=public edit o/r",
+    ];
+    for denied in hard_denied {
         let checked = invoke(&ctx, "check_command", json!({ "cmd": denied }));
         assert_eq!(checked["decision"], "deny", "{denied}: {checked}");
         assert_eq!(
-            checked["rule"], "github_command_not_read_only",
+            checked["rule"], "github_command_not_allowed",
             "{denied}: {checked}"
         );
+        assert_eq!(checked["resolved_by"], "other", "{denied}: {checked}");
+
+        let confirmed = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": denied, "confirm": true }),
+        );
+        assert_eq!(
+            confirmed["decision"], "deny",
+            "{denied} with confirm=true: {confirmed}"
+        );
+        assert_eq!(
+            confirmed["rule"], "github_command_not_allowed",
+            "{denied} with confirm=true: {confirmed}"
+        );
     }
+
+    // 4. 显式配 gh:write：日常写免 confirm，同时仍可跑只读；高危（含透传与高危 flag）仍硬拒。
+    let write_ctx =
+        common::ctx_with_allowed_commands_and_path(&fx.root, "gh:write", &fx.root.join("tools"));
+    for direct in [
+        "gh run list",
+        "gh run watch 42",
+        "gh repo create my-repo --private",
+        "gh pr create --title test",
+        "gh run rerun 42",
+        "gh repo clone o/r subdir",
+    ] {
+        let checked = invoke(&write_ctx, "check_command", json!({ "cmd": direct }));
+        assert_eq!(
+            checked["decision"], "allow",
+            "gh:write should allow {direct}: {checked}"
+        );
+    }
+    for still_denied in hard_denied {
+        let checked = invoke(&write_ctx, "check_command", json!({ "cmd": still_denied }));
+        assert_eq!(
+            checked["decision"], "deny",
+            "gh:write must still block {still_denied}: {checked}"
+        );
+        assert_eq!(
+            checked["rule"], "github_command_not_allowed",
+            "{still_denied}: {checked}"
+        );
+        let checked_confirmed = invoke(
+            &write_ctx,
+            "check_command",
+            json!({ "cmd": still_denied, "confirm": true }),
+        );
+        assert_eq!(
+            checked_confirmed["decision"], "deny",
+            "gh:write + confirm=true must still block {still_denied}: {checked_confirmed}"
+        );
+        assert_eq!(
+            checked_confirmed["rule"], "github_command_not_allowed",
+            "{still_denied}: {checked_confirmed}"
+        );
+    }
+
+    // 5. clone 目标落在项目外（含波浪线、环境变量、双引号内命令替换与带空格的同前缀绝对路径）时被工作区路径保护拦下（confirm=true 和 gh:write 都不能绕过）。
+    let sibling_with_space = format!("gh repo clone o/r '{} copy/repo'", fx.root.display());
+    for external_clone in [
+        "gh repo clone o/r /tmp/x",
+        "gh repo clone o/r ../outside",
+        "gh repo clone o/r ..",
+        "gh repo clone o/r ~",
+        "gh repo clone o/r ~other/x",
+        "gh repo clone o/r $HOME/x",
+        "gh repo clone o/r \"${HOME}\"",
+        "gh repo clone o/r \"`echo /tmp`\"",
+        "gh repo clone o/r \"$(echo /tmp)\"",
+        sibling_with_space.as_str(),
+    ] {
+        let checked = invoke(
+            &ctx,
+            "check_command",
+            json!({ "cmd": external_clone, "confirm": true }),
+        );
+        assert_eq!(checked["decision"], "deny", "{external_clone}: {checked}");
+        assert_eq!(
+            checked["rule"], "workspace_path_protected",
+            "{external_clone}: {checked}"
+        );
+
+        let checked_write = invoke(
+            &write_ctx,
+            "check_command",
+            json!({ "cmd": external_clone }),
+        );
+        assert_eq!(
+            checked_write["decision"], "deny",
+            "gh:write {external_clone}: {checked_write}"
+        );
+        assert_eq!(
+            checked_write["rule"], "workspace_path_protected",
+            "gh:write {external_clone}: {checked_write}"
+        );
+
+        let checked_write_confirmed = invoke(
+            &write_ctx,
+            "check_command",
+            json!({ "cmd": external_clone, "confirm": true }),
+        );
+        assert_eq!(
+            checked_write_confirmed["decision"], "deny",
+            "gh:write + confirm {external_clone}: {checked_write_confirmed}"
+        );
+        assert_eq!(
+            checked_write_confirmed["rule"], "workspace_path_protected",
+            "gh:write + confirm {external_clone}: {checked_write_confirmed}"
+        );
+    }
+
+    // 未加引号的命令替换在更早的 shell 语法检查层即被拒绝。
+    for shell_expansion_clone in [
+        "gh repo clone o/r `echo /tmp`",
+        "gh repo clone o/r $(echo /tmp)",
+    ] {
+        for (label, target_ctx, args) in [
+            (
+                "confirm=true",
+                &ctx,
+                json!({ "cmd": shell_expansion_clone, "confirm": true }),
+            ),
+            (
+                "gh:write",
+                &write_ctx,
+                json!({ "cmd": shell_expansion_clone }),
+            ),
+        ] {
+            let checked = invoke(target_ctx, "check_command", args);
+            assert_eq!(
+                checked["decision"], "deny",
+                "{label} {shell_expansion_clone}: {checked}"
+            );
+            assert_eq!(
+                checked["rule"], "shell_syntax_rejected",
+                "{label} {shell_expansion_clone}: {checked}"
+            );
+        }
+    }
+
+    // 相对子目录（含多级）克隆仍在 Workspace 内，应正常放行。
+    let subdir_confirmed = invoke(
+        &ctx,
+        "check_command",
+        json!({ "cmd": "gh repo clone o/r sub/dir", "confirm": true }),
+    );
+    assert_eq!(
+        subdir_confirmed["decision"], "allow",
+        "gh repo clone o/r sub/dir (confirm=true): {subdir_confirmed}"
+    );
+    let subdir_write = invoke(
+        &write_ctx,
+        "check_command",
+        json!({ "cmd": "gh repo clone o/r sub/dir" }),
+    );
+    assert_eq!(
+        subdir_write["decision"], "allow",
+        "gh repo clone o/r sub/dir (gh:write): {subdir_write}"
+    );
 }
 
 /// 没把 gh 加进白名单时，它就是一条普通的未获准命令——不会因为有只读规则
@@ -1140,7 +1442,7 @@ fn a_denial_only_config_lifts_says_so_and_confirm_really_does_not_lift_it() {
     assert_eq!(checked["needs_user_authorization"], json!(true));
     assert_eq!(
         checked["config_command"],
-        format!("gld set <项目> actions.allowed-commands=only:{TEST_PYTHON}"),
+        format!("gld set <项目> actions.allowed-commands+={TEST_PYTHON}"),
         "{checked}"
     );
     let confirmed = invoke(
@@ -1189,7 +1491,7 @@ fn a_denial_only_config_lifts_says_so_and_confirm_really_does_not_lift_it() {
         json!({ "cmd": "curl https://example.com" }),
     );
     assert_eq!(
-        checked["config_command"], "gld set api permission-mode=trusted allowed-commands=curl",
+        checked["config_command"], "gld set api permission-mode=trusted allowed-commands+=curl",
         "{checked}"
     );
 }
@@ -1205,13 +1507,16 @@ fn resolved_by_is_what_lifts_the_denial_not_what_the_rule_name_suggests() {
     let rm = resolve(json!({ "cmd": "rm -rf build" }));
     assert_eq!(rm["decision"], "needs_approval", "{rm}");
     assert_eq!(rm["resolved_by"], "config_change", "{rm}");
-    assert_eq!(rm["config_command"], "gld set <项目> allowed-commands=rm");
+    assert_eq!(rm["config_command"], "gld set <项目> allowed-commands+=rm");
 
-    // 加进白名单也只开只读诊断，merge 还是过不去。
-    let merge = resolve(json!({ "cmd": "gh pr merge 1" }));
-    assert_eq!(merge["rule"], "command_not_allowlisted", "{merge}");
-    assert_eq!(merge["resolved_by"], "other", "{merge}");
-    assert!(merge.get("config_command").is_none(), "{merge}");
+    // 加进白名单也只开只读 + 日常写确认，不可逆高危（repo delete）还是过不去，不能误导去加 gh。
+    let delete_repo = resolve(json!({ "cmd": "gh repo delete o/r" }));
+    assert_eq!(
+        delete_repo["rule"], "command_not_allowlisted",
+        "{delete_repo}"
+    );
+    assert_eq!(delete_repo["resolved_by"], "other", "{delete_repo}");
+    assert!(delete_repo.get("config_command").is_none(), "{delete_repo}");
 
     // 程序名是调用方给的，不能把 $(...) 拼进给用户复制的命令。
     let hostile = resolve(json!({ "argv": ["evil$(touch pwned)", "x"] }));

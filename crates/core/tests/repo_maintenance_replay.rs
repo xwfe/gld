@@ -191,8 +191,25 @@ fn a_repository_maintenance_round_trip_holds_together_end_to_end() {
 
     // 7. 看 CI 状态。**这里往下是合成远端**：`gh` 是工作区 tools/ 下的假脚本。
     let rerun = invoke(&ctx, "check_command", json!({"cmd": "gh run rerun 17041"}));
-    assert_eq!(rerun["decision"], "deny", "{rerun}");
-    assert_eq!(rerun["rule"], "github_command_not_read_only", "{rerun}");
+    assert_eq!(rerun["decision"], "needs_approval", "{rerun}");
+    assert_eq!(rerun["rule"], "confirmation_required", "{rerun}");
+    assert_eq!(rerun["resolved_by"], "confirm", "{rerun}");
+    let rerun_confirmed = invoke(
+        &ctx,
+        "check_command",
+        json!({"cmd": "gh run rerun 17041", "confirm": true}),
+    );
+    assert_eq!(rerun_confirmed["decision"], "allow", "{rerun_confirmed}");
+    let secret_set = invoke(
+        &ctx,
+        "check_command",
+        json!({"cmd": "gh secret set TOKEN", "confirm": true}),
+    );
+    assert_eq!(secret_set["decision"], "deny", "{secret_set}");
+    assert_eq!(
+        secret_set["rule"], "github_command_not_allowed",
+        "{secret_set}"
+    );
 
     let status = assert_ok(&invoke(
         &ctx,

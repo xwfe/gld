@@ -4702,7 +4702,200 @@ D15-P2 只保留用户指定 Prompt 正文读取的缺口；另一台 Mac/Linux 
 
 **文档落盘后复验：**`docs_commands_exist`、`docs_links_resolve`、`docs_have_no_home_paths`、`messages_name_real_commands` 四个测试目标合计 **7 passed / 0 failed**；`git diff --check` 通过。
 
-## 115. 按信任边界拆出授权模型与传输机制（2026-11-12）
+## 115. workspace_context -32603：消除 Harness 初始化 panic 这一条来源（2026-11-21）
+
+**起因：** §114 记录本轮首次 `workspace_context` 返回 `-32603: Internal error`，重试成功，原因未定位。本节只追加事实与证据，不改 §114 结论。
+
+**核对到的代码事实：**
+
+- MCP 路径上 `-32603` 只由 `mcp/listener.rs` 的 `generation_failure`（`reason=worker_failed`）和 `nodes/client.rs` 的节点转发产生；`"Internal error"` 字样不在仓库里，是客户端对 -32603 的渲染。
+- `ToolContext::from_workspace` / `from_workspace_with_harness_root` 原来用 `.expect(...)` 初始化 Harness；`Harness::new` 只在两处失败：`workspace_root.canonicalize()`（项目目录不存在或解析不了，`WORKSPACE_UNAVAILABLE`）和 `HarnessStore::new` 里的 `create_dir_all(GLD_HOME/harness)`（`STORE_UNAVAILABLE`）。任一失败都会 panic，worker 线程崩溃，这次工具调用变成 -32603（`reason=worker_failed`）。
+- `create_dir_all` 本身能承受并发创建，「并发下的 IO 错误」没有依据；真实触发更可能是项目目录 canonicalize 失败，或数据目录建不了（权限、盘满、只读）。
+- 上下文按 `workspace+指纹` 缓存，`context_for` 里 build 失败不入缓存，所以重试会重建。这与 §114「首次失败、重试成功」的现象**可能对应，是推测，未证实**。
+
+**修复与回归：** PR #2 把两个构造函数改成返回 `Result<Self, String>`，Harness 初始化失败走普通工具错误回包，不再打崩 worker；新增 `a_harness_dir_that_cannot_be_created_is_an_error_not_a_panic`。三个检查本地全绿，CI 9 项全绿，Devin Review 无问题。
+
+**还不能说死 §114 那次：** 2026-11-05 那次的生产日志没拿到。能定论的命令在用户机器上：
+
+```
+grep worker_failed ~/.config/gld/logs/hub/mcp-requests.log
+# 以及各项目的 logs/<项目>/mcp-requests.log
+```
+
+看那条的 `error=`：是 `worker_panicked` 就坐实是这次 panic，是别的值就不是。另一条 -32603 可能来源是 `generation_unavailable`（10 秒 admit 超时，已测定为预期行为，见 `generation_boundary.rs`），本次不动。
+
+**范围：** 未合并、未碰本机部署、未重启守护进程。
+
+## 116. 修复 `**/` 后带子目录的 glob 误过滤（2026-11-21）
+
+**问题：** §85 记录 `list_files` 用 `**/bridge/*.rs` 返回空（同一路径不带 glob 能列出 5 个文件）；§89 记录 `search_text` 在 crates 下用 `include_globs=["**/tests/*.rs"]` 返回 `scanned_files=0`、`rejected_by_glob=321`，当时只记录、未修根因。
+
+**根因：** `glob_match`（`crates/core/src/tools/file.rs`，`list_files` 的 patterns/exclude_patterns 和 `search_text` 的 include/exclude globs 共用）手工剥掉前导 `**/` 再拿剩余部分比对：`**/tests/*.rs` 剥成 `tests/*.rs` 后只比整路径或单层，永远比不中 `crates/core/tests/x.rs` 这种嵌套路径。
+
+**修法：** `glob_match`（`crates/core/src/tools/file.rs`，`list_files` 的 patterns/exclude_patterns 和 `search_text` 的 include/exclude globs 共用）改用已在依赖里的 glob crate（0.3.4）的原生 `**` 语义：`**/` 匹配零或多层目录，glob 基准仍是工作区根（`registry.rs` 的 `GLOB_BASE_DESCRIPTION`）。PR #3 复核又发现只比整条路径会让「以目录名结尾」的模式失效：遍历只拿文件的相对路径来比，目录本身从不进匹配，`**/node_modules` 以前靠「任一路径段相同」排掉整个目录，现在一个文件都排不掉。最终做法：整条路径或任一级上级目录前缀命中即算（`web/deps/y/b.js` 依次比 `web`、`web/deps`、`web/deps/y`、`web/deps/y/b.js`），include / exclude 共用这一个函数，目录名命中时目录下所有文件都算命中。`*` 跨 `/`（glob crate 默认 `require_literal_separator=false`）是原有行为，未改，单测钉住。
+
+**证据：**
+
+- 集成回归 `recursive_globs_match_nested_directories` 先红后绿：修复前复现 §89 原样症状（`scanned_files=0`、`rejected_by_glob=3`），修复后 `search_text` 命中 1 个文件、`list_files` 列出 `crates/core/src/bridge/peer.rs`。
+- 复核加的 `directory_globs_exclude_everything_below` 先红后绿：复核修复前 `list_files` 列出 `web/deps/y/b.js`、`search_text` `total_matches=2`，修复后只剩 `web/src/a.js`。`node_modules`、`target` 这类名字的目录在遍历时就整棵跳过，到不了 glob，所以测试用不在默认排除名单里的 `deps`。
+- 单元测试：`glob_match_recurses_through_directories`、`glob_match_directory_name_covers_files_below`、`glob_match_star_crosses_path_separators`。
+- 全仓 `cargo test --workspace --all-targets --locked`：**1410 passed / 0 failed**（Linux 本机，63 个测试目标；§114 的 1409 是 macOS，平台测试集不同）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
+
+**边界：** 未换本机二进制、未重启守护进程、未推送 main，PR #3 待审（含复核修复）。子任务挂起等其它摩擦项沿用原证据，不在本轮范围。
+
+## 117. GPT Actions 补 `actions.command-policy`（2026-11-21）
+
+**起因：** `task_plan.md` 的「一键放行全部命令」一行写明 MCP 侧 `command-policy=all` 已上，尾部还留着「GPT Actions 那条线路没有这个开关」。本轮先核对它是不是已写下的决定：没有找到把 Actions 侧缺开关当作决策的记录，RFC-0007 里「GPT Actions 不动」说的是 scoped grants，不是命令关卡；所以按排队项处理。
+
+**事实：**
+
+- `ActionsConfig` 新增 `command_policy`，serde 默认 `guarded`，旧配置读出来仍是 guarded；`gld set` 新增 `actions.command-policy=guarded|all`，和 MCP 侧的 `command-policy` 分开，互不改写。
+- `PolicySettings::from_actions_config` 只把 `"all"` 映成放行，其余一律按 guarded 处理；Actions 的 `exec_command` 仍走同一套 dispatch，放行时回包沿用既有 `policy_bypassed` 字段，没有新增绕过关卡的路径。
+- `gld set <项目> actions.command-policy=all` 会打印和 MCP 侧同等级的风险提示，并写明改回 `actions.command-policy=guarded`；`docs/concepts.md`、`docs/security.md`、生成的 `docs/cli.md` 同一提交补上 Actions 侧用法。
+
+**证据：**
+
+- 新增单元/字段测试：`actions_command_policy_is_separate_from_the_mcp_one`、`an_old_config_without_confine_reads_defaults_to_confined`、`allowing_all_commands_lifts_the_restrictions_but_keeps_the_rails` 的 Actions 断言。
+- 新增集成回归 `actions_command_policy_all_runs_commands_the_default_policy_would_deny`：默认 Actions `exec_command` 跑 `sh` 返回 422 `command_not_allowlisted`；设 `actions.command-policy=all` 并重启 Actions 服务后同一命令返回 200，`structured_content.policy_bypassed.rule` 为 `command_not_allowlisted`。
+- 全仓 `cargo test --workspace --all-targets --locked`：**1413 passed / 0 failed / 0 ignored**（Linux 本机，63 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
+
+**遇到的问题：** 第一次全量测试在 `command_write_paths.rs` 的 `copying_an_outside_file_into_the_workspace_is_allowed` 失败，原因是这台机器的 shell PATH 里没有 `node`；用 `~/.nvm/versions/node/v24.22.2/bin` 补进 PATH 后同一条全量测试通过。与本次改动无关，未改测试。
+
+**边界：** 未换本机二进制、未重启守护进程、未推送 main；PR 待审。
+
+## 118. macOS 上换代测试偶发失败：是条数阈值的时间假设，不是切换丢请求（2026-11-21）
+
+**起因：** PR #2 第一次 CI 的 macOS 作业失败，重跑通过。失败的是 `requests_keep_succeeding_across_prepare_and_switch`，它验的是「切换执行代时没有一条请求失败」。先当作可能的产品缺陷查，也核对它和 §114 的 `-32603` 有没有关系。
+
+**事实：**
+
+- 失败日志（run 44898507184，job 136829201931，macOS）：panic 在 `crates/cli/tests/generation_boundary.rs:1110`，信息是「这段时间只发出去 10 条，没覆盖到切换」，断言要求大于 10。请求线程里「状态 200」「回包含 `steady`」两条断言没有触发（触发的话会先在 `join` 处失败）。也就是 10 条请求全部成功，没有一条因为切换报错，也没有 `-32603`。同一次 attempt 里 Ubuntu 作业的失败是另外两条 Agent 测试的 `AGENT_TASK_RUNNING`，与本条无关，本轮没查。
+- 这条测试每轮切换前固定睡 200ms，这段时间没有 `prepare` / `switch` 在跑。整段只发出 10 条，说明不切换的平稳阶段请求就已经平均 20ms 以上一条（正常 2~3ms）。慢不是切换带来的。
+- 条数量的是机器快慢。macOS runner 上实测 30 次（run 44913863502）：单独跑 15 次 127~233 条，单条最慢 67ms；整个文件并行跑 15 次（和失败那次的跑法一样）46~280 条，单条最慢 86ms。30 次没有一条请求失败。Linux 本机整个文件循环 50 次全过，84~161 条，单条最慢 29ms；同时压 128 个空转进程时降到 29~47 条，压 400 个时 31~32 条。
+- 切换时确实有一条请求会慢一点：多数样本里恰好有一条 20~30ms 的请求，对应 `hand_off` 把工作区标成 `moving`、新请求排队等搬完。负载高时这一条到过 86ms。这是设计内的排队，没有看到报错或丢请求。
+
+**结论：** 判为测试的时间假设不成立，不是产品在切换窗口里丢请求或返回错误。没有改产品代码，`docs/concepts.md` 不用动。
+
+**改动：** 只改这条测试。每条请求必须 200 且内容对，这两条断言原样保留，没有加重试。把「总条数大于 10」换成直接的证据：请求一条接一条不停发，每次切换前等到有 1 条答完，切换后等到再有 2 条答完（至少 1 条完全在切换之后发出），旧代都退出后再等 2 条。请求线程中途报错会立刻带出它的断言信息。
+
+**证据：** 改后单独循环 50 次全过；压 128 个空转进程跑 5 次全过。全仓 `cargo test --workspace --all-targets --locked`：**1414 passed / 0 failed / 0 ignored**（Linux 本机，63 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 退出码 0；`cargo fmt --all -- --check` 退出码 0。测试用隔离 `GLD_HOME`。
+
+**遇到的问题：** 全量测试头两次停在 `version_names_the_build_commit_when_it_is_known`：`gld --version` 没带提交号。起因是本轮为了量数据临时开过一个 git worktree、和主检出共用同一个 `target`，删掉 worktree 后 `crates/core/build.rs` 没有重跑。`touch` 这个文件后重编通过。没有查 build.rs 的重跑条件是否有漏，未改代码。
+
+**没做到、没证实的：**
+
+- 没能在 Linux 上复现出「不超过 10 条」。加压时窗口跟着变长，条数停在 30 上下。
+- 失败那次的日志没有计时，只能从条数反推平稳阶段慢，不能排除当时有单条请求卡了几百毫秒。这条测试的注释本来就写着「延迟预算没有验」，现在仍然不验；要验得另外定预算。
+- macOS 的数据来自一次性探针（PR #5）。它把 CI 的测试步骤换成了只循环这一条，本来不该合并，却被合进了 main，随后由 PR #6 原样撤回，撤回后的树和 PR #4 合并后一致。之后在 CI 上量数据只推分支或保持草稿，用完删分支。
+
+**边界：** 未换本机二进制、未重启守护进程；PR 待审，未合并。
+
+## 119. 委派测试偶发 `AGENT_TASK_RUNNING`：跑完后项目多占了一小段；构建脚本写死了编译时的目录（2026-11-22）
+
+**起因：** §118 留了两件没查的事。一是 PR #2 的 CI 里 Ubuntu 作业有两条 Agent 测试报 `AGENT_TASK_RUNNING`，重跑通过。二是删掉共用 `target` 的 worktree 后版本号不带提交号，没查 `crates/core/build.rs`。
+
+**更正 §118 的一处：** 那两条失败不在 run 44898507184 里，在同一个 PR 更早的 run 44895454481 第一次（job 136820013298，提交 `bea9dd40`）。44898507184 第一次只有 macOS 作业失败。
+
+### 一、`AGENT_TASK_RUNNING`
+
+**事实：**
+
+- 失败日志：`gld-core` 单测 882 过、2 失败。
+  - `agents::tests::ask_waits_for_local_approval_and_deny_or_stop_ends_it`，panic 在 `crates/core/src/agents/tests.rs:324`，是 `f.start("fake", Approval::Ask).expect("存下")`。
+  - `agents::tests::approval_can_change_the_agent_model_and_effort`，panic 在 `tests.rs:661`，同样是 `start(...).expect("存下")`。
+  - 两条的回包都是 `AgentError { code: "AGENT_TASK_RUNNING", message: "这个项目已经有委派在跑（任务 <id>），同一个项目同时只许一个；等它跑完或者先停掉" }`。
+- 两条测试各用自己的临时数据目录和临时 git 项目，测试之间不共享项目。进程内那张「哪个项目在跑」的表是全局的，但按项目目录比对，别的测试的项目不会撞上。
+- 两处失败前都有同一个动作：上一个委派刚用 `wait_until_finished` 等到记录不再是 `running`，紧接着在同一个项目再起一个。
+- 产品代码 `crates/core/src/agents/run.rs` 的监视线程收尾时，先 `store::write` 把结局写进记录，再 `release` 把项目从表里拿掉，是分开的两步。两步之间，记录写着跑完了，项目还占着。
+
+**复现：**
+
+- 原样循环跑 `agents::tests::`（隔离 `GLD_HOME`）：空闲 30 轮、压 64 个忙循环 15 轮，共 45 轮没有一次失败。窗口太短，没有原样复现。
+- 在旧代码两步之间插 100 毫秒：27 条里 8 条失败，CI 上那两条都在内，报错和行号（324、661）与 CI 日志一致。
+
+**结论：** 是产品缺陷，不是测试共享状态。任何调用方读到委派「跑完了」后马上在同一个项目再委派，都可能被挡回去；对这个项目的 `apply_patch` / `exec_command` 也一样会多挡这一小段。没有并发起出两个任务，任务状态也没有残留，只是放开晚了一步。
+
+**改动：** 写记录和放开项目放进同一把锁（`run.rs` 的 `finish`），三处收尾都走它。先放开再写不行：记录还是 `running` 而表里没有它，读的人会把它判成 `unknown`。回归测试 `a_task_recorded_as_finished_no_longer_holds_its_project` 用测试钩子把两步之间拉长到 200 毫秒，只对这条测试自己的项目生效：改回不持锁红，持锁绿。原有断言没有放宽，没有加重试。工具回包和规则没变，`docs/concepts.md` 没动。
+
+**没证实的：** CI 日志里报出的任务号是不是刚跑完的那一个。日志不打印前一个任务的 id，只能从测试结构和插延迟后的同款失败推出。
+
+### 二、`crates/core/build.rs`
+
+**事实：** `rerun-if-changed` 没有漏，构建脚本当时重跑了。问题是脚本里三处用 `env!("CARGO_MANIFEST_DIR")`，这是脚本自己被编译时的目录。两个检出共用 `target` 时，cargo 拿 worktree 编出来的脚本直接为主检出跑，里面写死的是 worktree 的路径。worktree 删了，往上找不到 `.git`，不报提交号；worktree 没删，报的是 worktree 的提交号。
+
+**复现：** `git worktree add` 一份，`CARGO_TARGET_DIR` 指到同一个目录，先在 worktree 里跑版本测试（过），删掉 worktree 再在主检出跑：`version_names_the_build_commit_when_it_is_known` 失败，`left: None`；编出来的构建脚本里能搜到 worktree 的路径。
+
+**改动：** 改成跑的时候读 cargo 给的 `CARGO_MANIFEST_DIR` 环境变量。新增 `crates/core/tests/build_script_checkout.rs`：在一个不存在的目录名下用 rustc 编 `build.rs`，再让它为本检出跑，要报出本检出的 HEAD。改前红、改后绿；上面的 worktree 步骤改后也通过。这条检查只在 unix 上跑。
+
+### 三、PR 审查里补的一处
+
+Devin Review 在 PR #8 上指出：`settle` 手里的记录可能是任务收尾前读的 `running`，等它查表时任务已经从表里拿掉，它会判成 `unknown` 写回去，把跑完的 recap、退出码、改动清单盖掉。这个先后在本轮之前就有。改成查不到在跑时重读一次盘上的记录，不是 `running` 就用盘上的；靠的是上面「写完记录才从表里拿掉」这个顺序。回归测试 `a_stale_running_copy_does_not_overwrite_the_finished_record` 改前红（返回 `Unknown`）、改后绿。
+
+PR 第一次 CI 的 Windows 作业失败：测试钩子只有 unix 的测试在用，Windows 上报 dead_code。钩子改成只在 unix 的测试里编。
+
+**证据：** 全仓 `cargo test --workspace --all-targets --locked`：**1417 passed / 0 failed**（Linux 本机，64 个测试目标，比 §118 多三条新测试）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。
+
+**边界：** 未换本机二进制、未重启守护进程；PR 待审，未合并。
+
+## 120. `gh` 三层分级命令策略（含 `gh:write`）与 `allowed-commands` 增删语法（2026-11-22）
+
+**起因：** 用户反馈在 `allowed-commands` 中加入 `gh` 后，日常写操作（如 `gh repo create`）仍被硬拒，即便口头同意放权、AI 重传 `confirm=true` 也无法通过；同时 `gld set <项目> allowed-commands=...` 只能整值覆盖，无法按项追加或移除。
+
+**决策变更记录：**
+
+- **确认来源：** 用户于 2026-11-21 在会话 `e11a2c718bde488cbe28962b33e178f6` 中明确选定「方案 A（`gh` 三层分级，日常写走 `confirm=true`，支持 `gh:write` 免确认）+ `gld set` 支持 `+=` / `-=`」，并要求同步更新相关文档。
+- **取代的旧决定：**
+  - `docs/reviews/2026-09-19-gld-tooling-review-and-plan.md` 的 **A05**（「GitHub 只读规则不允许 rerun/cancel、PR/release/secret 写操作或任意写 API；未授权 SSH 不建立连接」）中关于把 `gh` 常规写操作（`rerun`/`cancel`、日常 PR/Issue/Release 写等）一律硬拒的部分；凭据与不可逆高危操作（`auth token`、`secret`、`variable`、`ssh-key`、`gpg-key`、`repo delete`、`release delete`、`gh api` 等）仍维持硬拒，未授权 SSH 规则不变。
+  - `docs/reviews/2026-09-19-gld-tooling-review-and-plan.md` 的 **U3 第二批**（「`gh` 加进白名单 = 只读诊断」「其余一律拒（`github_command_not_read_only`）」）。
+  - 原 `docs/security.md` 中「写操作请自己在终端做」的表述。
+- **三层分级内容（`guarded` 模式下）：**
+  1. **只读诊断（白名单含 `gh` 即直接放行）：** `run list|view|watch`、`workflow list|view`、`pr list|view|diff|checks|status`、`issue list|view|status`、`release list|view`、`repo list|view`、`cache list`、`label list`、`auth status`、`version`、`status`。
+  2. **日常写操作（白名单含 `gh` 时返回 `ConfirmationRequired`，用户确认后重传 `confirm=true` 放行；白名单配 `gh:write` 时免确认直接放行）：** `repo create|clone|fork|edit|sync|rename`、`pr create|edit|comment|review|ready|close|reopen|checkout|merge|update-branch`、`issue create|edit|comment|close|reopen|develop|pin|unpin|lock|unlock`、`run rerun|cancel`、`workflow run|enable|disable`、`release create|edit|upload`、`label create|edit|clone`、`gist create|edit|clone`。`docs/security.md` 已明示：配了 `gh:write` 后，AI 不经询问即可执行合并 PR（含 `--delete-branch` 删分支）、`repo sync --force`、`release upload --clobber` 等操作。
+  3. **高危与凭据操作（无论 `confirm=true` 还是 `gh:write` 一律硬拒，仅 `command-policy=all` 放行）：** `auth token`、`secret`、`variable`、`ssh-key`、`gpg-key`、`repo delete|archive|unarchive|deploy-key`、`release delete|delete-asset`、`gh api`、未登记子命令，以及 `gh repo clone` / `gh repo fork` 带 `--` 透传或 `--config`/`-c`/`--upload-pack`/`-u`、`gh pr merge --admin`、`gh repo edit --visibility`（含 `--flag=value` 及选项位于子命令前后的写法）；`clone`/`fork` 目标路径落在项目目录外时按 `workspace_path_protected` 拦截。
+- **兼容性影响：** 拒绝原因码由 `github_command_not_read_only` 更名为 `github_command_not_allowed`；按旧原因码字符串精确匹配的调用方会受影响，需同步更新为新码。
+
+**同步改动与审查修复：**
+
+- **`gld set` 增量修改：** `allowed-commands` 与 `actions.allowed-commands` 支持 `+=` 和 `-=`（自动去重并保留 `only:` 前缀语义，`=` 保持整值替换），策略拒绝提示中的建议命令同步改用 `+=`。
+- **并发写回修复（Devin Review）：** `set_workspace_fields` 原先先 `profile_by_id` 释放锁、在锁外应用 `+=`/`-=` 再 `update_workspace` 整份写回，并发调用会丢更新；改为在单次 `with_data` 临界区（持内存锁与文件锁并重读磁盘）内原子完成读、改、校验和落盘。
+- **PR #9 审查意见落实：** 收紧 `gh repo clone`/`fork` 透传与 git 选项、`gh pr merge --admin`、`gh repo edit --visibility` 及项目外 clone 路径；将 `gh run watch` 归入只读层；所有新增拦截项均按「改前跑失败、改后通过」补齐 `confirm=true` 与 `gh:write` 双场景回归测试。
+
+**证据：**
+
+- 定向测试：`cargo test -p gld-core --test call_tool_contract --locked`（83 passed / 0 failed）、`cargo test -p gld-core --lib policy --locked`（16 passed / 0 failed）、`cargo test -p gld-core --lib concurrent_allowed_commands_delta_updates --locked`（1 passed / 0 failed）。
+- 补修 `gh` 克隆参数外部路径检查（只扫参数并拦截裸 `..`、`~`/`~user`、`$VAR`/命令替换以及含空格的同前缀绝对路径如 `'<workspace> copy/repo'`，同时确认 `gh repo clone o/r sub/dir` 放行）：先红（`gh repo clone o/r ~` 放行失败）后绿，上述定向测试、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均在隔离 `GLD_HOME` 下通过。
+- 全仓验证（Linux 本机，隔离 `GLD_HOME`，Node v24.22.2 在 `PATH` 中）：`cargo test --workspace --all-targets --locked` **1420 passed / 0 failed / 0 ignored**（64 个测试目标）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 均通过。
+
+**边界：** 未换本机二进制、未重启守护进程；PR #9 待审，未合并。
+
+## 121. launchd / systemd 的升级路径也先查在跑的命令：`gld daemon stop --if-idle`（2026-11-22）
+
+**起因：** §40 给 `gld daemon restart` 加了「有命令在跑就不重启」，当时写明 `gld daemon stop` 和 launchd 那条路径没加。§113 之后本机守护进程归 launchd 管，升级用的是 `gld daemon stop && launchctl kickstart gui/$(id -u)/dev.gld.daemon`，正好走不到那段检查；`docs/install.md` 和 `docs/daemon.md` 只能写「这句不查，先 `pgrep` 自己看一眼」。
+
+**先查清的事实：** restart 的检查在 `crates/cli/src/commands/daemon.rs` 的 `refuse_while_commands_run`。它查两样：`runs::running_under`（守护进程起的命令）和 `gld_core::agents::running_under`（委派的 Agent，RFC-0009），守护进程和各执行代的 pid 都算。读的是盘上的运行记录，不问守护进程；守护进程不在或不响应时不拦。所以 Agent 不用另开待办。
+
+**改动：**
+
+- `gld daemon stop` 加 `--if-idle`，默认不开。带上时先调 `refuse_while_commands_run`，有命令或 Agent 在跑就不停、按项目列出来，退出码 1，`&&` 后面的 `launchctl kickstart` 不会执行。没有另写一份检查，只给那个函数加了一个参数区分措辞。
+- 和 restart 一样的：检查本身、列表格式、`--json` 里的 `running_commands`、退出码。不一样的只有措辞：提示是「没停守护进程」，`--json` 是 `{"stopped": false, ...}`（restart 是 `"restarted": false`）；照抄 restart 的话 stop 会说「没重启」。
+- 不带 `--if-idle` 的 `stop` 没变，§40「stop 的意思就是停」不推翻。`--if-idle` 和 `--force` 一起给由 clap 报用法错误。
+- 没动守护进程的 `Request` / `Response`，`PROTOCOL_VERSION` 不变。
+- 文档：`docs/install.md` 升级第 4 步、`docs/daemon.md` 命令表和两处 launchd 升级说明换成 `gld daemon stop --if-idle && launchctl kickstart ...`，删掉「先 pgrep」；`docs/cli.md` 由 `scripts/gen-cli-docs.sh` 生成；`task_plan.md` 改「重启前等空闲」行和本机部署配置里的升级命令。
+
+**证据：**
+
+- 新增集成测试 `stop_if_idle_refuses_while_a_command_runs_and_plain_stop_still_stops`（`crates/cli/tests/daemon_lifecycle.rs`）。改前红：`error: unexpected argument '--if-idle' found`。改后绿，断言：有命令在跑时退出码非零、stderr 列出命令、守护进程 pid 不变、命令还在跑；`--json` 给出 `stopped: false` 和同一个 `session_id`；`--if-idle --force` 被拒、守护进程不动；不带选项的 `stop` 照旧停掉命令；空闲时 `--if-idle` 正常停，守护进程不在时回 `NotRunning`。
+- 全仓（Linux，隔离 `GLD_HOME`，Node v24.22.2 在 `PATH` 中）：`cargo test --workspace --all-targets --locked` **1421 passed / 0 failed / 0 ignored**（64 个测试目标，比 §120 多这一条）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check` 通过。`PATH` 里没有 node 时 `command_write_paths` 的 `copying_an_outside_file_into_the_workspace_is_allowed` 会失败（`Program not found on PATH: node`），和本次改动无关。
+
+**没验证的：**
+
+- 真实 launchd 下的整条命令（`stop --if-idle && launchctl kickstart`）没跑：这轮不换本机二进制、不重启守护进程。集成测试覆盖的是 `--if-idle` 自己的退出码和不动守护进程。
+- `docs/daemon.md` 里 systemd 的写法 `gld daemon stop --if-idle && systemctl --user start gld` 没在真机上跑过。
+- 委派的 Agent 在跑时 `--if-idle` 拦不拦，没有单独的集成测试；它和 restart 走同一个函数，那一段本次没改。
+
+**边界：** 未换本机二进制、未重启守护进程、未动 grant、未发版。`gld restart`（服务重启）仍不查在跑的命令。
+
+## 122. 按信任边界拆出授权模型与传输机制（2026-11-12）
 
 **用户要求：**GLD 像 CCNM 一样，在 crate 层按信任边界优化设计，为后续功能保留可维护的接入面。
 本轮从 `main@508571c`、干净工作树开始；按最新要求新增 D17，首批完成 A/B，后续排队只在 `task_plan.md`。
@@ -4766,7 +4959,7 @@ test 和 Clippy 实际通过 cargo `--config env.GLD_HOME=…` 指向仓库 targ
 
 **文档最终复验：**命令、链接、公开路径与提示四个测试目标合计 7 passed / 0 failed；随后清理 Markdown 文件末尾多余空行。
 
-## 116. 提取配置与进程间纯协议（2026-11-12）
+## 123. 提取配置与进程间纯协议（2026-11-12）
 
 **用户要求继续 D17。** 本轮从干净的 `main@f6cc335` 开始，该提交已完成 A/B，比本地 `origin/main` 超前 1 个提交。
 继续执行 C，按 [RFC-0014](../rfc/0014-trust-boundary-crates.md) 先解开纯数据对运行实现的引用，再提取 `gld-protocol`。
@@ -4840,7 +5033,7 @@ test 和 Clippy 通过 cargo `--config env.GLD_HOME=…` 指向本轮专用 targ
 **文档收尾复验：**命令、相对链接、公开路径与提示四个测试目标合计 **7 passed / 0 failed**；`git diff --check` 通过。独立审查已核对任务状态、方法入口调整和本节验证数字。
 
 
-## 117. 提取工作区文件执行边界（2026-11-12）
+## 124. 提取工作区文件执行边界（2026-11-12）
 
 **用户继续 D17。** 本轮从干净的 `main@2e36d28` 开始，比本地 `origin/main` 超前 2 个提交。
 D1 的源码迁移与本机回归已通过；Windows CI 测试入口同步被工作流保护规则拦下，待用户明确授权。
@@ -4880,7 +5073,7 @@ D1 的源码迁移与本机回归已通过；Windows CI 测试入口同步被工
 
 67 个原文件/路径/补丁测试随实现进入 runtime，新增保护目录别名、显式工作区豁免、提交回调时序 3 条，共 **70 条**。
 数值边界原测试移入 protocol，protocol 合计 **21 条**；core 新增工厂注入保护目录的 1 条。
-全仓相较 §116 净增 **4 条**，既有授权、路径、调用方版本链、共享锁、Notebook 事务和 CLI 集成继续保留。
+全仓相较 §123 净增 **4 条**，既有授权、路径、调用方版本链、共享锁、Notebook 事务和 CLI 集成继续保留。
 
 ### 本机验证
 
@@ -4931,28 +5124,28 @@ if {
 **文档收尾复验：**命令、链接、公开路径与提示四个目标合计 **7 passed / 0 failed**，退出 0；最终 `git diff --check` 通过。独立审查已核对测试数字、构造入口、状态归属及 CI 待授权状态。
 
 
-## 118. D17-D1 授权后的 CI 与文档收尾（2026-11-12）
+## 125. D17-D1 授权后的 CI 与文档收尾（2026-11-12）
 
-用户明确批准 Windows CI 测试入口修改，并要求同步提交与文档。接续 §117 的待提交改动，起点仍是 `main@2e36d28`。
-按该授权通过 apply_patch 的 `confirm=true` 完成工作流修改；§117 中的待授权状态已在本轮解除。
+用户明确批准 Windows CI 测试入口修改，并要求同步提交与文档。接续 §124 的待提交改动，起点仍是 `main@2e36d28`。
+按该授权通过 apply_patch 的 `confirm=true` 完成工作流修改；§124 中的待授权状态已在本轮解除。
 
 - Windows 的“补丁落盘与写锁测试”先跑 `gld-runtime` 的 `patch`，成功后再跑 `gld-core` 的 `tools::workspace_runtime`，使用同一日志和失败报告。
 - 修改限定于该测试条件；两组通过 `&&` 连接，保留任意一组失败时的失败结果。
 - development 同步实际测试归属和执行顺序；task_plan 将 D1 标为完成，下一实施入口改为 D2。
 - 架构与 RFC 保留 D1 的显式保护目录、共享参数契约和调用侧锁/账本约束；D2 只排队，本轮完成 D1 收尾。
 
-Rust 源码保持 §117 已验证的快照：69 个目标 **1428 passed / 0 failed / 0 ignored**，严格 Clippy、格式检查均通过；
+Rust 源码保持 §124 已验证的快照：69 个目标 **1428 passed / 0 failed / 0 ignored**，严格 Clippy、格式检查均通过；
 新过滤器在本机分别选中并通过 **38 / 14** 条测试。本次主要复核新增的 CI 控制流和最终文档。
 
 从实际工作流提取 if 条件，在本地 `bash -eo pipefail` 下用命令退出码替身验证四种组合：
 两组均成功时退出 0；第一组、第二组或两组失败时均退出 1，且第一组失败不会执行第二组。
 这覆盖 shell 的控制流，实际 Windows Cargo 与文件锁仍由后续远端 CI 验证；本轮未推送或触发远端 CI。
 
-源码、测试、CI 与相关文档纳入同一份 D1 提交，外部依赖锁定版本沿用；完整源码验证与拆分接口说明见 §117。
+源码、测试、CI 与相关文档纳入同一份 D1 提交，外部依赖锁定版本沿用；完整源码验证与拆分接口说明见 §124。
 
 **授权后收尾复验：**四个文档目标合计 **7 passed / 0 failed**，格式检查退出 0；独立审查确认 CI 修改范围、失败传播、runtime 文件/fixture 完整性及状态文档一致。
 
-## 119. D17-D2：命令、会话与共享执行状态归入 runtime（2026-11-13）
+## 126. D17-D2：命令、会话与共享执行状态归入 runtime（2026-11-13）
 
 从干净的 `main@933979a` 继续，起点比本地 `origin/main` 超前 3 个提交。
 按用户“继续深入”推进命令执行切片，沿已获准的范围同步源码、CI 入口、文档与提交。
@@ -5031,7 +5224,7 @@ Windows 的补丁与写锁步骤现依次执行 runtime 的 patch、runtime 的 
 本轮未推送、未触发远端 CI、未换装或重启运行中的服务，未改项目、节点或 grant 配置。
 
 
-## 120. D17-E：Agent 档案、任务记录与进程生命周期拆分（2026-11-14）
+## 127. D17-E：Agent 档案、任务记录与进程生命周期拆分（2026-11-14）
 
 从干净的 `main@3c5fc77` 继续，起点比本地 `origin/main` 超前 4 个提交。依据 RFC-0014 的下一切片，
 只调整代码归属与实际调用接口，不改变 MCP 回包、Agent 档案/任务 JSON、命令行帮助或 daemon 协议。
@@ -5093,10 +5286,10 @@ CI 仍由 Linux/macOS 的全 workspace 测试与 Windows 的全 workspace 编译
 
 文件连接器 `Filesystem.read_multiple_files` 因路径白名单返回 `Access denied - path outside allowed directories`，
 改用本地 shell 定点读写，没有修改白名单。它不是 gld 工具错误。
-本轮构建与测试走本地 shell，gld 仅用于运行版本查询，因此不据此宣布 §119 的内部错误已修复。
+本轮构建与测试走本地 shell，gld 仅用于运行版本查询，因此不据此宣布 §126 的内部错误已修复。
 
 
-## 121. D17-F1：先分开请求归属与宿主路由（2026-11-14）
+## 128. D17-F1：先分开请求归属与宿主路由（2026-11-14）
 
 用户要求继续 D17-F，先梳理宿主边界和依赖，再按能单独验证的小步拆分；本轮不推送、不部署。
 起点为干净的 `main@768fe95`，比本地 `origin/main` 超前 5 个提交。
@@ -5164,7 +5357,7 @@ macOS、隔离 GLD_HOME；外部依赖离线使用，没有安装或升级全局
 
 状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。
 
-## 122. D18 规划：统一客户端授权与动态全部项目（2026-11-14）
+## 129. D18 规划：统一客户端授权与动态全部项目（2026-11-14）
 
 ### 122.1 用户决定与本次范围
 
@@ -5227,10 +5420,10 @@ env.GLD_HOME.force 两个标量配置后，隔离目录生效，严格 Clippy �
 本轮未出现新的 gld 内部错误，也没有把此前间歇恢复宣布为根因修复。
 
 
-## 123. D17-F2：原生节点连接由宿主创建、共享和关闭（2026-11-15）
+## 130. D17-F2：原生节点连接由宿主创建、共享和关闭（2026-11-15）
 
 从干净的 `main@6b1c113` 开始，比本地 `origin/main` 超前 7 个提交。先按源码追踪 Nodes 创建、共享、
-关闭和换代，再改资源归属。保留 §122 的 D18 规划与实施顺序，本轮没有实施新授权行为。
+关闭和换代，再改资源归属。保留 §129 的 D18 规划与实施顺序，本轮没有实施新授权行为。
 
 ### 123.1 实际链路与改动
 
@@ -5291,7 +5484,7 @@ Cargo manifest/lock、CI、私有协议、nodes 的 client/connection/reconnect/
 状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。
 
 
-## 124. D17-F3.1：应用状态与监听管理分开，由宿主显式装配（2026-11-15）
+## 131. D17-F3.1：应用状态与监听管理分开，由宿主显式装配（2026-11-15）
 
 从干净的 `main@598ed40` 开始，比本地 `origin/main` 超前 8 个提交。先核对 App 字段、生命周期锁及真实消费者，
 将 F3 分为监听管理与执行代选路两片。本片不改变工具/委派/撤销的选路，D18 授权仍未实施。
@@ -5329,7 +5522,7 @@ macOS、隔离 GLD_HOME：Manager 两条单测、App 67 条、service_lifecycle 
 本轮不推送、不部署，未操作真实授权配置，未做真实跨平台或在线升级验收。当前状态仍是 F3 进行中。
 
 
-## 125. D17-F3.2：daemon 显式装配执行代选路与清理（2026-11-15）
+## 132. D17-F3.2：daemon 显式装配执行代选路与清理（2026-11-15）
 
 接续已提交的 F3.1（`d6b95db`），起点工作区干净，比本地 origin/main 超前 9 个提交。
 本片保持监听管理器装配，移除 App 对全局 Router 的选择，把工具、委派、撤销、Planning 和退出接回宿主的同一实例。
@@ -5384,7 +5577,7 @@ F3 完成不代表宿主实现已移出 core：HTTP/Hub/凭据和日志适配、
 
 状态与审查同步后，命令文档、生成脚本、隐私路径、相对链接四组复验合计 **9 passed / 0 failed**。
 
-## 126. D17-F4.1：宿主 Router/Link 迁入 gld-host（2026-11-15）
+## 133. D17-F4.1：宿主 Router/Link 迁入 gld-host（2026-11-15）
 
 从干净的 `main@0c8bc3a` 开始，本地比 `origin/main` 超前 10 个提交。先核对两个方向的真实依赖：
 
@@ -5404,7 +5597,7 @@ CLI Actions/网关、换代、原生节点、OAuth、grant 共 86 条通过。Ac
 确实由同一个执行代 PID 启动，不是在宿主本地开另一份会话。独立静态审查未发现阻断回归。
 锁文件仅增加工作区内部包、依赖边，没有外部升级；协议、凭据文件、连接、重试与启停语义未改。不推送、不部署。
 
-## 127. D17-F4.2：MCP/Actions HTTP、OAuth 与监听凭据接入归宿主（2026-11-15）
+## 134. D17-F4.2：MCP/Actions HTTP、OAuth 与监听凭据接入归宿主（2026-11-15）
 
 `daf3ce6` 只迁真实 HTTP 入口和会话。宿主读取监听启动凭据、创建 OAuthRuntime、绑定端口；
 core 保留 `mcp::handle_request` 给工作区监听/执行代共用，Supervisor 继续管理运行状态与停止顺序。
@@ -5418,7 +5611,7 @@ macOS 离线、隔离 GLD_HOME：40 条原 HTTP/认证测试迁随实现，AuthC
 6 条测试用独立子进程，校验精确执行一条。all-targets 首查发现 fixture 漏 revoke、构造器名称和局部变量冲突；修正后通过。
 宿主 40 条、CLI 相关 6 组共 53 条、严格 Clippy 和依赖边界通过。独立静态审查无阻断发现，外部锁定包不变。
 
-## 128. D17-F4.3：全局网关迁入宿主（2026-11-15）
+## 135. D17-F4.3：全局网关迁入宿主（2026-11-15）
 
 网关监听、流式 HTTP 转发、转发头清理、路由 opt-in、隧道和公开地址回写整体移至 host，原函数仅改导入路径。
 App 只保留网关配置操作；Hub 与工作区服务持原先的次序，在绑定前通过一个显式入口确保网关已启动。
@@ -5427,7 +5620,7 @@ App 只保留网关配置操作；Hub 与工作区服务持原先的次序，在
 macOS 离线、隔离 GLD_HOME：host 独立编译、网关 2 条单测和 Actions/网关、原生节点、OAuth、服务生命周期 62 条通过。
 Cargo.lock 仅宿主增加两个既有依赖边。未改协议、未推送、未部署。
 
-## 129. D17-F4.4：Hub 监听与原生节点服务端归宿主（2026-11-15）
+## 136. D17-F4.4：Hub 监听与原生节点服务端归宿主（2026-11-15）
 
 活动 Hub 的监听任务、隧道、唯一 Nodes 表与配对 HTTP/Upgrade/WSS 收发迁入 host。直连入口、网关和 daemon 节点操作
 仍取同一宿主表；Router 复用 NodeBridge，执行代不接触真实节点 socket。App 通过 ListenerHost 控制 Hub，
@@ -5442,7 +5635,7 @@ core 的 Axum 只剩测试使用，Cargo metadata 拦住生产反向宿主依赖
 独立审查核对同表、失败不发布、停机、转发头、身份和存储，不作为真机/线上验收，不推送、不部署。
 
 
-## 130. D17-F4.5：工作区监听管理与宿主边界收口（2026-11-15）
+## 137. D17-F4.5：工作区监听管理与宿主边界收口（2026-11-15）
 
 接续 F4.4（`b59cfb4`）。真实工作区监听表、用量、端口、停止信号和任务句柄由宿主 `RuntimeSupervisor` 实现。
 App 通过 `WorkspaceListeners` 与 `ListenerHost` 使用实际需要的状态/操作；同一 ListenerManager 继续串行化重启、
@@ -5471,11 +5664,11 @@ App 通过 `WorkspaceListeners` 与 `ListenerHost` 使用实际需要的状态/�
 
 状态和架构文档同步后，命令参考、生成脚本、隐私路径与相对链接 9 条复验通过。
 
-## 131. D18 重新设计：移除旧兼容，统一授权模型（2026-11-15）
+## 138. D18 重新设计：移除旧兼容，统一授权模型（2026-11-15）
 
 本轮从干净的 `main@3f485055` 开始，本地比 `origin/main` 超前 15 个提交。
-用户明确要求“不需要兼容旧代码，重新优化”，替代 §122 中旧命令、数据和协议兼容的规划。
-D17-F 源码边界及本机验证已完成（§126–§130）；本轮只改设计与排期，D18 代码没有实施。
+用户明确要求“不需要兼容旧代码，重新优化”，替代 §129 中旧命令、数据和协议兼容的规划。
+D17-F 源码边界及本机验证已完成（§133–§137）；本轮只改设计与排期，D18 代码没有实施。
 
 **源码核对后的设计调整：**
 
@@ -5519,9 +5712,9 @@ RFC-0015 重写，task_plan 更新 A–E 顺序与完成标准，RFC-0007/0014�
 本轮未创建/轮换/撤销真实授权，未读取凭据配置，未部署、重启、推送、发布或做真实客户端切换。
 下一项源码工作仍是 task_plan 的 D18-A；当前运行连接与凭据不会因本轮文档提交改变。
 
-## 132. 2026-11-15：D18-A 显式授权模型、新存储与消费者切换
+## 139. 2026-11-15：D18-A 显式授权模型、新存储与消费者切换
 
-**范围：**从干净的 `main@05bec55c` 开始，执行 §131 与 RFC-0015 的 A 阶段。用户已明确不保留旧授权兼容；
+**范围：**从干净的 `main@05bec55c` 开始，执行 §138 与 RFC-0015 的 A 阶段。用户已明确不保留旧授权兼容；
 本轮实现基础模型、存储、可信执行边界和消费者，不把后续签发、认证与远端接通提前算作完成。
 
 **源码边界：**
@@ -5566,7 +5759,7 @@ RFC-0015 重写，task_plan 更新 A–E 顺序与完成标准，RFC-0007/0014�
 - AccessStore 定向 8/8，包含句柄副本回归由红转绿；generation_boundary 30/30，Hub 9/9，native 33/33。
   Actions 的 API key、OAuth PKCE / refresh 与工具调用保持正向验证，项目、命令、执行代切换等本地正向回归继续执行。
 - 文档命令、私人路径和相对链接在全仓回归中通过；CLI 文档由实际脚本重新生成。
-  Windows 交叉检查、远端 CI 和真实跨平台/客户端切换仍沿用 §130 的具体缺口，本轮没有新增这些证据。
+  Windows 交叉检查、远端 CI 和真实跨平台/客户端切换仍沿用 §137 的具体缺口，本轮没有新增这些证据。
 
 旧成功矩阵不能机械沿用：native 集成从原 49 项改为当前 A 阶段 33 项，没有 ignore、伪造 grant 或网络 LocalOperator。
 配对、邀请丢包恢复、TLS、Hub 公钥、CONNECT/NO_PROXY、配置锁、退出与自启动仍使用实际进程和网络验证；
@@ -5592,7 +5785,7 @@ concepts、architecture、security、connect-clients、project-lifecycle、READM
 本轮未读取、创建、轮换或撤销真实凭据，未换装二进制、重启运行服务、推送或发布。
 A 不是完整客户端接入版本；三种凭据签发与认证、动态远端授权、统一命令和真实客户端切换分别由 B/C/D/E 完成。
 
-## 133. 2026-11-15：D18 执行代在握手完成前拒绝不匹配消息
+## 140. 2026-11-15：D18 执行代在握手完成前拒绝不匹配消息
 
 **范围：**用户要求先按 RFC-0015 复核旧写者、会话与版本边界，验证后小步提交，不推送、不部署。
 从 `cd0103b` 复核发现，执行代收到 Hello 只匹配消息种类，未校验宿主的 generation_protocol；
@@ -5615,7 +5808,7 @@ Cargo 报告释放 **1.2 GiB**；保留历史 gld 测试程序后重跑通过。
 没有扩大白名单或用其他解释器执行这些被拒命令，改用 check_command 明确允许的包级 Cargo clean。
 concepts 与 architecture 同步解释拒绝时点。没有改动运行服务或真实授权。
 
-## 134. 2026-11-15：D18-B1 当前授权读取端与本机项目范围验证
+## 141. 2026-11-15：D18-B1 当前授权读取端与本机项目范围验证
 
 **实现：**core 新增 `AccessReader::authenticate_token`，每次按公开凭据 ID 取得最新已提交快照，
 校验 Token 用途、Active 状态、期限和摘要后创建本次 AuthContext。没有连接级权限缓存、旧存储回退或 OAuth/URL 猜测分派。
@@ -5638,9 +5831,9 @@ concepts、architecture、security 与任务计划同步。未更改 CLI 帮助�
 创建默认 All、Selected 创建校验、签发/轮换用例和旧授权重建提示仍需 B2；
 三类宿主入口与真实客户端是 B3/E，CCNM 租约和原生节点交集仍属 C。本轮内核测试不替代这些正向验收。
 
-## 135. 2026-11-15：D18 真实旧写者、双向版本拒绝与备份回退演练
+## 142. 2026-11-15：D18 真实旧写者、双向版本拒绝与备份回退演练
 
-**对象：**独立检出并离线构建 `05bec55c`，与包含 §133/§134 的 `0be8850` 当前程序比较。
+**对象：**独立检出并离线构建 `05bec55c`，与包含 §140/§141 的 `0be8850` 当前程序比较。
 历史程序是 daemon 18 / generation 1 / state 1，当前程序是 19 / 2 / 2；没有换装在用的 `1717aaf`。
 可重复入口为 `crates/cli/examples/access_cutover_rehearsal.rs`，显式要求两个程序路径；
 全部配置、凭据、项目和子进程输出位于新建临时目录，子输出不回显。命令有超时，隔离 daemon 由创建它的同版 CLI 收回。
@@ -5682,7 +5875,7 @@ CLI 帮助未改变，没有新增依赖或修改锁文件。跨平台真机、�
 本轮分配三名独立子代理负责握手、历史边界/演练和持久归属，使用用户允许的较轻模型；主代理统一构建、复核和提交。
 没有操作真实凭据、换装程序、重启在用服务、推送、部署或发布。
 
-## 136. 2026-11-15：D18-B2 统一创建材料与原子轮换内核
+## 143. 2026-11-15：D18-B2 统一创建材料与原子轮换内核
 
 **实现：**复用 ring/base64/UUID 依赖，三种创建凭据按用途和版本显式编码，秘密使用 32 字节随机值。
 统一 TTL 解析区分未指定、正整数时长与不限期；创建默认 token 30 天、URL 8 小时，OAuth 拒绝 TTL。
@@ -5700,7 +5893,7 @@ OAuth/URL 材料重开后保留修订及 Origin，以及稳定 CallerId 随当�
 RFC、concepts、architecture 与任务计划同步。没有新增依赖、修改锁文件或协议 DTO；
 HTTP、CLI 与真实客户端交付不包含在本小步的通过结论内。未触碰真实授权、推送或部署。
 
-## 137. 2026-11-15：D18-B2 应用创建范围、旧授权重建提示与完整验证
+## 144. 2026-11-15：D18-B2 应用创建范围、旧授权重建提示与完整验证
 
 **应用用例：**新增 GrantCreate 与 GrantIssued，默认 token、AllProjects、只读、服务能力为空。
 创建接收可信宿主实际使用的 Hub；省略项目不读取成员快照，零成员或成员发现故障时仍可建立 All。
@@ -5723,7 +5916,7 @@ Selected 失败不发布和 All 显式服务能力。涉及 AppData 的测试持
 完整 stdout 分四个 32768 字节页读取，73 个 test result 与 stderr 的 73 个运行目标对应。
 `cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 均通过。
 CLI 帮助、daemon/执行代 DTO、协议版本和锁文件均未改；未把内核与格式解析测试当成 HTTP 正向接入证据。
-旧写者和异版程序真实演练仍沿用 §135 的历史结果，本轮没有重建历史程序或重跑该演练。
+旧写者和异版程序真实演练仍沿用 §142 的历史结果，本轮没有重建历史程序或重跑该演练。
 
 **工具与协作：**两名 gpt-6.1-sol、medium 子代理分别处理材料/旧数据边界和范围解析/独立审查；
 主代理完成存储与应用编排、统一构建、日志统计和提交。避免并行 Cargo 与重复仓库盘点。
@@ -5735,7 +5928,7 @@ concepts、architecture、security、RFC 与唯一任务状态表已同步。B2 
 三类 HTTP 入口、OAuth access/refresh 修订失效、隧道绑定、远端权限及统一 CLI 仍按 B3/C/D 接续。
 没有操作真实授权、推送、部署、换装程序或重启在用服务。
 
-## 138. 2026-11-16：D18-B3.1 HTTP 凭据来源先行分类
+## 145. 2026-11-16：D18-B3.1 HTTP 凭据来源先行分类
 
 新建 `crates/host/src/auth/source.rs`，在存储验证之前分类 Bearer 专用 token、OAuth access Bearer、URL secret 和受信隧道头。
 专用 token 格式按版本与用途严格解析；格式损坏或 URL/OAuth 确认口令冒充 token 时不再尝试其他格式。
@@ -5757,7 +5950,7 @@ agent_manage 探测结果：本项目 `delegation=off`，所有列出的 agent �
 签发和修订验证、URL Origin、隧道来源绑定，再完成单工作区项目上限与 RFC-0015 正向测试。
 当前小步只验证来源冲突与拒绝边界，不代表新的客户端可连接。
 
-## 139. 2026-11-16：D18-B3.2 共享授权读取端与 API token HTTP 正向接通
+## 146. 2026-11-16：D18-B3.2 共享授权读取端与 API token HTTP 正向接通
 
 **源码改动：**daemon 与 CLI 本机装配复用同一个 `Arc<App>`；Hub 与单工作区监听器从该 App 获取
 `AccessReader`，不在宿主新建独立授权存储或长效 AuthContext 缓存。创建／轮换／撤销发布新快照后，
@@ -5788,4 +5981,3 @@ subagent，也未调整委派开关。未操作在用授权、推送、部署或
 
 **未完成：**OAuth access/refresh 的 grant+client_id 绑定及修订验证、URL Origin、
 隧道显式绑定、全量真实客户端正向接入和统一 CLI 仍按 B3.3/C/D/E 推进。
-

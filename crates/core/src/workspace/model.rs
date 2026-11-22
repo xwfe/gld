@@ -166,6 +166,9 @@ pub struct ActionsConfig {
     pub oauth_scopes: String,
     #[serde(default = "default_allowed_commands")]
     pub allowed_commands: String,
+    /// Actions 侧 `exec_command` 的关卡，和 [`RuntimeConfig::command_policy`] 同一组取值。
+    #[serde(default = "default_command_policy")]
+    pub command_policy: String,
     #[serde(default = "default_max_patch_bytes")]
     pub max_patch_bytes: u32,
     #[serde(default)]
@@ -346,6 +349,7 @@ impl Default for ActionsConfig {
             oauth_client_id: default_actions_oauth_client_id(),
             oauth_scopes: String::new(),
             allowed_commands: default_allowed_commands(),
+            command_policy: default_command_policy(),
             max_patch_bytes: default_max_patch_bytes(),
             use_shared_secrets: false,
             confine_reads: default_confine_reads(),
@@ -529,6 +533,7 @@ mod tests {
 
         let actions: ActionsConfig = serde_json::from_str("{}").expect("旧配置也该能读");
         assert!(actions.confine_reads, "Actions 侧升级后应当默认收紧");
+        assert_eq!(actions.command_policy, "guarded");
     }
 
     /// 显式写了 false 就要认，别被 default 覆盖掉。

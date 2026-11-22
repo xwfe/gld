@@ -593,7 +593,7 @@ Options:
 改项目配置：gld set api tool-profile=read-only（字段见 gld fields）
 
   gld set tool-profile=read-only              当前目录对应的项目
-  gld set api allowed-commands=rg,gh          按名称指定项目
+  gld set api allowed-commands+=gh            追加白名单命令（-= 移除，= 整值替换）
 
 下一次调用就生效，不用重启。服务本身的端口、认证、公网入口用 gld upgrade / gld share。
 
@@ -2631,9 +2631,10 @@ Usage: gld daemon stop [OPTIONS]
 Options:
       --force           超时后强制结束进程树
   -w, --workspace <WS>  目标项目：id、id 前缀（≥4 位）、名称或路径；省略时按当前目录推断 [env: GLD_WORKSPACE=]
+      --if-idle         有在跑的命令时不停，列出来（launchd / systemd 管着守护进程、换完二进制要停它时用）
       --json            以 JSON 输出结果（脚本友好；提示信息仍走 stderr）
-      --wait <SECS>     等待退出的秒数 [default: 20]
       --no-autostart    守护进程未运行时不要自动拉起（需要它时以退出码 3 报错）
+      --wait <SECS>     等待退出的秒数 [default: 20]
       --timeout <SECS>  等待守护进程响应的秒数（默认 30，启动服务 / 隧道类为 180）
       --home <DIR>      数据目录（等价于环境变量 GLD_HOME，默认 ~/.config/gld） [env: GLD_HOME=]
       --no-color        关闭彩色输出（也可设置环境变量 NO_COLOR）
@@ -2749,7 +2750,7 @@ tool-profile              compact | core | advanced | read-only  暴露给客户
 permission-mode           trusted | dangerous                    工具权限模式；两个值现在行为完全一样（留着是为了老配置照样能读），见 docs/concepts.md
 history-recording         true | false                           是否允许把会话检查点写入 docs/history-session
 history-context           逗号分隔的编号，或空                   新会话注入哪些历史档案（有界快照）
-allowed-commands          逗号分隔                               在默认白名单之外追加的命令（如 rg、gh）；写成 only:cargo,git 则表示只允许这些。gh 只开只读诊断子命令，ssh 加进来等于放开任意远端 shell，见 docs/security.md
+allowed-commands          逗号分隔（支持 += 追加、-= 移除）      在默认白名单之外追加的命令（如 rg、gh、gh:write）；写成 only:cargo,git 则表示只允许这些。可用 allowed-commands+=gh 追加、-=rg 移除而不覆盖已有项。见 docs/security.md
 confine-reads             true | false                           读工具只许读 Workspace 内（默认 true；关掉才能读隔壁仓库等外部路径）
 command-policy            guarded | all                          AI 跑命令要过哪些关：guarded（默认）照白名单、装东西和危险命令要它先问你；all 一律放行，AI 能以你的账号跑任何命令，见 docs/security.md
 agent-delegation          off | ask | auto                       AI 能不能把活委派给本机 Agent（codex、claude……，做完交回审核）：off 不能（默认）；ask 每次要你在本机 gld agent approve；auto 直接起
@@ -2762,7 +2763,8 @@ actions.auth              api_key | oauth | none                 Actions 认证�
 actions.oauth-client-id   文本                                   Actions OAuth Client ID
 actions.shared-secrets    true | false                           Actions 使用共享密钥池
 actions.confine-reads     true | false                           Actions 侧同上（默认 true）
-actions.allowed-commands  逗号分隔                               Actions 侧同上（追加；only: 前缀表示只允许这些）
+actions.allowed-commands  逗号分隔（支持 += 追加、-= 移除）      Actions 侧同上（追加；only: 前缀表示只允许这些；可用 += / -= 增删而不覆盖）
+actions.command-policy    guarded | all                          Actions 侧的命令关卡：guarded（默认）照白名单、装东西和危险命令要它先问你；all 一律放行，风险和 MCP 侧相同，见 docs/security.md
 actions.tunnel            frp | cf | none                        Actions 公网隧道类型（cf 即 cloudflare）
 actions.frp-profile       FRP 配置的名称或 id，或空              Actions 使用的 FRP 服务器配置
 actions.frp-subdomain     子域名（小写字母 / 数字 / 连字符）     Actions FRP 子域名

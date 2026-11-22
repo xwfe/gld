@@ -318,7 +318,9 @@ pub async fn set(ctx: &mut Ctx, args: SetArgs) -> CliResult {
         ));
     }
     let allows_capture = pairs.iter().any(|(key, value)| {
-        key.trim_start_matches("mcp.") == "allowed-commands" && allows_screen_capture(value)
+        !key.trim().ends_with('-')
+            && risk_key(key) == "allowed-commands"
+            && allows_screen_capture(value)
     });
     set_fields(ctx, target, pairs).await?;
     if allows_capture && cfg!(target_os = "macos") {
@@ -334,11 +336,8 @@ async fn set_fields(
     target: WorkspaceTarget,
     pairs: Vec<(String, String)>,
 ) -> CliResult {
-    // 这次改到的字段名（去掉 `mcp.` 前缀），发请求前取：pairs 要交出去。
-    let keys: Vec<String> = pairs
-        .iter()
-        .map(|(key, _)| key.trim().trim_start_matches("mcp.").to_string())
-        .collect();
+    // 这次改到的字段名（去掉 `mcp.` 前缀，大小写和 `_`/`-` 规整），发请求前取：pairs 要交出去。
+    let keys: Vec<String> = pairs.iter().map(|(key, _)| risk_key(key)).collect();
     let update: WorkspaceUpdate = ctx
         .backend
         .call_typed(Request::SetWorkspaceFields {
@@ -355,6 +354,36 @@ async fn set_fields(
     report_restarts(ctx, &update)
 }
 
+/// 风险提示认字段的规范写法：`gld set` 的字段名大小写不敏感、`_` 当 `-`，
+/// `mcp.` 前缀可省略；提示只看存下来的值，写法不该决定说不说风险。
+fn risk_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let bare = trimmed
+        .strip_suffix('+')
+        .or_else(|| trimmed.strip_suffix('-'))
+        .unwrap_or(trimmed);
+    let key = bare.to_ascii_lowercase().replace('_', "-");
+    key.strip_prefix("mcp.").unwrap_or(&key).to_string()
+}
+
+/// 提示里印的 `gld set` 回退命令要能直接粘进 shell：名字带空格这类就加引号。
+fn set_command(name: &str, assignment: &str) -> String {
+    let bare = !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b','
+                )
+        });
+    let selector = if bare {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "'\\''"))
+    };
+    format!("gld set {selector} {assignment}")
+}
+
 /// 一键放开的两个开关，打开的那一刻把风险说清楚、说怎么改回来（审查 §60）。只看存下来的值，
 /// 写错被拒的不会走到这里。
 fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
@@ -365,8 +394,19 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
             "{} 这个项目现在允许 AI 跑任何命令：不看白名单，装依赖、rm -rf 这类也不再先问你。命令用你的账号跑，\
              能读写你账号碰得到的一切，不只是项目目录；网页、issue 里夹着的提示注入也能借 AI 让它跑。\
              接到公网（ChatGPT、DeepSeek 网页这些）的服务尤其要想清楚。\n  连着的 AI 每次进这个项目都会被告知这个设置，并被要求先跟你说一声。\
-             \n  改回来：gld set {name} command-policy=guarded",
-            ctx.out.yellow("⚠")
+             \n  改回来：{}",
+            ctx.out.yellow("⚠"),
+            set_command(name, "command-policy=guarded")
+        ));
+    }
+    if keys.iter().any(|key| key == "actions.command-policy")
+        && update.profile.actions.command_policy == "all"
+    {
+        ctx.out.line(format!(
+            "{} 这个项目的 GPT Actions 现在允许 AI 跑任何命令：不看白名单，装依赖、rm -rf 这类也不再先问你。命令用你的账号跑，\
+             能读写你账号碰得到的一切，不只是项目目录。\n  改回来：{}",
+            ctx.out.yellow("⚠"),
+            set_command(name, "actions.command-policy=guarded")
         ));
     }
     // 委派的两个开关一起说：谁来放行（agent-delegation）、放行后 Agent 能做多少（agent-approval）。
@@ -394,10 +434,10 @@ fn report_risks(ctx: &Ctx, keys: &[String], update: &WorkspaceUpdate) {
         };
         let mut tighten = Vec::new();
         if runtime.agent_delegation == "auto" {
-            tighten.push(format!("gld set {name} agent-delegation=ask"));
+            tighten.push(set_command(name, "agent-delegation=ask"));
         }
         if runtime.agent_approval == "all" {
-            tighten.push(format!("gld set {name} agent-approval=self"));
+            tighten.push(set_command(name, "agent-approval=self"));
         }
         let tighten = if tighten.is_empty() {
             String::new()

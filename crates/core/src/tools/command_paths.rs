@@ -330,7 +330,7 @@ fn path_like_tokens(command: &str, backslash_separates: bool) -> Vec<&str> {
 /// 绝对路径是不是落在 Workspace 里面。从最长的已经存在的那一级 canonicalize，
 /// 所以软链指到外面的、悬空的软链都算外面；`starts_with` 按路径组件比，
 /// `/a/gld2` 不算在 `/a/gld` 里。`root` 是 `Workspace::root`，已经 canonicalize 过。
-fn absolute_path_inside(token: &str, root: &Path) -> bool {
+pub(crate) fn absolute_path_inside(token: &str, root: &Path) -> bool {
     let path = Path::new(token);
     if !path.is_absolute()
         || path

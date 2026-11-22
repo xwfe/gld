@@ -1318,46 +1318,56 @@ done"#,
     assert!(alive(g1), "{status}");
 }
 
-/// 本地请求在切代前后持续成功；同时网络入口仍拒绝未接通的授权。延迟预算没有验。
+/// 本地请求在切代前后持续成功；网络入口仍拒绝未接通的授权。延迟预算没有验。
+///
+/// 请求一条接一条不停发，所以“切换前有一条答完、切换后又有两条答完”就说明切换落在了请求中间，
+/// 而且至少有一条是完全在切换之后发出的。只数总条数说明不了这一点：条数随机器快慢变，慢的
+/// runner 上不切换也发不够（审查 §118）。
 #[test]
 fn local_calls_keep_succeeding_across_prepare_and_switch() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+
     let fixture = fixture();
     fixture.env.write("hello.txt", "steady\n");
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU32::new(0));
     let client = {
-        let (local, stop, progress) = (fixture.local(), stop.clone(), progress.clone());
+        let (local, stop, done) = (fixture.local(), stop.clone(), done.clone());
         std::thread::spawn(move || {
-            let mut count = 0u32;
-            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            while !stop.load(Ordering::SeqCst) {
                 let reply = local.tool("read_file", json!({"workspace":"api","path":"hello.txt"}));
                 assert_eq!(reply["ok"], true, "{reply}");
                 assert_eq!(reply["content"], "steady\n", "{reply}");
-                count += 1;
-                progress.store(count, std::sync::atomic::Ordering::SeqCst);
+                done.fetch_add(1, Ordering::SeqCst);
             }
-            count
         })
     };
-    wait_for("首次读取完成", || {
-        progress.load(std::sync::atomic::Ordering::SeqCst) > 0
-    });
-    for _ in 0..2 {
+    // 请求线程报错退出时不再空等到超时，直接把它的断言信息带出来。
+    let wait_for_more = |what: &str, more: u32| {
+        let target = done.load(Ordering::SeqCst) + more;
+        wait_for(what, || {
+            assert!(!client.is_finished(), "请求线程中途退出了，等不到：{what}");
+            done.load(Ordering::SeqCst) >= target
+        });
+    };
+    wait_for_more("首次读取完成", 1);
+    for round in 1..=2 {
+        std::thread::sleep(Duration::from_millis(200));
+        wait_for_more(&format!("第 {round} 次切换前有请求答完"), 1);
         fixture
             .env
             .ok(&["daemon", "upgrade", "prepare", env!("CARGO_BIN_EXE_gld")]);
         fixture.env.ok(&["daemon", "upgrade", "switch"]);
-        let switched_at = progress.load(std::sync::atomic::Ordering::SeqCst);
-        wait_for("切换后继续读取", || {
-            progress.load(std::sync::atomic::Ordering::SeqCst) > switched_at
-        });
+        wait_for_more(&format!("第 {round} 次切换后还有请求答完"), 2);
         assert_auth_not_ready(&fixture.post(&rpc_body("tools/list", json!({}))));
     }
     wait_for("旧代都退出", || {
         generation_pids(&fixture.status()).len() == 1
     });
-    stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(client.join().expect("请求线程没有报错") >= 3);
+    wait_for_more("旧代退出后还有请求答完", 2);
+    stop.store(true, Ordering::SeqCst);
+    client.join().expect("请求线程没有报错");
 }
 
 /// 切换时正在跑的带副作用调用只执行一次，回包对得上；新版本失败也不会让它再跑一遍。

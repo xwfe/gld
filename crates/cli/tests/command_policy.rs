@@ -63,10 +63,7 @@ fn the_config_command_lifts_the_denial_and_keeps_what_was_configured() {
     env.ok(&["set", "it", "allowed-commands=rg"]);
     let denied = check(&env, "sh -c true", false);
     assert_eq!(denied["resolved_by"], "config_change", "{denied}");
-    assert_eq!(
-        denied["config_command"],
-        "gld set it allowed-commands=rg,sh"
-    );
+    assert_eq!(denied["config_command"], "gld set it allowed-commands+=sh");
     let confirmed = check(&env, "sh -c true", true);
     assert_eq!(confirmed["decision"], "deny", "{confirmed}");
     run_fix(&denied);
@@ -74,13 +71,16 @@ fn the_config_command_lifts_the_denial_and_keeps_what_was_configured() {
     assert_eq!(fixed["decision"], "allow", "{fixed}");
     assert!(allowed(&fixed, "rg"), "rg 被冲掉了：{fixed}");
 
+    // -= 可以精确移除刚加的命令，且不影响已有项。
+    env.ok(&["set", "it", "allowed-commands-=sh"]);
+    let removed = check(&env, "sh -c true", false);
+    assert_eq!(removed["decision"], "deny", "{removed}");
+    assert!(allowed(&removed, "rg"), "rg 被误删了：{removed}");
+
     // only 模式：改完还得是 only。
     env.ok(&["set", "it", "allowed-commands=only:cargo"]);
     let denied = check(&env, "sh -c true", false);
-    assert_eq!(
-        denied["config_command"],
-        "gld set it allowed-commands=only:cargo,sh"
-    );
+    assert_eq!(denied["config_command"], "gld set it allowed-commands+=sh");
     run_fix(&denied);
     let fixed = check(&env, "sh -c true", false);
     assert_eq!(fixed["decision"], "allow", "{fixed}");
@@ -134,4 +134,23 @@ fn allowing_all_commands_warns_marks_and_reports_what_it_bypassed() {
         "{auto}"
     );
     env.ok(&["daemon", "stop"]);
+}
+
+/// 风险提示里印的回退命令要能直接粘进 shell：项目名带空格时得加引号。
+#[test]
+fn risk_warnings_quote_project_names_with_spaces() {
+    let env = Env::new();
+    env.ok(&["add", ".", "--name", "my app"]);
+
+    let mcp = env.ok(&["set", "my app", "command-policy=all"]);
+    assert!(
+        mcp.contains("gld set 'my app' command-policy=guarded"),
+        "{mcp}"
+    );
+
+    let actions = env.ok(&["set", "my app", "actions.command-policy=all"]);
+    assert!(
+        actions.contains("gld set 'my app' actions.command-policy=guarded"),
+        "{actions}"
+    );
 }

@@ -50,6 +50,9 @@ impl ListenerManager {
 }
 
 #[cfg(test)]
+pub(crate) use tests::test_manager as test_listener_manager;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::async_rt::JoinHandle;
@@ -112,7 +115,7 @@ mod tests {
             unreachable!()
         }
         fn is_running(&self, _: &str, _: ServiceKind) -> bool {
-            unreachable!()
+            false
         }
         fn is_active(&self, _: &str, _: ServiceKind) -> bool {
             unreachable!()
@@ -131,7 +134,7 @@ mod tests {
         }
     }
 
-    fn test_manager() -> ListenerManager {
+    pub(crate) fn test_manager() -> ListenerManager {
         ListenerManager::new(Arc::new(UnusedListeners), Box::new(UnusedListeners))
     }
 

@@ -173,13 +173,25 @@ impl App {
         id: &str,
         assignments: &[(String, String)],
     ) -> AppResult<WorkspaceUpdate> {
-        let before = self.profile_by_id(id)?;
-        let mut profile = before.clone();
-        let ctx = self.field_context()?;
-        for (key, value) in assignments {
-            super::workspace_fields::apply_workspace_field(&mut profile, key, value, &ctx)?;
-        }
-        let saved = self.update_workspace(profile)?;
+        let (before, saved) = self.with_data(|store| {
+            let before = store
+                .get(id)
+                .cloned()
+                .ok_or_else(|| AppError::Message(format!("workspace not found: {id}")))?;
+            let ctx = super::workspace_fields::FieldContext {
+                frp_profiles: store.settings().frp_profiles,
+            };
+            let mut profile = before.clone();
+            for (key, value) in assignments {
+                super::workspace_fields::apply_workspace_field(&mut profile, key, value, &ctx)?;
+            }
+            validate_workspace_resources_update(store.list(), &before, &profile)?;
+            validate_unique_path(store.list(), &profile)?;
+            store.update(profile.clone())?;
+            Ok((before, profile))
+        })?;
+        // 缓存的工具上下文带着旧的工具集和命令白名单，配置一变就必须丢弃。
+        self.invalidate_tool_context(&saved.id);
 
         let mut restarted = Vec::new();
         let mut restart_failures = Vec::new();
@@ -205,13 +217,6 @@ impl App {
             profile: saved,
             restarted,
             restart_failures,
-        })
-    }
-
-    /// 校验字段取值时要看的全局数据（目前只有 FRP 配置表）。
-    fn field_context(&self) -> AppResult<super::workspace_fields::FieldContext> {
-        Ok(super::workspace_fields::FieldContext {
-            frp_profiles: self.settings()?.frp_profiles,
         })
     }
 
@@ -621,5 +626,134 @@ mod tests {
         assert_eq!(resolve_by_dir(&profiles, &deeper).unwrap().id, "inner");
         assert_eq!(resolve_by_dir(&profiles, temp.path()).unwrap().id, "outer");
         assert!(resolve_by_dir(&profiles, Path::new("/")).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_allowed_commands_delta_updates_do_not_lose_entries() {
+        crate::home::isolate_for_tests();
+        let project_dir = tempfile::tempdir().expect("project dir");
+        let app = std::sync::Arc::new(App::load().expect("load app"));
+        let created = app
+            .create_workspace(project_dir.path(), WorkspaceCreateOptions::default())
+            .expect("create workspace");
+        let id = created.id.clone();
+        let listeners = std::sync::Arc::new(crate::runtime::test_listener_manager());
+
+        // 预置两个待删除项，确保并发 += 和 -= 互不覆盖（MCP 与 Actions 两套白名单都测）。
+        app.set_workspace_fields(
+            &listeners,
+            &id,
+            &[
+                (
+                    "allowed-commands".to_string(),
+                    "remove_mcp_1,remove_mcp_2".to_string(),
+                ),
+                (
+                    "actions.allowed-commands".to_string(),
+                    "remove_act_1,remove_act_2".to_string(),
+                ),
+            ],
+        )
+        .await
+        .expect("seed allowed-commands");
+
+        // 同时使用两个独立的 App 实例，既覆盖进程内并发，也覆盖跨实例/跨进程的文件锁串行。
+        let app_b = std::sync::Arc::new(App::load().expect("load second app"));
+
+        let mut handles = Vec::new();
+        for idx in 0..8 {
+            let target_app = if idx % 2 == 0 {
+                std::sync::Arc::clone(&app)
+            } else {
+                std::sync::Arc::clone(&app_b)
+            };
+            let id = id.clone();
+            let listeners = std::sync::Arc::clone(&listeners);
+            handles.push(tokio::spawn(async move {
+                target_app
+                    .set_workspace_fields(
+                        &listeners,
+                        &id,
+                        &[
+                            ("allowed-commands+".to_string(), format!("mcp_cmd_{idx}")),
+                            (
+                                "actions.allowed-commands+".to_string(),
+                                format!("act_cmd_{idx}"),
+                            ),
+                        ],
+                    )
+                    .await
+                    .expect("concurrent append");
+            }));
+        }
+        for (idx, (mcp_rm, act_rm)) in [
+            ("remove_mcp_1", "remove_act_1"),
+            ("remove_mcp_2", "remove_act_2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target_app = if idx % 2 == 0 {
+                std::sync::Arc::clone(&app)
+            } else {
+                std::sync::Arc::clone(&app_b)
+            };
+            let id = id.clone();
+            let listeners = std::sync::Arc::clone(&listeners);
+            handles.push(tokio::spawn(async move {
+                target_app
+                    .set_workspace_fields(
+                        &listeners,
+                        &id,
+                        &[
+                            ("allowed-commands-".to_string(), mcp_rm.to_string()),
+                            ("actions.allowed-commands-".to_string(), act_rm.to_string()),
+                        ],
+                    )
+                    .await
+                    .expect("concurrent remove");
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("join");
+        }
+
+        let after = app.profile_by_id(&id).expect("reload profile");
+        let mcp_items: Vec<&str> = after
+            .runtime
+            .allowed_commands
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let act_items: Vec<&str> = after
+            .actions
+            .allowed_commands
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        for idx in 0..8 {
+            assert!(
+                mcp_items.contains(&format!("mcp_cmd_{idx}").as_str()),
+                "missing mcp_cmd_{idx} in {mcp_items:?}"
+            );
+            assert!(
+                act_items.contains(&format!("act_cmd_{idx}").as_str()),
+                "missing act_cmd_{idx} in {act_items:?}"
+            );
+        }
+        for removed in ["remove_mcp_1", "remove_mcp_2"] {
+            assert!(
+                !mcp_items.contains(&removed),
+                "unexpected {removed} in {mcp_items:?}"
+            );
+        }
+        for removed in ["remove_act_1", "remove_act_2"] {
+            assert!(
+                !act_items.contains(&removed),
+                "unexpected {removed} in {act_items:?}"
+            );
+        }
     }
 }
