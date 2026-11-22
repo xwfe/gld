@@ -355,15 +355,16 @@ fn mcp_oauth_pkce_tools_refresh_rotation_revocation_and_restart_follow_the_grant
     assert_eq!(swapped.status, 400, "{}", swapped.body);
     assert_eq!(swapped.json()["error"], "invalid_client");
 
-    // URL 入口和隧道还没接入，仍是 AUTH_NOT_READY。
-    let url_reply = post_json(
-        port,
-        &format!("/mcp/connect/{url_secret}"),
-        &json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string(),
-        None,
-    );
-    assert_eq!(url_reply.status, 503, "{}", url_reply.body);
-    assert_eq!(url_reply.json()["error"], "AUTH_NOT_READY");
+    // URL 入口只认 URL 用途的秘密，OAuth access 和确认口令放进地址都是 401；
+    // 隧道还没接入，仍是 AUTH_NOT_READY。
+    let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string();
+    let url_reply = post_json(port, &format!("/mcp/connect/{url_secret}"), &list, None);
+    assert_eq!(url_reply.status, 200, "{}", url_reply.body);
+    for other in [&second_access, &confirmation] {
+        let reply = post_json(port, &format!("/mcp/connect/{other}"), &list, None);
+        assert_eq!(reply.status, 401, "{}", reply.body);
+        assert!(reply.header("www-authenticate").is_none());
+    }
     let tunnel_reply = request(
         port,
         "POST",
