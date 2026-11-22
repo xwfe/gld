@@ -410,6 +410,116 @@ fn the_global_gateway_forwards_hub_only_when_asked_to() {
     ));
 }
 
+/// 全局入口换地址后，hub 的 OAuth 发现链接要跟着当前地址走，不能停在监听器启动时的旧地址；
+/// 入口停用后按请求的 Host 生成（PR #12 遗留，真实客户端验收前必须修）。
+#[test]
+fn hub_oauth_discovery_follows_the_current_gateway_address() {
+    // grant 要赶在守护进程拿到授权写锁之前建（它一启动就持有）。
+    let env = Env::new();
+    create_oauth_grant(&env);
+    env.write("only-api.txt", "api-marker\n");
+    env.ok(&["add", ".", "--name", "api"]);
+    let hub_port = free_port();
+    env.ok(&[
+        "upgrade",
+        "--port",
+        &hub_port.to_string(),
+        "--auth",
+        "bearer",
+    ]);
+    env.ok(&["start"]);
+    let gateway_port = free_port();
+    env.ok(&[
+        "gateway",
+        "set",
+        "--enabled",
+        "true",
+        "--tunnel",
+        "off",
+        "--public-url",
+        "https://gw-one.example.com",
+        "--port",
+        &gateway_port.to_string(),
+    ]);
+    env.ok(&["gateway", "start"]);
+    env.ok(&["hub", "set", "--global-gateway", "true"]);
+    env.ok(&["upgrade", "--auth", "oauth"]);
+
+    assert_hub_discovery(gateway_port, "https://gw-one.example.com", "/hub");
+
+    // 只重启入口、不重启 hub：发现地址必须已经是 gw-two。
+    env.ok(&[
+        "gateway",
+        "set",
+        "--public-url",
+        "https://gw-two.example.com",
+    ]);
+    env.ok(&["gateway", "start"]);
+    assert_hub_discovery(gateway_port, "https://gw-two.example.com", "/hub");
+
+    // 入口停用、hub 照旧跑：不再指向已停用的入口，按请求的 Host 生成。
+    env.ok(&["gateway", "set", "--enabled", "false"]);
+    env.ok(&["gateway", "stop"]);
+    let local = format!("http://127.0.0.1:{hub_port}");
+    assert_hub_discovery(hub_port, &local, "");
+}
+
+/// 没有任何 grant 时网络授权是 503 而不是 401；建一条 OAuth grant 才能走到发现流程。
+fn create_oauth_grant(env: &Env) {
+    use gld_core::auth::{
+        AccessStore, CredentialKind, GrantCreation, GrantPermissions, ProjectScope,
+    };
+    let store = AccessStore::open_in(env.home.path()).expect("access store");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    store
+        .create_grant(
+            GrantCreation {
+                name: "chat-client".into(),
+                scope: ProjectScope::AllProjects,
+                permissions: GrantPermissions::default(),
+                kind: CredentialKind::OAuth,
+                ttl: None,
+                allowed_origins: vec![],
+            },
+            now,
+        )
+        .expect("create grant");
+}
+
+/// 经入口时路径带 `/hub` 前缀，直连本地端口时不带；`origin` 是对外的协议+主机。
+fn assert_hub_discovery(port: u16, origin: &str, prefix: &str) {
+    let base = format!("{origin}{prefix}");
+    let challenge_path = format!("{prefix}/mcp");
+    let issuer_path = format!("/.well-known/oauth-authorization-server{prefix}");
+    let resource_path = format!("/.well-known/oauth-protected-resource{prefix}/mcp");
+    let challenge = rpc(port, &challenge_path, None, 1, "initialize", json!({}));
+    assert_eq!(challenge.status, 401, "{}", challenge.body);
+    let expected_metadata = format!("{origin}{resource_path}");
+    assert!(
+        challenge
+            .header("www-authenticate")
+            .is_some_and(|value| value.contains(&expected_metadata)),
+        "401 的 resource_metadata 应指向 {expected_metadata}：{}",
+        challenge.header("www-authenticate").unwrap_or("")
+    );
+
+    let issuer = get(port, &issuer_path);
+    assert_eq!(issuer.status, 200, "{}", issuer.body);
+    assert_eq!(issuer.json()["issuer"], json!(base), "{}", issuer.body);
+
+    let resource = get(port, &resource_path);
+    assert_eq!(resource.status, 200, "{}", resource.body);
+    assert_eq!(
+        resource.json()["resource"],
+        json!(format!("{base}/mcp")),
+        "{}",
+        resource.body
+    );
+}
+
 #[test]
 fn served_tool_discovery_remains_available_to_the_local_operator() {
     let hub = hub_with_two_members();
