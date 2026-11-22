@@ -64,6 +64,10 @@ impl AccessReader {
         now_unix_secs: u64,
     ) -> Result<AuthContext, TunnelRejection> {
         let current = self.snapshot().map_err(|_| TunnelRejection::Unavailable)?;
+        // 还没建过任何 grant 的机器没有统一授权可用，和其它入口一样报"未就绪"。
+        if !current.is_initialized() {
+            return Err(TunnelRejection::Unavailable);
+        }
         let binding = current.by_tunnel(tunnel).ok_or(TunnelRejection::Unbound)?;
         let record = current
             .by_grant_id(&binding.grant_id)
@@ -741,6 +745,14 @@ mod tests {
         bound.grant.permissions.write = true;
         store.insert(bound.clone()).unwrap();
         let reader = store.reader();
+        assert_eq!(
+            AccessStore::open_in(tempfile::tempdir().unwrap().path())
+                .unwrap()
+                .reader()
+                .authenticate_tunnel("hub", TUNNEL, 200)
+                .unwrap_err(),
+            TunnelRejection::Unavailable
+        );
         // 有 grant、没有绑定：隧道不取得任何权限。
         assert_eq!(
             reader.authenticate_tunnel("hub", TUNNEL, 200).unwrap_err(),
