@@ -375,8 +375,10 @@ fn mcp_oauth_pkce_tools_refresh_rotation_revocation_and_restart_follow_the_grant
         ],
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
     );
-    assert_eq!(tunnel_reply.status, 503, "{}", tunnel_reply.body);
-    assert_eq!(tunnel_reply.json()["error"], "AUTH_NOT_READY");
+    // 这个服务没配 OpenAI 隧道：隧道头不被接受，也不带 OAuth 发现信息。
+    assert_eq!(tunnel_reply.status, 401, "{}", tunnel_reply.body);
+    assert_eq!(tunnel_reply.json()["error"], "AUTHENTICATION_FAILED");
+    assert!(tunnel_reply.header("www-authenticate").is_none());
 
     // 重启：注册表和签名密钥都是落盘的那一份，重启前签发的 token 继续可用。
     let registry = env.home.path().join("data/oauth-clients/hub.json");
