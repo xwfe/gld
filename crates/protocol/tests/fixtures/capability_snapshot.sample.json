@@ -1,0 +1,98 @@
+{
+  "contract_version": 1,
+  "node": {
+    "hub_id": "hub-a",
+    "machine_id": "machine-a"
+  },
+  "module_generation": 7,
+  "capabilities": [
+    {
+      "id": "file_command",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    },
+    {
+      "id": "desktop_observe",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    },
+    {
+      "id": "app_open",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    },
+    {
+      "id": "desktop_input",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    },
+    {
+      "id": "clipboard",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    },
+    {
+      "id": "session_provider",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    },
+    {
+      "id": "project_autonomy",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    },
+    {
+      "id": "machine_provisioner",
+      "supported": true,
+      "installed": true,
+      "enabled": true,
+      "available": {
+        "state": "ready",
+        "observed_at_ms": 1000,
+        "validity_ms": 500
+      }
+    }
+  ]
+}

@@ -6304,3 +6304,51 @@ grant 都校验通过后先落盘再签发，重复兑换幂等；50 个 authori
   （`use_global_gateway` + `restore_runtime_state_on_launch` + `restore_mcp_workspace_ids`）造老配置，
   再靠启动时恢复拉起。老配置路径是否还该保留、要不要补 CLI 入口，留给 D/E 决定。
 - 没有更换本机二进制、重启本机守护进程或改动真实 grant。
+
+## 155. D19-A1 能力 / 身份契约样例（2026-11-22）
+
+**范围：**按 RFC-0016 只做协议样例与确定性评估，不接模块装配、GUI helper、桌面观察 / 输入、
+session provider、shun 客户端、部署或发布。能力 ID 是 §4.1 的临时设计分组样例，未进入
+CLI 帮助、MCP 工具表或 `docs/concepts.md`；`task_plan.md` 状态未改。
+
+**落点与边界：**
+- `gld-protocol::capabilities` 只放纯数据、selector/query 校验和新鲜度规则：contract version、
+  hub/machine 节点身份、workspace XOR machine 路由、`CapabilityQuery` 空列表表示全部 / 非空先校验、
+  supported / installed / enabled / available（签发方单调 `observed_at_ms` + `validity_ms` +
+  `module_generation`）与稳定原因码。`CapabilitySnapshot::from_json` 是唯一线格式入口：先读
+  `contract_version` 再解析主体，未知能力 ID 丢弃为不可用、其余快照仍有效，未知原因码仍拒绝；
+  同版本多出的字段、非法 JSON、空 hub/machine、重复能力、supported=false 却 installed/enabled、
+  ready 但缺 supported/installed/enabled 都归 `CAPABILITY_SNAPSHOT_INVALID` 或对应稳定错误。
+  `check_snapshot` 只判结构、版本和 `module_generation`；单项有效期由接收方按自己的单调时钟
+  传入“收到快照后经过的毫秒数”逐项判定，过期能力单独变成 `unknown/stale_snapshot`，不拖垮整份快照。
+  `observed_at_ms` 只在同一 `module_generation` 内有顺序意义；节点重启必须递增 `module_generation`。
+  旧 / 新代次、过期窗口、未知 contract version、未知能力 / 原因码、混用 workspace/machine、
+  目标 machine 与快照节点不一致都有固定错误；不新增 daemon `Request` / `Response`，`PROTOCOL_VERSION` 仍为 19。
+- `gld-core::capabilities` 按 D18 `AuthContext` 做查询过滤、每次请求的可见集合与授权判断：
+  复用 `CallerId` / `Grant` / `ProjectScope` / `ServiceCapabilities`，不建第二套身份模型。
+  workspace 目标必须由调用方先用现有 NativeMember 路由解析成 `CapabilityTargetBinding` 的
+  hub + workspace -> node 绑定，本模块不查路由表；machine 目标只需 hub 归属。目标授权先于节点匹配，
+  目标被拒绝返回 `CAPABILITY_TARGET_DENIED` 且不带探测数据；目标允许但能力未授权时只回能力 ID、
+  `authorized=false` 和原因，supported / installed / enabled / available 四个探测字段整体省略，
+  避免 AllProjects 之类 token 学到机器上装了什么。machine 目标仅本机操作员；AllProjects 与现有
+  service-access 组合不授予 desktop / clipboard / session-control 等可选能力，这些要等 D19-A4 的
+  显式能力授权。`file_command` 只跟随现有项目范围且要求写权限；这里的 authorized 只表示“该主体对这个
+  目标可见已建立的 file_command 探测”，不等于允许写文件或执行命令，真正执行仍走既有 grant / tool 策略。
+
+**验证：**Linux、隔离 `GLD_HOME`，PATH 含临时下载的 Node v24.22.3
+（本 VM 默认 PATH 没有 `node`，与 §148 / §149 同类环境问题）。
+- `cargo test --workspace --all-targets --locked`：**76 个目标，1549 passed / 0 failed / 0 ignored**。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` 通过。
+- `cargo fmt --all -- --check` 与 `git diff --check` 通过。
+- 关键用例：protocol fixture 经 `from_json` 往返；version 2 + 多余字段、未知能力 ID、未知原因码、
+  非法 JSON 都有固定结果；incoherent probe 被拒；新鲜度按接收方 elapsed 且逐能力独立；
+  core 同一节点对 local operator、Selected project、其他 project、AllProjects+service、只读 grant
+  返回不同可见集合，目标被拒不泄露探测，未授权能力不回探测字段，workspace 绑定 / hub 不匹配都
+  返回 `CAPABILITY_TARGET_INVALID`，AllProjects+service 不授权 desktop / clipboard / session_provider，
+  只读 grant 不把 `file_command` 看成已授权。
+
+**未验证与已知限制：**没有真实节点探测、模块启停、GUI helper、会话 provider 或 shun 联调；
+能力 ID 与 fixture 仍是临时样例，正式名称和线上消息格式留给后续任务。未知原因码仍拒绝整份快照，
+而未知能力 ID 与过期探测只影响单项；这是 A1 的确定选择，A2 模块自报原因时再复审。`authorized` 是契约样例里的
+可见性 / 授权交集，不是 D19-A4 的运行时授权实现，也不替代既有命令执行策略。没有更换本机二进制、
+重启守护进程、变更真实授权、推送或发布。
