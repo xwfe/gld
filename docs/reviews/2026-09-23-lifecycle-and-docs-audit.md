@@ -6352,3 +6352,79 @@ CLI 帮助、MCP 工具表或 `docs/concepts.md`；`task_plan.md` 状态未改�
 而未知能力 ID 与过期探测只影响单项；这是 A1 的确定选择，A2 模块自报原因时再复审。`authorized` 是契约样例里的
 可见性 / 授权交集，不是 D19-A4 的运行时授权实现，也不替代既有命令执行策略。没有更换本机二进制、
 重启守护进程、变更真实授权、推送或发布。
+
+## 152. 2026-11-22：D18-B3.5 隧道显式绑定到 grant
+
+**范围：**B3.5 让带隧道头的请求按显式绑定取得所绑 grant 的权限。没有加绑定命令（属 D）、没有改 daemon 协议，
+也没有碰本机二进制、本机守护进程或真实 grant。方案和八个决定事先经审查方确认。
+
+**改了什么：**
+- `crates/core/src/auth/access_store.rs`、`access_store/model.rs`：`access/v1/grants.json` 加必填的 `tunnel_bindings`。
+  每条绑定只有绑定 ID、隧道标识 `openai:<隧道 ID>`、GrantId、绑定时的凭据修订号和绑定时间，不存秘密和权限。
+  加载和每次写入都校验：绑定 ID 与隧道标识各自唯一，隧道 ID 通过 `tunnel::openai::is_tunnel_id`，GrantId 存在且是
+  token 用途，修订号不大于当前修订。任何一项不符整份文件拒绝，原文件不动。
+- `access_store/lifecycle.rs`：`bind_tunnel` / `unbind_tunnel`。只有有效的 token grant 能绑；同一隧道重绑同一 grant
+  保留绑定 ID，改绑别的 grant 换新 ID；一条隧道一个绑定，一个 grant 可被多条隧道绑定。
+- `access_store/authorize.rs`：`AccessReader::authenticate_tunnel` 读当前快照，依次要求存储已初始化、有绑定、
+  grant 有效、修订号一致、凭据在期限内，通过后建立 `McpSubject::Tunnel { binding_id }` 的 `AuthContext`。
+- `crates/host/src/mcp.rs`：`require_tunnel_auth`。判断顺序：来源冲突 400 → 不是配了 OpenAI 隧道的 Hub、
+  密钥为空或不对 401（常量时间比较，带 `no-store`，不带 `WWW-Authenticate`）→ 存储不可用或未初始化 503 →
+  没有可用绑定 403 `TUNNEL_NOT_BOUND`。密钥判断在查存储之前，错钥的回包不透露存储是否初始化。
+  拒绝原因（`key` / `unbound` / `revoked` / `stale_revision` / `expired`）只写进 `mcp-requests.log`。
+- `crates/core/src/tunnel/openai.rs`：`wait_until_ready` 见到 tunnel-client 报探测失败时，用同一把隧道密钥向本机服务
+  发一次 `initialize`，确认是 403 `TUNNEL_NOT_BOUND` 就报"隧道还没有绑定到 grant、绑定命令还没有提供、本地服务不受影响"。
+- daemon `Request` / `Response` 未改，`PROTOCOL_VERSION` 未动；命令行帮助未改。
+
+**审查方确认的决定：**
+- `schema_version` 保持 1，`tunnel_bindings` 必填，不做迁移。依据已核实：用户本机 `gld --version` 是 `1717aaf41685`，
+  它是 main 的祖先，树里没有 `access_store`，所以没有任何真实机器存在 D18 格式的授权文件。
+- RFC-0015 "与隧道来源能力取交集"：来源能力只是入口上限。只有 Hub 入口接受隧道头，隧道调用方不会成为
+  `LocalOperator`，不带 grant 之外的服务能力，委派和写权限完全跟随所绑 grant；绑定记录没有额外开关。
+- 错钥 401，钥对但绑定无效统一 403。理由是语义（密钥有效、只是没有授权），不是 tunnel-client 的就绪判断。
+- 撤销不删绑定，只拒绝。由于加载时悬空的 GrantId 会让整份文件被拒绝，所有写入都经 `change_all` 把记录和绑定
+  一起校验后才落盘：会删掉记录却留下绑定的写入不会提交（有单测）。
+- 换隧道 ID 需要重新绑定，不自动迁移。
+
+**Hub 监听器会不会随配置重建：**会。隧道标识和 `openai_tunnel_key` 是监听器启动时放进 `ListenerState` 的；
+`crates/core/src/app/hub.rs` 里改 Hub 配置（含 `tunnel_type`、`openai_tunnel_id`）、`set_hub_secret` 和
+`regenerate_hub_secret` 在服务运行时都调用 `restart_after_change` 重建监听器，守护进程不重启。
+所以没有改成每次请求读配置。集成测试 `changing_the_tunnel_key_id_or_type_leaves_no_old_value_valid` 证明：
+`gld secret regenerate openai_tunnel_key` 后旧密钥 401、新密钥沿用原绑定；换隧道 ID 后密钥对也是 403；
+`gld share --tunnel off` 后新旧密钥都是 401；全程守护进程 pid 不变。
+
+**tunnel-client v0.0.18 遇到 403：**对照源码（tag `v0.0.18`），没有用真实二进制运行。
+- `pkg/mcpclient/probe_state.go` 的 `IsAuthRequiredProbeError` 只认 401；`pkg/runtimehealth/health.go` 对 401 回
+  `200 ready (mcp initialize requires auth: …)`，对其它非超时错误回 `503 mcp probe failed: …`。
+- `pkg/mcpclient/fxmodule_test.go` 的 `TestRunStartupProbeDefaultDoesNotRetryPermanentErrors` 把 403 列为不重试的永久失败。
+- 所以 403 时 `/readyz` 是 503、正文以 `mcp probe failed` 开头。正文其余部分的确切格式没有逐字核实；
+  gld 不依赖它，只在见到 `mcp probe failed` 后自己向服务确认是不是 `TUNNEL_NOT_BOUND`。集成测试里的 tunnel-client 是假的二进制，
+  回的是 `503 mcp probe failed: 403`。
+
+**验证：**Linux、隔离 `GLD_HOME`，PATH 含 Node v24.22.2。
+- `cargo test --workspace --all-targets --locked --no-fail-fast`：**76 个目标，1563 passed / 0 failed / 0 ignored**（变基到含 §153–§155 改动的 main 之后重跑的结果）。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 通过。
+- core 单测（`access_store/tunnel_tests.rs`、`authorize.rs`）：绑定往返且只存引用；缺字段、未知字段、重复 ID、重复隧道、
+  悬空或非 token 的 GrantId、非法隧道标识、修订号超前都整份拒绝且原文件不动；OAuth/URL/已撤销的 grant 绑不上；
+  重绑保留 ID、改绑换 ID；撤销后文件照常加载而请求被拒；会留下悬空绑定的写入不提交；保存失败不发布绑定；
+  隧道与直接 token 是两个 CallerId；权限和范围取 grant 当前值；轮换、到期、解绑、撤销各自拒绝；空存储报未就绪。
+- host 单测（`mcp.rs`，共享 reader，监听器不重启）：空存储时钥对 503、错钥 401；未绑定 403；错的、空的、截短的密钥和
+  拿 token 当密钥都是 401；隧道头配 Bearer、重复隧道头 400；绑定后身份、范围和"不是 LocalOperator、无服务能力"；
+  运行中放宽 grant 下一次请求即生效；单工作区入口、没配隧道的 Hub、换了密钥的监听器 401，换了隧道 ID 的监听器 403；
+  运行中轮换后 403、重绑后恢复且 CallerId 不变；撤销和解绑 403；回包和数据目录里没有隧道密钥。
+- 真实 daemon/HTTP（`crates/cli/tests/openai_tunnel.rs`，grant 和绑定由 `AccessStore` 在 daemon 停着时建立）：
+  假 tunnel-client 带隧道头的 `initialize` 通过、`tools/list` 成功 → 只读 grant 拿不到写、范围外的项目读不到 →
+  错钥和拿 token 当密钥 401、隧道头配 Bearer 400 → 停机轮换后启动报未绑定且请求 403，直接用新 token 不受影响 →
+  重绑并加写权限后恢复、绑定 ID 不变 → 撤销后 403。另有未绑定用例断言启动提示的原文，以及上面的改配置用例。
+  每个阶段后遍历整个隔离数据目录：隧道密钥只在服务凭据文件里，Runtime Key 和 token 秘密不在日志和授权文件里；
+  隧道密钥和 Runtime Key 不在 tunnel-client 的命令行参数里。
+  `oauth_connector_flow.rs` 和本文件里原先断言隧道头 503 的几处改为 401 / 403，其它断言没动。
+
+**未验证与已知限制：**
+- **合并后真实用户仍无法建立绑定**：只有 core API，没有命令（属 D）。在那之前新配的 OpenAI 隧道起不来，启动时会报出原因。
+- 运行中的绑定和轮换只有 host 单测证明：运行中的 daemon 没有这两个入口，集成测试都是停机后改存储再启动。
+- 没有用真实的 tunnel-client 二进制、真实 OpenAI 隧道或 ChatGPT 验收（属 E）。
+- 首次全量测试暴露了两处遗漏并已修：`crates/core/src/app/state.rs` 的空授权文件夹具缺 `tunnel_bindings`，
+  `oauth_connector_flow.rs` 里一处隧道头断言仍是 503。PATH 上没有 `node` 时 `command_write_paths` 的一条用例失败（同 §148）。
+- 没有更换本机二进制、重启本机守护进程或改动真实 grant。
+
+**对 §155 的更正（审查方要求，旧节不改）：**§155 范围段写的「task_plan 状态未改」已被 798f689 推翻，D19-A 行已改成 A1 样例已落。
