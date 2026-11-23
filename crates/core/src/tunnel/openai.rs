@@ -158,7 +158,8 @@ pub async fn spawn_openai_tunnel(spec: OpenAiTunnelSpec<'_>) -> AppResult<OpenAi
         .spawn()
         .map_err(|err| AppError::Message(format!("启动 {} 失败：{err}", binary.display())))?;
     let pid = child.id();
-    if let Err(reason) = wait_until_ready(&mut child, health_port).await {
+    if let Err(reason) = wait_until_ready(&mut child, health_port, spec.port, spec.tunnel_key).await
+    {
         let _ = super::cloudflare::stop_child(child, pid).await;
         return Err(AppError::Message(format!(
             "tunnel-client 没起来：{reason}\n{}看完整日志：{}",
@@ -176,7 +177,42 @@ fn free_loopback_port() -> AppResult<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-async fn wait_until_ready(child: &mut Child, health_port: u16) -> Result<(), String> {
+/// 隧道密钥对、但这条隧道没有绑定到可用 grant 时给用户的话。
+const NOT_BOUND_HINT: &str = "服务认出了隧道密钥，但这条 OpenAI 隧道还没有绑定到 grant（或所绑 grant 已轮换、撤销、到期），\
+请求会被 403 TUNNEL_NOT_BOUND 拒绝。隧道要先绑定一个 token 类型的 grant 才能用；绑定命令还没有提供，\
+会随统一的 grant 命令一起加入，在那之前 OpenAI 隧道接不通。本地服务不受影响";
+
+/// 用 tunnel-client 会带的那把请求头自己探一次本机服务，看是不是因为隧道没绑定 grant。
+///
+/// tunnel-client v0.0.18 的启动探测遇到 403 不重试（`pkg/mcpclient/fxmodule_test.go` 的
+/// `TestRunStartupProbeDefaultDoesNotRetryPermanentErrors`），`/readyz` 回 503，正文是
+/// "mcp probe failed: " 加 MCP SDK 的报错原文（`pkg/runtimehealth/health.go`）。那段原文
+/// 带不带回包里的错误码没核过，所以不去猜它的字样，直接问服务。
+async fn tunnel_is_not_bound(client: &reqwest::Client, port: u16, tunnel_key: &str) -> bool {
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"gld-tunnel-check","version":"0"}}}"#;
+    let Ok(response) = client
+        .post(format!("http://127.0.0.1:{port}/mcp"))
+        .header(crate::hub::OPENAI_TUNNEL_HEADER, tunnel_key)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    response.status() == reqwest::StatusCode::FORBIDDEN
+        && response
+            .text()
+            .await
+            .is_ok_and(|text| text.contains("TUNNEL_NOT_BOUND"))
+}
+
+async fn wait_until_ready(
+    child: &mut Child,
+    health_port: u16,
+    port: u16,
+    tunnel_key: &str,
+) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))
@@ -204,6 +240,12 @@ async fn wait_until_ready(child: &mut Child, health_port: u16) -> Result<(), Str
                 return Ok(());
             }
             last = format!("{} {}", status.as_u16(), body.trim());
+            // 探测已经失败：没绑定不会自己好，tunnel-client 也不重试 403，不用等到超时。
+            if body.contains("mcp probe failed")
+                && tunnel_is_not_bound(&client, port, tunnel_key).await
+            {
+                return Err(format!("{NOT_BOUND_HINT}（/readyz：{last}）"));
+            }
         }
         if Instant::now() >= deadline {
             return Err(format!(

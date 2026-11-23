@@ -2,7 +2,7 @@
 
 use gld_policy::{CredentialKind, Grant, GrantPermissions, GrantStatus, ProjectScope};
 
-use super::{invalid, AccessRecord, AccessStore, CredentialRecord};
+use super::{invalid, AccessRecord, AccessStore, CredentialRecord, TunnelBinding};
 use crate::auth::credential::{credential_lifetime, generate_secret, CredentialTtl, IssuedSecret};
 use crate::error::AppResult;
 
@@ -105,6 +105,65 @@ impl AccessStore {
                 record: record.clone(),
                 secret,
             })
+        })
+    }
+
+    /// 把一条隧道绑定到一个有效的 token 类型 grant，记下此刻的凭据修订号。
+    /// `tunnel` 是 [`super::openai_tunnel_name`] 生成的标识，`selector` 是 GrantId 或有效 grant 的名字。
+    /// 这条隧道已绑同一个 grant 时只更新修订号、保留绑定 ID（轮换后重绑，调用方身份不变）；
+    /// 改绑别的 grant 时换新 ID。OAuth、URL 用途和已撤销的 grant 都不能绑。
+    pub fn bind_tunnel(
+        &self,
+        tunnel: &str,
+        selector: &str,
+        now_unix_secs: u64,
+    ) -> AppResult<TunnelBinding> {
+        let selector = selector.trim();
+        self.change_all(|records, bindings| {
+            let record = records
+                .iter()
+                .find(|record| record.grant.id == selector)
+                .or_else(|| {
+                    records.iter().find(|record| {
+                        record.grant.status == GrantStatus::Active
+                            && record.grant.name.eq_ignore_ascii_case(selector)
+                    })
+                })
+                .ok_or_else(|| invalid("Grant not found; use gld grant ls"))?;
+            if record.grant.status == GrantStatus::Revoked {
+                return Err(invalid("A revoked grant cannot be bound to a tunnel"));
+            }
+            if record.credential.kind != CredentialKind::Token {
+                return Err(invalid("Only a token grant can be bound to a tunnel"));
+            }
+            let previous = bindings.iter().position(|old| old.tunnel == tunnel);
+            let id = previous
+                .map(|index| &bindings[index])
+                .filter(|old| old.grant_id == record.grant.id)
+                .map(|old| old.id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+            let binding = TunnelBinding {
+                id,
+                tunnel: tunnel.to_string(),
+                grant_id: record.grant.id.clone(),
+                credential_revision: record.credential.revision,
+                bound_at_unix_secs: now_unix_secs,
+            };
+            binding.validate().map_err(|error| invalid(&error))?;
+            match previous {
+                Some(index) => bindings[index] = binding.clone(),
+                None => bindings.push(binding.clone()),
+            }
+            Ok(binding)
+        })
+    }
+
+    /// 解除一条隧道的绑定；本来就没有绑定时返回 `false`，不写文件以外的状态。
+    pub fn unbind_tunnel(&self, tunnel: &str) -> AppResult<bool> {
+        self.change_all(|_, bindings| {
+            let before = bindings.len();
+            bindings.retain(|binding| binding.tunnel != tunnel);
+            Ok(bindings.len() != before)
         })
     }
 }

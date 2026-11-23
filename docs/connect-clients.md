@@ -350,12 +350,18 @@ ChatGPT 里：Plugins → `+` → Add custom MCP server，**Connection 选 Tunne
 **谁能用它。**关联了这条隧道的 ChatGPT 工作区里，能选到这条隧道建连接器的人，都等于拿到了服务凭据
 （旧版本的全部项目）。D18 已取消该隐式放行，见 [新隧道授权边界](security.md#openai-隧道需要显式授权绑定)。
 
+**当前源码：隧道要先绑定 grant，而绑定的命令还没有提供。**隧道密钥现在只证明请求来自这条隧道；
+能用哪些项目、能不能写，取决于隧道绑定的那个 token 类型 grant。没绑定时 `gld share` 会报
+"这条 OpenAI 隧道还没有绑定到 grant"（请求回的是 `403 / TUNNEL_NOT_BOUND`），本地服务照常运行。
+绑定命令会随统一的 grant 命令一起提供，在那之前 OpenAI 隧道接不通。
+
 **官方限制：**单个请求从排队到回包最长 120 秒，请求或回包最大 10 MiB，每条隧道每分钟 600 次。
 gld 单次调用最多等 30 秒（经目标机的调用最多 60 秒）、回包最大 1 MiB，都在范围内。
 
 **起不来时**，`gld share` 的报错里附着 tunnel-client 日志的最后几行，完整的在
 `~/.config/gld/logs/hub/tunnel-client.log`（`gld logs` 也有）。gld 只等它在本机就绪：它的 `/readyz` 回 200，
-说明它带着请求头连得上服务。连 OpenAI 那一段（隧道 ID 不对、Runtime Key 不对或权限不够）不在这个检查里，
+说明它带着请求头连得上服务。它的启动探测被服务拒绝时 `/readyz` 回 503，gld 会再用同一把请求头问一次服务，
+如果原因是隧道没绑定 grant 就直接这样报出来。连 OpenAI 那一段（隧道 ID 不对、Runtime Key 不对或权限不够）不在这个检查里，
 `gld share` 成功了 ChatGPT 还是选不到、连不上，就看这份日志。
 
 这一节是对着 tunnel-client v0.0.18 的源码写的，还没在真的 OpenAI 隧道上跑过（审查 §70）。

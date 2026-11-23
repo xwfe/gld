@@ -19,10 +19,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gld_core::async_rt::{self, JoinHandle};
-use gld_core::auth::{AccessReader, UrlRejection};
+use gld_core::auth::{constant_time_eq_str, AccessReader, TunnelRejection, UrlRejection};
 use gld_core::data::{AppData, DataStore};
 use gld_core::generation::CallError;
-use gld_core::hub::{public_base_url, Hub, HubSecrets, HUB_SCOPE, SERVER_NAME};
+use gld_core::hub::{
+    public_base_url, Hub, HubSecrets, HUB_SCOPE, OPENAI_TUNNEL_HEADER, SERVER_NAME,
+};
 use gld_core::local_network;
 use gld_core::logs::append_profile_log;
 use gld_core::mcp::handle_request;
@@ -237,7 +239,23 @@ struct ListenerState {
     spawn_public_url: String,
     oauth: Option<Arc<OAuthRuntime>>,
     oauth_client_secret: Option<String>,
+    /// 这个入口认的隧道来源。只有公网入口配成 OpenAI 隧道的 Hub 才有；
+    /// 单工作区入口和没配这种隧道的 Hub 是 `None`，带隧道头的请求一律 401。
+    tunnel: Option<TunnelSource>,
 }
+
+/// 隧道来源证明：请求头里的密钥等于 `key`，就说明请求是这条隧道转发来的。
+/// 它只定位绑定，不带权限；权限来自 `name` 在授权存储里绑定的 grant。
+#[derive(Clone)]
+struct TunnelSource {
+    /// 授权存储里的隧道标识，`openai:<隧道 ID>`。
+    name: String,
+    key: String,
+}
+
+/// 隧道请求被拒的原因，挂在回包上只给日志用；回包正文不区分。
+#[derive(Clone, Copy)]
+struct TunnelRejectReason(&'static str);
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_listener(
@@ -288,6 +306,7 @@ pub fn spawn_listener(
         spawn_public_url,
         oauth,
         oauth_client_secret,
+        tunnel: None,
     })
 }
 
@@ -302,11 +321,18 @@ pub fn spawn_hub_listener(
     hub: Arc<Hub>,
     nodes: Arc<Nodes>,
     _auth_type: &str,
+    openai_tunnel_id: &str,
     public_base_url: String,
     secrets: HubSecrets,
     generation: Option<Arc<GenerationRouter>>,
     access: AccessReader,
 ) -> Result<(ShutdownSender, JoinHandle<()>), String> {
+    // 密钥只在公网入口是 OpenAI 隧道时才取出来；隧道 ID 格式不对时没有可绑定的标识，同样不认隧道头。
+    let tunnel = secrets
+        .openai_tunnel_key
+        .filter(|key| !key.is_empty())
+        .zip(gld_core::auth::openai_tunnel_name(openai_tunnel_id))
+        .map(|(key, name)| TunnelSource { name, key });
     let oauth = Some(Arc::new(OAuthRuntime::new_mcp(
         hub_audience(),
         HUB_SCOPE.into(),
@@ -327,6 +353,7 @@ pub fn spawn_hub_listener(
         spawn_public_url: public_base_url.trim().to_string(),
         oauth,
         oauth_client_secret: None,
+        tunnel,
     })
 }
 
@@ -775,7 +802,12 @@ async fn mcp_post(
     let auth = match require_mcp_auth(&state, &headers) {
         Ok(auth) => auth,
         Err(response) => {
-            log_rejected(&state.scope, &headers, response.status());
+            match response.extensions().get::<TunnelRejectReason>() {
+                Some(reason) => {
+                    log_tunnel_rejected(&state.scope, &headers, response.status(), reason.0)
+                }
+                None => log_rejected(&state.scope, &headers, response.status()),
+            }
             return *response;
         }
     };
@@ -959,6 +991,25 @@ async fn dispatch_mcp(state: ListenerState, auth: AuthContext, body: Value) -> R
 /// 只记"带没带凭据"，凭据本身绝不进日志：日志常被整段贴出去求助，而填错的 token
 /// 往往只差一两个字符。`forwarded_for` 来自隧道加的请求头，直连时客户端能随便填，
 /// 只能当线索。
+/// 隧道入口被拒的请求。原因只写在这里，回包不区分；隧道密钥不进日志。
+fn log_tunnel_rejected(scope: &str, headers: &HeaderMap, status: StatusCode, reason: &str) {
+    let hint = if reason == "key" {
+        "请求带了隧道头，但密钥不对，或这个入口没有配 OpenAI 隧道"
+    } else {
+        "请求来自隧道，但这条隧道没有绑定到可用的 grant"
+    };
+    append_profile_log(
+        scope,
+        "mcp-requests.log",
+        &format!(
+            "[auth] rejected status={} entry=tunnel reason={reason} forwarded_for={} user_agent={} （{hint}）",
+            status.as_u16(),
+            header_for_log(headers, &["cf-connecting-ip", "x-forwarded-for", "x-real-ip"]),
+            header_for_log(headers, &[USER_AGENT.as_str()]),
+        ),
+    );
+}
+
 fn log_rejected(scope: &str, headers: &HeaderMap, status: StatusCode) {
     let (credential, hint) = if headers.contains_key(AUTHORIZATION) {
         ("rejected", "请求到了 gld，但凭据不对或已失效")
@@ -1000,9 +1051,8 @@ fn header_for_log(headers: &HeaderMap, names: &[&str]) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-/// `/mcp` 的认证分派：先确定唯一的凭据来源，再只按那一种验证，失败即拒绝。
-/// API token 和 OAuth access token 已接入统一授权；URL 凭据走自己的路径，见 [`require_url_auth`]；
-/// 隧道仍未接入，返回 AUTH_NOT_READY。
+/// `/mcp` 的认证分派：先确定唯一的凭据来源，再只按那一种验证。
+/// API token、OAuth access token 和隧道都接入统一授权；URL 凭据走自己的路径，见 [`require_url_auth`]。
 fn require_mcp_auth(
     state: &ListenerState,
     headers: &HeaderMap,
@@ -1011,14 +1061,15 @@ fn require_mcp_auth(
         Err("duplicate_credential_source" | "conflicting_credential_sources") => {
             return Err(Box::new(mcp_source_conflict()));
         }
+        // 空的或不是文本的隧道头：和错的隧道密钥一样对待。
+        Err("invalid_credential") if headers.contains_key(OPENAI_TUNNEL_HEADER) => {
+            return require_tunnel_auth(state, "");
+        }
         Err("invalid_credential") => {
             return Err(Box::new(mcp_unauthorized(state, headers)));
         }
-        // 隧道的显式 grant 绑定还没接线：格式合法也不取得工具访问权。
-        Ok(CredentialSource::Tunnel(key)) => {
-            let _ = key;
-            return Err(Box::new(mcp_auth_not_ready()));
-        }
+        // 隧道先验来源：密钥不对时不透露这台机器的授权状态。
+        Ok(CredentialSource::Tunnel(key)) => return require_tunnel_auth(state, key),
         Ok(source) => Some(source),
         Err(_) => None,
     };
@@ -1078,6 +1129,64 @@ fn mcp_unauthorized(state: &ListenerState, headers: &HeaderMap) -> Response {
     response
 }
 
+/// 隧道入口。先验来源（密钥），再解析这条隧道的显式绑定：
+/// 密钥不对是 401，不带 OAuth 发现信息（隧道不是让客户端去走授权页的入口）；
+/// 密钥对但没有可用绑定是 403 `TUNNEL_NOT_BOUND`，四种原因对外不区分。
+/// 隧道密钥本身不带任何权限，也不会成为本机操作员。
+fn require_tunnel_auth(state: &ListenerState, key: &str) -> Result<AuthContext, Box<Response>> {
+    let reject = |mut response: Response, reason: &'static str| {
+        response.extensions_mut().insert(TunnelRejectReason(reason));
+        Box::new(response)
+    };
+    // 只有配了 OpenAI 隧道的 Hub 入口认隧道头。单工作区入口本来就不带 `tunnel`，这里再按端点挡一次。
+    let Some(tunnel) = state
+        .tunnel
+        .as_ref()
+        .filter(|_| matches!(&state.endpoint, Endpoint::Hub { .. }))
+        .filter(|tunnel| !key.is_empty() && constant_time_eq_str(key, &tunnel.key))
+    else {
+        return Err(reject(mcp_tunnel_unauthorized(), "key"));
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Box::new(mcp_auth_not_ready()))?
+        .as_secs();
+    state
+        .access
+        .authenticate_tunnel(&state.scope, &tunnel.name, now)
+        .map_err(|rejection| match rejection {
+            TunnelRejection::Unavailable => reject(mcp_auth_not_ready(), rejection.reason()),
+            _ => reject(mcp_tunnel_not_bound(), rejection.reason()),
+        })
+}
+
+fn mcp_tunnel_unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [
+            (CACHE_CONTROL, "no-store"),
+            (REFERRER_POLICY, "no-referrer"),
+        ],
+        Json(json!({"error": "AUTHENTICATION_FAILED", "message": "Missing or invalid credential"})),
+    )
+        .into_response()
+}
+
+fn mcp_tunnel_not_bound() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [
+            (CACHE_CONTROL, "no-store"),
+            (REFERRER_POLICY, "no-referrer"),
+        ],
+        Json(json!({
+            "error": "TUNNEL_NOT_BOUND",
+            "message": "隧道密钥有效，但这条隧道没有绑定到可用的 grant：还没绑定，或所绑 grant 已轮换、撤销、到期。绑定后才能调用工具"
+        })),
+    )
+        .into_response()
+}
+
 fn mcp_forbidden() -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -1108,7 +1217,7 @@ fn mcp_auth_not_ready() -> Response {
         [(CACHE_CONTROL, "no-store")],
         Json(json!({
             "error": "AUTH_NOT_READY",
-            "message": "这台机器还没有可用的统一授权，或请求来自尚未绑定 grant 的隧道；匿名和旧凭据一律拒绝"
+            "message": "这台机器还没有可用的统一授权；匿名和旧凭据一律拒绝"
         })),
     )
         .into_response()
@@ -1272,6 +1381,7 @@ mod tests {
             spawn_public_url: String::new(),
             oauth: None,
             oauth_client_secret: None,
+            tunnel: None,
         }
     }
 
@@ -1537,15 +1647,14 @@ mod tests {
                 unauthorized(&state, &bearer("old-oauth-jwt"));
                 unauthorized(&state, &axum::http::HeaderMap::new());
 
-                // 隧道还没接入统一授权，仍是 AUTH_NOT_READY，不因 OAuth 接通而放行。
+                // 单工作区入口不认隧道头，不因 OAuth 接通而放行；隧道的 401 不带 OAuth 发现信息。
                 let mut tunnel = axum::http::HeaderMap::new();
                 tunnel.insert(gld_core::hub::OPENAI_TUNNEL_HEADER, "key".parse().unwrap());
-                assert_eq!(
-                    super::require_mcp_auth(&state, &tunnel)
-                        .unwrap_err()
-                        .status(),
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE
-                );
+                let refused = super::require_mcp_auth(&state, &tunnel).unwrap_err();
+                assert_eq!(refused.status(), axum::http::StatusCode::UNAUTHORIZED);
+                assert!(!refused
+                    .headers()
+                    .contains_key(axum::http::header::WWW_AUTHENTICATE));
 
                 // 单工作区入口沿用 token 的上限：grant 不含本项目，或没开读取限制，都是 403。
                 let mut changed = issued.record.clone();
@@ -1862,6 +1971,281 @@ mod tests {
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["error"], "CONFLICTING_CREDENTIAL_SOURCES");
                 assert!(!String::from_utf8_lossy(&body).contains("old-url-secret"));
+            },
+        );
+    }
+
+    const TUNNEL_ID: &str = "tunnel_0123456789abcdef0123456789abcdef";
+    const TUNNEL_KEY: &str = "tunnel-key-0123456789abcdef";
+
+    fn hub_state(access: AccessReader, tunnel_id: &str, key: Option<&str>) -> ListenerState {
+        let nodes = Arc::new(crate::nodes::registry::Nodes::new());
+        let hub = Arc::new(gld_core::hub::Hub::new(
+            &gld_core::settings::HubConfig::default(),
+            nodes.clone(),
+        ));
+        ListenerState {
+            endpoint: Endpoint::Hub { hub, nodes },
+            access,
+            workspace_confined: true,
+            generation: None,
+            scope: gld_core::hub::HUB_SCOPE.into(),
+            authorize_label: "hub".into(),
+            bind_port: 0,
+            spawn_public_url: String::new(),
+            oauth: None,
+            oauth_client_secret: None,
+            tunnel: key.map(|key| super::TunnelSource {
+                name: gld_core::auth::openai_tunnel_name(tunnel_id).unwrap(),
+                key: key.into(),
+            }),
+        }
+    }
+
+    fn tunnel_headers(key: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(gld_core::hub::OPENAI_TUNNEL_HEADER, key.parse().unwrap());
+        headers
+    }
+
+    /// 走完整的 `mcp_post`（含拒绝日志），返回状态、错误码和回包正文。
+    fn tunnel_post(
+        state: &ListenerState,
+        headers: axum::http::HeaderMap,
+    ) -> (axum::http::StatusCode, String, String) {
+        let response = gld_core::async_rt::block_on(super::mcp_post(
+            State(state.clone()),
+            headers,
+            axum::Json(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
+        ));
+        let status = response.status();
+        if status != axum::http::StatusCode::OK {
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            assert!(!response
+                .headers()
+                .contains_key(axum::http::header::WWW_AUTHENTICATE));
+        }
+        let body =
+            gld_core::async_rt::block_on(axum::body::to_bytes(response.into_body(), 1 << 20))
+                .unwrap();
+        let text = String::from_utf8_lossy(&body).into_owned();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let error = value["error"].as_str().unwrap_or_default().to_string();
+        (status, error, text)
+    }
+
+    fn files_under(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files_under(&path, found);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn tunnel_needs_the_right_key_and_a_live_binding_and_gets_only_the_grant() {
+        run_isolated(
+            module_path!(),
+            "tunnel_needs_the_right_key_and_a_live_binding_and_gets_only_the_grant",
+            || {
+                use axum::http::StatusCode;
+                let root = tempfile::tempdir().unwrap();
+                let store = AccessStore::open_in(root.path()).unwrap();
+                let state = hub_state(store.reader(), TUNNEL_ID, Some(TUNNEL_KEY));
+                let tunnel = gld_core::auth::openai_tunnel_name(TUNNEL_ID).unwrap();
+                let right = || tunnel_headers(TUNNEL_KEY);
+                let refused = |state: &ListenerState, headers, status, code: &str| {
+                    let (got, error, body) = tunnel_post(state, headers);
+                    assert_eq!((got, error.as_str()), (status, code), "{body}");
+                    assert!(!body.contains(TUNNEL_KEY), "{body}");
+                };
+
+                // 还没有任何 grant：密钥对也只是"未就绪"；密钥不对先是 401，不透露授权状态。
+                refused(
+                    &state,
+                    right(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "AUTH_NOT_READY",
+                );
+                refused(
+                    &state,
+                    tunnel_headers("wrong"),
+                    StatusCode::UNAUTHORIZED,
+                    "AUTHENTICATION_FAILED",
+                );
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let create = |name: &str, kind| {
+                    store
+                        .create_grant(
+                            GrantCreation {
+                                name: name.into(),
+                                scope: ProjectScope::Selected(vec!["w1".into()]),
+                                permissions: GrantPermissions::default(),
+                                kind,
+                                ttl: None,
+                                allowed_origins: vec![],
+                            },
+                            now,
+                        )
+                        .unwrap()
+                };
+                let issued = create("Tunnel client", CredentialKind::Token);
+                let grant_id = issued.record.grant.id.clone();
+                let token_secret = issued.secret.into_string();
+
+                // 有 grant、密钥也对，但没有绑定：403，不是 401，也不是放行。
+                refused(&state, right(), StatusCode::FORBIDDEN, "TUNNEL_NOT_BOUND");
+                // 错的、空的密钥，以及拿 grant 的 token 当隧道密钥：都是不带发现信息的 401。
+                for key in ["wrong", "", token_secret.as_str(), &TUNNEL_KEY[1..]] {
+                    refused(
+                        &state,
+                        tunnel_headers(key),
+                        StatusCode::UNAUTHORIZED,
+                        "AUTHENTICATION_FAILED",
+                    );
+                }
+                // 隧道头不能和别的凭据混用，也不能重复。
+                let mut mixed = right();
+                mixed.insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {token_secret}").parse().unwrap(),
+                );
+                refused(
+                    &state,
+                    mixed,
+                    StatusCode::BAD_REQUEST,
+                    "CONFLICTING_CREDENTIAL_SOURCES",
+                );
+                let mut twice = right();
+                twice.append(
+                    gld_core::hub::OPENAI_TUNNEL_HEADER,
+                    TUNNEL_KEY.parse().unwrap(),
+                );
+                refused(
+                    &state,
+                    twice,
+                    StatusCode::BAD_REQUEST,
+                    "CONFLICTING_CREDENTIAL_SOURCES",
+                );
+
+                // 绑定后放行：调用方是隧道自己的身份，权限只有 grant 给的。
+                let binding = store.bind_tunnel(&tunnel, &grant_id, now).unwrap();
+                let caller = super::require_mcp_auth(&state, &right()).unwrap();
+                assert!(matches!(
+                    caller.identity(),
+                    gld_core::auth::CallerIdentity::McpClient {
+                        grant_id: bound,
+                        subject: gld_core::auth::McpSubject::Tunnel { binding_id },
+                        ..
+                    } if bound == &grant_id && binding_id == &binding.id
+                ));
+                assert!(!caller.is_local_operator());
+                assert!(caller.allows_project("w1") && !caller.allows_project("w2"));
+                assert!(!caller.may_write_project() && !caller.may_delegate());
+                assert!(!caller.may_read_user_prompts());
+                assert!(!caller.may_use_machine_mcp() && !caller.may_manage_workspaces());
+                let mut direct = axum::http::HeaderMap::new();
+                direct.insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {token_secret}").parse().unwrap(),
+                );
+                let token_caller = super::require_mcp_auth(&state, &direct).unwrap();
+                assert_ne!(caller.id(), token_caller.id());
+                let (status, _, body) = tunnel_post(&state, right());
+                assert_eq!(status, StatusCode::OK, "{body}");
+                assert!(body.contains("\"tools\""), "{body}");
+
+                // 运行中改 grant：下一次请求就按新权限算，不用重启监听器。
+                let mut record = store
+                    .snapshot()
+                    .unwrap()
+                    .by_grant_id(&grant_id)
+                    .unwrap()
+                    .clone();
+                record.grant.permissions.write = true;
+                store.update(record).unwrap();
+                let widened = super::require_mcp_auth(&state, &right()).unwrap();
+                assert!(widened.may_write_project());
+                assert_eq!(widened.id(), caller.id());
+
+                // 别的入口不认这把密钥：单工作区入口、没配 OpenAI 隧道的 Hub。
+                let mut workspace = state_with_access(root.path(), "api", store.reader());
+                workspace.tunnel = state.tunnel.clone();
+                let plain_hub = hub_state(store.reader(), TUNNEL_ID, None);
+                // 监听器按新配置重建后：旧密钥不再有效；换了隧道 ID 要重新绑定。
+                let rekeyed = hub_state(store.reader(), TUNNEL_ID, Some("another-tunnel-key"));
+                let moved = hub_state(
+                    store.reader(),
+                    "tunnel_fedcba9876543210fedcba9876543210",
+                    Some(TUNNEL_KEY),
+                );
+                for other in [&workspace, &plain_hub, &rekeyed] {
+                    refused(
+                        other,
+                        right(),
+                        StatusCode::UNAUTHORIZED,
+                        "AUTHENTICATION_FAILED",
+                    );
+                }
+                refused(&moved, right(), StatusCode::FORBIDDEN, "TUNNEL_NOT_BOUND");
+
+                // 轮换：旧绑定不跟到新修订；重新绑定后恢复，调用方不变。
+                let rotated = store.rotate_grant(&grant_id, None, now).unwrap();
+                let new_secret = rotated.secret.into_string();
+                refused(&state, right(), StatusCode::FORBIDDEN, "TUNNEL_NOT_BOUND");
+                store.bind_tunnel(&tunnel, &grant_id, now).unwrap();
+                assert_eq!(
+                    super::require_mcp_auth(&state, &right()).unwrap().id(),
+                    caller.id()
+                );
+
+                // OAuth 和 URL 用途的 grant 绑不上，原绑定不受影响。
+                for (name, kind) in [
+                    ("OAuth", CredentialKind::OAuth),
+                    ("Url", CredentialKind::Url),
+                ] {
+                    let other = create(name, kind);
+                    assert!(store
+                        .bind_tunnel(&tunnel, &other.record.grant.id, now)
+                        .is_err());
+                }
+                assert!(super::require_mcp_auth(&state, &right()).is_ok());
+
+                // 撤销后绑定还在，但请求被拒。
+                store.revoke(&grant_id).unwrap();
+                assert!(store.snapshot().unwrap().by_tunnel(&tunnel).is_some());
+                refused(&state, right(), StatusCode::FORBIDDEN, "TUNNEL_NOT_BOUND");
+                // 解除绑定后同样是 403。
+                assert!(store.unbind_tunnel(&tunnel).unwrap());
+                refused(&state, right(), StatusCode::FORBIDDEN, "TUNNEL_NOT_BOUND");
+
+                // 原因只进日志；隧道密钥和 token 秘密不落到任何文件里。
+                let mut files = Vec::new();
+                files_under(root.path(), &mut files);
+                files_under(&gld_core::home::data_home().unwrap(), &mut files);
+                let mut log = String::new();
+                for file in &files {
+                    let text = String::from_utf8_lossy(&std::fs::read(file).unwrap()).into_owned();
+                    for secret in [TUNNEL_KEY, "another-tunnel-key", &token_secret, &new_secret] {
+                        assert!(!text.contains(secret), "secret in {}", file.display());
+                    }
+                    if file.ends_with("mcp-requests.log") {
+                        log.push_str(&text);
+                    }
+                }
+                for reason in ["key", "unavailable", "unbound", "stale_revision", "revoked"] {
+                    assert!(
+                        log.contains(&format!("entry=tunnel reason={reason} ")),
+                        "{reason} missing in {log}"
+                    );
+                }
             },
         );
     }

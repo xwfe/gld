@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use fs2::FileExt;
-use gld_policy::{Grant, GrantStatus};
+use gld_policy::{CredentialKind, Grant, GrantStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
@@ -17,12 +17,16 @@ use crate::nodes::local_config::{check_private_file, create_private_file};
 mod authorize;
 mod lifecycle;
 mod model;
-pub use authorize::{OAuthBinding, UrlRejection};
+pub use authorize::{OAuthBinding, TunnelRejection, UrlRejection};
 pub use lifecycle::{GrantCreation, IssuedAccess};
-pub use model::{AccessRecord, CredentialRecord, MAX_URL_TTL_SECONDS};
+pub use model::{
+    openai_tunnel_name, AccessRecord, CredentialRecord, TunnelBinding, MAX_URL_TTL_SECONDS,
+};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tunnel_tests;
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -31,6 +35,8 @@ const SCHEMA_VERSION: u32 = 1;
 struct AccessFile {
     schema_version: u32,
     records: Vec<AccessRecord>,
+    /// 必填：没有绑定也要写空数组，缺字段的文件整份拒绝。
+    tunnel_bindings: Vec<TunnelBinding>,
 }
 
 /// 一次已提交的不可变状态。请求通过 AccessReader 取得当前值，不单独缓存认证结果。
@@ -41,16 +47,24 @@ pub struct AccessSnapshot {
     grants: HashMap<String, usize>,
     credentials: HashMap<String, usize>,
     names: HashMap<String, usize>,
+    tunnel_bindings: Vec<TunnelBinding>,
+    tunnels: HashMap<String, usize>,
 }
 
 impl AccessSnapshot {
-    fn build(records: Vec<AccessRecord>, initialized: bool) -> AppResult<Self> {
+    fn build(
+        records: Vec<AccessRecord>,
+        tunnel_bindings: Vec<TunnelBinding>,
+        initialized: bool,
+    ) -> AppResult<Self> {
         let mut snapshot = Self {
             initialized,
             records,
             grants: HashMap::new(),
             credentials: HashMap::new(),
             names: HashMap::new(),
+            tunnel_bindings,
+            tunnels: HashMap::new(),
         };
         for (index, record) in snapshot.records.iter().enumerate() {
             record
@@ -77,6 +91,35 @@ impl AccessSnapshot {
                     .is_some()
             {
                 return Err(invalid("Duplicate active grant name"));
+            }
+        }
+        let mut binding_ids = std::collections::HashSet::new();
+        for (index, binding) in snapshot.tunnel_bindings.iter().enumerate() {
+            binding
+                .validate()
+                .map_err(|_| invalid("Invalid tunnel binding"))?;
+            if !binding_ids.insert(binding.id.as_str()) {
+                return Err(invalid("Duplicate tunnel binding ID"));
+            }
+            if snapshot
+                .tunnels
+                .insert(binding.tunnel.clone(), index)
+                .is_some()
+            {
+                return Err(invalid("A tunnel can only have one binding"));
+            }
+            // 悬空或指向别的用途的绑定说明文件被改坏了：整份拒绝，不挑能用的部分加载。
+            // 已撤销的 grant 记录仍在，所以撤销后的绑定能加载，只是认证时被拒。
+            let record = snapshot
+                .grants
+                .get(&binding.grant_id)
+                .map(|&index| &snapshot.records[index])
+                .ok_or_else(|| invalid("Tunnel binding refers to a missing grant"))?;
+            if record.credential.kind != CredentialKind::Token {
+                return Err(invalid("Tunnel binding requires a token grant"));
+            }
+            if binding.credential_revision > record.credential.revision {
+                return Err(invalid("Tunnel binding is newer than its credential"));
             }
         }
         Ok(snapshot)
@@ -106,6 +149,17 @@ impl AccessSnapshot {
         self.names
             .get(&name.to_ascii_lowercase())
             .map(|&index| &self.records[index])
+    }
+
+    pub fn tunnel_bindings(&self) -> &[TunnelBinding] {
+        &self.tunnel_bindings
+    }
+
+    /// 只定位绑定；找到不表示隧道请求已通过，见 `AccessReader::authenticate_tunnel`。
+    pub fn by_tunnel(&self, tunnel: &str) -> Option<&TunnelBinding> {
+        self.tunnels
+            .get(tunnel)
+            .map(|&index| &self.tunnel_bindings[index])
     }
 }
 
@@ -158,10 +212,12 @@ impl AccessStore {
         let parent = path.parent().expect("authorization path has parent");
         create_directory(parent)?;
         let lock = open_lock(&path.with_extension("lock"))?;
-        let records = read_file(&path)?;
-        let initialized = records.is_some();
+        let saved = read_file(&path)?;
+        let initialized = saved.is_some();
+        let (records, tunnel_bindings) = saved.unwrap_or_default();
         let snapshot = Arc::new(AccessSnapshot::build(
-            records.unwrap_or_default(),
+            records,
+            tunnel_bindings,
             initialized,
         )?);
         Ok(Self {
@@ -234,16 +290,30 @@ impl AccessStore {
         &self,
         mutate: impl FnOnce(&mut Vec<AccessRecord>) -> AppResult<R>,
     ) -> AppResult<R> {
+        self.change_all(|records, _| mutate(records))
+    }
+
+    /// 授权记录和隧道绑定在同一次提交里一起校验、一起落盘。
+    /// 以后若有删除授权记录的写入，必须在同一个闭包里删掉指向它的绑定：
+    /// 留下悬空绑定的候选状态在这里就校验失败，不会写出一份下次加载被拒的文件。
+    fn change_all<R>(
+        &self,
+        mutate: impl FnOnce(&mut Vec<AccessRecord>, &mut Vec<TunnelBinding>) -> AppResult<R>,
+    ) -> AppResult<R> {
         let _writer = self
             .writer
             .lock()
             .map_err(|_| invalid("Authorization writer lock is poisoned"))?;
-        let mut records = self.snapshot()?.records.clone();
-        let result = mutate(&mut records)?;
-        let candidate = Arc::new(AccessSnapshot::build(records, true)?);
+        let current = self.snapshot()?;
+        let mut records = current.records.clone();
+        let mut tunnel_bindings = current.tunnel_bindings.clone();
+        drop(current);
+        let result = mutate(&mut records, &mut tunnel_bindings)?;
+        let candidate = Arc::new(AccessSnapshot::build(records, tunnel_bindings, true)?);
         let bytes = serde_json::to_vec_pretty(&AccessFile {
             schema_version: SCHEMA_VERSION,
             records: candidate.records.clone(),
+            tunnel_bindings: candidate.tunnel_bindings.clone(),
         })
         .map_err(|_| invalid("Cannot serialize authorization data"))?;
         // 所有可能失败的检查和锁获取都在 rename 前；提交后只替换已分配好的 Arc。
@@ -316,7 +386,7 @@ fn open_existing(path: &Path, writable: bool) -> AppResult<File> {
     Ok(file)
 }
 
-fn read_file(path: &Path) -> AppResult<Option<Vec<AccessRecord>>> {
+fn read_file(path: &Path) -> AppResult<Option<(Vec<AccessRecord>, Vec<TunnelBinding>)>> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(invalid("Cannot inspect authorization data")),
@@ -331,7 +401,7 @@ fn read_file(path: &Path) -> AppResult<Option<Vec<AccessRecord>>> {
     if saved.schema_version != SCHEMA_VERSION {
         return Err(invalid("Unsupported authorization schema version"));
     }
-    Ok(Some(saved.records))
+    Ok(Some((saved.records, saved.tunnel_bindings)))
 }
 
 fn replace_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
