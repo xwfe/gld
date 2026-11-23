@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use gld_core::auth::{
     bearer_token, constant_time_eq_str, parse_credential, AccessReader, AuthContext,
-    ClientRegistry, CredentialKind, OAuthBinding, RegisteredClient, RegistrationError,
+    ClientRegistrationStatus, ClientRegistry, CredentialKind, OAuthBinding, RegisteredClient,
+    RegistrationError,
 };
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
@@ -212,16 +213,19 @@ impl OAuthRuntime {
         matches!(self.authorization, OAuthAuthorization::Actions { .. })
     }
 
+    fn is_static_client(&self, client_id: &str) -> bool {
+        !self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id)
+    }
+
     pub fn client_id_allowed(&self, client_id: &str) -> bool {
         if client_id.is_empty() {
             return false;
         }
-        (!self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id))
-            || self.clients.contains(client_id)
+        self.is_static_client(client_id) || self.clients.contains(client_id)
     }
 
     fn redirect_uri_allowed(&self, client_id: &str, redirect_uri: &str) -> bool {
-        if !self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id) {
+        if self.is_static_client(client_id) {
             return !redirect_uri.trim().is_empty();
         }
         self.clients
@@ -230,7 +234,7 @@ impl OAuthRuntime {
     }
 
     fn client_credentials_allowed(&self, client_id: &str, client_secret: &str) -> bool {
-        if !self.client_id.is_empty() && constant_time_eq_str(client_id, &self.client_id) {
+        if self.is_static_client(client_id) {
             return self
                 .client_secret
                 .as_deref()
@@ -347,6 +351,7 @@ pub fn register_client(oauth: &OAuthRuntime, request: ClientRegistrationRequest)
             client_secret: client_secret.clone(),
             client_name: request.client_name.trim().to_string(),
             created_at: unix_now(),
+            status: ClientRegistrationStatus::Pending,
         },
     ) {
         return registration_unavailable(error);
@@ -606,6 +611,37 @@ pub fn token_exchange(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ExchangeClientError {
+    NotRegistered,
+    Unavailable,
+}
+
+impl ExchangeClientError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::NotRegistered => token_error("invalid_client", "Invalid client credentials"),
+            Self::Unavailable => token_error("server_error", "Failed to issue token pair"),
+        }
+    }
+}
+
+fn authorize_exchange_client(
+    oauth: &OAuthRuntime,
+    client_id: &str,
+) -> Result<(), ExchangeClientError> {
+    if oauth.is_static_client(client_id) {
+        return Ok(());
+    }
+    oauth
+        .clients
+        .mark_authorized(client_id)
+        .map_err(|error| match error {
+            RegistrationError::NotRegistered => ExchangeClientError::NotRegistered,
+            _ => ExchangeClientError::Unavailable,
+        })
+}
+
 fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Response {
     if !oauth.client_id_allowed(&form.client_id)
         || !oauth.client_credentials_allowed(&form.client_id, &form.client_secret)
@@ -643,10 +679,19 @@ fn authorization_code_exchange(oauth: &OAuthRuntime, form: TokenForm) -> Respons
     }
     match (&oauth.authorization, code_data.binding) {
         (OAuthAuthorization::Actions { .. }, None) => {
+            if let Err(error) = authorize_exchange_client(oauth, &form.client_id) {
+                return error.into_response();
+            }
             issue_actions_token_pair(oauth, &form.client_id)
         }
         (OAuthAuthorization::Mcp { .. }, Some(binding)) => {
-            issue_mcp_token_pair(oauth, &form.client_id, &binding)
+            if !mcp_binding_current(oauth, &form.client_id, &binding) {
+                return token_error("invalid_grant", "Authorization is no longer valid");
+            }
+            if let Err(error) = authorize_exchange_client(oauth, &form.client_id) {
+                return error.into_response();
+            }
+            sign_mcp_token_pair(oauth, &form.client_id, &binding)
         }
         _ => token_error("invalid_grant", "Authorization code is not valid here"),
     }
@@ -690,18 +735,25 @@ fn refresh_token_exchange(oauth: &OAuthRuntime, mut form: TokenForm) -> Response
     }
 }
 
+fn mcp_binding_current(oauth: &OAuthRuntime, client_id: &str, binding: &OAuthBinding) -> bool {
+    let OAuthAuthorization::Mcp { access, entry } = &oauth.authorization else {
+        return false;
+    };
+    access
+        .authenticate_oauth(entry, binding, client_id, unix_now())
+        .is_ok()
+}
+
 /// 授权码兑换和 refresh 共用：签发前用共享读者确认 grant 仍有效、修订号仍是绑定的那个。
 /// 轮换或撤销之后，旧授权码和旧 refresh 都换不出新 token。
 fn issue_mcp_token_pair(oauth: &OAuthRuntime, client_id: &str, binding: &OAuthBinding) -> Response {
-    let OAuthAuthorization::Mcp { access, entry } = &oauth.authorization else {
-        return token_error("invalid_grant", "Authorization is not valid here");
-    };
-    if access
-        .authenticate_oauth(entry, binding, client_id, unix_now())
-        .is_err()
-    {
+    if !mcp_binding_current(oauth, client_id, binding) {
         return token_error("invalid_grant", "Authorization is no longer valid");
     }
+    sign_mcp_token_pair(oauth, client_id, binding)
+}
+
+fn sign_mcp_token_pair(oauth: &OAuthRuntime, client_id: &str, binding: &OAuthBinding) -> Response {
     let sign = |ttl: i64, kind: &str| {
         let now = unix_now() as i64;
         sign_claims(

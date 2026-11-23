@@ -449,7 +449,12 @@ client_secret 也在对应注册表中，文件同样为 600。保留这些注�
 签名密钥（`oauth_token_secret`）同样落盘，重启不会重新生成；更换它会让全部已签发的 OAuth token 作废。
 
 注册表读取或解析失败时保留原文件，拒绝新注册，不把损坏表当空表覆盖；写盘失败也不返回成功注册。
-现有 Actions OAuth 验证要求客户端仍在对应注册表中。满 50 个注册后拒绝新增，不挤掉旧记录。
+动态注册先落为 pending：同时最多保留 10 个未完成授权的 client，超过时淘汰最旧的 pending；
+pending 从注册时间算 24 小时，过期后按不存在处理。授权码兑换校验 client、PKCE 和 grant/确认口令后，
+才把该 client 落盘为 authorized 并签发 token；这期间被淘汰或过期的 client 兑换会得到 invalid_client。
+状态落盘失败返回 server_error，不签发 token。
+现有 Actions OAuth 验证要求客户端仍在对应注册表中。已授权客户端仍最多 50 个且不回收，全部占满后拒绝新增；
+这需要有效确认口令才能达到，不是匿名注册能触发，剩余清理属 D 的撤销/清理命令。
 `data/oauth-clients/<项目id>.json` 属于对应项目，删除项目时一并清理。
 
 从 0.3.0 起，`profiles.json` 解析失败时 gld 会整体停机并保留原文件，而不是当成

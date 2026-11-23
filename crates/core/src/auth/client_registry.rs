@@ -2,7 +2,7 @@
 //!
 //! ChatGPT 这类客户端会保存注册时拿到的 `dcr-…` client_id，以后继续使用。
 //! 只有注册表写入成功才确认注册；并发请求不能覆盖已经确认的客户端，容量满时也
-//! 不能淘汰旧 id。已有注册表读不动或损坏时保留原文件，暂时拒绝新注册。
+//! 不能淘汰已授权的 id。已有注册表读不动或损坏时保留原文件，暂时拒绝新注册。
 //!
 //! 服务重启后读取同一份注册表；就算文件丢了，已有签名刷新令牌仍走原来的兼容
 //! 路径（见 `oauth_flow::refresh_token_exchange`），但不能据此找回未知的注册记录。
@@ -11,16 +11,22 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
 use crate::logs::append_profile_log;
 
-/// 一个作用域最多接纳多少个已注册客户端；满了拒绝新注册，保留所有已发出的 id。
+/// 一个作用域最多保存多少条注册记录；满了只淘汰未授权的 pending，
+/// 已授权的占满才拒绝新注册，保留所有已发出的 id。
 ///
 /// `/register` 不需要认证，必须限制增长；容量限制不能变成淘汰已有连接器的入口。
 const MAX_CLIENTS: usize = 50;
+/// 同时允许多少个还没完成授权的动态注册占着名额；满了淘汰最旧的 pending。
+const MAX_PENDING_CLIENTS: usize = 10;
+/// 未授权注册从 `created_at` 起最多保留一天；过期后按不存在处理。
+const PENDING_CLIENT_TTL_SECONDS: u64 = 24 * 60 * 60;
 
 /// 注册失败时可安全返回给 HTTP 层的原因，不携带路径、凭据或底层 I/O 错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -29,6 +35,18 @@ pub enum RegistrationError {
     CapacityReached,
     #[error("Client registration is temporarily unavailable.")]
     Unavailable,
+    #[error("Client registration is not present or no longer authorized.")]
+    NotRegistered,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRegistrationStatus {
+    /// 已完成授权码兑换，或旧版本留下的记录；不会被 pending 回收淘汰。
+    #[default]
+    Authorized,
+    /// 已注册但还没换到 token；受 pending 上限和 TTL 回收。
+    Pending,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +59,9 @@ pub struct RegisteredClient {
     pub client_name: String,
     #[serde(default)]
     pub created_at: u64,
+    /// 旧记录没有这个字段，按 authorized 加载，不参与 pending TTL 回收。
+    #[serde(default)]
+    pub status: ClientRegistrationStatus,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -138,22 +159,32 @@ impl ClientRegistry {
     }
 
     pub fn get(&self, client_id: &str) -> Option<RegisteredClient> {
+        let now = unix_now();
         self.clients
             .lock()
             .expect("oauth clients lock")
             .get(client_id)
+            .filter(|client| client_visible(client, now))
             .cloned()
     }
 
     pub fn contains(&self, client_id: &str) -> bool {
+        let now = unix_now();
         self.clients
             .lock()
             .expect("oauth clients lock")
-            .contains_key(client_id)
+            .get(client_id)
+            .is_some_and(|client| client_visible(client, now))
     }
 
     pub fn len(&self) -> usize {
-        self.clients.lock().expect("oauth clients lock").len()
+        let now = unix_now();
+        self.clients
+            .lock()
+            .expect("oauth clients lock")
+            .values()
+            .filter(|client| client_visible(client, now))
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -162,6 +193,8 @@ impl ClientRegistry {
 
     /// 先持久化，再发布新客户端。整个过程持锁，保证较旧的并发快照不会覆盖新注册。
     /// 写入失败时内存和已有注册表不变，调用方不得返回注册成功。
+    ///
+    /// pending 注册可以被过期清理或更旧的 pending 挤掉；authorized 记录永不被淘汰。
     pub fn insert(
         &self,
         client_id: String,
@@ -171,11 +204,56 @@ impl ClientRegistry {
         if !self.writable {
             return Err(RegistrationError::Unavailable);
         }
-        if clients.len() >= MAX_CLIENTS && !clients.contains_key(&client_id) {
+        let now = unix_now();
+        let mut candidate = clients.clone();
+        reclaim_expired_pending(&mut candidate, now);
+        let replacing = candidate.contains_key(&client_id);
+        if client.status == ClientRegistrationStatus::Pending && !replacing {
+            while pending_count(&candidate, now) >= MAX_PENDING_CLIENTS {
+                let Some(oldest) = oldest_pending(&candidate, now) else {
+                    break;
+                };
+                candidate.remove(&oldest);
+            }
+            // 名额占满时只淘汰 pending；一个 pending 都没有就说明已授权的占满了。
+            while candidate.len() >= MAX_CLIENTS {
+                let Some(oldest) = oldest_pending(&candidate, now) else {
+                    break;
+                };
+                candidate.remove(&oldest);
+            }
+        }
+        if !replacing && candidate.len() >= MAX_CLIENTS {
             return Err(RegistrationError::CapacityReached);
         }
-        let mut candidate = clients.clone();
         candidate.insert(client_id, client);
+        self.persist(&candidate)?;
+        *clients = candidate;
+        Ok(())
+    }
+
+    /// 授权码兑换校验全部通过后调用：先把 pending 落成 authorized，再允许签发 token。
+    /// 缺失或过期 pending 返回 `NotRegistered`；已经 authorized 是幂等 no-op，写盘失败不发布状态。
+    pub fn mark_authorized(&self, client_id: &str) -> Result<(), RegistrationError> {
+        let mut clients = self.clients.lock().expect("oauth clients lock");
+        let now = unix_now();
+        let Some(client) = clients.get(client_id) else {
+            return Err(RegistrationError::NotRegistered);
+        };
+        if !client_visible(client, now) {
+            return Err(RegistrationError::NotRegistered);
+        }
+        if client.status == ClientRegistrationStatus::Authorized {
+            return Ok(());
+        }
+        if !self.writable {
+            return Err(RegistrationError::Unavailable);
+        }
+        let mut candidate = clients.clone();
+        reclaim_expired_pending(&mut candidate, now);
+        if let Some(client) = candidate.get_mut(client_id) {
+            client.status = ClientRegistrationStatus::Authorized;
+        }
         self.persist(&candidate)?;
         *clients = candidate;
         Ok(())
@@ -201,6 +279,50 @@ impl ClientRegistry {
             RegistrationError::Unavailable
         })
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn pending_expired(client: &RegisteredClient, now: u64) -> bool {
+    client.status == ClientRegistrationStatus::Pending
+        && now.saturating_sub(client.created_at) >= PENDING_CLIENT_TTL_SECONDS
+}
+
+fn client_visible(client: &RegisteredClient, now: u64) -> bool {
+    !pending_expired(client, now)
+}
+
+fn reclaim_expired_pending(clients: &mut HashMap<String, RegisteredClient>, now: u64) {
+    clients.retain(|_, client| !pending_expired(client, now));
+}
+
+fn pending_count(clients: &HashMap<String, RegisteredClient>, now: u64) -> usize {
+    clients
+        .values()
+        .filter(|client| {
+            client.status == ClientRegistrationStatus::Pending && !pending_expired(client, now)
+        })
+        .count()
+}
+
+fn oldest_pending(clients: &HashMap<String, RegisteredClient>, now: u64) -> Option<String> {
+    clients
+        .iter()
+        .filter(|(_, client)| {
+            client.status == ClientRegistrationStatus::Pending && !pending_expired(client, now)
+        })
+        .min_by(|(id_a, client_a), (id_b, client_b)| {
+            client_a
+                .created_at
+                .cmp(&client_b.created_at)
+                .then_with(|| id_a.cmp(id_b))
+        })
+        .map(|(id, _)| id.clone())
 }
 
 fn write_registry(path: &PathBuf, clients: &HashMap<String, RegisteredClient>) -> AppResult<()> {
@@ -273,7 +395,14 @@ mod tests {
             client_secret: None,
             client_name: "ChatGPT".into(),
             created_at,
+            status: ClientRegistrationStatus::Authorized,
         }
+    }
+
+    fn pending(created_at: u64) -> RegisteredClient {
+        let mut client = client(created_at);
+        client.status = ClientRegistrationStatus::Pending;
+        client
     }
 
     #[test]
@@ -489,5 +618,188 @@ mod tests {
 
         remove_scope(scope).expect("清理");
         assert!(ClientRegistry::load(scope, scope).is_empty());
+    }
+
+    /// 旧文件没有 status 字段：加载按 authorized，保存再重载后 client_id 和字段不变，
+    /// created_at 为 0 的旧记录也不会被当成过期 pending 回收。
+    #[test]
+    fn legacy_records_without_status_load_as_authorized_and_survive_a_save() {
+        crate::home::isolate_for_tests();
+        let path = crate::home::test_scratch_dir("oauth-legacy-status").join("clients.json");
+        fs::create_dir_all(path.parent().expect("registry parent")).expect("create parent");
+        let raw = r#"{"clients":{
+            "dcr-old":{"redirect_uris":["https://chatgpt.com/connector/oauth/cb"],
+                "token_endpoint_auth_method":"none","client_name":"Old","created_at":0},
+            "dcr-secret":{"redirect_uris":["https://chatgpt.com/connector/oauth/cb"],
+                "token_endpoint_auth_method":"client_secret_post","client_secret":"secret-value",
+                "client_name":"Secret","created_at":7}
+        }}"#;
+        fs::write(&path, raw).expect("legacy registry");
+
+        let registry = ClientRegistry::load_path(Ok(path.clone()), "legacy-status");
+        let old = registry.get("dcr-old").expect("legacy client");
+        assert_eq!(old.status, ClientRegistrationStatus::Authorized);
+        assert_eq!(old.created_at, 0);
+        assert_eq!(old.client_name, "Old");
+        let secret = registry
+            .get("dcr-secret")
+            .expect("legacy confidential client");
+        assert_eq!(secret.status, ClientRegistrationStatus::Authorized);
+        assert_eq!(secret.client_secret.as_deref(), Some("secret-value"));
+
+        registry
+            .insert("dcr-new".into(), client(unix_now()))
+            .expect("save legacy records with a new client");
+        let reloaded = ClientRegistry::load_path(Ok(path), "legacy-status");
+        for id in ["dcr-old", "dcr-secret", "dcr-new"] {
+            assert!(reloaded.contains(id), "missing after reload: {id}");
+        }
+        let old = reloaded.get("dcr-old").expect("legacy client after reload");
+        assert_eq!(old.status, ClientRegistrationStatus::Authorized);
+        assert_eq!(old.created_at, 0);
+        assert_eq!(old.client_name, "Old");
+        assert_eq!(
+            old.redirect_uris,
+            vec!["https://chatgpt.com/connector/oauth/cb"]
+        );
+        let secret = reloaded
+            .get("dcr-secret")
+            .expect("confidential after reload");
+        assert_eq!(secret.status, ClientRegistrationStatus::Authorized);
+        assert_eq!(secret.created_at, 7);
+        assert_eq!(secret.client_secret.as_deref(), Some("secret-value"));
+    }
+
+    #[test]
+    fn expired_pending_clients_are_hidden_and_reclaimed_on_insert() {
+        let path = crate::home::test_scratch_dir("oauth-pending-ttl").join("clients.json");
+        let registry = ClientRegistry::load_path(Ok(path.clone()), "pending-ttl");
+        let now = unix_now();
+        registry
+            .insert("dcr-auth".into(), client(0))
+            .expect("authorized client");
+        registry
+            .insert("dcr-fresh".into(), pending(now))
+            .expect("fresh pending client");
+        registry
+            .insert("dcr-expired".into(), pending(0))
+            .expect("expired pending client");
+
+        assert!(!registry.contains("dcr-expired"));
+        assert!(registry.get("dcr-expired").is_none());
+        assert_eq!(registry.len(), 2);
+
+        registry
+            .insert("dcr-fresh-2".into(), pending(now))
+            .expect("insert reclaims expired pending");
+        assert!(!registry.contains("dcr-expired"));
+        let reloaded = ClientRegistry::load_path(Ok(path), "pending-ttl");
+        for id in ["dcr-auth", "dcr-fresh", "dcr-fresh-2"] {
+            assert!(reloaded.contains(id), "missing after reload: {id}");
+        }
+        assert!(!reloaded.contains("dcr-expired"));
+    }
+
+    #[test]
+    fn pending_cap_evicts_only_the_oldest_pending_client() {
+        let registry = ClientRegistry::in_memory();
+        registry
+            .insert("dcr-authorized".into(), client(0))
+            .expect("authorized client");
+        let base = unix_now() - 1_000;
+        for i in 0..MAX_PENDING_CLIENTS {
+            registry
+                .insert(format!("dcr-p{i}"), pending(base + i as u64))
+                .expect("pending client");
+        }
+
+        registry
+            .insert(
+                "dcr-p-new".into(),
+                pending(base + MAX_PENDING_CLIENTS as u64),
+            )
+            .expect("new pending evicts oldest pending");
+
+        assert!(!registry.contains("dcr-p0"));
+        for i in 1..MAX_PENDING_CLIENTS {
+            assert!(registry.contains(&format!("dcr-p{i}")), "missing p{i}");
+        }
+        assert!(registry.contains("dcr-p-new"));
+        assert!(registry.contains("dcr-authorized"));
+        assert_eq!(registry.len(), MAX_PENDING_CLIENTS + 1);
+    }
+
+    #[test]
+    fn mark_authorized_reports_only_visible_registered_clients() {
+        let registry = ClientRegistry::in_memory();
+        let now = unix_now();
+        registry
+            .insert("dcr-pending".into(), pending(now))
+            .expect("pending client");
+        registry
+            .insert("dcr-expired".into(), pending(0))
+            .expect("expired pending client");
+        registry
+            .insert("dcr-authorized".into(), client(0))
+            .expect("authorized client");
+
+        assert_eq!(
+            registry.mark_authorized("dcr-missing"),
+            Err(RegistrationError::NotRegistered)
+        );
+        assert_eq!(
+            registry.mark_authorized("dcr-expired"),
+            Err(RegistrationError::NotRegistered)
+        );
+        assert_eq!(registry.mark_authorized("dcr-pending"), Ok(()));
+        assert_eq!(
+            registry.get("dcr-pending").unwrap().status,
+            ClientRegistrationStatus::Authorized
+        );
+        assert_eq!(registry.mark_authorized("dcr-pending"), Ok(()));
+        assert_eq!(registry.mark_authorized("dcr-authorized"), Ok(()));
+    }
+
+    #[test]
+    fn pending_registrations_make_room_but_authorized_capacity_still_rejects() {
+        let path = crate::home::test_scratch_dir("oauth-authorized-capacity").join("clients.json");
+        let registry = ClientRegistry::load_path(Ok(path.clone()), "authorized-capacity");
+        let now = unix_now();
+        for i in 0..MAX_CLIENTS - 1 {
+            registry
+                .insert(format!("dcr-auth-{i}"), client(i as u64))
+                .expect("authorized client");
+        }
+        registry
+            .insert("dcr-victim".into(), pending(now - 1_000))
+            .expect("pending victim");
+        assert_eq!(registry.len(), MAX_CLIENTS);
+
+        registry
+            .insert("dcr-newcomer".into(), pending(now - 999))
+            .expect("pending evicts pending at total capacity");
+        assert!(!registry.contains("dcr-victim"));
+        assert!(registry.contains("dcr-newcomer"));
+        assert_eq!(registry.len(), MAX_CLIENTS);
+
+        assert_eq!(registry.mark_authorized("dcr-newcomer"), Ok(()));
+        assert_eq!(
+            registry.get("dcr-newcomer").unwrap().status,
+            ClientRegistrationStatus::Authorized
+        );
+        assert_eq!(
+            registry.insert("dcr-blocked".into(), pending(now - 998)),
+            Err(RegistrationError::CapacityReached)
+        );
+        assert!(!registry.contains("dcr-blocked"));
+        assert_eq!(registry.len(), MAX_CLIENTS);
+
+        let reloaded = ClientRegistry::load_path(Ok(path), "authorized-capacity");
+        assert_eq!(
+            reloaded.get("dcr-newcomer").unwrap().status,
+            ClientRegistrationStatus::Authorized
+        );
+        assert!(!reloaded.contains("dcr-blocked"));
+        assert!(!reloaded.contains("dcr-victim"));
     }
 }

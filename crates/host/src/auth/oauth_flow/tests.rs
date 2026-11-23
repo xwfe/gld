@@ -680,9 +680,23 @@ fn registration_capacity_preserves_existing_clients_and_returns_a_specific_error
     let clients = Arc::new(ClientRegistry::in_memory());
     let oauth = runtime_with("chatgpt-client-test", clients.clone());
     let mut registered = Vec::new();
-    // 通过真实注册入口达到容量，不依赖测试专用的 HTTP 错误构造。
-    for _ in 0..50 {
-        registered.push(register(&oauth));
+    // 50 个已授权客户端占满名额；pending 注册会先淘汰 pending，只有 authorized 占满才 503。
+    for i in 0..50 {
+        let id = format!("dcr-authorized-{i}");
+        clients
+            .insert(
+                id.clone(),
+                RegisteredClient {
+                    redirect_uris: vec![REDIRECT_URI.into()],
+                    token_endpoint_auth_method: "none".into(),
+                    client_secret: None,
+                    client_name: "authorized-fixture".into(),
+                    created_at: unix_now(),
+                    status: ClientRegistrationStatus::Authorized,
+                },
+            )
+            .expect("authorized fixture");
+        registered.push(id);
     }
     assert_registration_unavailable(
         confidential_registration(&oauth),
@@ -693,6 +707,191 @@ fn registration_capacity_preserves_existing_clients_and_returns_a_specific_error
         assert!(oauth.client_id_allowed(id));
     }
     authorize_and_exchange(&oauth, &registered[0], "https://lb.example.com");
+}
+
+#[test]
+fn dynamic_registration_stays_pending_until_exchange_and_survives_reload() {
+    run_isolated(
+        module_path!(),
+        "dynamic_registration_stays_pending_until_exchange_and_survives_reload",
+        || {
+            let scope = "oauth-pending-authorized";
+            let clients = Arc::new(ClientRegistry::load(scope, scope));
+            let oauth = runtime_with("chatgpt-client-test", clients.clone());
+            let client_id = register(&oauth);
+            let base = "https://lb.example.com";
+            assert_eq!(
+                clients.get(&client_id).unwrap().status,
+                ClientRegistrationStatus::Pending
+            );
+
+            let code = authorize_code(&oauth, &client_id, base, PASSWORD);
+            assert_eq!(
+                clients.get(&client_id).unwrap().status,
+                ClientRegistrationStatus::Pending,
+                "the authorization page alone must not authorize the client"
+            );
+            let response = exchange_code(&oauth, &client_id, base, code);
+            assert_eq!(response.status(), StatusCode::OK);
+            let refresh = body_json(response)["refresh_token"]
+                .as_str()
+                .expect("refresh")
+                .to_string();
+            assert_eq!(
+                clients.get(&client_id).unwrap().status,
+                ClientRegistrationStatus::Authorized
+            );
+            drop(oauth);
+            drop(clients);
+
+            let registry = ClientRegistry::load(scope, scope);
+            assert_eq!(
+                registry.get(&client_id).unwrap().status,
+                ClientRegistrationStatus::Authorized
+            );
+            let after = runtime_with("chatgpt-client-test", Arc::new(registry));
+            let renewed = refresh_with(&after, &client_id, refresh);
+            assert_eq!(renewed.status(), StatusCode::OK);
+            authorize_and_exchange(&after, &client_id, base);
+            remove_client_registry(scope).expect("clean registry");
+        },
+    );
+}
+
+#[test]
+fn pending_clients_expiring_or_evicted_before_exchange_cannot_get_tokens() {
+    let clients = Arc::new(ClientRegistry::in_memory());
+    let oauth = runtime_with("chatgpt-client-test", clients.clone());
+    let base = "https://lb.example.com";
+
+    let expired_id = register(&oauth);
+    let expired_code = authorize_code(&oauth, &expired_id, base, PASSWORD);
+    clients
+        .insert(
+            expired_id.clone(),
+            RegisteredClient {
+                redirect_uris: vec![REDIRECT_URI.into()],
+                token_endpoint_auth_method: "none".into(),
+                client_secret: None,
+                client_name: "expired-pending".into(),
+                created_at: 0,
+                status: ClientRegistrationStatus::Pending,
+            },
+        )
+        .expect("expire pending client");
+    let response = exchange_code(&oauth, &expired_id, base, expired_code);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(response)["error"], "invalid_client");
+    assert!(clients.get(&expired_id).is_none());
+
+    let victim = register(&oauth);
+    let victim_code = authorize_code(&oauth, &victim, base, PASSWORD);
+    for i in 0..10 {
+        oauth
+            .register(
+                format!("dcr-flood-{i}"),
+                RegisteredClient {
+                    redirect_uris: vec![REDIRECT_URI.into()],
+                    token_endpoint_auth_method: "none".into(),
+                    client_secret: None,
+                    client_name: "flood".into(),
+                    created_at: unix_now() + 3_600,
+                    status: ClientRegistrationStatus::Pending,
+                },
+            )
+            .expect("flood pending client");
+    }
+    assert!(!clients.contains(&victim));
+    let response = exchange_code(&oauth, &victim, base, victim_code);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(response)["error"], "invalid_client");
+}
+
+#[test]
+fn authorization_write_failure_returns_server_error_without_tokens() {
+    run_isolated(
+        module_path!(),
+        "authorization_write_failure_returns_server_error_without_tokens",
+        || {
+            let scope = "oauth-mark-write-failure";
+            let clients = Arc::new(ClientRegistry::load(scope, scope));
+            let oauth = runtime_with("chatgpt-client-test", clients.clone());
+            let client_id = register(&oauth);
+            let base = "https://lb.example.com";
+            let path = data_home()
+                .expect("test home")
+                .join("data/oauth-clients")
+                .join(format!("{scope}.json"));
+            let before = std::fs::read(&path).expect("registry after register");
+            let blocked_tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+            std::fs::create_dir(&blocked_tmp).expect("force temporary write failure");
+
+            let code = authorize_code(&oauth, &client_id, base, PASSWORD);
+            let response = exchange_code(&oauth, &client_id, base, code);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = body_json(response);
+            assert_eq!(body["error"], "server_error");
+            assert!(body.get("access_token").is_none());
+            assert!(body.get("refresh_token").is_none());
+            assert_eq!(
+                clients.get(&client_id).unwrap().status,
+                ClientRegistrationStatus::Pending,
+                "a failed status write must not publish authorized"
+            );
+            assert_eq!(std::fs::read(&path).expect("preserved registry"), before);
+
+            std::fs::remove_dir(blocked_tmp).expect("restore storage");
+            let code = authorize_code(&oauth, &client_id, base, PASSWORD);
+            let response = exchange_code(&oauth, &client_id, base, code);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                clients.get(&client_id).unwrap().status,
+                ClientRegistrationStatus::Authorized
+            );
+            remove_client_registry(scope).expect("clean registry");
+        },
+    );
+}
+
+#[test]
+fn exchange_authorization_rejects_clients_that_are_no_longer_registered() {
+    let clients = Arc::new(ClientRegistry::in_memory());
+    let oauth = runtime_with("", clients.clone());
+
+    let missing = authorize_exchange_client(&oauth, "dcr-missing")
+        .unwrap_err()
+        .into_response();
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(missing)["error"], "invalid_client");
+
+    clients
+        .insert(
+            "dcr-expired".into(),
+            RegisteredClient {
+                redirect_uris: vec![REDIRECT_URI.into()],
+                token_endpoint_auth_method: "none".into(),
+                client_secret: None,
+                client_name: "expired-pending".into(),
+                created_at: 0,
+                status: ClientRegistrationStatus::Pending,
+            },
+        )
+        .expect("expired pending fixture");
+    let expired = authorize_exchange_client(&oauth, "dcr-expired")
+        .unwrap_err()
+        .into_response();
+    assert_eq!(expired.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(expired)["error"], "invalid_client");
+}
+
+#[test]
+fn static_client_id_exchange_does_not_require_a_registry_record() {
+    let oauth = runtime("chatgpt-client-test");
+    let base = "https://service.example.com";
+    let (access, refresh) = authorize_and_exchange(&oauth, "chatgpt-client-test", base);
+    assert!(oauth.verify_access_token(&access, base));
+    let renewed = refresh_with(&oauth, "chatgpt-client-test", refresh);
+    assert_eq!(renewed.status(), StatusCode::OK);
 }
 
 #[test]

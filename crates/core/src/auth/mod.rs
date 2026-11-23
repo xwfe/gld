@@ -9,7 +9,8 @@ pub use access_store::{
 };
 pub use bearer::{bearer_token, constant_time_eq_str};
 pub use client_registry::{
-    remove_scope as remove_client_registry, ClientRegistry, RegisteredClient, RegistrationError,
+    remove_scope as remove_client_registry, ClientRegistrationStatus, ClientRegistry,
+    RegisteredClient, RegistrationError,
 };
 pub use credential::{credential_lifetime, parse_credential, CredentialTtl, IssuedSecret};
 pub use gld_policy::{
