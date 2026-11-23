@@ -20,12 +20,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use gld_core::async_rt::{self, JoinHandle};
 use gld_core::auth::{AccessReader, UrlRejection};
+use gld_core::data::{AppData, DataStore};
 use gld_core::generation::CallError;
-use gld_core::hub::{Hub, HubSecrets, HUB_SCOPE, SERVER_NAME};
+use gld_core::hub::{public_base_url, Hub, HubSecrets, HUB_SCOPE, SERVER_NAME};
 use gld_core::local_network;
 use gld_core::logs::append_profile_log;
 use gld_core::mcp::handle_request;
-use gld_core::settings::AppSettings;
+use gld_core::settings::{AppSettings, HubConfig};
 use gld_core::tools::{build_tool_context, patch::failure_log_fields, SharedToolContext};
 use gld_core::usage::ServiceUsage;
 use gld_core::workspace::{AuthConfig, RuntimeConfig};
@@ -230,7 +231,10 @@ struct ListenerState {
     /// 授权页上告诉用户"你在授权什么"的那一行。
     authorize_label: String,
     bind_port: u16,
-    configured_public_url: String,
+    /// 启动时记下的公网基址。只在地址纯运行时才知道时（Cloudflare 临时隧道、
+    /// OpenAI 隧道）由它兜底；其余情况每次请求按当前配置重算，见
+    /// [`configured_oauth_base`]。
+    spawn_public_url: String,
     oauth: Option<Arc<OAuthRuntime>>,
     oauth_client_secret: Option<String>,
 }
@@ -263,7 +267,7 @@ pub fn spawn_listener(
         &global,
         usage,
     )?);
-    let configured_public_url = public_base_url.trim().to_string();
+    let spawn_public_url = public_base_url.trim().to_string();
     let oauth = Some(Arc::new(OAuthRuntime::new_mcp(
         workspace_audience(&workspace_id),
         workspace_id.clone(),
@@ -281,7 +285,7 @@ pub fn spawn_listener(
         scope: workspace_id,
         authorize_label: workspace_display,
         bind_port: port,
-        configured_public_url,
+        spawn_public_url,
         oauth,
         oauth_client_secret,
     })
@@ -320,7 +324,7 @@ pub fn spawn_hub_listener(
         scope: HUB_SCOPE.into(),
         authorize_label: "gld 客户端授权".into(),
         bind_port: port,
-        configured_public_url: public_base_url.trim().to_string(),
+        spawn_public_url: public_base_url.trim().to_string(),
         oauth,
         oauth_client_secret: None,
     })
@@ -461,8 +465,59 @@ fn mcp_discovery_payload(state: &ListenerState) -> Value {
     })
 }
 
+/// OAuth 发现类应答（401 挑战、两个 well-known、authorize、token）共用的公网基址。
+///
+/// 每次请求按当前配置重算：入口换地址后（`gld gateway start` 换了公网地址、
+/// `hub set --global-gateway false` 关掉入口），监听器不能还指着启动时的旧地址，
+/// 否则旧地址下线后从新地址来的客户端完成不了授权。
 fn resolve_oauth_base(state: &ListenerState, headers: &HeaderMap) -> String {
-    external_base_url(headers, state.bind_port, &state.configured_public_url)
+    external_base_url(headers, state.bind_port, &configured_oauth_base(state))
+}
+
+/// 当前配置推导的公网基址；推不出来（纯运行时地址）或数据文件读失败时用启动时的。
+///
+/// 配置能表达的入口（none / frp / 命名 Cloudflare / 手填 public_url / 全局入口）一律以当前
+/// 配置为准：算出来是空就传空串给 [`external_base_url`]，走转发头或回环，不回退到启动时的
+/// 旧地址。只有运行时才知道的地址（Cloudflare 临时隧道、OpenAI 隧道）用启动时记下的那个。
+/// 读数据文件失败时记一条不带秘密的警告、回退启动时的地址，绝不让请求变成 500。
+fn configured_oauth_base(state: &ListenerState) -> String {
+    match DataStore::read_file(|data| Ok(configured_base_from_data(&state.scope, data))) {
+        Ok(Some(base)) => base,
+        Ok(None) => state.spawn_public_url.clone(),
+        Err(_) => {
+            append_profile_log(
+                &state.scope,
+                "stderr.log",
+                "[oauth] 数据文件读取失败，OAuth 发现地址沿用启动时的值",
+            );
+            state.spawn_public_url.clone()
+        }
+    }
+}
+
+/// 数据文件里的当前配置能算出基址就返回它（可以是空串）；纯运行时地址返回 None。
+///
+/// 工作区不分支：临时隧道的地址由隧道运行时写回 `profile.tunnel.public_url`，现读就是现值。
+fn configured_base_from_data(scope: &str, data: &AppData) -> Option<String> {
+    let settings = AppSettings::from_data(data);
+    if scope == HUB_SCOPE {
+        if hub_runtime_only(&settings.hub) {
+            return None;
+        }
+        return Some(public_base_url(&settings));
+    }
+    let profile = data.profiles.iter().find(|profile| profile.id == scope)?;
+    Some(profile.effective_public_url_with(&settings))
+}
+
+/// 这个隧道类型的公网地址要等隧道起来才知道（OpenAI 隧道根本没有），配置里推不出来。
+/// 与 [`public_base_url`] 的分支保持一致。
+fn hub_runtime_only(hub: &HubConfig) -> bool {
+    match hub.tunnel_type.as_str() {
+        "cloudflare" => hub.cloudflare_mode != "named",
+        "openai" => true,
+        _ => false,
+    }
 }
 
 /// URL-only 客户端不一定实现 OAuth / 自定义认证头。独立短期 grant 复用现有
@@ -1214,10 +1269,157 @@ mod tests {
             scope: "w1".into(),
             authorize_label: "/tmp/x".into(),
             bind_port: 0,
-            configured_public_url: String::new(),
+            spawn_public_url: String::new(),
             oauth: None,
             oauth_client_secret: None,
         }
+    }
+
+    /// 配置能表达的入口（手填地址、全局入口）一律以当前配置为准，入口停用后是空串
+    /// （走转发头或回环），绝不回退到启动时的旧地址。
+    #[test]
+    fn hub_oauth_base_follows_current_config() {
+        use gld_core::data::AppData;
+        use gld_core::hub::HUB_SCOPE;
+
+        let mut data = AppData::default();
+        data.hub.public_url = "https://manual.example.com/".into();
+        assert_eq!(
+            super::configured_base_from_data(HUB_SCOPE, &data).as_deref(),
+            Some("https://manual.example.com")
+        );
+
+        data.hub.use_global_gateway = true;
+        data.global_gateway.enabled = true;
+        data.global_gateway.public_url = "https://gw.example.com".into();
+        assert_eq!(
+            super::configured_base_from_data(HUB_SCOPE, &data).as_deref(),
+            Some("https://gw.example.com/hub")
+        );
+
+        // 入口换地址：不重启监听器也要跟着变。
+        data.global_gateway.public_url = "https://gw-two.example.com".into();
+        assert_eq!(
+            super::configured_base_from_data(HUB_SCOPE, &data).as_deref(),
+            Some("https://gw-two.example.com/hub")
+        );
+
+        // 入口停用：回落到手填地址；连手填也没有就是空串，交给 external_base_url。
+        data.global_gateway.enabled = false;
+        assert_eq!(
+            super::configured_base_from_data(HUB_SCOPE, &data).as_deref(),
+            Some("https://manual.example.com")
+        );
+        data.hub.public_url.clear();
+        assert_eq!(
+            super::configured_base_from_data(HUB_SCOPE, &data).as_deref(),
+            Some("")
+        );
+
+        // 命名 Cloudflare 是配置能表达的。
+        let mut data = AppData::default();
+        data.hub.tunnel_type = "cloudflare".into();
+        data.hub.cloudflare_mode = "named".into();
+        data.hub.public_url = "https://cf.example.com".into();
+        assert_eq!(
+            super::configured_base_from_data(HUB_SCOPE, &data).as_deref(),
+            Some("https://cf.example.com")
+        );
+    }
+
+    /// Cloudflare 临时隧道和 OpenAI 隧道的地址运行时才知道：返回 None，调用方用启动时的值。
+    #[test]
+    fn hub_oauth_base_keeps_spawn_url_for_runtime_only_tunnels() {
+        use gld_core::data::AppData;
+        use gld_core::hub::HUB_SCOPE;
+
+        for (tunnel_type, cloudflare_mode) in [("cloudflare", "quick"), ("openai", "quick")] {
+            let mut data = AppData::default();
+            data.hub.tunnel_type = tunnel_type.into();
+            data.hub.cloudflare_mode = cloudflare_mode.into();
+            assert_eq!(super::configured_base_from_data(HUB_SCOPE, &data), None);
+        }
+    }
+
+    /// 工作区：全局入口、手填地址、临时隧道写回值都从当前数据文件现读。
+    #[test]
+    fn workspace_oauth_base_follows_current_profile_config() {
+        use gld_core::data::AppData;
+        use gld_core::workspace::WorkspaceProfile;
+
+        fn profile(id: &str) -> WorkspaceProfile {
+            let mut profile = WorkspaceProfile::new("/tmp/ws".into(), None);
+            profile.id = id.into();
+            profile
+        }
+
+        // 老配置：MCP 走全局入口。
+        let mut data = AppData::default();
+        data.global_gateway.enabled = true;
+        data.global_gateway.public_url = "https://gw.example.com".into();
+        let mut routed = profile("w1");
+        routed.tunnel.use_global_gateway = true;
+        data.profiles.push(routed);
+        assert_eq!(
+            super::configured_base_from_data("w1", &data).as_deref(),
+            Some("https://gw.example.com/w/w1")
+        );
+
+        // 入口换地址跟着变；停用后是空串，不指向已下线的入口。
+        data.global_gateway.public_url = "https://gw-two.example.com".into();
+        assert_eq!(
+            super::configured_base_from_data("w1", &data).as_deref(),
+            Some("https://gw-two.example.com/w/w1")
+        );
+        data.global_gateway.enabled = false;
+        assert_eq!(
+            super::configured_base_from_data("w1", &data).as_deref(),
+            Some("")
+        );
+
+        // 手填地址。
+        let mut data = AppData::default();
+        let mut manual = profile("w2");
+        manual.tunnel.public_url = "https://manual.example.com/".into();
+        data.profiles.push(manual);
+        assert_eq!(
+            super::configured_base_from_data("w2", &data).as_deref(),
+            Some("https://manual.example.com")
+        );
+
+        // Cloudflare 临时隧道：地址由隧道运行时写回 public_url，现读就是现值。
+        let mut data = AppData::default();
+        let mut quick = profile("w3");
+        quick.tunnel.tunnel_type = "cloudflare".into();
+        quick.tunnel.public_url = "https://quick.example.com".into();
+        data.profiles.push(quick);
+        assert_eq!(
+            super::configured_base_from_data("w3", &data).as_deref(),
+            Some("https://quick.example.com")
+        );
+
+        // 项目已经不在：用启动时的值。
+        assert_eq!(super::configured_base_from_data("missing", &data), None);
+    }
+
+    /// 数据文件读失败：回退到启动时记下的地址并记警告，不能让请求变成 500。
+    #[test]
+    fn oauth_base_falls_back_to_spawn_url_when_the_data_file_is_unreadable() {
+        run_isolated(
+            module_path!(),
+            "oauth_base_falls_back_to_spawn_url_when_the_data_file_is_unreadable",
+            || {
+                let home = std::env::var_os(gld_core::home::HOME_ENV).expect("isolated home");
+                let data_dir = Path::new(&home).join("data");
+                std::fs::create_dir_all(&data_dir).unwrap();
+                std::fs::write(data_dir.join("profiles.json"), "{ not json").unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let mut state = state_named(root.path(), "ws");
+                state.spawn_public_url = "https://spawn.example.com".into();
+                let base = super::resolve_oauth_base(&state, &axum::http::HeaderMap::new());
+                assert_eq!(base, "https://spawn.example.com");
+            },
+        );
     }
 
     /// 用公开的授权页和 token 端点走一遍 PKCE，拿到 (access, refresh)。

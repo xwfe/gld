@@ -182,6 +182,139 @@ fn actions_command_policy_all_runs_commands_the_default_policy_would_deny() {
     env.ok(&["stop", "-s", "actions"]);
 }
 
+/// 工作区 MCP 走全局入口时，OAuth 发现链接同样跟当前入口地址走，不能停在监听器启动时的旧地址。
+#[test]
+fn workspace_oauth_discovery_follows_the_current_gateway_address() {
+    let env = Env::new();
+    create_oauth_grant(&env);
+    let gateway_port = free_port();
+    let id = env.json(&["--json", "add", ".", "--name", "gw"])[0]["id"]
+        .as_str()
+        .expect("project id")
+        .to_string();
+    env.ok(&[
+        "gateway",
+        "set",
+        "--enabled",
+        "true",
+        "--tunnel",
+        "off",
+        "--public-url",
+        "https://gw-one.example.com",
+        "--port",
+        &gateway_port.to_string(),
+    ]);
+    // 工作区走全局入口的字段已从 `gld set` 退役（D18 只有服务有公网入口），
+    // 老配置里还在用：停掉守护进程直接改数据文件，造一份老配置。
+    env.ok(&["daemon", "stop"]);
+    route_workspace_through_gateway(&env, &id);
+    env.ok(&["gateway", "start"]);
+
+    assert_workspace_discovery(gateway_port, &id, "https://gw-one.example.com");
+
+    // 只重启入口、不重启工作区服务：发现地址必须已经是 gw-two。
+    env.ok(&[
+        "gateway",
+        "set",
+        "--public-url",
+        "https://gw-two.example.com",
+    ]);
+    env.ok(&["gateway", "start"]);
+    assert_workspace_discovery(gateway_port, &id, "https://gw-two.example.com");
+}
+
+/// `/w/<id>` 的 401 发现指针、issuer、resource 都按入口公网地址拼。
+fn assert_workspace_discovery(gateway_port: u16, id: &str, gateway_base: &str) {
+    let base = format!("{gateway_base}/w/{id}");
+    // 工作区监听器是刚起的，先等它应答再打 POST，免得撞上 502 的启动窗口。
+    let issuer_path = format!("/.well-known/oauth-authorization-server/w/{id}");
+    let issuer = wait_for_get(gateway_port, &issuer_path);
+    assert_eq!(issuer.status, 200, "{}", issuer.body);
+    assert_eq!(
+        issuer.json()["issuer"],
+        serde_json::json!(base),
+        "{}",
+        issuer.body
+    );
+
+    let challenge = post_json(
+        gateway_port,
+        &format!("/w/{id}/mcp"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+        None,
+    );
+    assert_eq!(challenge.status, 401, "{}", challenge.body);
+    let expected_metadata =
+        format!("{gateway_base}/.well-known/oauth-protected-resource/w/{id}/mcp");
+    assert!(
+        challenge
+            .header("www-authenticate")
+            .is_some_and(|value| value.contains(&expected_metadata)),
+        "401 的 resource_metadata 应指向 {expected_metadata}：{}",
+        challenge.header("www-authenticate").unwrap_or("")
+    );
+
+    let resource = get(
+        gateway_port,
+        &format!("/.well-known/oauth-protected-resource/w/{id}/mcp"),
+    );
+    assert_eq!(resource.status, 200, "{}", resource.body);
+    assert_eq!(
+        resource.json()["resource"],
+        serde_json::json!(format!("{base}/mcp")),
+        "{}",
+        resource.body
+    );
+}
+
+/// 把项目的 MCP 服务标成走全局入口（老配置形状），并让守护进程启动时把它恢复起来——
+/// D18 之后 `gld set`/`gld start` 都不再管工作区 MCP 服务，只剩这条老路还在。
+/// 必须在守护进程停着时改：它内存里拿着整份数据，起来后会整份覆盖回去。
+fn route_workspace_through_gateway(env: &Env, id: &str) {
+    let path = env.home.path().join("data").join("profiles.json");
+    let raw = std::fs::read_to_string(&path).expect("read profiles.json");
+    let mut data: serde_json::Value = serde_json::from_str(&raw).expect("parse profiles.json");
+    let profile = data["profiles"]
+        .as_array_mut()
+        .expect("profiles array")
+        .iter_mut()
+        .find(|profile| profile["id"].as_str() == Some(id))
+        .expect("workspace profile");
+    profile["tunnel"]["use_global_gateway"] = serde_json::json!(true);
+    data["restore_runtime_state_on_launch"] = serde_json::json!(true);
+    data["restore_mcp_workspace_ids"] = serde_json::json!([id]);
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&data).expect("serialize"),
+    )
+    .expect("write profiles.json");
+}
+
+/// 没有任何 grant 时网络授权是 503 而不是 401；建一条 OAuth grant 才能走到发现流程。
+fn create_oauth_grant(env: &Env) {
+    use gld_core::auth::{
+        AccessStore, CredentialKind, GrantCreation, GrantPermissions, ProjectScope,
+    };
+    let store = AccessStore::open_in(env.home.path()).expect("access store");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    store
+        .create_grant(
+            GrantCreation {
+                name: "chat-client".into(),
+                scope: ProjectScope::AllProjects,
+                permissions: GrantPermissions::default(),
+                kind: CredentialKind::OAuth,
+                ttl: None,
+                allowed_origins: vec![],
+            },
+            now,
+        )
+        .expect("create grant");
+}
+
 /// 全局入口：按 `/w/<项目 id>/actions` 和 `/hub` 分流，没接入的不该被转发。
 #[test]
 fn global_gateway_routes_only_what_opted_in() {

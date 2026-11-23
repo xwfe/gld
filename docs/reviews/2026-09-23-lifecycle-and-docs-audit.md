@@ -6255,3 +6255,52 @@ grant 都校验通过后先落盘再签发，重复兑换幂等；50 个 authori
 - 没有用真实 ChatGPT / Claude 连接器走一遍动态注册；没有更换本机二进制、重启本机守护进程或改动真实 grant。
 - 持续匿名刷注册仍可能挤掉正在授权中的 pending client；它重新注册即可恢复，`docs/security.md` 已写明代价。
 - 已授权 50 个占满后不回收，需要有效确认口令才能到达；撤销/清理命令属 D，`task_plan.md` 已记为剩余限制。
+
+## 153. 2026-11-22：OAuth 发现地址每次请求按当前配置重算
+
+**范围：**修 task_plan 待办（§148，PR #12 Devin Review 提出）：`gld gateway start` 换地址后，Hub 的
+401 发现链接仍是监听器启动时的旧地址，旧入口下线后从新地址来的客户端无法完成授权。Hub 和工作区 MCP
+监听器都改；Actions 监听器不在本次范围（task_plan 新待办）。没有改 daemon 协议、命令行帮助、本机二进制、
+本机守护进程或真实 grant。方案经审查方批准，批准时的七条修改全部落实。
+
+**改了什么：**
+- `crates/host/src/mcp.rs`：`ListenerState.configured_public_url` 改名 `spawn_public_url`，只在地址纯运行时
+  才知道时（Cloudflare 临时隧道、OpenAI 隧道）兜底。`resolve_oauth_base` 改为每个请求经
+  `DataStore::read_file` 读当前配置重算（`configured_oauth_base` → `configured_base_from_data`），
+  401 挑战、两个 well-known、authorize get/post、token 共六处调用点全部走这一个函数，没有遗漏。
+- 回退按隧道类型分支，不按结果是否为空分支：配置能表达的入口（none / frp / 命名 Cloudflare / 手填
+  public_url / 全局入口）一律以当前配置为准，算出来是空就把空串交给 `external_base_url`，走转发头或回环，
+  不回退启动时的旧地址——否则 `gateway stop` 或 `hub set --global-gateway false` 之后发现链接还指向已下线的
+  旧网关，这正是要修的 bug。地址运行时才知道的（`hub_runtime_only`：Cloudflare 临时隧道、OpenAI 隧道）用启动时
+  记下的值。数据文件读失败记一条不带秘密的警告到 `stderr.log`、回退启动时的地址，不返回 500；没有用
+  `AppSettings::load_or_default()`（读失败会静默给默认值）。
+- 工作区不分支隧道类型：`profile.tunnel.public_url` 对临时隧道是运行时写回的现值（停隧道不清，已核实），
+  现读即现值；经全局入口的工作区由 `effective_public_url_with` 算出 `{gw}/w/<id>`。
+- `external_base_url`（`crates/host/src/auth/oauth.rs`）本身没改。全仓调用点（修复后）：
+  `crates/host/src/mcp.rs` 的 `resolve_oauth_base` 是 Hub/工作区 MCP 监听器全部 OAuth 发现类应答的唯一出口；
+  `crates/host/src/actions/listener.rs` 与 `crates/host/src/actions/auth.rs` 仍用启动时写死的
+  `configured_public_url`，同样过期，本次不改（task_plan 新待办）。
+- `docs/concepts.md` OAuth 一节补一段：发现链接每次请求按当前配置重算及运行时地址的例外。
+
+**验证：**Linux、隔离 `GLD_HOME`。
+- 修复前失败证据：Hub 用例在 gw-two 断言处失败（`Bearer resource_metadata="https://gw-one.example.com/.well-known/oauth-protected-resource/hub/mcp"`）；
+  工作区用例 issuer 断言左 `https://gw-one.example.com/w/8f1647ae…`、右 `https://gw-two.example.com/w/8f1647ae…`。
+  修复后两条都过。
+- 回归覆盖（真实 daemon/HTTP，不重启监听器）：Hub 全局入口 gw-one → gw-two，随后停用入口后 401 与
+  well-known 按请求 Host 生成（`http://127.0.0.1:<hub端口>`）；工作区经全局入口的 `/w/<id>` gw-one → gw-two。
+- host 单测四条：Hub 各隧道类型分支、运行时才知道的隧道类型返回 None、工作区各分支（含临时隧道写回值）、
+  数据文件读失败回退启动时地址（`run_isolated` 子进程，写入非法 JSON 后断言）。
+- `cargo test --workspace --all-targets --locked`：75 个目标全过（PATH 含 Node v24.22.2；同 §149，
+  PATH 无 node 时 `command_write_paths` 一条失败，加 node 后通过）；`cargo clippy --workspace --all-targets
+  --locked -- -D warnings` 与 `cargo fmt --all -- --check` 通过。
+
+**未验证与已知限制：**
+- Actions 监听器的同类过期未修，task_plan 已排队（涉及 `actions/listener.rs`、`actions/auth.rs`、
+  `actions/openapi.rs`，OpenAPI `servers` 也会过期）。
+- 工作区临时隧道「运行中换地址跟随」没有写进文档和提交说明：只核实了停隧道不清写回值，运行中换地址
+  的行为未实测。
+- 工作区回归测试的搭建暴露了 gld 的缺口（按 AGENTS.md 记录）：D18 退役 `mcp.*` 工作区服务配置后，
+  工作区 MCP 监听器没有任何 CLI 启动入口，测试只能在守护进程停止时直接改 `profiles.json`
+  （`use_global_gateway` + `restore_runtime_state_on_launch` + `restore_mcp_workspace_ids`）造老配置，
+  再靠启动时恢复拉起。老配置路径是否还该保留、要不要补 CLI 入口，留给 D/E 决定。
+- 没有更换本机二进制、重启本机守护进程或改动真实 grant。
