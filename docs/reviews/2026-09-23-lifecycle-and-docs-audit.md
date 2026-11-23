@@ -6335,9 +6335,9 @@ CLI 帮助、MCP 工具表或 `docs/concepts.md`；`task_plan.md` 状态未改�
   显式能力授权。`file_command` 只跟随现有项目范围且要求写权限；这里的 authorized 只表示“该主体对这个
   目标可见已建立的 file_command 探测”，不等于允许写文件或执行命令，真正执行仍走既有 grant / tool 策略。
 
-**验证：**Linux、隔离 `GLD_HOME=/tmp/gld-d19-a1-home`，PATH 含临时下载的 Node v24.22.3
+**验证：**Linux、隔离 `GLD_HOME`，PATH 含临时下载的 Node v24.22.3
 （本 VM 默认 PATH 没有 `node`，与 §148 / §149 同类环境问题）。
-- `cargo test --workspace --all-targets --locked --no-fail-fast`：**76 个目标，1533 passed / 0 failed / 0 ignored**。
+- `cargo test --workspace --all-targets --locked`：**76 个目标，1549 passed / 0 failed / 0 ignored**。
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` 通过。
 - `cargo fmt --all -- --check` 与 `git diff --check` 通过。
 - 关键用例：protocol fixture 经 `from_json` 往返；version 2 + 多余字段、未知能力 ID、未知原因码、
